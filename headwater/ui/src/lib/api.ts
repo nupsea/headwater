@@ -304,6 +304,7 @@ export interface ExplorationResult {
   row_count: number;
   visualization: VisualizationSpec | null;
   error: string | null;
+  warnings: string[];
   repaired: boolean;
   repair_history: RepairAttempt[];
 }

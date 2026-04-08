@@ -25,6 +25,9 @@ from headwater.core.models import (
     VisualizationSpec,
 )
 from headwater.explorer.nl_to_sql import (
+    _build_vocabulary,
+    _check_grounding,
+    _heuristic_sql,
     _is_read_only,
     _match_suggestion,
     _questions_similar,
@@ -651,6 +654,176 @@ class TestAutoRepair:
         assert r.repaired is True
         assert len(r.repair_history) == 1
         assert r.repair_history[0]["error"] == "table not found"
+
+
+# ---------------------------------------------------------------------------
+# Grounding check tests
+# ---------------------------------------------------------------------------
+
+
+class TestGrounding:
+    def test_vocabulary_includes_table_and_column_names(self, sample_discovery):
+        vocab = _build_vocabulary(sample_discovery, [])
+        assert "readings" in vocab
+        assert "sites" in vocab
+        assert "value" in vocab
+        assert "site" in vocab  # from site_id split on _
+        assert "sensor" in vocab  # from sensor_type
+
+    def test_vocabulary_includes_descriptions_and_domains(self, sample_discovery):
+        vocab = _build_vocabulary(sample_discovery, [])
+        assert "environmental" in vocab
+        assert "monitoring" in vocab
+
+    def test_vocabulary_includes_model_names(self, sample_discovery, sample_models):
+        vocab = _build_vocabulary(sample_discovery, sample_models)
+        assert "air" in vocab  # from mart_air_quality_daily
+        assert "quality" in vocab
+
+    def test_grounded_question_returns_no_warnings(self, sample_discovery):
+        warnings = _check_grounding(
+            "What is the average reading value by sensor type?",
+            sample_discovery,
+            [],
+        )
+        assert len(warnings) == 0
+
+    def test_ungrounded_term_returns_warning(self, sample_discovery):
+        warnings = _check_grounding(
+            "How are toys distributed across zones?",
+            sample_discovery,
+            [],
+        )
+        assert len(warnings) >= 1
+        assert "toys" in warnings[0].lower()
+
+    def test_multiple_ungrounded_terms_strong_warning(self, sample_discovery):
+        warnings = _check_grounding(
+            "Show me banana prices by galaxy cluster",
+            sample_discovery,
+            [],
+        )
+        assert len(warnings) >= 2
+        assert "unreliable" in warnings[-1].lower()
+
+    def test_stop_words_and_analytical_words_ignored(self, sample_discovery):
+        # A question with only stop words + analytical words + known terms
+        warnings = _check_grounding(
+            "What is the average value per site?",
+            sample_discovery,
+            [],
+        )
+        assert len(warnings) == 0
+
+    def test_grounding_warns_on_unrecognized_terms(
+        self, duckdb_con, sample_discovery
+    ):
+        """Free-form query with terms absent from schema and suggestions gets warned."""
+        # LLM provider that returns valid SQL (simulates LLM ignoring "toys")
+        provider = _FixingProvider(
+            "SELECT COUNT(*) AS cnt FROM staging.stg_readings"
+        )
+        result = ask(
+            question="How are toys trending?",
+            con=duckdb_con,
+            discovery=sample_discovery,
+            suggestions=[],
+            provider=provider,
+        )
+        assert result.error is None
+        assert len(result.warnings) >= 1
+        assert "toys" in result.warnings[0].lower()
+
+    def test_grounded_suggestion_has_no_warnings(
+        self, duckdb_con, sample_discovery
+    ):
+        """A well-grounded curated question should produce no warnings."""
+        suggestions = [
+            SuggestedQuestion(
+                question="What is the average reading value by sensor type?",
+                source="semantic",
+                category="Test",
+                sql_hint=(
+                    "SELECT sensor_type, AVG(value) "
+                    "FROM staging.stg_readings GROUP BY sensor_type"
+                ),
+            ),
+        ]
+        result = ask(
+            question="What is the average reading value by sensor type?",
+            con=duckdb_con,
+            discovery=sample_discovery,
+            suggestions=suggestions,
+        )
+        assert result.error is None
+        assert len(result.warnings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Heuristic SQL builder tests
+# ---------------------------------------------------------------------------
+
+
+class TestHeuristicSql:
+    def test_trend_query(self, sample_discovery):
+        sql = _heuristic_sql(
+            "Are readings increasing over time?",
+            sample_discovery,
+            [],
+        )
+        assert sql is not None
+        assert "FROM staging.stg_readings" in sql
+        assert "period" in sql.lower()
+        assert "GROUP BY" in sql
+
+    def test_breakdown_query(self, sample_discovery):
+        sql = _heuristic_sql(
+            "What is the average value by sensor type?",
+            sample_discovery,
+            [],
+        )
+        assert sql is not None
+        assert "sensor_type" in sql
+        assert "AVG" in sql
+
+    def test_count_query(self, sample_discovery):
+        sql = _heuristic_sql(
+            "How many readings per sensor type?",
+            sample_discovery,
+            [],
+        )
+        assert sql is not None
+        assert "COUNT" in sql
+
+    def test_ungrounded_question_returns_none(self, sample_discovery):
+        sql = _heuristic_sql(
+            "Tell me about toys and galaxies",
+            sample_discovery,
+            [],
+        )
+        assert sql is None
+
+    def test_ask_uses_heuristic_without_llm(
+        self, duckdb_con, sample_discovery
+    ):
+        """ask() falls back to heuristic when no suggestion match and no LLM."""
+        result = ask(
+            question="How many readings by sensor type?",
+            con=duckdb_con,
+            discovery=sample_discovery,
+        )
+        assert result.error is None
+        assert result.row_count > 0
+
+    def test_uses_mart_when_available(self, sample_discovery, sample_models):
+        sql = _heuristic_sql(
+            "What are the reading trends over time?",
+            sample_discovery,
+            sample_models,
+        )
+        assert sql is not None
+        # Should prefer the executed mart over staging
+        assert "marts." in sql
 
 
 # ---------------------------------------------------------------------------

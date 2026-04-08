@@ -16,8 +16,8 @@ All 9 phases implemented, tested, and verified. Full end-to-end demo working.
 | 6 | Execution | Done | 26 | DuckDB backend, topo sort runner, quality checker |
 | 7 | CLI | Done | 9 | demo, discover, generate, status commands |
 | 8 | API + UI + Docker | Done | 20 | FastAPI (18 endpoints), Next.js (5 pages), Docker |
-| 9 | NL Exploration + Stats | Done | 50 | Explorer layer, scipy stats, NL-to-SQL, viz recommender, auto-repair |
-| **Total** | | | **194** | |
+| 9 | NL Exploration + Stats | Done | 58 | Explorer layer, scipy stats, NL-to-SQL, viz recommender, auto-repair, grounding checks |
+| **Total** | | | **202** | |
 
 ## Demo Results (Sample Dataset)
 
@@ -36,8 +36,10 @@ Explorer layer (Phase 9):
   Statistical insights: temporal anomaly detection, period-over-period t-tests, correlation surfacing
   NL-to-SQL: question matching + LLM generation + read-only validation + DuckDB execution
   Auto-repair: failed queries sent back to LLM with error context, up to 3 retries
+  Grounding check: verifies question terms exist in schema vocabulary, warns on unrecognized terms
   Visualization: auto-recommends chart type (KPI, line, bar, scatter, heatmap, table)
-  UI: repair status badge + collapsible repair history log
+  Charts: recharts integration (line, bar, scatter, heatmap) with grouped series support
+  UI: repair status badge + collapsible repair history log + grounding warnings
   New dependency: scipy (z-scores, t-tests, Pearson correlation, p-values)
 ```
 

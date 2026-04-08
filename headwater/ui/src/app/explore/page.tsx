@@ -155,6 +155,17 @@ export default function ExplorePage() {
             )}
           </div>
 
+          {result.warnings && result.warnings.length > 0 && (
+            <div className="px-4 py-3 border-b border-border bg-amber-50 border-l-4 border-l-amber-400">
+              <div className="text-xs font-semibold text-amber-800 uppercase tracking-wider mb-1">
+                Grounding Warning
+              </div>
+              {result.warnings.map((w, i) => (
+                <p key={i} className="text-sm text-amber-900">{w}</p>
+              ))}
+            </div>
+          )}
+
           {showSql && result.sql && (
             <div className="p-4 border-b border-border">
               <SqlViewer sql={result.sql} />

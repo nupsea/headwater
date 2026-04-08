@@ -253,5 +253,6 @@ class ExplorationResult(BaseModel):
     row_count: int = 0
     visualization: VisualizationSpec | None = None
     error: str | None = None
+    warnings: list[str] = Field(default_factory=list)  # Grounding / confidence warnings
     repaired: bool = False  # True if LLM auto-repaired a failed query
     repair_history: list[dict[str, str]] = Field(default_factory=list)  # [{sql, error}]

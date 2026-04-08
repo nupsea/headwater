@@ -20,10 +20,12 @@ import duckdb
 
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider
 from headwater.core.models import (
+    ColumnInfo,
     DiscoveryResult,
     ExplorationResult,
     GeneratedModel,
     SuggestedQuestion,
+    TableInfo,
 )
 from headwater.explorer.visualization import recommend_visualization
 
@@ -88,7 +90,11 @@ def ask(
     # Try matching a suggested question first
     sql = _match_suggestion(question, suggestions or [])
 
-    # If no match and LLM is available, generate SQL
+    # If no match, try heuristic SQL generation from metadata
+    if sql is None:
+        sql = _heuristic_sql(question, discovery, models or [])
+
+    # If still no match and LLM is available, generate SQL
     if sql is None and has_llm:
         sql = asyncio.run(_generate_sql(question, context, provider))
 
@@ -98,7 +104,7 @@ def ask(
             sql="",
             error=(
                 "Could not generate SQL for this question. "
-                "Try selecting one of the suggested questions, or enable LLM mode."
+                "Try rephrasing with table or column names from your data."
             ),
         )
 
@@ -110,12 +116,18 @@ def ask(
             error="Generated SQL contains write operations and was blocked for safety.",
         )
 
+    # Grounding check: verify question terms exist in schema + generated SQL
+    warnings = _check_grounding(
+        question, discovery, models or [], sql, suggestions or []
+    )
+
     # Execute (with auto-repair if LLM is available)
     result = _execute_query(question, sql, con)
 
     if result.error and has_llm:
         result = _repair_loop(question, sql, result.error, con, context, provider)
 
+    result.warnings = warnings
     return result
 
 
@@ -251,24 +263,314 @@ _STOP_WORDS = {
     "where", "when", "who", "in", "on", "by", "for", "to", "of", "and",
     "or", "from", "with", "that", "this", "there", "have", "has", "was",
     "were", "be", "been", "being", "my", "your", "their", "its",
+    "we", "our", "us", "i", "me", "more", "less", "than", "not", "no",
+    "one", "ones", "other", "each", "every", "any", "some", "all",
 }
 
 
 def _questions_similar(a: str, b: str) -> bool:
-    """Check if two questions are similar enough to match."""
-    # Exact match
+    """Check if two questions are similar enough to match.
+
+    Intentionally strict: exact match or substring containment only.
+    Fuzzy word-overlap matching is dangerous -- changing one key term
+    (e.g. "by severity" -> "by inspection") changes the entire meaning
+    but barely moves the overlap ratio, leading to silently wrong SQL.
+    """
     if a == b:
         return True
-    # One contains the other
-    if a in b or b in a:
-        return True
-    # Compare content words (exclude stop words) with >60% overlap
-    words_a = set(a.split()) - _STOP_WORDS
-    words_b = set(b.split()) - _STOP_WORDS
-    if not words_a or not words_b:
-        return False
-    overlap = len(words_a & words_b)
-    return overlap / max(len(words_a), len(words_b)) > 0.6
+    return bool(a in b or b in a)
+
+
+# ---------------------------------------------------------------------------
+# Heuristic SQL builder -- constructs queries from metadata, no LLM needed
+# ---------------------------------------------------------------------------
+
+# Question patterns that indicate what kind of query to build
+_TREND_WORDS = {
+    "trend", "trends", "trending", "trended",
+    "increasing", "decreasing", "growing", "growth",
+    "over", "time", "changing",
+}
+_COUNT_WORDS = {"how", "many", "count", "total", "number"}
+_BREAKDOWN_WORDS = {"by", "across", "per", "breakdown", "break", "distribution", "distributed"}
+_TOP_WORDS = {"top", "most", "highest", "worst", "best", "largest", "lowest", "least", "smallest"}
+
+
+def _heuristic_sql(
+    question: str,
+    discovery: DiscoveryResult,
+    models: list[GeneratedModel],
+) -> str | None:
+    """Build SQL from metadata heuristics when no suggestion matches.
+
+    Only handles single-table queries where intent is clear. Returns None
+    (rather than wrong SQL) when the question implies JOINs, references
+    entities from multiple tables, or can't be mapped confidently.
+    """
+    q_lower = question.lower()
+    q_words = set(re.sub(r"[^a-z0-9 ]", "", q_lower).split())
+    content_words = q_words - _STOP_WORDS - _ANALYTICAL_WORDS
+
+    # Step 1: Find the primary table
+    table = _match_table(q_words, discovery, models)
+    if table is None:
+        return None
+
+    # Step 2: Bail out if the question references other tables
+    # (implies a JOIN we can't reliably construct)
+    if _references_other_tables(content_words, table, discovery):
+        return None
+
+    # Classify columns by role
+    temporal_cols = [
+        c for c in table.columns
+        if c.dtype in ("timestamp", "date")
+        or c.semantic_type == "temporal"
+        or re.search(r"(date|time|month|year|day|week|quarter|_at$)", c.name, re.IGNORECASE)
+    ]
+    metric_cols = [
+        c for c in table.columns
+        if c.dtype in ("int64", "float64")
+        and c.semantic_type not in ("id", "foreign_key")
+        and not c.name.endswith("_id")
+        and not c.is_primary_key
+    ]
+    dimension_cols = [
+        c for c in table.columns
+        if c.dtype == "varchar"
+        and c.semantic_type not in ("id", "foreign_key")
+        and not c.name.endswith("_id")
+        and not c.is_primary_key
+    ]
+
+    table_ref = f"staging.stg_{table.name}"
+
+    # Check if a mart table exists for this entity
+    for m in models:
+        if m.model_type == "mart" and table.name in m.source_tables and m.status == "executed":
+            table_ref = f"marts.{m.name}"
+            break
+
+    # Step 3: Detect the question intent and build SQL
+    is_trend = bool(q_words & _TREND_WORDS) and temporal_cols
+    is_count = bool(q_words & _COUNT_WORDS)
+    is_top = bool(q_words & _TOP_WORDS)
+    has_breakdown_word = bool(q_words & _BREAKDOWN_WORDS)
+
+    # Try to find a specific dimension mentioned in the question
+    target_dim = _match_column(q_words, dimension_cols)
+    target_metric = _match_column(q_words, metric_cols)
+
+    # -- Trend query: metric over time, optionally grouped by a dimension
+    if is_trend and temporal_cols:
+        time_col = temporal_cols[0]
+        metric = target_metric or (metric_cols[0] if metric_cols else None)
+        dim = target_dim
+
+        time_expr = f'CAST("{time_col.name}" AS DATE)'
+        if time_col.dtype == "timestamp":
+            time_expr = f"DATE_TRUNC('month', \"{time_col.name}\")"
+
+        parts = [f"SELECT {time_expr} AS period"]
+        if dim:
+            parts[0] += f', "{dim.name}"'
+        if metric:
+            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}'
+            parts[0] += ", COUNT(*) AS total"
+        else:
+            parts[0] += ", COUNT(*) AS total"
+
+        parts.append(f"FROM {table_ref}")
+        group = "GROUP BY period"
+        if dim:
+            group += f', "{dim.name}"'
+        parts.append(group)
+        parts.append("ORDER BY period")
+        return " ".join(parts)
+
+    # -- Breakdown query: metric grouped by a dimension
+    if target_dim and (has_breakdown_word or target_metric):
+        metric = target_metric or (metric_cols[0] if metric_cols else None)
+        parts = [f'SELECT "{target_dim.name}"']
+        if metric:
+            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}'
+        parts[0] += ", COUNT(*) AS total"
+        parts.append(f"FROM {table_ref}")
+        parts.append(f'GROUP BY "{target_dim.name}"')
+        order = "ORDER BY total DESC"
+        if metric:
+            order = f"ORDER BY avg_{metric.name} DESC"
+        parts.append(order)
+        return " ".join(parts)
+
+    # -- Top/ranking query
+    if is_top and (metric_cols or dimension_cols):
+        metric = target_metric or (metric_cols[0] if metric_cols else None)
+        dim = target_dim or (dimension_cols[0] if dimension_cols else None)
+        if dim and metric:
+            return (
+                f'SELECT "{dim.name}", ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}, '
+                f"COUNT(*) AS total "
+                f"FROM {table_ref} "
+                f'GROUP BY "{dim.name}" '
+                f"ORDER BY avg_{metric.name} DESC LIMIT 15"
+            )
+        if dim:
+            return (
+                f'SELECT "{dim.name}", COUNT(*) AS total '
+                f"FROM {table_ref} "
+                f'GROUP BY "{dim.name}" '
+                f"ORDER BY total DESC LIMIT 15"
+            )
+
+    # -- Count query
+    if is_count:
+        parts = ["SELECT COUNT(*) AS total"]
+        if target_dim:
+            parts[0] = f'SELECT "{target_dim.name}", COUNT(*) AS total'
+        parts.append(f"FROM {table_ref}")
+        if target_dim:
+            parts.append(f'GROUP BY "{target_dim.name}" ORDER BY total DESC')
+        return " ".join(parts)
+
+    # -- Fallback: if we matched a table, show a useful summary
+    if dimension_cols and metric_cols:
+        dim = target_dim or dimension_cols[0]
+        metric = target_metric or metric_cols[0]
+        return (
+            f'SELECT "{dim.name}", '
+            f'ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}, '
+            f"COUNT(*) AS total "
+            f"FROM {table_ref} "
+            f'GROUP BY "{dim.name}" '
+            f"ORDER BY total DESC LIMIT 20"
+        )
+
+    if dimension_cols:
+        dim = target_dim or dimension_cols[0]
+        return (
+            f'SELECT "{dim.name}", COUNT(*) AS total '
+            f"FROM {table_ref} "
+            f'GROUP BY "{dim.name}" ORDER BY total DESC LIMIT 20'
+        )
+
+    # Can't build anything meaningful
+    return None
+
+
+def _references_other_tables(
+    content_words: set[str],
+    primary_table: TableInfo,
+    discovery: DiscoveryResult,
+) -> bool:
+    """Check if the question references entities from tables other than the primary.
+
+    If someone asks about "inspections by neighborhood", "neighborhood" maps to
+    the zones table -- that requires a JOIN we can't reliably build. Return True
+    to signal the heuristic should bail out.
+    """
+    primary_vocab: set[str] = set()
+    # Build vocabulary for the primary table (name + columns + domain + description)
+    primary_vocab.update(primary_table.name.lower().replace("_", " ").split())
+    if primary_table.domain:
+        primary_vocab.update(primary_table.domain.lower().split())
+    if primary_table.description:
+        primary_vocab.update(primary_table.description.lower().split())
+    for col in primary_table.columns:
+        primary_vocab.update(col.name.lower().replace("_", " ").split())
+
+    for other_table in discovery.tables:
+        if other_table.name == primary_table.name:
+            continue
+
+        other_words = set(other_table.name.lower().replace("_", " ").split())
+        if other_table.domain:
+            other_words.update(other_table.domain.lower().split())
+        for col in other_table.columns:
+            col_parts = set(col.name.lower().replace("_", " ").split())
+            # Only include meaningful column name parts (skip "id", "name", etc.)
+            other_words.update(
+                w for w in col_parts
+                if w not in ("id", "name", "type", "status", "date")
+            )
+
+        # Remove words that overlap with the primary table's vocabulary
+        unique_other = other_words - primary_vocab
+
+        # Check if any content word from the question stems to a unique other-table word
+        for qw in content_words:
+            qw_stems = _stem(qw)
+            for ow in unique_other:
+                if _stem(ow) & qw_stems:
+                    return True
+
+    return False
+
+
+def _match_table(
+    q_words: set[str],
+    discovery: DiscoveryResult,
+    models: list[GeneratedModel],
+) -> TableInfo | None:
+    """Find the table most relevant to the question words."""
+    best_table: TableInfo | None = None
+    best_score = 0
+
+    for table in discovery.tables:
+        score = 0
+        table_words = set(table.name.lower().replace("_", " ").split())
+
+        # Direct table name match (strongest signal)
+        for tw in table_words:
+            stems = _stem(tw)
+            for qw in q_words:
+                qw_stems = _stem(qw)
+                if stems & qw_stems:
+                    score += 10
+                    break
+
+        # Domain match
+        if table.domain:
+            domain_words = set(table.domain.lower().split())
+            score += len(q_words & domain_words) * 3
+
+        # Description match
+        if table.description:
+            desc_words = set(table.description.lower().split())
+            score += len(q_words & desc_words) * 2
+
+        # Column name match (strong signal -- referencing a column implies the table)
+        for col in table.columns:
+            col_words = set(col.name.lower().replace("_", " ").split())
+            for cw in col_words:
+                if cw in q_words or any(_stem(cw) & _stem(qw) for qw in q_words):
+                    score += 3
+                    break  # One match per column is enough
+
+        if score > best_score:
+            best_score = score
+            best_table = table
+
+    # Require a minimum match strength
+    if best_score < 5:
+        return None
+
+    return best_table
+
+
+def _match_column(
+    q_words: set[str],
+    columns: list[ColumnInfo],
+) -> ColumnInfo | None:
+    """Find the column whose name best matches the question words."""
+    for col in columns:
+        col_words = set(col.name.lower().replace("_", " ").split())
+        for cw in col_words:
+            cw_stems = _stem(cw)
+            for qw in q_words:
+                if _stem(qw) & cw_stems:
+                    return col
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +618,232 @@ def _build_context(
             )
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Grounding check -- verify question terms exist in the schema
+# ---------------------------------------------------------------------------
+
+# Words that describe analytical operations, not data entities
+_ANALYTICAL_WORDS = {
+    # Aggregation / metrics
+    "average", "avg", "mean", "sum", "total", "count", "max", "min",
+    "median", "rate", "rates", "ratio", "percent", "percentage", "pct",
+    # Trends / comparison
+    "trend", "trends", "trending", "trended",
+    "compare", "comparison", "comparing", "compared",
+    "increase", "increasing", "decrease", "decreasing",
+    "change", "changes", "changed",
+    # Distribution / analysis
+    "distribution", "distributed", "breakdown", "break", "down",
+    "across", "between", "relative", "among",
+    # Time
+    "over", "time", "daily", "weekly", "monthly", "yearly", "per",
+    "during", "since", "before", "after", "recent", "recently",
+    # Ranking / filtering
+    "top", "bottom", "highest", "lowest", "most", "least", "many",
+    "much", "often", "common", "commonly", "frequent", "frequently",
+    "consistently", "likely", "unlikely",
+    # Actions
+    "show", "list", "get", "find", "display", "report",
+    # Quantities
+    "number", "numbers", "levels", "level",
+    # Analysis types
+    "correlation", "correlate", "correlated", "impact", "impacts",
+    "pattern", "patterns", "associated", "association",
+    # BI verbs / adjectives
+    "meeting", "meet", "face", "facing", "experience", "experiencing",
+    "wait", "waiting", "unresolved", "resolved",
+    "fail", "failing", "failed", "pass", "passing", "passed",
+    # Superlatives / qualifiers
+    "worst", "best", "longest", "shortest", "largest", "smallest",
+    "lower", "higher", "greater", "fewer", "worse", "better",
+    "active", "inactive", "routine",
+    # Domain-agnostic BI terms
+    "allocated", "allocation", "driven", "operational",
+    "exceed", "exceeds", "exceeding", "threshold", "thresholds",
+    "capita", "per-capita",
+    "discovery", "discovered", "finding", "findings",
+    "sla", "slas", "kpi", "kpis",
+    "unhealthy", "healthy",
+    "reports", "reported", "reporting",
+    # Geographic scale terms (not entity names -- those are data terms)
+    "region", "regions", "area", "areas",
+}
+
+
+def _build_vocabulary(
+    discovery: DiscoveryResult,
+    models: list[GeneratedModel],
+) -> set[str]:
+    """Build a set of all known terms from schema metadata.
+
+    Includes table names, column names, descriptions, domains, semantic types,
+    profile top-values, and model names -- all lowercased and split into words.
+    """
+    vocab: set[str] = set()
+
+    for table in discovery.tables:
+        # Table name words: "air_quality_readings" -> {"air", "quality", "readings"}
+        vocab.update(table.name.lower().replace("_", " ").split())
+        if table.description:
+            vocab.update(table.description.lower().split())
+        if table.domain:
+            vocab.update(table.domain.lower().split())
+        for col in table.columns:
+            vocab.update(col.name.lower().replace("_", " ").split())
+            if col.description:
+                vocab.update(col.description.lower().split())
+            if col.semantic_type:
+                vocab.update(col.semantic_type.lower().replace("_", " ").split())
+
+    # Profile top-values (known categorical values in the data)
+    for profile in discovery.profiles:
+        if profile.top_values:
+            for val, _count in profile.top_values:
+                vocab.update(val.lower().split())
+
+    # Model names and descriptions
+    for model in models:
+        vocab.update(model.name.lower().replace("_", " ").split())
+        if model.description:
+            vocab.update(model.description.lower().split())
+
+    # Relationship columns
+    for rel in discovery.relationships:
+        vocab.update(rel.from_table.lower().replace("_", " ").split())
+        vocab.update(rel.to_table.lower().replace("_", " ").split())
+
+    return vocab
+
+
+def _stem(word: str) -> set[str]:
+    """Generate plausible stems for a word to match against vocabulary.
+
+    Not a full stemmer -- just handles common English suffixes that appear
+    in BI questions vs schema names (e.g. "categories" -> "category",
+    "communities" -> "community", "readings" -> "reading").
+    """
+    stems = {word}
+
+    # -ies -> -y (categories -> category, communities -> community)
+    if word.endswith("ies") and len(word) > 4:
+        stems.add(word[:-3] + "y")
+
+    # -es -> base (processes -> process, indexes -> index)
+    if word.endswith("es") and len(word) > 3:
+        stems.add(word[:-2])
+
+    # -s -> base (zones -> zone, readings -> reading)
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+        stems.add(word[:-1])
+
+    # -ing -> base (trending -> trend, monitoring -> monitor)
+    if word.endswith("ing") and len(word) > 5:
+        stems.add(word[:-3])
+        stems.add(word[:-3] + "e")  # monitoring -> monitore? No, but: investigating -> investigate
+
+    # -ed -> base (hospitalized -> hospitalize, resolved -> resolve)
+    if word.endswith("ed") and len(word) > 4:
+        stems.add(word[:-2])
+        stems.add(word[:-1])  # -ed where base ends in e (e.g. resolved -> resolve: -d)
+        if word.endswith("ied"):
+            stems.add(word[:-3] + "y")  # carried -> carry
+
+    # -ly -> base (consistently -> consistent)
+    if word.endswith("ly") and len(word) > 4:
+        stems.add(word[:-2])
+
+    # -ment -> base (acknowledgment -> acknowledge)
+    if word.endswith("ment") and len(word) > 6:
+        stems.add(word[:-4])
+
+    return stems
+
+
+def _word_in_vocab(word: str, vocab: set[str]) -> bool:
+    """Check if a word or any of its stems exist in the vocabulary."""
+    stems = _stem(word)
+    if any(s in vocab for s in stems):
+        return True
+
+    # Also check if any vocab word starts with or contains this stem
+    # (handles partial matches like "inspect" matching "inspections")
+    for s in stems:
+        if len(s) >= 4 and any(v.startswith(s) or s.startswith(v) for v in vocab):
+            return True
+
+    return False
+
+
+def _check_grounding(
+    question: str,
+    discovery: DiscoveryResult,
+    models: list[GeneratedModel],
+    sql: str = "",
+    suggestions: list[SuggestedQuestion] | None = None,
+) -> list[str]:
+    """Check that the question's key terms exist in the schema vocabulary.
+
+    Vocabulary comes from four sources:
+    1. Schema metadata (table/column names, descriptions, domains, top-values)
+    2. Model names and descriptions
+    3. The generated SQL itself (column aliases, table references)
+    4. Curated suggestion text (system-generated questions are grounded by definition)
+
+    Returns a list of warnings. An empty list means the question is fully grounded.
+    """
+    vocab = _build_vocabulary(discovery, models)
+
+    # Curated suggestion questions are grounded by definition -- every word
+    # in a system-generated question is a valid domain term
+    for s in suggestions or []:
+        vocab.update(re.sub(r"[^a-z0-9 ]", "", s.question.lower()).split())
+
+    # Also extract identifiers from the SQL as grounding evidence
+    if sql:
+        sql_words = set(re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", sql.lower()))
+        for w in sql_words:
+            vocab.update(w.replace("_", " ").split())
+
+    # Extract content words from the question
+    # Normalize: strip punctuation, collapse "PM2.5" -> "pm25" etc.
+    raw_words = question.lower().strip().rstrip("?").split()
+    q_words: set[str] = set()
+    for w in raw_words:
+        # Primary form: letters + digits, punctuation removed ("PM2.5" -> "pm25")
+        cleaned = re.sub(r"[^a-z0-9]", "", w)
+        if cleaned:
+            q_words.add(cleaned)
+    content_words = q_words - _STOP_WORDS - _ANALYTICAL_WORDS
+
+    if not content_words:
+        return []
+
+    ungrounded = []
+    for word in content_words:
+        if _word_in_vocab(word, vocab):
+            continue
+        ungrounded.append(word)
+
+    if not ungrounded:
+        return []
+
+    warnings: list[str] = []
+    terms = ", ".join(f'"{w}"' for w in sorted(ungrounded))
+    warnings.append(
+        f"Unrecognized terms not found in your data: {terms}. "
+        f"The generated query may not accurately reflect your question."
+    )
+
+    # If more than half the content words are ungrounded, strong warning
+    if len(ungrounded) > len(content_words) / 2:
+        warnings.append(
+            "Most key terms in this question could not be matched to any "
+            "table, column, or known value. Results are likely unreliable."
+        )
+
+    return warnings
 
 
 # ---------------------------------------------------------------------------

@@ -188,11 +188,10 @@ _MART_QUESTIONS: dict[str, list[dict[str, str]]] = {
             "q": "How is program budget distributed relative to community risk?",
             "cat": "Programs",
             "sql": (
-                "SELECT program_name, budget_usd, "
-                "ROUND(AVG(incidents_per_1k), 2) AS avg_incident_rate, "
-                "ROUND(AVG(environmental_risk_score), 2) AS avg_risk_score "
+                "SELECT program_name, budget_usd, zone_name, "
+                "environmental_risk_score, incidents_per_1k "
                 "FROM marts.mart_program_effectiveness "
-                "GROUP BY program_name, budget_usd "
+                "WHERE program_status = 'active' "
                 "ORDER BY budget_usd DESC"
             ),
         },
