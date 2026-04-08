@@ -31,3 +31,7 @@ class ExecutorError(HeadwaterError):
 
 class MetadataError(HeadwaterError):
     """Error reading or writing the metadata store."""
+
+
+class ExplorerError(HeadwaterError):
+    """Error during NL exploration or statistical analysis."""

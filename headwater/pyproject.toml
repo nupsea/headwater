@@ -16,6 +16,7 @@ dependencies = [
     "rich>=13.0",
     "pyyaml>=6.0",
     "pyarrow>=23.0.1",
+    "scipy>=1.17.1",
 ]
 
 [project.scripts]

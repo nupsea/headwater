@@ -9,7 +9,7 @@ import duckdb
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from headwater.api.routes import discovery, execute, insights, models, pipeline, quality
+from headwater.api.routes import discovery, execute, explore, insights, models, pipeline, quality
 
 
 @asynccontextmanager
@@ -50,6 +50,7 @@ def create_app() -> FastAPI:
     app.include_router(quality.router, prefix="/api", tags=["quality"])
     app.include_router(execute.router, prefix="/api", tags=["execute"])
     app.include_router(insights.router, prefix="/api", tags=["insights"])
+    app.include_router(explore.router, prefix="/api", tags=["explore"])
     app.include_router(pipeline.router, prefix="/api", tags=["pipeline"])
 
     @app.get("/api/status")

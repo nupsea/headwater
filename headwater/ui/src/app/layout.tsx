@@ -23,6 +23,7 @@ const navItems = [
   { href: "/discovery", label: "Discovery" },
   { href: "/models", label: "Models" },
   { href: "/quality", label: "Quality" },
+  { href: "/explore", label: "Explore" },
 ];
 
 export default function RootLayout({

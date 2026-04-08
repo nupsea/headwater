@@ -55,15 +55,21 @@ async def run_full_pipeline(
     staging = generate_staging_models(
         discovery_result.tables, source_schema=source_schema, target_schema=target_schema
     )
-    marts = generate_mart_models(discovery_result, target_schema=target_schema)
+    marts = generate_mart_models(discovery_result, target_schema="marts")
     contracts = generate_contracts(discovery_result.profiles, target_schema=target_schema)
     pipeline["staging_models"] = staging
     pipeline["mart_models"] = marts
     pipeline["contracts"] = contracts
 
-    # Step 3: Execute approved models
+    # Step 3: Execute models
+    # Staging models are auto-approved. In the demo pipeline, approve marts
+    # too so the full analytical layer is available for exploration.
     backend = DuckDBBackend(con)
     backend.ensure_schema(target_schema)
+    backend.ensure_schema("marts")
+    for m in marts:
+        if m.status == "proposed":
+            m.status = "approved"
     exec_results = run_models(backend, staging + marts, only_approved=True)
     pipeline["execution_results"] = exec_results
 

@@ -255,6 +255,64 @@ export interface PipelineRunResponse {
   quality_failed: number;
 }
 
+// ---------- Explorer types ----------
+
+export interface SuggestedQuestion {
+  question: string;
+  source: "mart" | "relationship" | "quality" | "semantic" | "statistical";
+  category: string;
+  relevant_tables: string[];
+  sql_hint: string | null;
+}
+
+export interface StatisticalInsight {
+  metric: string;
+  table_name: string;
+  insight_type:
+    | "temporal_anomaly"
+    | "period_comparison"
+    | "correlation"
+    | "distribution_shift";
+  description: string;
+  magnitude: number;
+  z_score: number | null;
+  p_value: number | null;
+  confidence_level: string | null;
+  time_period: string | null;
+  comparison_baseline: string | null;
+  severity: "info" | "warning" | "critical";
+}
+
+export interface VisualizationSpec {
+  chart_type: "kpi" | "bar" | "line" | "scatter" | "table" | "heatmap";
+  title: string;
+  x_axis: string | null;
+  y_axis: string | null;
+  group_by: string | null;
+  description: string;
+}
+
+export interface RepairAttempt {
+  sql: string;
+  error: string;
+}
+
+export interface ExplorationResult {
+  question: string;
+  sql: string;
+  data: Record<string, unknown>[];
+  row_count: number;
+  visualization: VisualizationSpec | null;
+  error: string | null;
+  repaired: boolean;
+  repair_history: RepairAttempt[];
+}
+
+export interface ExploreSuggestionsResponse {
+  suggestions: SuggestedQuestion[];
+  insights: StatisticalInsight[];
+}
+
 // ---------- API calls ----------
 
 export const api = {
@@ -288,4 +346,14 @@ export const api = {
     }),
 
   contracts: () => fetchJSON<ContractSummary[]>("/contracts"),
+
+  exploreSuggestions: () =>
+    fetchJSON<ExploreSuggestionsResponse>("/explore/suggestions"),
+
+  exploreAsk: (question: string) =>
+    fetchJSON<ExplorationResult>("/explore/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    }),
 };

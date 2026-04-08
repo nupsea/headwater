@@ -198,3 +198,60 @@ class DiscoveryResult(BaseModel):
     relationships: list[Relationship] = Field(default_factory=list)
     domains: dict[str, list[str]] = Field(default_factory=dict)  # domain -> [table_names]
     discovered_at: datetime = Field(default_factory=datetime.now)
+
+
+# ---------------------------------------------------------------------------
+# Explorer -- NL questions, statistical insights, visualization
+# ---------------------------------------------------------------------------
+
+
+class SuggestedQuestion(BaseModel):
+    """A natural language question the system can answer from materialized models."""
+
+    question: str
+    source: Literal["mart", "relationship", "quality", "semantic", "statistical"]
+    category: str  # e.g. "Air Quality", "Inspections", "Trends"
+    relevant_tables: list[str] = Field(default_factory=list)
+    sql_hint: str | None = None  # Optional pre-generated SQL
+
+
+class StatisticalInsight(BaseModel):
+    """A statistically significant pattern detected in materialized data."""
+
+    metric: str  # Column or expression measured
+    table_name: str
+    insight_type: Literal[
+        "temporal_anomaly", "period_comparison", "correlation", "distribution_shift"
+    ]
+    description: str  # Plain-English explanation
+    magnitude: float  # % deviation or correlation coefficient
+    z_score: float | None = None
+    p_value: float | None = None
+    confidence_level: str | None = None  # "90%", "95%", "99%"
+    time_period: str | None = None  # e.g. "2024-12-20 to 2025-01-03"
+    comparison_baseline: str | None = None  # e.g. "90-day rolling average"
+    severity: Literal["info", "warning", "critical"] = "info"
+
+
+class VisualizationSpec(BaseModel):
+    """Recommendation for how to visualize a query result."""
+
+    chart_type: Literal["kpi", "bar", "line", "scatter", "table", "heatmap"]
+    title: str
+    x_axis: str | None = None
+    y_axis: str | None = None
+    group_by: str | None = None
+    description: str = ""
+
+
+class ExplorationResult(BaseModel):
+    """Result of a natural language query against the analytical data."""
+
+    question: str
+    sql: str
+    data: list[dict[str, Any]] = Field(default_factory=list)
+    row_count: int = 0
+    visualization: VisualizationSpec | None = None
+    error: str | None = None
+    repaired: bool = False  # True if LLM auto-repaired a failed query
+    repair_history: list[dict[str, str]] = Field(default_factory=list)  # [{sql, error}]
