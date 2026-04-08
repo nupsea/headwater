@@ -1,0 +1,72 @@
+"""FastAPI application -- Headwater API."""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from typing import Any
+
+import duckdb
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from headwater.api.routes import discovery, execute, insights, models, pipeline, quality
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application state: DuckDB connection and pipeline state."""
+    app.state.duckdb_con = duckdb.connect(":memory:")
+    app.state.pipeline: dict[str, Any] = {
+        "discovery": None,
+        "staging_models": [],
+        "mart_models": [],
+        "contracts": [],
+        "execution_results": [],
+        "quality_report": None,
+    }
+    yield
+    app.state.duckdb_con.close()
+
+
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application."""
+    app = FastAPI(
+        title="Headwater",
+        description="Advisory data platform for data professionals.",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.include_router(discovery.router, prefix="/api", tags=["discovery"])
+    app.include_router(models.router, prefix="/api", tags=["models"])
+    app.include_router(quality.router, prefix="/api", tags=["quality"])
+    app.include_router(execute.router, prefix="/api", tags=["execute"])
+    app.include_router(insights.router, prefix="/api", tags=["insights"])
+    app.include_router(pipeline.router, prefix="/api", tags=["pipeline"])
+
+    @app.get("/api/status")
+    async def api_status():
+        pipeline = app.state.pipeline
+        has_discovery = pipeline["discovery"] is not None
+        return {
+            "status": "ok",
+            "discovered": has_discovery,
+            "tables": len(pipeline["discovery"].tables) if has_discovery else 0,
+            "staging_models": len(pipeline["staging_models"]),
+            "mart_models": len(pipeline["mart_models"]),
+            "contracts": len(pipeline["contracts"]),
+            "executed": len(pipeline["execution_results"]),
+        }
+
+    return app
+
+
+app = create_app()

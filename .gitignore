@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv
+
+# Node
+node_modules/
+.next/
+
+# Claude
+CLAUDE.md
+.claude/
+
+# Archives
+archives/
+
+# Runtime data
+*.duckdb
+*.duckdb.wal
+metadata.db
+.headwater/
+
+# OS
+.DS_Store
+
+# Ruff / pytest cache
+.ruff_cache/
+.pytest_cache/

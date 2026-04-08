@@ -1,0 +1,387 @@
+"""SQLite metadata store -- schema DDL, init, and CRUD helpers.
+
+Metadata is always SQLite (POC) or Postgres (Phase 1+). Never DuckDB.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+from headwater.core.exceptions import MetadataError
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS sources (
+    name        TEXT PRIMARY KEY,
+    type        TEXT NOT NULL,
+    path        TEXT,
+    uri         TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS discovery_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL REFERENCES sources(name),
+    started_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    table_count INTEGER DEFAULT 0,
+    status      TEXT NOT NULL DEFAULT 'running'
+);
+
+CREATE TABLE IF NOT EXISTS tables (
+    name        TEXT NOT NULL,
+    source_name TEXT NOT NULL REFERENCES sources(name),
+    schema_name TEXT,
+    row_count   INTEGER DEFAULT 0,
+    description TEXT,
+    domain      TEXT,
+    tags        TEXT DEFAULT '[]',
+    run_id      INTEGER REFERENCES discovery_runs(id),
+    PRIMARY KEY (name, source_name)
+);
+
+CREATE TABLE IF NOT EXISTS columns (
+    table_name  TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    dtype       TEXT NOT NULL,
+    nullable    INTEGER DEFAULT 1,
+    is_primary_key INTEGER DEFAULT 0,
+    description TEXT,
+    semantic_type TEXT,
+    ordinal     INTEGER DEFAULT 0,
+    PRIMARY KEY (table_name, source_name, name),
+    FOREIGN KEY (table_name, source_name) REFERENCES tables(name, source_name)
+);
+
+CREATE TABLE IF NOT EXISTS profiles (
+    table_name  TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    dtype       TEXT NOT NULL,
+    stats_json  TEXT NOT NULL,
+    run_id      INTEGER REFERENCES discovery_runs(id),
+    PRIMARY KEY (table_name, column_name, source_name)
+);
+
+CREATE TABLE IF NOT EXISTS relationships (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name     TEXT NOT NULL,
+    from_table      TEXT NOT NULL,
+    from_column     TEXT NOT NULL,
+    to_table        TEXT NOT NULL,
+    to_column       TEXT NOT NULL,
+    rel_type        TEXT NOT NULL,
+    confidence      REAL NOT NULL,
+    ref_integrity   REAL NOT NULL,
+    detection_source TEXT NOT NULL,
+    run_id          INTEGER REFERENCES discovery_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS models (
+    name        TEXT PRIMARY KEY,
+    source_name TEXT NOT NULL,
+    model_type  TEXT NOT NULL,
+    sql_text    TEXT NOT NULL,
+    description TEXT,
+    source_tables TEXT DEFAULT '[]',
+    depends_on  TEXT DEFAULT '[]',
+    status      TEXT NOT NULL DEFAULT 'proposed',
+    assumptions TEXT DEFAULT '[]',
+    questions   TEXT DEFAULT '[]',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS contracts (
+    id          TEXT PRIMARY KEY,
+    model_name  TEXT NOT NULL,
+    column_name TEXT,
+    rule_type   TEXT NOT NULL,
+    expression  TEXT NOT NULL,
+    severity    TEXT NOT NULL DEFAULT 'warning',
+    description TEXT DEFAULT '',
+    confidence  REAL DEFAULT 0.8,
+    status      TEXT NOT NULL DEFAULT 'proposed',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_type TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    reason      TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider    TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    prompt_hash TEXT,
+    prompt_text TEXT NOT NULL,
+    response_text TEXT,
+    tokens_in   INTEGER DEFAULT 0,
+    tokens_out  INTEGER DEFAULT 0,
+    cached      INTEGER DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
+class MetadataStore:
+    """SQLite-backed metadata store with WAL mode for read concurrency."""
+
+    def __init__(self, db_path: str | Path = ":memory:") -> None:
+        self._db_path = str(db_path)
+        self._con: sqlite3.Connection | None = None
+
+    def _connect(self) -> sqlite3.Connection:
+        con = sqlite3.connect(self._db_path)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA foreign_keys=ON")
+        return con
+
+    @property
+    def con(self) -> sqlite3.Connection:
+        if self._con is None:
+            self._con = self._connect()
+        return self._con
+
+    def init(self) -> None:
+        """Create all tables if they don't exist."""
+        self.con.executescript(_SCHEMA_SQL)
+
+    def close(self) -> None:
+        if self._con is not None:
+            self._con.close()
+            self._con = None
+
+    # -- Sources -----------------------------------------------------------
+
+    def upsert_source(self, name: str, type_: str, path: str | None, uri: str | None) -> None:
+        self.con.execute(
+            "INSERT OR REPLACE INTO sources (name, type, path, uri) VALUES (?, ?, ?, ?)",
+            (name, type_, path, uri),
+        )
+        self.con.commit()
+
+    def get_source(self, name: str) -> dict | None:
+        row = self.con.execute("SELECT * FROM sources WHERE name = ?", (name,)).fetchone()
+        return dict(row) if row else None
+
+    def list_sources(self) -> list[dict]:
+        return [dict(r) for r in self.con.execute("SELECT * FROM sources").fetchall()]
+
+    # -- Discovery runs ----------------------------------------------------
+
+    def start_run(self, source_name: str) -> int:
+        cur = self.con.execute(
+            "INSERT INTO discovery_runs (source_name) VALUES (?)", (source_name,)
+        )
+        self.con.commit()
+        if cur.lastrowid is None:
+            raise MetadataError("Failed to create discovery run")
+        return cur.lastrowid
+
+    def finish_run(self, run_id: int, table_count: int, status: str = "completed") -> None:
+        self.con.execute(
+            "UPDATE discovery_runs SET finished_at = datetime('now'), table_count = ?, status = ? "
+            "WHERE id = ?",
+            (table_count, status, run_id),
+        )
+        self.con.commit()
+
+    # -- Tables & Columns --------------------------------------------------
+
+    def upsert_table(
+        self,
+        name: str,
+        source_name: str,
+        *,
+        schema_name: str | None = None,
+        row_count: int = 0,
+        description: str | None = None,
+        domain: str | None = None,
+        tags: list[str] | None = None,
+        run_id: int | None = None,
+    ) -> None:
+        self.con.execute(
+            "INSERT OR REPLACE INTO tables "
+            "(name, source_name, schema_name, row_count, description, domain, tags, run_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, source_name, schema_name, row_count, description, domain,
+             json.dumps(tags or []), run_id),
+        )
+        self.con.commit()
+
+    def upsert_column(
+        self,
+        table_name: str,
+        source_name: str,
+        name: str,
+        dtype: str,
+        *,
+        nullable: bool = True,
+        is_primary_key: bool = False,
+        description: str | None = None,
+        semantic_type: str | None = None,
+        ordinal: int = 0,
+    ) -> None:
+        self.con.execute(
+            "INSERT OR REPLACE INTO columns "
+            "(table_name, source_name, name, dtype, nullable, is_primary_key, "
+            "description, semantic_type, ordinal) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (table_name, source_name, name, dtype, int(nullable), int(is_primary_key),
+             description, semantic_type, ordinal),
+        )
+        self.con.commit()
+
+    def get_tables(self, source_name: str) -> list[dict]:
+        return [
+            dict(r)
+            for r in self.con.execute(
+                "SELECT * FROM tables WHERE source_name = ?", (source_name,)
+            ).fetchall()
+        ]
+
+    def get_columns(self, table_name: str, source_name: str) -> list[dict]:
+        return [
+            dict(r)
+            for r in self.con.execute(
+                "SELECT * FROM columns WHERE table_name = ? AND source_name = ? ORDER BY ordinal",
+                (table_name, source_name),
+            ).fetchall()
+        ]
+
+    # -- Profiles ----------------------------------------------------------
+
+    def upsert_profile(
+        self, table_name: str, column_name: str, source_name: str, dtype: str,
+        stats: dict, run_id: int | None = None,
+    ) -> None:
+        self.con.execute(
+            "INSERT OR REPLACE INTO profiles "
+            "(table_name, column_name, source_name, dtype, stats_json, run_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (table_name, column_name, source_name, dtype, json.dumps(stats), run_id),
+        )
+        self.con.commit()
+
+    # -- Relationships -----------------------------------------------------
+
+    def insert_relationship(
+        self,
+        source_name: str,
+        from_table: str,
+        from_column: str,
+        to_table: str,
+        to_column: str,
+        rel_type: str,
+        confidence: float,
+        ref_integrity: float,
+        detection_source: str,
+        run_id: int | None = None,
+    ) -> None:
+        self.con.execute(
+            "INSERT INTO relationships "
+            "(source_name, from_table, from_column, to_table, to_column, "
+            "rel_type, confidence, ref_integrity, detection_source, run_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (source_name, from_table, from_column, to_table, to_column,
+             rel_type, confidence, ref_integrity, detection_source, run_id),
+        )
+        self.con.commit()
+
+    def get_relationships(self, source_name: str) -> list[dict]:
+        return [
+            dict(r)
+            for r in self.con.execute(
+                "SELECT * FROM relationships WHERE source_name = ?", (source_name,)
+            ).fetchall()
+        ]
+
+    # -- Models ------------------------------------------------------------
+
+    def upsert_model(
+        self,
+        name: str,
+        source_name: str,
+        model_type: str,
+        sql_text: str,
+        description: str = "",
+        source_tables: list[str] | None = None,
+        depends_on: list[str] | None = None,
+        status: str = "proposed",
+        assumptions: list[str] | None = None,
+        questions: list[str] | None = None,
+    ) -> None:
+        self.con.execute(
+            "INSERT OR REPLACE INTO models "
+            "(name, source_name, model_type, sql_text, description, source_tables, "
+            "depends_on, status, assumptions, questions, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            (
+                name, source_name, model_type, sql_text, description,
+                json.dumps(source_tables or []),
+                json.dumps(depends_on or []),
+                status,
+                json.dumps(assumptions or []),
+                json.dumps(questions or []),
+            ),
+        )
+        self.con.commit()
+
+    def get_models(self, source_name: str | None = None) -> list[dict]:
+        if source_name:
+            rows = self.con.execute(
+                "SELECT * FROM models WHERE source_name = ?", (source_name,)
+            ).fetchall()
+        else:
+            rows = self.con.execute("SELECT * FROM models").fetchall()
+        return [dict(r) for r in rows]
+
+    def update_model_status(self, name: str, status: str) -> None:
+        self.con.execute(
+            "UPDATE models SET status = ?, updated_at = datetime('now') WHERE name = ?",
+            (status, name),
+        )
+        self.con.commit()
+
+    # -- Contracts ---------------------------------------------------------
+
+    def upsert_contract(
+        self,
+        id_: str,
+        model_name: str,
+        rule_type: str,
+        expression: str,
+        *,
+        column_name: str | None = None,
+        severity: str = "warning",
+        description: str = "",
+        confidence: float = 0.8,
+        status: str = "proposed",
+    ) -> None:
+        self.con.execute(
+            "INSERT OR REPLACE INTO contracts "
+            "(id, model_name, column_name, rule_type, expression, severity, "
+            "description, confidence, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (id_, model_name, column_name, rule_type, expression, severity,
+             description, confidence, status),
+        )
+        self.con.commit()
+
+    def get_contracts(self, model_name: str | None = None) -> list[dict]:
+        if model_name:
+            rows = self.con.execute(
+                "SELECT * FROM contracts WHERE model_name = ?", (model_name,)
+            ).fetchall()
+        else:
+            rows = self.con.execute("SELECT * FROM contracts").fetchall()
+        return [dict(r) for r in rows]

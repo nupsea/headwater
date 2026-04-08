@@ -1,0 +1,291 @@
+const BASE = "/api";
+
+async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${url}`, init);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`API ${res.status}: ${body}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+// ---------- Types ----------
+
+export interface StatusResponse {
+  status: string;
+  discovered: boolean;
+  tables: number;
+  staging_models: number;
+  mart_models: number;
+  contracts: number;
+  executed: number;
+}
+
+export interface ColumnInfo {
+  name: string;
+  dtype: string;
+  nullable: boolean;
+  is_primary_key: boolean;
+  description: string | null;
+  semantic_type: string | null;
+}
+
+export interface TableDetail {
+  name: string;
+  row_count: number;
+  columns: ColumnInfo[];
+  description: string | null;
+  domain: string | null;
+  tags: string[];
+}
+
+export interface ColumnProfile {
+  table_name: string;
+  column_name: string;
+  dtype: string;
+  null_count: number;
+  null_rate: number;
+  distinct_count: number;
+  uniqueness_ratio: number;
+  min_value: number | null;
+  max_value: number | null;
+  mean: number | null;
+  median: number | null;
+  min_length: number | null;
+  max_length: number | null;
+  top_values: [string, number][] | null;
+  detected_pattern: string | null;
+}
+
+export interface ModelSummary {
+  name: string;
+  model_type: string;
+  status: string;
+  description: string;
+  source_tables: string[];
+  questions: string[];
+  assumptions: string[];
+}
+
+export interface ModelDetail extends ModelSummary {
+  sql: string;
+  depends_on: string[];
+}
+
+export interface ContractSummary {
+  id: string;
+  model_name: string;
+  column_name: string | null;
+  rule_type: string;
+  severity: string;
+  confidence: number;
+  status: string;
+  description: string;
+}
+
+export interface QualityCheckResult {
+  rule_id: string;
+  model_name: string;
+  passed: boolean;
+  message: string;
+}
+
+// ---------- Data Profile ----------
+
+export interface PKCoverage {
+  tables_with_pk: number;
+  total_tables: number;
+  description: string;
+}
+
+export interface FKIntegrity {
+  avg_integrity_pct: number | null;
+  total_relationships: number;
+  description: string;
+}
+
+export interface QualityMetric {
+  passed: number;
+  total: number;
+  pass_rate_pct: number | null;
+  description: string;
+}
+
+export interface DataProfile {
+  completeness_pct: number;
+  pk_coverage: PKCoverage;
+  fk_integrity: FKIntegrity;
+  quality: QualityMetric;
+  high_null_columns: number;
+  constant_columns: number;
+  total_columns_profiled: number;
+}
+
+// ---------- Workflow ----------
+
+export interface WorkflowPhase {
+  key: string;
+  label: string;
+  status: "complete" | "active" | "pending";
+  detail: string;
+}
+
+export interface Workflow {
+  phases: WorkflowPhase[];
+  current_phase: string;
+}
+
+// ---------- Advisory Actions ----------
+
+export interface AdvisoryAction {
+  phase: string;
+  priority: "blocking" | "recommended" | "informational" | "success";
+  title: string;
+  detail: string;
+  link: string;
+}
+
+// ---------- Insights types ----------
+
+export interface TableHealth {
+  name: string;
+  row_count: number;
+  column_count: number;
+  domain: string | null;
+  description: string | null;
+  completeness: number;
+  avg_null_rate: number;
+  pk_columns: string[];
+  fk_columns: { column: string; references: string }[];
+  has_relationships: boolean;
+}
+
+export interface ColumnIssue {
+  table: string;
+  column: string;
+  dtype: string;
+  issues: {
+    type: string;
+    severity: string;
+    message: string;
+    detail: string;
+  }[];
+}
+
+export interface NullEntry {
+  table: string;
+  column: string;
+  null_rate: number;
+  null_count: number;
+  total_rows: number;
+}
+
+export interface UniquenessEntry {
+  table: string;
+  column: string;
+  uniqueness_ratio: number;
+  distinct_count: number;
+  is_pk_candidate: boolean;
+}
+
+export interface PatternEntry {
+  table: string;
+  column: string;
+  pattern: string;
+}
+
+export interface RelationshipEntry {
+  from_table: string;
+  from_column: string;
+  to_table: string;
+  to_column: string;
+  type: string;
+  confidence: number;
+  integrity: number;
+}
+
+export interface ModelSuggestion {
+  type: string;
+  title: string;
+  detail: string;
+}
+
+export interface InsightsResponse {
+  data_profile: DataProfile;
+  workflow: Workflow;
+  advisory_actions: AdvisoryAction[];
+  overview: {
+    total_tables: number;
+    total_columns: number;
+    total_rows: number;
+    total_cells: number;
+    total_relationships: number;
+    completeness_pct: number;
+    total_profiles: number;
+    total_contracts: number;
+  };
+  domains: Record<string, { tables: string[]; total_rows: number }>;
+  table_health: TableHealth[];
+  column_issues: ColumnIssue[];
+  null_analysis: NullEntry[];
+  uniqueness_analysis: UniquenessEntry[];
+  patterns_found: PatternEntry[];
+  relationship_map: RelationshipEntry[];
+  quality_summary: {
+    total: number;
+    passed: number;
+    failed: number;
+    pass_rate: number;
+  } | null;
+  model_suggestions: ModelSuggestion[];
+}
+
+export interface PipelineRunResponse {
+  tables_loaded: number;
+  tables_discovered: number;
+  profiles: number;
+  relationships: number;
+  staging_models: number;
+  mart_models: number;
+  contracts: number;
+  models_executed: number;
+  models_succeeded: number;
+  quality_total: number;
+  quality_passed: number;
+  quality_failed: number;
+}
+
+// ---------- API calls ----------
+
+export const api = {
+  status: () => fetchJSON<StatusResponse>("/status"),
+
+  pipelineRun: (sourcePath: string, sourceType = "json") =>
+    fetchJSON<PipelineRunResponse>(
+      `/pipeline/run?source_path=${encodeURIComponent(sourcePath)}&source_type=${sourceType}`,
+      { method: "POST" }
+    ),
+
+  insights: () => fetchJSON<InsightsResponse>("/insights"),
+
+  table: (name: string) => fetchJSON<TableDetail>(`/tables/${name}`),
+
+  tableProfile: (name: string) =>
+    fetchJSON<ColumnProfile[]>(`/tables/${name}/profile`),
+
+  models: () => fetchJSON<ModelSummary[]>("/models"),
+
+  model: (name: string) => fetchJSON<ModelDetail>(`/models/${name}`),
+
+  approveModel: (name: string) =>
+    fetchJSON<{ name: string; status: string }>(`/models/${name}/approve`, {
+      method: "POST",
+    }),
+
+  rejectModel: (name: string) =>
+    fetchJSON<{ name: string; status: string }>(`/models/${name}/reject`, {
+      method: "POST",
+    }),
+
+  contracts: () => fetchJSON<ContractSummary[]>("/contracts"),
+};

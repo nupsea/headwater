@@ -1,0 +1,101 @@
+"""Discovery API routes."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, Request
+
+from headwater.analyzer.heuristics import build_domain_map, enrich_tables
+from headwater.connectors.registry import get_connector
+from headwater.core.models import SourceConfig
+from headwater.profiler.engine import discover
+
+router = APIRouter()
+
+
+@router.post("/discover")
+async def run_discovery(
+    request: Request,
+    source_path: str,
+    source_type: str = "json",
+    source_name: str = "source",
+    source_schema: str = "env_health",
+):
+    """Run the discovery pipeline on a data source."""
+    from pathlib import Path
+
+    data_path = Path(source_path).resolve()
+    if not data_path.exists():
+        raise HTTPException(status_code=400, detail=f"Path not found: {data_path}")
+
+    con = request.app.state.duckdb_con
+    source = SourceConfig(name=source_name, type=source_type, path=str(data_path))
+
+    connector = get_connector(source.type)
+    connector.connect(source)
+    connector.load_to_duckdb(con, source_schema)
+
+    discovery = discover(con, source_schema, source)
+    enrich_tables(discovery.tables, discovery.profiles, discovery.relationships)
+    discovery.domains = build_domain_map(discovery.tables)
+
+    request.app.state.pipeline["discovery"] = discovery
+
+    return {
+        "tables": len(discovery.tables),
+        "profiles": len(discovery.profiles),
+        "relationships": len(discovery.relationships),
+        "domains": discovery.domains,
+    }
+
+
+@router.get("/tables")
+async def list_tables(request: Request):
+    """List discovered tables."""
+    discovery = request.app.state.pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(
+            status_code=400, detail="No discovery run yet. POST /api/discover first."
+        )
+    return [
+        {
+            "name": t.name,
+            "row_count": t.row_count,
+            "columns": len(t.columns),
+            "domain": t.domain,
+            "description": t.description,
+        }
+        for t in discovery.tables
+    ]
+
+
+@router.get("/tables/{table_name}")
+async def get_table(request: Request, table_name: str):
+    """Get table detail including columns."""
+    discovery = request.app.state.pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+    table = next((t for t in discovery.tables if t.name == table_name), None)
+    if not table:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
+    return table.model_dump()
+
+
+@router.get("/tables/{table_name}/profile")
+async def get_table_profile(request: Request, table_name: str):
+    """Get column profiles for a table."""
+    discovery = request.app.state.pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+    profiles = [p for p in discovery.profiles if p.table_name == table_name]
+    if not profiles:
+        raise HTTPException(status_code=404, detail=f"No profiles for '{table_name}'.")
+    return [p.model_dump() for p in profiles]
+
+
+@router.get("/relationships")
+async def list_relationships(request: Request):
+    """List all detected relationships."""
+    discovery = request.app.state.pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+    return [r.model_dump() for r in discovery.relationships]

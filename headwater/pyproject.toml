@@ -1,0 +1,42 @@
+[project]
+name = "headwater"
+version = "0.1.0"
+description = "Advisory data platform for data professionals"
+requires-python = ">=3.11"
+dependencies = [
+    "polars>=1.0",
+    "duckdb>=1.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "typer>=0.12",
+    "anthropic>=0.40",
+    "jinja2>=3.1",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "pyarrow>=23.0.1",
+]
+
+[project.scripts]
+headwater = "headwater.cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]

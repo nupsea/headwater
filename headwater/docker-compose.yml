@@ -1,0 +1,28 @@
+services:
+  headwater:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - headwater-data:/app/.headwater
+      - ../data/sample:/data/sample:ro
+    environment:
+      - HEADWATER_LLM_PROVIDER=${HEADWATER_LLM_PROVIDER:-none}
+      - HEADWATER_LLM_API_KEY=${HEADWATER_LLM_API_KEY:-}
+      - HEADWATER_LLM_MODEL=${HEADWATER_LLM_MODEL:-claude-sonnet-4-20250514}
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - API_URL=http://headwater:8000
+    depends_on:
+      - headwater
+
+volumes:
+  headwater-data:
