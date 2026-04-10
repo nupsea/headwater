@@ -701,7 +701,7 @@ def _compute_advisory_actions(
                 "phase": "quality",
                 "priority": "success",
                 "title": f"All {quality_report.total_contracts} quality contracts pass",
-                "detail": "Quality baseline established -- data meets all auto-generated expectations",
+                "detail": "Quality baseline established -- data meets all auto-generated expectations",  # noqa: E501
                 "link": "/quality",
             }
         )

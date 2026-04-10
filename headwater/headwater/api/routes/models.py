@@ -82,7 +82,14 @@ async def approve_model(request: Request, model_name: str):
             status_code=400,
             detail=f"Model is '{model.status}', not 'proposed'.",
         )
+    prev_status = model.status
     model.status = "approved"
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is not None:
+        store.record_decision(
+            "model", model_name, "approved",
+            payload={"previous_status": prev_status},
+        )
     return {"name": model.name, "status": model.status}
 
 
@@ -94,5 +101,12 @@ async def reject_model(request: Request, model_name: str):
     model = next((m for m in all_models if m.name == model_name), None)
     if not model:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found.")
+    prev_status = model.status
     model.status = "rejected"
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is not None:
+        store.record_decision(
+            "model", model_name, "rejected",
+            payload={"previous_status": prev_status},
+        )
     return {"name": model.name, "status": model.status}

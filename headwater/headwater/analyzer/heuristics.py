@@ -138,12 +138,29 @@ def enrich_tables(
     profiles: list[ColumnProfile],
     relationships: list[Relationship],
 ) -> list[TableInfo]:
-    """Enrich tables with heuristic descriptions, domains, and semantic types."""
+    """Enrich tables with heuristic descriptions, domains, and semantic types.
+
+    Locked tables preserve their existing descriptions. Locked columns preserve
+    their descriptions and semantic types.
+    """
+    import logging
+
+    _log = logging.getLogger(__name__)
     enriched: list[TableInfo] = []
     for table in tables:
-        table.description = generate_table_description(table)
-        table.domain = classify_domain(table)
+        locked_col_count = sum(1 for c in table.columns if c.locked)
+        if locked_col_count:
+            _log.info(
+                "Skipped enrichment for %d locked column(s) in table %s",
+                locked_col_count, table.name,
+            )
+
+        if not table.locked:
+            table.description = generate_table_description(table)
+            table.domain = classify_domain(table)
         for col in table.columns:
+            if col.locked:
+                continue  # Preserve human-approved description
             col.description = generate_column_description(col.name, table.name)
             col.semantic_type = classify_semantic_type(col.name)
         enriched.append(table)

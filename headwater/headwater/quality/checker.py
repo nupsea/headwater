@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import duckdb
 
+from headwater.core.exceptions import ContractExpressionError
 from headwater.core.models import ContractCheckResult, ContractRule
 
 logger = logging.getLogger(__name__)
@@ -146,14 +148,61 @@ def _check_row_count(
     """Check that the table has at least the expected row count."""
     sql = f"SELECT COUNT(*) FROM {rule.model_name}"
     row_count = con.execute(sql).fetchone()[0]
-    # Expression format: "COUNT(*) >= N"
-    passed = eval(rule.expression.replace("COUNT(*)", str(row_count)))  # noqa: S307
+    passed = _evaluate_count_expression(rule.expression, row_count)
     return ContractCheckResult(
         rule_id=rule.id or "",
         model_name=rule.model_name,
         passed=passed,
         observed_value=row_count,
         message=f"Row count: {row_count}",
+    )
+
+
+# Supported: COUNT(*) >= N, <= N, > N, < N, == N, BETWEEN N AND M
+_COUNT_EXPR_PATTERNS = [
+    (re.compile(r"^COUNT\(\*\)\s*>=\s*(\d+)$"), "gte"),
+    (re.compile(r"^COUNT\(\*\)\s*<=\s*(\d+)$"), "lte"),
+    (re.compile(r"^COUNT\(\*\)\s*>\s*(\d+)$"), "gt"),
+    (re.compile(r"^COUNT\(\*\)\s*<\s*(\d+)$"), "lt"),
+    (re.compile(r"^COUNT\(\*\)\s*==\s*(\d+)$"), "eq"),
+    (re.compile(r"^COUNT\(\*\)\s+BETWEEN\s+(\d+)\s+AND\s+(\d+)$", re.IGNORECASE), "between"),
+]
+
+
+def _evaluate_count_expression(expression: str, row_count: int) -> bool:
+    """Safely evaluate a COUNT(*) expression without using eval().
+
+    Supported formats:
+      COUNT(*) >= N
+      COUNT(*) <= N
+      COUNT(*) > N
+      COUNT(*) < N
+      COUNT(*) == N
+      COUNT(*) BETWEEN N AND M
+
+    Raises ContractExpressionError for unsupported formats.
+    """
+    expr = expression.strip()
+    for pattern, op in _COUNT_EXPR_PATTERNS:
+        m = pattern.match(expr)
+        if m:
+            if op == "between":
+                lo, hi = int(m.group(1)), int(m.group(2))
+                return lo <= row_count <= hi
+            n = int(m.group(1))
+            if op == "gte":
+                return row_count >= n
+            if op == "lte":
+                return row_count <= n
+            if op == "gt":
+                return row_count > n
+            if op == "lt":
+                return row_count < n
+            if op == "eq":
+                return row_count == n
+    raise ContractExpressionError(
+        f"Unsupported row_count expression: {expression!r}. "
+        "Supported: COUNT(*) >=/<=/>/</== N, COUNT(*) BETWEEN N AND M"
     )
 
 

@@ -19,6 +19,9 @@ export default function ModelsPage() {
   const [detail, setDetail] = useState<ModelDetail | null>(null);
   const [message, setMessage] = useState("");
   const [showSection, setShowSection] = useState<string>("overview");
+  // Map of model name -> ModelDetail for the Review Queue tab
+  const [reviewDetails, setReviewDetails] = useState<Record<string, ModelDetail>>({});
+  const [reviewDetailErrors, setReviewDetailErrors] = useState<Record<string, string>>({});
 
   const refresh = () =>
     api
@@ -38,6 +41,25 @@ export default function ModelsPage() {
     if (!selected) return;
     api.model(selected).then(setDetail);
   }, [selected]);
+
+  // Fetch full model detail (including SQL) for each proposed model when Review Queue opens
+  useEffect(() => {
+    if (showSection !== "review") return;
+    const proposed = models.filter((m) => m.status === "proposed");
+    proposed.forEach((m) => {
+      if (reviewDetails[m.name] || reviewDetailErrors[m.name]) return;
+      api
+        .model(m.name)
+        .then((d) => setReviewDetails((prev) => ({ ...prev, [m.name]: d })))
+        .catch((e) =>
+          setReviewDetailErrors((prev) => ({
+            ...prev,
+            [m.name]: e instanceof Error ? e.message : String(e),
+          }))
+        );
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showSection, models]);
 
   const handleApprove = async (name: string) => {
     try {
@@ -546,7 +568,15 @@ export default function ModelsPage() {
                       View SQL
                     </summary>
                     <div className="mt-2">
-                      <SqlViewer sql={m.assumptions.length > 0 ? "-- Click 'Browse All' tab and select this model to view full SQL" : ""} />
+                      {reviewDetailErrors[m.name] ? (
+                        <p className="text-xs text-danger">
+                          Failed to load SQL: {reviewDetailErrors[m.name]}
+                        </p>
+                      ) : reviewDetails[m.name] ? (
+                        <SqlViewer sql={reviewDetails[m.name].sql} />
+                      ) : (
+                        <p className="text-xs text-muted">Loading SQL...</p>
+                      )}
                       <button
                         onClick={() => {
                           setSelected(m.name);

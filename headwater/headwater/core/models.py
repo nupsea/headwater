@@ -19,6 +19,7 @@ class SourceConfig(BaseModel):
     type: Literal["json", "csv", "parquet", "postgres", "mysql"]
     path: str | None = None  # For file-based sources
     uri: str | None = None  # For database sources
+    mode: Literal["generate", "observe"] = "generate"
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +36,7 @@ class ColumnInfo(BaseModel):
     is_primary_key: bool = False
     description: str | None = None  # Filled by analyzer
     semantic_type: str | None = None  # pii, metric, dimension, id, foreign_key, etc.
+    locked: bool = False  # True = description approved by human; skip re-enrichment
 
 
 class TableInfo(BaseModel):
@@ -47,6 +49,7 @@ class TableInfo(BaseModel):
     description: str | None = None  # Filled by analyzer
     domain: str | None = None  # Filled by analyzer
     tags: list[str] = Field(default_factory=list)
+    locked: bool = False  # True = description approved by human; skip re-enrichment
 
 
 # ---------------------------------------------------------------------------

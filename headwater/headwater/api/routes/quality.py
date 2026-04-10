@@ -74,3 +74,12 @@ async def get_quality_report(request: Request):
         "passed": report.passed,
         "failed": report.failed,
     }
+
+
+@router.get("/audit")
+async def get_audit_log(request: Request, limit: int = 100):
+    """Return the last N LLM audit log entries (default 100)."""
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        return []
+    return store.get_llm_audit_log(limit=limit)

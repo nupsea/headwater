@@ -1,284 +1,437 @@
-"""Mart model generator -- domain-specific analytical models with clarifying questions.
+"""Mart model generator -- domain-agnostic archetype-based pattern matching.
 
 Mart models encode business logic and require individual human review. Never batch-approved.
+
+US-501: Replace hard-coded _MART_DEFINITIONS with PatternMatcher that detects archetypes
+from discovered column semantic types and table relationships.
+
+US-503: Quality gate -- only yield a candidate if it meets minimum evidence thresholds.
 """
 
 from __future__ import annotations
 
-from headwater.core.models import DiscoveryResult, GeneratedModel
+import logging
+from dataclasses import dataclass, field
+from typing import Literal
 
-# Each mart definition: name, description, sql_template, assumptions, questions, required_tables
-_MART_DEFINITIONS: list[dict] = [
-    {
-        "name": "mart_air_quality_daily",
-        "description": (
-            "Daily air quality averages by site and zone. "
-            "Aggregates PM2.5 and ozone readings with AQI category classification."
-        ),
-        "required_tables": {"readings", "sensors", "sites", "zones"},
-        "sql": """-- Mart: Daily Air Quality by Site and Zone
--- REQUIRES REVIEW: Contains business logic for AQI classification.
+from headwater.core.models import ColumnInfo, DiscoveryResult, GeneratedModel
 
-CREATE OR REPLACE TABLE {{target_schema}}.mart_air_quality_daily AS
-WITH daily_readings AS (
+logger = logging.getLogger(__name__)
+
+# Semantic types that indicate metric columns
+_METRIC_SEMANTIC_TYPES = {"metric"}
+
+# Semantic types that indicate temporal columns
+_TEMPORAL_SEMANTIC_TYPES = {"temporal"}
+
+# Column name patterns that suggest temporal values (fallback if semantic_type not set)
+_TEMPORAL_PATTERNS = ("date", "time", "at", "period", "month", "year", "week", "day")
+
+# Minimum evidence thresholds (US-503)
+_MIN_RELATIONSHIPS_FOR_ENTITY_SUMMARY = 2
+_MIN_METRIC_COLUMNS_FOR_ENTITY_SUMMARY = 1
+_MIN_ROWS_FOR_ENTITY_SUMMARY = 100
+_MIN_ROWS_FOR_AGGREGATION = 100
+
+
+@dataclass
+class MartCandidate:
+    """Proposed mart model before SQL rendering."""
+
+    archetype: Literal["period_comparison", "entity_summary", "aggregation"]
+    candidate_tables: list[str]
+    candidate_columns: list[str]
+    proposed_name: str
+    assumptions: list[str] = field(default_factory=list)
+    questions: list[str] = field(default_factory=list)
+
+
+class PatternMatcher:
+    """Detects mart archetypes from a DiscoveryResult.
+
+    Archetypes:
+    - period_comparison: source has a temporal column -> period-over-period metrics
+    - entity_summary: source has metric column + FK to dimension -> aggregation by dimension
+    - aggregation: source has multiple numeric columns, no FK context -> simple aggregation
+
+    Quality gate (US-503): candidates below minimum evidence thresholds are discarded.
+    """
+
+    def match(self, discovery: DiscoveryResult) -> list[MartCandidate]:
+        """Return all matched MartCandidates for the discovery result."""
+        candidates: list[MartCandidate] = []
+
+        # Build FK set: (from_table, to_table) pairs
+        fk_pairs = {
+            (r.from_table, r.to_table)
+            for r in discovery.relationships
+        }
+        fk_pairs_reverse = {
+            (r.to_table, r.from_table)
+            for r in discovery.relationships
+        }
+        all_fk_pairs = fk_pairs | fk_pairs_reverse
+
+        # Count relationships per table
+        rel_count: dict[str, int] = {}
+        for r in discovery.relationships:
+            rel_count[r.from_table] = rel_count.get(r.from_table, 0) + 1
+            rel_count[r.to_table] = rel_count.get(r.to_table, 0) + 1
+
+        for table in discovery.tables:
+            temporal_cols = self._get_temporal_cols(table.columns)
+            metric_cols = self._get_metric_cols(table.columns)
+            dimension_tables = self._get_dimension_tables(
+                table.name, all_fk_pairs, discovery
+            )
+            table_rels = rel_count.get(table.name, 0)
+
+            # Archetype 1: period_comparison
+            if temporal_cols:
+                candidate = self._build_period_comparison(table, temporal_cols, metric_cols)
+                candidates.append(candidate)
+                logger.debug(
+                    "period_comparison candidate: %s (temporal=%s)",
+                    table.name, temporal_cols,
+                )
+
+            # Archetype 2: entity_summary (quality gate: relationships >= 2 OR metric >= 1)
+            if metric_cols and dimension_tables:
+                passes_gate = (
+                    table_rels >= _MIN_RELATIONSHIPS_FOR_ENTITY_SUMMARY
+                    or len(metric_cols) >= _MIN_METRIC_COLUMNS_FOR_ENTITY_SUMMARY
+                ) and table.row_count >= _MIN_ROWS_FOR_ENTITY_SUMMARY
+                if passes_gate:
+                    candidate = self._build_entity_summary(
+                        table, metric_cols, dimension_tables
+                    )
+                    candidates.append(candidate)
+                    logger.debug(
+                        "entity_summary candidate: %s (metrics=%s, dims=%s)",
+                        table.name, metric_cols, dimension_tables,
+                    )
+                else:
+                    logger.debug(
+                        "Skipped entity_summary candidate for %s: "
+                        "insufficient evidence (rels=%d, rows=%d)",
+                        table.name, table_rels, table.row_count,
+                    )
+
+            # Archetype 3: aggregation (numeric columns, no FK context, enough rows)
+            if (
+                len(metric_cols) >= 2
+                and not dimension_tables
+                and table.row_count >= _MIN_ROWS_FOR_AGGREGATION
+            ):
+                candidate = self._build_aggregation(table, metric_cols)
+                candidates.append(candidate)
+                logger.debug(
+                    "aggregation candidate: %s (metrics=%s)",
+                    table.name, metric_cols,
+                )
+
+        return candidates
+
+    def _get_temporal_cols(self, columns: list[ColumnInfo]) -> list[str]:
+        result = []
+        for col in columns:
+            is_temporal = col.semantic_type in _TEMPORAL_SEMANTIC_TYPES or (
+                col.semantic_type is None
+                and any(p in col.name.lower() for p in _TEMPORAL_PATTERNS)
+            )
+            if is_temporal:
+                result.append(col.name)
+        return result
+
+    _NON_METRIC_TYPES = {"id", "foreign_key", "geographic", "temporal"}
+    _NUMERIC_DTYPES = {"float64", "int64", "float32", "int32"}
+
+    def _get_metric_cols(self, columns: list[ColumnInfo]) -> list[str]:
+        result = []
+        for col in columns:
+            is_metric = col.semantic_type in _METRIC_SEMANTIC_TYPES or (
+                col.dtype in self._NUMERIC_DTYPES
+                and col.semantic_type not in self._NON_METRIC_TYPES
+            )
+            if is_metric:
+                result.append(col.name)
+        return result
+
+    def _get_dimension_tables(
+        self,
+        table_name: str,
+        fk_pairs: set[tuple[str, str]],
+        discovery: DiscoveryResult,
+    ) -> list[str]:
+        """Return tables that this table is related to (potential dimension tables)."""
+        result = []
+        for r in discovery.relationships:
+            if r.from_table == table_name:
+                result.append(r.to_table)
+            elif r.to_table == table_name:
+                result.append(r.from_table)
+        return list(set(result))
+
+    def _build_period_comparison(
+        self,
+        table,  # TableInfo
+        temporal_cols: list[str],
+        metric_cols: list[str],
+    ) -> MartCandidate:
+        time_col = temporal_cols[0]
+        metrics_expr = ", ".join(
+            f"    AVG({c!r}) AS avg_{c},\n    MIN({c!r}) AS min_{c},\n    MAX({c!r}) AS max_{c}"
+            for c in (metric_cols[:3] if metric_cols else [])
+        )
+        metrics_select = f"\n{metrics_expr}\n" if metrics_expr else ""
+        table_ref = f"staging.stg_{table.name}"
+
+        return MartCandidate(
+            archetype="period_comparison",
+            candidate_tables=[table.name],
+            candidate_columns=temporal_cols + metric_cols,
+            proposed_name=f"mart_{table.name}_by_period",
+            assumptions=[
+                f"Groups by {time_col} (truncated to day/week/month -- review granularity)",
+                "Period-over-period comparison uses LAG() -- requires consistent time intervals",
+                "Only non-null values are aggregated",
+            ],
+            questions=[
+                f"What time granularity should '{time_col}' be truncated to? (day/week/month)",
+                "Should period comparison be week-over-week or month-over-month?",
+                "Are there time zones to consider for the temporal column?",
+            ],
+        )
+
+    def _build_entity_summary(
+        self,
+        table,  # TableInfo
+        metric_cols: list[str],
+        dimension_tables: list[str],
+    ) -> MartCandidate:
+        dim_table = dimension_tables[0]
+        return MartCandidate(
+            archetype="entity_summary",
+            candidate_tables=[table.name, dim_table],
+            candidate_columns=metric_cols,
+            proposed_name=f"mart_{table.name}_by_{dim_table}",
+            assumptions=[
+                f"Joins {table.name} to {dim_table} via detected foreign key",
+                f"Aggregates metrics: {', '.join(metric_cols[:5])}",
+                "Groups by all dimension columns from the joined table",
+            ],
+            questions=[
+                f"Is the join between {table.name} and {dim_table} the correct grain?",
+                "Should any metrics be summed vs averaged?",
+                "Are there additional dimension tables that should be joined?",
+            ],
+        )
+
+    def _build_aggregation(
+        self,
+        table,  # TableInfo
+        metric_cols: list[str],
+    ) -> MartCandidate:
+        return MartCandidate(
+            archetype="aggregation",
+            candidate_tables=[table.name],
+            candidate_columns=metric_cols,
+            proposed_name=f"mart_{table.name}_summary",
+            assumptions=[
+                f"Aggregates all numeric columns: {', '.join(metric_cols[:5])}",
+                "No foreign key context detected -- single-table aggregation",
+                "NULL values excluded from aggregate calculations",
+            ],
+            questions=[
+                "Should any of these numeric columns be treated as dimensions (GROUP BY) "
+                "rather than metrics?",
+                "Are there categorical columns to break this aggregation out by?",
+                "What is the expected grain of this summary?",
+            ],
+        )
+
+
+def _render_period_comparison(
+    candidate: MartCandidate,
+    target_schema: str,
+) -> GeneratedModel:
+    """Render a period_comparison candidate to a GeneratedModel with SQL."""
+    table_name = candidate.candidate_tables[0]
+    time_cols = [c for c in candidate.candidate_columns if any(
+        p in c.lower() for p in _TEMPORAL_PATTERNS
+    )]
+    metric_cols = [c for c in candidate.candidate_columns if c not in time_cols]
+    time_col = time_cols[0] if time_cols else "created_at"
+
+    metric_lines = "\n".join(
+        f'    AVG("{c}") AS avg_{c},'
+        for c in metric_cols[:5]
+    )
+    if not metric_lines:
+        metric_lines = "    COUNT(*) AS record_count,"
+
+    sql = f"""-- Mart: {candidate.proposed_name}
+-- Archetype: period_comparison
+-- REQUIRES REVIEW: Temporal aggregation and period comparison logic.
+
+CREATE OR REPLACE TABLE {target_schema}.{candidate.proposed_name} AS
+WITH by_period AS (
     SELECT
-        r.site_id,
-        r.sensor_type,
-        CAST(r."timestamp" AS DATE) AS reading_date,
-        AVG(r.value) AS avg_value,
-        MIN(r.value) AS min_value,
-        MAX(r.value) AS max_value,
-        COUNT(*) AS reading_count
-    FROM staging.stg_readings r
-    WHERE r.qc_flag = 'valid'
-    GROUP BY r.site_id, r.sensor_type, CAST(r."timestamp" AS DATE)
+        DATE_TRUNC('month', CAST("{time_col}" AS DATE)) AS period,
+{metric_lines}
+        COUNT(*) AS row_count
+    FROM staging.stg_{table_name}
+    GROUP BY 1
 )
 SELECT
-    dr.reading_date,
-    dr.site_id,
-    s.name AS site_name,
-    s.zone_id,
-    z.name AS zone_name,
-    z.type AS zone_type,
-    dr.sensor_type,
-    dr.avg_value,
-    dr.min_value,
-    dr.max_value,
-    dr.reading_count,
-    CASE
-        WHEN dr.sensor_type = 'pm25' AND dr.avg_value <= 12.0 THEN 'Good'
-        WHEN dr.sensor_type = 'pm25' AND dr.avg_value <= 35.4 THEN 'Moderate'
-        WHEN dr.sensor_type = 'pm25' AND dr.avg_value <= 55.4 THEN 'Unhealthy for Sensitive'
-        WHEN dr.sensor_type = 'pm25' AND dr.avg_value > 55.4 THEN 'Unhealthy'
-        WHEN dr.sensor_type = 'ozone' AND dr.avg_value <= 0.054 THEN 'Good'
-        WHEN dr.sensor_type = 'ozone' AND dr.avg_value <= 0.070 THEN 'Moderate'
-        ELSE NULL
-    END AS aqi_category
-FROM daily_readings dr
-JOIN staging.stg_sites s ON dr.site_id = s.site_id
-JOIN staging.stg_zones z ON s.zone_id = z.zone_id""",
-        "assumptions": [
-            "Only 'valid' QC flag readings are included (maintenance/suspect/invalid excluded)",
-            "AQI breakpoints follow EPA standards for PM2.5 (24-hr) and ozone (8-hr)",
-            "Daily average is used as the aggregation metric",
-        ],
-        "questions": [
-            "Should 'suspect' QC flag readings be included with a flag, or excluded entirely?",
-            "Are the AQI breakpoints correct for your jurisdiction?",
-            "Should this include all sensor types, or only air quality sensors "
-            "(pm25, ozone, no2, co, so2)?",
-        ],
-    },
-    {
-        "name": "mart_incident_summary",
-        "description": (
-            "Public health incident summary by type, severity, zone, and month. "
-            "Includes demographic overlay from zone data."
-        ),
-        "required_tables": {"incidents", "zones"},
-        "sql": """-- Mart: Incident Summary by Zone and Month
--- REQUIRES REVIEW: Aggregation and demographic overlay.
+    period,
+    row_count,
+{metric_lines.replace("AVG(", "    ").replace(" AS avg_", " AS current_avg_")},
+    LAG(row_count) OVER (ORDER BY period) AS prev_period_row_count
+FROM by_period
+ORDER BY period"""
 
-CREATE OR REPLACE TABLE {{target_schema}}.mart_incident_summary AS
-SELECT
-    DATE_TRUNC('month', CAST(i.date_reported AS DATE)) AS report_month,
-    i.zone_id,
-    z.name AS zone_name,
-    z.type AS zone_type,
-    z.population,
-    z.median_household_income,
-    z.pct_below_poverty,
-    z.pct_minority,
-    z.environmental_risk_score,
-    i.incident_type,
-    i.severity,
-    COUNT(*) AS incident_count,
-    COUNT(DISTINCT i.incident_id) AS unique_incidents,
-    AVG(i.patient_age) AS avg_patient_age,
-    SUM(CASE WHEN i.outcome = 'hospitalized' THEN 1 ELSE 0 END) AS hospitalizations,
-    ROUND(COUNT(*) * 1000.0 / z.population, 2) AS incidents_per_1k_population
-FROM staging.stg_incidents i
-JOIN staging.stg_zones z ON i.zone_id = z.zone_id
-GROUP BY ALL""",
-        "assumptions": [
-            "Incident rate is calculated per 1,000 population using zone-level census data",
-            "Monthly aggregation uses date_reported, not date_onset",
-            "All severity levels are included in the aggregate",
-        ],
-        "questions": [
-            "Should incident rate be calculated per 1K or per 10K population?",
-            "Should this use date_reported or date_onset for temporal grouping?",
-            "Should we filter out any severity levels (e.g., 'mild') from the summary?",
-        ],
-    },
-    {
-        "name": "mart_inspection_scores",
-        "description": (
-            "Inspection pass rates and violation breakdown by site type and zone."
+    return GeneratedModel(
+        name=candidate.proposed_name,
+        model_type="mart",
+        sql=sql.strip(),
+        description=(
+            f"Period-over-period comparison for {table_name}. "
+            f"Groups by {time_col} and computes aggregate metrics across time periods."
         ),
-        "required_tables": {"inspections", "sites", "zones"},
-        "sql": """-- Mart: Inspection Scores by Site Type and Zone
--- REQUIRES REVIEW: Pass rate calculation and violation counting.
+        source_tables=candidate.candidate_tables,
+        depends_on=[f"stg_{t}" for t in candidate.candidate_tables],
+        status="proposed",
+        assumptions=candidate.assumptions,
+        questions=candidate.questions,
+    )
 
-CREATE OR REPLACE TABLE {{target_schema}}.mart_inspection_scores AS
+
+def _render_entity_summary(
+    candidate: MartCandidate,
+    target_schema: str,
+) -> GeneratedModel:
+    """Render an entity_summary candidate to a GeneratedModel with SQL."""
+    fact_table = candidate.candidate_tables[0]
+    dim_table = candidate.candidate_tables[1] if len(candidate.candidate_tables) > 1 else None
+    metric_cols = candidate.candidate_columns
+
+    metric_lines = "\n".join(
+        f'    AVG(f."{c}") AS avg_{c},\n    SUM(f."{c}") AS total_{c},'
+        for c in metric_cols[:3]
+    )
+    if not metric_lines:
+        metric_lines = "    COUNT(*) AS record_count,"
+
+    join_clause = (
+        f"JOIN staging.stg_{dim_table} d ON f.{dim_table[:-1] if dim_table.endswith('s') else dim_table}_id = d.{dim_table[:-1] if dim_table.endswith('s') else dim_table}_id"
+        if dim_table else ""
+    )
+
+    sql = f"""-- Mart: {candidate.proposed_name}
+-- Archetype: entity_summary
+-- REQUIRES REVIEW: Join logic and metric aggregation assumptions.
+
+CREATE OR REPLACE TABLE {target_schema}.{candidate.proposed_name} AS
 SELECT
-    s.zone_id,
-    z.name AS zone_name,
-    s.site_type,
-    COUNT(*) AS total_inspections,
-    AVG(i.score) AS avg_score,
-    SUM(CASE WHEN i.result = 'pass' THEN 1 ELSE 0 END) AS pass_count,
-    SUM(CASE WHEN i.result = 'conditional_pass' THEN 1 ELSE 0 END) AS conditional_count,
-    SUM(CASE WHEN i.result = 'fail' THEN 1 ELSE 0 END) AS fail_count,
-    ROUND(
-        SUM(CASE WHEN i.result = 'pass' THEN 1 ELSE 0 END) * 100.0
-        / COUNT(*), 1
-    ) AS pass_rate_pct,
-    SUM(i.violation_count) AS total_violations,
-    SUM(i.critical_violations) AS total_critical,
-    AVG(i.duration_minutes) AS avg_duration_minutes
-FROM staging.stg_inspections i
-JOIN staging.stg_sites s ON i.site_id = s.site_id
-JOIN staging.stg_zones z ON s.zone_id = z.zone_id
-GROUP BY s.zone_id, z.name, s.site_type""",
-        "assumptions": [
-            "Pass rate includes only 'pass' results (not conditional_pass)",
-            "All inspection types are aggregated together",
-            "Violation counts come from the pre-computed columns, not the violations array",
-        ],
-        "questions": [
-            "Should conditional_pass count toward the pass rate?",
-            "Should inspection types be broken out separately (routine vs complaint-driven)?",
-            "Is there a minimum score threshold that defines a passing inspection?",
-        ],
-    },
-    {
-        "name": "mart_complaint_response",
-        "description": (
-            "Complaint resolution times and status breakdown by category, priority, and zone."
+    d.*,
+{metric_lines}
+    COUNT(*) AS fact_count
+FROM staging.stg_{fact_table} f
+{join_clause}
+GROUP BY ALL"""
+
+    return GeneratedModel(
+        name=candidate.proposed_name,
+        model_type="mart",
+        sql=sql.strip(),
+        description=(
+            f"Summary of {fact_table} grouped by {dim_table or 'dimension'}. "
+            f"Aggregates metrics: {', '.join(metric_cols[:3])}."
         ),
-        "required_tables": {"complaints", "zones"},
-        "sql": """-- Mart: Complaint Response Times
--- REQUIRES REVIEW: Resolution time calculation.
+        source_tables=candidate.candidate_tables,
+        depends_on=[f"stg_{t}" for t in candidate.candidate_tables],
+        status="proposed",
+        assumptions=candidate.assumptions,
+        questions=candidate.questions,
+    )
 
-CREATE OR REPLACE TABLE {{target_schema}}.mart_complaint_response AS
+
+def _render_aggregation(
+    candidate: MartCandidate,
+    target_schema: str,
+) -> GeneratedModel:
+    """Render an aggregation candidate to a GeneratedModel with SQL."""
+    table_name = candidate.candidate_tables[0]
+    metric_cols = candidate.candidate_columns
+
+    metric_lines = "\n".join(
+        f'    AVG("{c}") AS avg_{c},\n    MIN("{c}") AS min_{c},\n    MAX("{c}") AS max_{c},'
+        for c in metric_cols[:5]
+    )
+
+    sql = f"""-- Mart: {candidate.proposed_name}
+-- Archetype: aggregation
+-- REQUIRES REVIEW: Verify which columns are metrics vs dimensions.
+
+CREATE OR REPLACE TABLE {target_schema}.{candidate.proposed_name} AS
 SELECT
-    c.zone_id,
-    z.name AS zone_name,
-    c.category,
-    c.priority,
-    COUNT(*) AS total_complaints,
-    SUM(CASE WHEN c.status = 'resolved' THEN 1 ELSE 0 END) AS resolved_count,
-    SUM(CASE WHEN c.status = 'open' THEN 1 ELSE 0 END) AS open_count,
-    ROUND(
-        SUM(CASE WHEN c.status = 'resolved' THEN 1 ELSE 0 END) * 100.0
-        / COUNT(*), 1
-    ) AS resolution_rate_pct,
-    AVG(
-        CASE WHEN c.resolution_date IS NOT NULL
-        THEN DATEDIFF('day', CAST(c.date_filed AS DATE), CAST(c.resolution_date AS DATE))
-        END
-    ) AS avg_resolution_days,
-    AVG(
-        DATEDIFF('day', CAST(c.date_filed AS DATE), CAST(c.date_acknowledged AS DATE))
-    ) AS avg_acknowledgment_days
-FROM staging.stg_complaints c
-JOIN staging.stg_zones z ON c.zone_id = z.zone_id
-GROUP BY c.zone_id, z.name, c.category, c.priority""",
-        "assumptions": [
-            "Resolution time is measured from date_filed to resolution_date",
-            "Acknowledgment time is measured from date_filed to date_acknowledged",
-            "Only resolved complaints contribute to avg_resolution_days",
-        ],
-        "questions": [
-            "Is resolution time measured from filing or from acknowledgment?",
-            "Should 'closed_no_action' be counted as resolved?",
-            "Are there SLA targets for acknowledgment or resolution times?",
-        ],
-    },
-    {
-        "name": "mart_program_effectiveness",
-        "description": (
-            "Program enrollment and incident correlation by target zone. "
-            "Helps evaluate whether intervention programs correlate with reduced incidents."
+{metric_lines}
+    COUNT(*) AS total_rows
+FROM staging.stg_{table_name}"""
+
+    return GeneratedModel(
+        name=candidate.proposed_name,
+        model_type="mart",
+        sql=sql.strip(),
+        description=(
+            f"Single-table aggregation of {table_name}. "
+            f"Summarizes numeric columns: {', '.join(metric_cols[:5])}."
         ),
-        "required_tables": {"programs", "incidents", "zones"},
-        "sql": """-- Mart: Program Effectiveness Indicators
--- REQUIRES REVIEW: Correlation model is observational, not causal.
+        source_tables=candidate.candidate_tables,
+        depends_on=[f"stg_{t}" for t in candidate.candidate_tables],
+        status="proposed",
+        assumptions=candidate.assumptions,
+        questions=candidate.questions,
+    )
 
-CREATE OR REPLACE TABLE {{target_schema}}.mart_program_effectiveness AS
-WITH zone_incidents AS (
-    SELECT
-        zone_id,
-        incident_type,
-        COUNT(*) AS incident_count
-    FROM staging.stg_incidents
-    GROUP BY zone_id, incident_type
-)
-SELECT
-    p.program_id,
-    p.name AS program_name,
-    p.type AS program_type,
-    p.budget_usd,
-    p.status AS program_status,
-    z.zone_id,
-    z.name AS zone_name,
-    z.population,
-    z.environmental_risk_score,
-    zi.incident_type,
-    COALESCE(zi.incident_count, 0) AS zone_incident_count,
-    ROUND(
-        COALESCE(zi.incident_count, 0) * 1000.0 / z.population, 2
-    ) AS incidents_per_1k
-FROM staging.stg_programs p,
-UNNEST(p.target_zones) AS t(zone_id)
-JOIN staging.stg_zones z ON t.zone_id = z.zone_id
-LEFT JOIN zone_incidents zi ON z.zone_id = zi.zone_id""",
-        "assumptions": [
-            "Program target_zones is an array field that gets unnested",
-            "Incident counts are total (not filtered by program-relevant type)",
-            "This is observational correlation, not causal attribution",
-        ],
-        "questions": [
-            "Should incidents be filtered to types relevant to each program?",
-            "Should we compare target zones vs non-target zones for the same period?",
-            "Is the UNNEST syntax correct for your target_zones array structure?",
-        ],
-    },
-]
+
+_ARCHETYPE_RENDERERS = {
+    "period_comparison": _render_period_comparison,
+    "entity_summary": _render_entity_summary,
+    "aggregation": _render_aggregation,
+}
 
 
 def generate_mart_models(
     discovery: DiscoveryResult,
     target_schema: str = "marts",
 ) -> list[GeneratedModel]:
-    """Generate mart SQL models based on discovered tables and domains.
+    """Generate mart SQL models using archetype-based pattern matching.
+
+    Replaces the hard-coded _MART_DEFINITIONS with a PatternMatcher that detects
+    archetypes from discovered column semantic types and table relationships.
 
     Each mart is proposed with assumptions and clarifying questions.
     Status is always 'proposed' -- never auto-approved.
     """
-    available_tables = {t.name for t in discovery.tables}
-    models: list[GeneratedModel] = []
+    matcher = PatternMatcher()
+    candidates = matcher.match(discovery)
 
-    for defn in _MART_DEFINITIONS:
-        # Only propose marts whose required tables are present
-        if not defn["required_tables"].issubset(available_tables):
+    models: list[GeneratedModel] = []
+    seen_names: set[str] = set()
+
+    for candidate in candidates:
+        if candidate.proposed_name in seen_names:
+            continue  # Deduplicate
+        seen_names.add(candidate.proposed_name)
+
+        renderer = _ARCHETYPE_RENDERERS.get(candidate.archetype)
+        if renderer is None:
+            logger.warning("No renderer for archetype %s", candidate.archetype)
             continue
 
-        sql = defn["sql"].replace("{{target_schema}}", target_schema)
-
-        models.append(
-            GeneratedModel(
-                name=defn["name"],
-                model_type="mart",
-                sql=sql.strip(),
-                description=defn["description"],
-                source_tables=sorted(defn["required_tables"]),
-                depends_on=[f"stg_{t}" for t in sorted(defn["required_tables"])],
-                status="proposed",
-                assumptions=defn["assumptions"],
-                questions=defn["questions"],
-            )
-        )
+        model = renderer(candidate, target_schema)
+        models.append(model)
 
     return models

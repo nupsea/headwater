@@ -132,3 +132,63 @@ class TestSchemaExtraction:
         tables = extract_schema(ddb, "env_health")
         readings = next(t for t in tables if t.name == "readings")
         assert readings.row_count == 49302
+
+
+# -- BaseConnector new methods (US-100) ------------------------------------
+
+
+class TestJsonLoaderProfile:
+    def test_profile_returns_stats_dict(self):
+        loader = JsonLoader()
+        loader.connect(SourceConfig(name="sample", type="json", path=str(SAMPLE_DIR)))
+        stats = loader.profile("zones")
+        assert isinstance(stats, dict)
+        assert "zone_id" in stats
+        assert stats["zone_id"]["count"] == 25
+        assert stats["zone_id"]["null_count"] == 0
+        assert stats["zone_id"]["distinct_count"] == 25
+
+    def test_profile_numeric_min_max(self):
+        loader = JsonLoader()
+        loader.connect(SourceConfig(name="sample", type="json", path=str(SAMPLE_DIR)))
+        stats = loader.profile("zones")
+        # population is numeric -- should have min/max
+        assert "population" in stats
+        pop = stats["population"]
+        assert "min" in pop
+        assert "max" in pop
+        assert pop["min"] >= 0
+
+    def test_sample_returns_arrow_table(self):
+        import pyarrow as pa
+
+        loader = JsonLoader()
+        loader.connect(SourceConfig(name="sample", type="json", path=str(SAMPLE_DIR)))
+        table = loader.sample("zones")
+        assert isinstance(table, pa.Table)
+        assert table.num_rows == 25  # zones has only 25 rows, all returned
+
+    def test_sample_respects_n(self):
+        loader = JsonLoader()
+        loader.connect(SourceConfig(name="sample", type="json", path=str(SAMPLE_DIR)))
+        # readings has 49302 rows; limit to 100
+        table = loader.sample("readings", n=100)
+        assert table.num_rows == 100
+
+    def test_profile_after_load_to_duckdb(self, ddb: duckdb.DuckDBPyConnection):
+        """profile() works after load_to_duckdb() using the cached frame."""
+        loader = JsonLoader()
+        loader.connect(SourceConfig(name="sample", type="json", path=str(SAMPLE_DIR)))
+        loader.load_to_duckdb(ddb, "env_health")
+        stats = loader.profile("zones")
+        assert stats["zone_id"]["count"] == 25
+
+
+class TestSourceConfigMode:
+    def test_default_mode_is_generate(self):
+        cfg = SourceConfig(name="s", type="json", path="/data")
+        assert cfg.mode == "generate"
+
+    def test_observe_mode_accepted(self):
+        cfg = SourceConfig(name="s", type="json", path="/data", mode="observe")
+        assert cfg.mode == "observe"

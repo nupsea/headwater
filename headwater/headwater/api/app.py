@@ -10,12 +10,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from headwater.api.routes import discovery, execute, explore, insights, models, pipeline, quality
+from headwater.core.metadata import MetadataStore
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application state: DuckDB connection and pipeline state."""
+    """Manage application state: DuckDB connection, metadata store, and pipeline state."""
     app.state.duckdb_con = duckdb.connect(":memory:")
+    app.state.metadata_store = MetadataStore()
+    app.state.metadata_store.init()
     app.state.pipeline: dict[str, Any] = {
         "discovery": None,
         "staging_models": [],
@@ -26,6 +29,7 @@ async def lifespan(app: FastAPI):
     }
     yield
     app.state.duckdb_con.close()
+    app.state.metadata_store.close()
 
 
 def create_app() -> FastAPI:

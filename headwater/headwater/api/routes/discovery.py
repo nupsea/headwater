@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from headwater.analyzer.heuristics import build_domain_map, enrich_tables
 from headwater.connectors.registry import get_connector
@@ -99,3 +100,69 @@ async def list_relationships(request: Request):
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
     return [r.model_dump() for r in discovery.relationships]
+
+
+class ColumnPatchRequest(BaseModel):
+    """Payload for PATCH /api/columns/{source_name}/{table_name}/{column_name}."""
+
+    description: str | None = None
+    locked: bool | None = None
+
+
+@router.patch("/columns/{source_name}/{table_name}/{column_name}")
+async def patch_column(
+    request: Request,
+    source_name: str,
+    table_name: str,
+    column_name: str,
+    body: ColumnPatchRequest,
+) -> dict:
+    """Update and optionally lock a column description.
+
+    Setting description automatically locks the column (locked=true).
+    Setting locked=false clears the lock without changing description.
+    """
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="Metadata store not available.")
+
+    # Check column exists in in-memory discovery
+    discovery = request.app.state.pipeline.get("discovery")
+    if discovery is None:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    table = next((t for t in discovery.tables if t.name == table_name), None)
+    if table is None:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
+    col = next((c for c in table.columns if c.name == column_name), None)
+    if col is None:
+        raise HTTPException(status_code=404, detail=f"Column '{column_name}' not found.")
+
+    # Apply changes
+    should_lock = body.locked if body.locked is not None else (body.description is not None)
+    if should_lock:
+        if body.description is not None:
+            col.description = body.description
+        store.lock_column(
+            table_name, source_name, column_name,
+            locked=True, description=body.description,
+        )
+        store.record_decision(
+            "column", f"{source_name}.{table_name}.{column_name}", "locked",
+            payload={"description": body.description},
+        )
+    elif body.locked is False:
+        store.lock_column(table_name, source_name, column_name, locked=False)
+        store.record_decision(
+            "column", f"{source_name}.{table_name}.{column_name}", "unlocked",
+        )
+    elif body.description is not None:
+        col.description = body.description
+
+    return {
+        "source_name": source_name,
+        "table_name": table_name,
+        "column_name": column_name,
+        "description": col.description,
+        "locked": should_lock,
+    }

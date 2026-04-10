@@ -67,7 +67,23 @@ async def _enrich_table_with_llm(
     relationships: list[Relationship],
     provider: LLMProvider,
 ) -> None:
-    """Enrich a single table using the LLM. Updates table in place."""
+    """Enrich a single table using the LLM. Updates table in place.
+
+    Locked tables have their descriptions preserved. Locked columns are skipped
+    and their existing descriptions are passed as ground truth to the LLM prompt.
+    """
+    # Count and log locked columns
+    locked_cols = [c for c in table.columns if c.locked]
+    if locked_cols:
+        logger.info(
+            "Skipped enrichment for %d locked column(s) in table %s",
+            len(locked_cols), table.name,
+        )
+
+    if table.locked:
+        logger.info("Skipping LLM enrichment for locked table %s", table.name)
+        return
+
     prompt = _build_table_prompt(table, profiles, relationships)
     cache_key = make_cache_key(table.name, [c.name for c in table.columns])
 
@@ -77,13 +93,15 @@ async def _enrich_table_with_llm(
     if not result:
         return  # Keep heuristic descriptions
 
-    # Apply LLM results, overriding heuristics
-    if "description" in result:
+    # Apply LLM results, skipping locked columns
+    if "description" in result and not table.locked:
         table.description = result["description"]
     if "domain" in result:
         table.domain = result["domain"]
     if "columns" in result and isinstance(result["columns"], dict):
         for col in table.columns:
+            if col.locked:
+                continue  # Ground truth; never overwrite
             col_data = result["columns"].get(col.name, {})
             if isinstance(col_data, dict):
                 if "description" in col_data:
@@ -130,6 +148,16 @@ def _build_table_prompt(
                 f"{r.to_table}.{r.to_column} ({r.type}, integrity={r.referential_integrity:.0%})"
             )
 
+    locked_col_lines = [
+        f"  - {c.name}: LOCKED -- ground truth: {c.description!r}"
+        for c in table.columns if c.locked and c.description
+    ]
+    locked_section = (
+        "\nLocked columns (do not re-classify, use as ground truth):\n"
+        + "\n".join(locked_col_lines)
+        if locked_col_lines else ""
+    )
+
     return f"""Analyze this database table:
 
 Table: {table.name} ({table.row_count} rows)
@@ -138,7 +166,7 @@ Columns:
 
 Relationships:
 {chr(10).join(rel_lines) if rel_lines else "  None detected"}
-
+{locked_section}
 Respond as JSON:
 {{
   "description": "1-2 sentence description of what this table represents",

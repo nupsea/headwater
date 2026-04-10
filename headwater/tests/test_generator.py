@@ -241,10 +241,11 @@ class TestStagingGenerator:
 
 
 class TestMartGenerator:
-    def test_generates_all_five_marts(self):
+    def test_generates_at_least_one_mart_for_rich_discovery(self):
+        """Full sample dataset should produce at least one mart proposal."""
         discovery = _sample_discovery()
         models = generate_mart_models(discovery)
-        assert len(models) == 5
+        assert len(models) >= 1
 
     def test_all_proposed_status(self):
         models = generate_mart_models(_sample_discovery())
@@ -270,43 +271,106 @@ class TestMartGenerator:
             for dep in m.depends_on:
                 assert dep.startswith("stg_")
 
-    def test_missing_tables_skips_mart(self):
-        """If required tables are missing, that mart is not proposed."""
+    def test_no_relationships_no_metrics_produces_zero_proposals(self):
+        """US-503: Source with no relationships and no metric/temporal columns = 0 marts."""
+        from headwater.core.models import ColumnInfo as CI
+
         discovery = DiscoveryResult(
-            source=SourceConfig(name="partial", type="json", path="/data"),
+            source=SourceConfig(name="simple", type="json", path="/data"),
             tables=[
-                TableInfo(name="zones", columns=[]),
-                TableInfo(name="sites", columns=[]),
+                TableInfo(
+                    name="tags",
+                    row_count=10,
+                    columns=[
+                        CI(name="tag_id", dtype="varchar", semantic_type="id"),
+                        CI(name="tag_name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
             ],
+            relationships=[],
         )
         models = generate_mart_models(discovery)
-        # Only marts whose required_tables are a subset of {zones, sites} should appear
-        # None of the 5 marts can be satisfied with only zones+sites
         assert len(models) == 0
 
-    def test_partial_tables_only_matching_marts(self):
-        """With incidents + zones, only mart_incident_summary should appear."""
+    def test_temporal_column_gets_period_comparison(self):
+        """US-501: A source with a temporal column gets a period_comparison proposal."""
+        from headwater.core.models import ColumnInfo as CI, Relationship
+
         discovery = DiscoveryResult(
-            source=SourceConfig(name="partial", type="json", path="/data"),
+            source=SourceConfig(name="events", type="json", path="/data"),
             tables=[
-                TableInfo(name="incidents", columns=[]),
-                TableInfo(name="zones", columns=[]),
+                TableInfo(
+                    name="events",
+                    row_count=500,
+                    columns=[
+                        CI(name="event_id", dtype="varchar", semantic_type="id"),
+                        CI(name="event_date", dtype="timestamp", semantic_type="temporal"),
+                        CI(name="revenue", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+        models = generate_mart_models(discovery)
+        archetypes = {m.name for m in models}
+        assert any("by_period" in n for n in archetypes), (
+            f"Expected a period_comparison mart. Got: {archetypes}"
+        )
+
+    def test_metric_with_fk_gets_entity_summary(self):
+        """US-501: A source with metric columns + FK to dimension gets entity_summary."""
+        from headwater.core.models import ColumnInfo as CI, Relationship
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="sales", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=1000,
+                    columns=[
+                        CI(name="order_id", dtype="varchar", semantic_type="id"),
+                        CI(name="customer_id", dtype="varchar", semantic_type="foreign_key"),
+                        CI(name="amount", dtype="float64", semantic_type="metric"),
+                        CI(name="quantity", dtype="int64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="customers",
+                    row_count=200,
+                    columns=[
+                        CI(name="customer_id", dtype="varchar", semantic_type="id"),
+                        CI(name="country", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="orders",
+                    from_column="customer_id",
+                    to_table="customers",
+                    to_column="customer_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.99,
+                    source="inferred_name",
+                ),
+                Relationship(
+                    from_table="orders",
+                    from_column="customer_id",
+                    to_table="customers",
+                    to_column="customer_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.99,
+                    source="inferred_value",
+                ),
             ],
         )
         models = generate_mart_models(discovery)
-        assert len(models) == 1
-        assert models[0].name == "mart_incident_summary"
-
-    def test_mart_names(self):
-        models = generate_mart_models(_sample_discovery())
-        names = {m.name for m in models}
-        assert names == {
-            "mart_air_quality_daily",
-            "mart_incident_summary",
-            "mart_inspection_scores",
-            "mart_complaint_response",
-            "mart_program_effectiveness",
-        }
+        archetypes = {m.name for m in models}
+        assert any("by_customers" in n for n in archetypes), (
+            f"Expected an entity_summary mart. Got: {archetypes}"
+        )
 
 
 # ---------------------------------------------------------------------------

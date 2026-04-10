@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import duckdb
+import pytest
 
+from headwater.core.exceptions import ContractExpressionError
 from headwater.core.models import ContractRule
-from headwater.quality.checker import check_contract, check_contracts
+from headwater.quality.checker import (
+    _evaluate_count_expression,
+    check_contract,
+    check_contracts,
+)
 from headwater.quality.report import build_report
 
 # ---------------------------------------------------------------------------
@@ -259,3 +265,151 @@ class TestQualityReport:
         assert report.total_contracts == 0
         assert report.passed == 0
         assert report.failed == 0
+
+
+# ---------------------------------------------------------------------------
+# Row count check and safe expression parser (US-601)
+# ---------------------------------------------------------------------------
+
+
+class TestRowCountCheck:
+    def test_passes_gte(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc1", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) >= 5",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is True
+        assert result.observed_value == 5
+
+    def test_fails_gte(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc2", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) >= 10",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is False
+
+    def test_passes_lte(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc3", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) <= 10",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is True
+
+    def test_fails_lte(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc4", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) <= 3",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is False
+
+    def test_passes_gt(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc5", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) > 4",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is True
+
+    def test_passes_lt(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc6", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) < 10",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is True
+
+    def test_passes_eq(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc7", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) == 5",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is True
+
+    def test_fails_eq(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc8", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) == 999",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is False
+
+    def test_passes_between(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc9", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) BETWEEN 3 AND 10",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is True
+
+    def test_fails_between(self):
+        con = _make_con()
+        rule = ContractRule(
+            id="rc10", model_name="stg_items", column_name=None,
+            rule_type="row_count", expression="COUNT(*) BETWEEN 10 AND 20",
+            status="observing",
+        )
+        result = check_contract(con, rule)
+        assert result.passed is False
+
+    def test_between_boundary_inclusive(self):
+        """BETWEEN N AND M is inclusive on both ends."""
+        assert _evaluate_count_expression("COUNT(*) BETWEEN 5 AND 10", 5) is True
+        assert _evaluate_count_expression("COUNT(*) BETWEEN 5 AND 10", 10) is True
+        assert _evaluate_count_expression("COUNT(*) BETWEEN 5 AND 10", 4) is False
+        assert _evaluate_count_expression("COUNT(*) BETWEEN 5 AND 10", 11) is False
+
+
+class TestCountExpressionParser:
+    def test_all_operators(self):
+        assert _evaluate_count_expression("COUNT(*) >= 5", 5) is True
+        assert _evaluate_count_expression("COUNT(*) >= 5", 4) is False
+        assert _evaluate_count_expression("COUNT(*) <= 5", 5) is True
+        assert _evaluate_count_expression("COUNT(*) <= 5", 6) is False
+        assert _evaluate_count_expression("COUNT(*) > 5", 6) is True
+        assert _evaluate_count_expression("COUNT(*) > 5", 5) is False
+        assert _evaluate_count_expression("COUNT(*) < 5", 4) is True
+        assert _evaluate_count_expression("COUNT(*) < 5", 5) is False
+        assert _evaluate_count_expression("COUNT(*) == 5", 5) is True
+        assert _evaluate_count_expression("COUNT(*) == 5", 4) is False
+
+    def test_between_case_insensitive(self):
+        assert _evaluate_count_expression("COUNT(*) between 1 AND 10", 5) is True
+
+    def test_whitespace_tolerance(self):
+        assert _evaluate_count_expression("COUNT(*)>=5", 5) is True
+        assert _evaluate_count_expression("COUNT(*) >= 5", 5) is True
+
+    def test_invalid_expression_raises(self):
+        with pytest.raises(ContractExpressionError):
+            _evaluate_count_expression("COUNT(*) != 5", 5)
+
+    def test_invalid_no_count_raises(self):
+        with pytest.raises(ContractExpressionError):
+            _evaluate_count_expression("rows > 5", 10)
+
+    def test_sql_injection_attempt_raises(self):
+        with pytest.raises(ContractExpressionError):
+            _evaluate_count_expression("COUNT(*) >= 5; DROP TABLE foo", 5)

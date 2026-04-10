@@ -102,14 +102,15 @@ class TestModels:
         assert resp.status_code == 200
         data = resp.json()
         assert data["staging_models"] == 8
-        assert data["mart_models"] == 5
+        assert data["mart_models"] >= 1  # Pattern-based: at least one mart from sample data
 
     def test_list_models(self, client):
         self._setup(client)
         resp = client.get("/api/models")
         assert resp.status_code == 200
         models = resp.json()
-        assert len(models) == 13  # 8 staging + 5 marts
+        # 8 staging + at least 1 mart (pattern-matched)
+        assert len(models) >= 9
 
     def test_get_model(self, client):
         self._setup(client)
@@ -120,13 +121,24 @@ class TestModels:
 
     def test_approve_model(self, client):
         self._setup(client)
-        resp = client.post("/api/models/mart_incident_summary/approve")
+        # Find any proposed mart to approve
+        models_resp = client.get("/api/models")
+        mart = next(
+            m for m in models_resp.json()
+            if m["model_type"] == "mart" and m["status"] == "proposed"
+        )
+        resp = client.post(f"/api/models/{mart['name']}/approve")
         assert resp.status_code == 200
         assert resp.json()["status"] == "approved"
 
     def test_reject_model(self, client):
         self._setup(client)
-        resp = client.post("/api/models/mart_incident_summary/reject")
+        models_resp = client.get("/api/models")
+        mart = next(
+            m for m in models_resp.json()
+            if m["model_type"] == "mart" and m["status"] == "proposed"
+        )
+        resp = client.post(f"/api/models/{mart['name']}/reject")
         assert resp.status_code == 200
         assert resp.json()["status"] == "rejected"
 
@@ -167,3 +179,100 @@ class TestQuality:
     def test_quality_report(self, client):
         resp = client.get("/api/quality")
         assert resp.status_code == 200
+
+
+class TestSemanticLockEndpoint:
+    """US-201: PATCH /api/columns endpoint."""
+
+    def _setup(self, client):
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+
+    def test_patch_column_description_locks(self, client):
+        self._setup(client)
+        resp = client.patch(
+            "/api/columns/source/zones/zone_id",
+            json={"description": "Unique zone identifier"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["locked"] is True
+        assert data["description"] == "Unique zone identifier"
+
+    def test_patch_column_lock_false(self, client):
+        self._setup(client)
+        # First lock it
+        client.patch(
+            "/api/columns/source/zones/zone_id",
+            json={"description": "test desc"},
+        )
+        # Then unlock
+        resp = client.patch(
+            "/api/columns/source/zones/zone_id",
+            json={"locked": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["locked"] is False
+
+    def test_patch_column_records_decision(self, client):
+        self._setup(client)
+        client.patch(
+            "/api/columns/source/zones/zone_id",
+            json={"description": "Locked desc"},
+        )
+        store = client.app.state.metadata_store
+        decisions = store.get_decisions("column", "source.zones.zone_id")
+        assert len(decisions) >= 1
+        assert any(d["action"] == "locked" for d in decisions)
+
+    def test_patch_column_not_found(self, client):
+        self._setup(client)
+        resp = client.patch(
+            "/api/columns/source/zones/nonexistent_col",
+            json={"description": "test"},
+        )
+        assert resp.status_code == 404
+
+
+class TestDecisionRecording:
+    """US-301: verify approve/reject writes to decisions table."""
+
+    def _setup(self, client):
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        client.post("/api/generate")
+
+    def _first_proposed_mart_name(self, client) -> str:
+        models_resp = client.get("/api/models")
+        mart = next(
+            m for m in models_resp.json()
+            if m["model_type"] == "mart" and m["status"] == "proposed"
+        )
+        return mart["name"]
+
+    def test_approve_records_decision(self, client):
+        self._setup(client)
+        mart_name = self._first_proposed_mart_name(client)
+        client.post(f"/api/models/{mart_name}/approve")
+        store = client.app.state.metadata_store
+        decisions = store.get_decisions("model", mart_name)
+        assert len(decisions) == 1
+        assert decisions[0]["action"] == "approved"
+
+    def test_reject_records_decision(self, client):
+        self._setup(client)
+        mart_name = self._first_proposed_mart_name(client)
+        client.post(f"/api/models/{mart_name}/reject")
+        store = client.app.state.metadata_store
+        decisions = store.get_decisions("model", mart_name)
+        assert len(decisions) == 1
+        assert decisions[0]["action"] == "rejected"
+
+    def test_decision_payload_contains_previous_status(self, client):
+        import json
+
+        self._setup(client)
+        mart_name = self._first_proposed_mart_name(client)
+        client.post(f"/api/models/{mart_name}/approve")
+        store = client.app.state.metadata_store
+        decisions = store.get_decisions("model", mart_name)
+        payload = json.loads(decisions[0]["payload_json"])
+        assert payload["previous_status"] == "proposed"

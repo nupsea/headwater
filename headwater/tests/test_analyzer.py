@@ -15,7 +15,7 @@ from headwater.analyzer.heuristics import (
     generate_column_description,
     generate_table_description,
 )
-from headwater.analyzer.llm import NoLLMProvider, make_cache_key
+from headwater.analyzer.llm import NoLLMProvider, _parse_json_response, make_cache_key
 from headwater.analyzer.semantic import analyze
 from headwater.connectors.json_loader import JsonLoader
 from headwater.core.models import ColumnInfo, SourceConfig, TableInfo
@@ -122,6 +122,46 @@ class TestLLMProvider:
         assert key1 != key2
 
 
+# -- LLM response parser (US-604) -------------------------------------------
+
+
+class TestParseJsonResponse:
+    def test_plain_json(self):
+        result = _parse_json_response('{"description": "test", "domain": "Health"}')
+        assert result["description"] == "test"
+
+    def test_json_in_backtick_fence(self):
+        text = '```json\n{"description": "test"}\n```'
+        result = _parse_json_response(text)
+        assert result["description"] == "test"
+
+    def test_json_in_plain_fence(self):
+        text = '```\n{"description": "test"}\n```'
+        result = _parse_json_response(text)
+        assert result["description"] == "test"
+
+    def test_plain_sql_select(self):
+        result = _parse_json_response("SELECT * FROM foo WHERE x > 1")
+        assert result == {"sql": "SELECT * FROM foo WHERE x > 1"}
+
+    def test_plain_sql_create(self):
+        result = _parse_json_response("CREATE TABLE foo AS SELECT 1")
+        assert result == {"sql": "CREATE TABLE foo AS SELECT 1"}
+
+    def test_plain_sql_with(self):
+        result = _parse_json_response("WITH cte AS (SELECT 1) SELECT * FROM cte")
+        assert "sql" in result
+
+    def test_sql_in_backtick_fence(self):
+        text = "```sql\nSELECT * FROM foo\n```"
+        result = _parse_json_response(text)
+        assert result == {"sql": "SELECT * FROM foo"}
+
+    def test_unparseable_returns_empty(self):
+        result = _parse_json_response("This is just some random text that isn't JSON or SQL.")
+        assert result == {}
+
+
 # -- Semantic analyzer (end-to-end, heuristic mode) -------------------------
 
 
@@ -164,3 +204,62 @@ class TestSemanticAnalyzer:
         # All tables should be in some domain
         all_tables = {name for tables in domains.values() for name in tables}
         assert len(all_tables) == 8
+
+
+# -- Semantic locks (US-201) ------------------------------------------------
+
+
+class TestSemanticLocks:
+    def test_locked_column_description_preserved(self):
+        """A locked column keeps its description after re-enrichment."""
+        table = TableInfo(
+            name="sensors",
+            row_count=10,
+            columns=[
+                ColumnInfo(
+                    name="sensor_id",
+                    dtype="varchar",
+                    description="Human-approved: unique sensor identifier",
+                    locked=True,
+                ),
+                ColumnInfo(name="site_id", dtype="varchar"),
+            ],
+        )
+        enrich_tables([table], [], [])
+        # Locked column description must be unchanged
+        locked_col = next(c for c in table.columns if c.name == "sensor_id")
+        assert locked_col.description == "Human-approved: unique sensor identifier"
+
+    def test_unlocked_column_gets_enriched(self):
+        """An unlocked column gets a heuristic description."""
+        table = TableInfo(
+            name="sensors",
+            row_count=10,
+            columns=[
+                ColumnInfo(name="site_id", dtype="varchar", locked=False),
+            ],
+        )
+        enrich_tables([table], [], [])
+        col = table.columns[0]
+        assert col.description is not None
+        assert col.description != ""
+
+    def test_locked_table_description_preserved(self):
+        """A locked table keeps its description after re-enrichment."""
+        table = TableInfo(
+            name="sensors",
+            row_count=10,
+            columns=[],
+            description="Human-approved table description",
+            locked=True,
+        )
+        enrich_tables([table], [], [])
+        assert table.description == "Human-approved table description"
+
+    def test_column_locked_flag_default_false(self):
+        col = ColumnInfo(name="x", dtype="varchar")
+        assert col.locked is False
+
+    def test_table_locked_flag_default_false(self):
+        table = TableInfo(name="x", columns=[])
+        assert table.locked is False

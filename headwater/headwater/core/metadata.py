@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS sources (
     type        TEXT NOT NULL,
     path        TEXT,
     uri         TEXT,
+    mode        TEXT NOT NULL DEFAULT 'generate',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -38,6 +39,8 @@ CREATE TABLE IF NOT EXISTS tables (
     domain      TEXT,
     tags        TEXT DEFAULT '[]',
     run_id      INTEGER REFERENCES discovery_runs(id),
+    locked      INTEGER NOT NULL DEFAULT 0,
+    locked_at   TEXT,
     PRIMARY KEY (name, source_name)
 );
 
@@ -51,6 +54,8 @@ CREATE TABLE IF NOT EXISTS columns (
     description TEXT,
     semantic_type TEXT,
     ordinal     INTEGER DEFAULT 0,
+    locked      INTEGER NOT NULL DEFAULT 0,
+    locked_at   TEXT,
     PRIMARY KEY (table_name, source_name, name),
     FOREIGN KEY (table_name, source_name) REFERENCES tables(name, source_name)
 );
@@ -113,6 +118,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     artifact_id TEXT NOT NULL,
     action      TEXT NOT NULL,
     reason      TEXT,
+    payload_json TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -139,7 +145,7 @@ class MetadataStore:
         self._con: sqlite3.Connection | None = None
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self._db_path)
+        con = sqlite3.connect(self._db_path, check_same_thread=False)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA foreign_keys=ON")
@@ -152,8 +158,31 @@ class MetadataStore:
         return self._con
 
     def init(self) -> None:
-        """Create all tables if they don't exist."""
+        """Create all tables if they don't exist, then apply any pending migrations."""
         self.con.executescript(_SCHEMA_SQL)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Apply incremental schema migrations that are safe to run repeatedly."""
+        migrations = [
+            # US-100: add mode column to sources (default 'generate')
+            "ALTER TABLE sources ADD COLUMN mode TEXT NOT NULL DEFAULT 'generate'",
+            # US-301: add payload_json column to decisions
+            "ALTER TABLE decisions ADD COLUMN payload_json TEXT",
+            # US-201: add locked columns to tables
+            "ALTER TABLE tables ADD COLUMN locked INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tables ADD COLUMN locked_at TEXT",
+            # US-201: add locked columns to columns
+            "ALTER TABLE columns ADD COLUMN locked INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE columns ADD COLUMN locked_at TEXT",
+        ]
+        for sql in migrations:
+            try:
+                self.con.execute(sql)
+                self.con.commit()
+            except Exception:
+                # Column already exists -- migration already applied
+                pass
 
     def close(self) -> None:
         if self._con is not None:
@@ -162,10 +191,18 @@ class MetadataStore:
 
     # -- Sources -----------------------------------------------------------
 
-    def upsert_source(self, name: str, type_: str, path: str | None, uri: str | None) -> None:
+    def upsert_source(
+        self,
+        name: str,
+        type_: str,
+        path: str | None,
+        uri: str | None,
+        mode: str = "generate",
+    ) -> None:
         self.con.execute(
-            "INSERT OR REPLACE INTO sources (name, type, path, uri) VALUES (?, ?, ?, ?)",
-            (name, type_, path, uri),
+            "INSERT OR REPLACE INTO sources (name, type, path, uri, mode) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (name, type_, path, uri, mode),
         )
         self.con.commit()
 
@@ -231,14 +268,53 @@ class MetadataStore:
         semantic_type: str | None = None,
         ordinal: int = 0,
     ) -> None:
+        # INSERT OR IGNORE to preserve existing lock state on re-runs.
+        # Then UPDATE non-lock fields only (description/semantic_type honored if not locked).
         self.con.execute(
-            "INSERT OR REPLACE INTO columns "
+            "INSERT OR IGNORE INTO columns "
             "(table_name, source_name, name, dtype, nullable, is_primary_key, "
             "description, semantic_type, ordinal) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (table_name, source_name, name, dtype, int(nullable), int(is_primary_key),
              description, semantic_type, ordinal),
         )
+        # Update non-locked columns; if locked=1 skip description/semantic_type update
+        self.con.execute(
+            "UPDATE columns SET "
+            "dtype = ?, nullable = ?, is_primary_key = ?, ordinal = ?, "
+            "description = CASE WHEN locked = 1 THEN description ELSE ? END, "
+            "semantic_type = CASE WHEN locked = 1 THEN semantic_type ELSE ? END "
+            "WHERE table_name = ? AND source_name = ? AND name = ?",
+            (dtype, int(nullable), int(is_primary_key), ordinal,
+             description, semantic_type,
+             table_name, source_name, name),
+        )
+        self.con.commit()
+
+    def lock_column(
+        self,
+        table_name: str,
+        source_name: str,
+        name: str,
+        *,
+        locked: bool,
+        description: str | None = None,
+    ) -> None:
+        """Set or clear the lock on a column. Setting locked=True also updates description."""
+        if locked:
+            self.con.execute(
+                "UPDATE columns SET locked = 1, locked_at = datetime('now')"
+                + (", description = ?" if description is not None else "")
+                + " WHERE table_name = ? AND source_name = ? AND name = ?",
+                ([description] if description is not None else [])
+                + [table_name, source_name, name],
+            )
+        else:
+            self.con.execute(
+                "UPDATE columns SET locked = 0, locked_at = NULL "
+                "WHERE table_name = ? AND source_name = ? AND name = ?",
+                (table_name, source_name, name),
+            )
         self.con.commit()
 
     def get_tables(self, source_name: str) -> list[dict]:
@@ -384,4 +460,89 @@ class MetadataStore:
             ).fetchall()
         else:
             rows = self.con.execute("SELECT * FROM contracts").fetchall()
+        return [dict(r) for r in rows]
+
+    # -- Decisions ---------------------------------------------------------
+
+    def record_decision(
+        self,
+        artifact_type: str,
+        artifact_id: str,
+        action: str,
+        *,
+        reason: str | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        """Record a human review decision in the decisions table.
+
+        Args:
+            artifact_type: 'model', 'contract', 'column', etc.
+            artifact_id:   Unique identifier of the artifact (name, id, etc.).
+            action:        Human action taken ('approved', 'rejected', 'locked', etc.).
+            reason:        Optional human-readable reason.
+            payload:       Optional dict of before/after values or context data.
+        """
+        payload_json = json.dumps(payload) if payload is not None else None
+        self.con.execute(
+            "INSERT INTO decisions "
+            "(artifact_type, artifact_id, action, reason, payload_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (artifact_type, artifact_id, action, reason, payload_json),
+        )
+        self.con.commit()
+
+    def get_decisions(
+        self,
+        artifact_type: str | None = None,
+        artifact_id: str | None = None,
+    ) -> list[dict]:
+        """Return decisions, optionally filtered by type and/or artifact id."""
+        if artifact_type and artifact_id:
+            rows = self.con.execute(
+                "SELECT * FROM decisions WHERE artifact_type = ? AND artifact_id = ? "
+                "ORDER BY created_at DESC",
+                (artifact_type, artifact_id),
+            ).fetchall()
+        elif artifact_type:
+            rows = self.con.execute(
+                "SELECT * FROM decisions WHERE artifact_type = ? ORDER BY created_at DESC",
+                (artifact_type,),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM decisions ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- LLM audit log -----------------------------------------------------
+
+    def insert_llm_audit(
+        self,
+        provider: str,
+        model: str,
+        prompt_text: str,
+        response_text: str,
+        *,
+        prompt_hash: str | None = None,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        cached: int = 0,
+    ) -> None:
+        """Write one row to the LLM audit log."""
+        self.con.execute(
+            "INSERT INTO llm_audit_log "
+            "(provider, model, prompt_hash, prompt_text, response_text, "
+            "tokens_in, tokens_out, cached) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (provider, model, prompt_hash, prompt_text, response_text,
+             tokens_in, tokens_out, cached),
+        )
+        self.con.commit()
+
+    def get_llm_audit_log(self, limit: int = 100) -> list[dict]:
+        """Return the most recent LLM audit log entries."""
+        rows = self.con.execute(
+            "SELECT * FROM llm_audit_log ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
         return [dict(r) for r in rows]

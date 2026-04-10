@@ -35,3 +35,7 @@ class MetadataError(HeadwaterError):
 
 class ExplorerError(HeadwaterError):
     """Error during NL exploration or statistical analysis."""
+
+
+class ContractExpressionError(HeadwaterError):
+    """Invalid or unsupported contract expression format."""
