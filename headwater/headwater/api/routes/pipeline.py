@@ -1,4 +1,4 @@
-"""Pipeline API -- one-click full pipeline execution for demos."""
+"""Pipeline API -- one-click full pipeline execution for demos and real sources."""
 
 from __future__ import annotations
 
@@ -20,31 +20,86 @@ from headwater.quality.report import build_report
 
 router = APIRouter()
 
+_DB_SCHEMES = {"postgresql", "postgres", "mysql", "sqlite"}
+
+
+def _is_db_uri(source: str) -> bool:
+    """Return True if source looks like a database URI rather than a file path."""
+    return any(source.startswith(f"{scheme}://") for scheme in _DB_SCHEMES)
+
+
+def _connector_type_from_uri(uri: str) -> str:
+    """Infer connector type from URI scheme."""
+    if uri.startswith("postgresql://") or uri.startswith("postgres://"):
+        return "postgres"
+    return "json"
+
 
 @router.post("/pipeline/run")
 async def run_full_pipeline(
     request: Request,
-    source_path: str,
-    source_type: str = "json",
+    source_path: str = "postgresql://headwater:headwater@localhost:5434/headwater_dev",
+    source_type: str = "auto",
     source_name: str = "source",
-    source_schema: str = "env_health",
+    source_schema: str = "public",
     target_schema: str = "staging",
 ):
-    """Run the entire pipeline: discover -> generate -> execute -> quality check."""
-    data_path = Path(source_path).resolve()
-    if not data_path.exists():
-        raise HTTPException(status_code=400, detail=f"Path not found: {data_path}")
+    """Run the entire pipeline: discover -> generate -> execute -> quality check.
 
+    source_path accepts either:
+    - A filesystem path to JSON/CSV data  (e.g. /data/sample)
+    - A database DSN                      (e.g. postgresql://user:pass@host:5434/db)
+
+    source_type defaults to 'auto' which infers the connector from the source value.
+    """
     con = request.app.state.duckdb_con
     pipeline = request.app.state.pipeline
 
-    # Step 1: Load + Discover
-    source = SourceConfig(name=source_name, type=source_type, path=str(data_path))
-    connector = get_connector(source.type)
-    connector.connect(source)
-    tables_loaded = connector.load_to_duckdb(con, source_schema)
+    # --- Resolve source type and build SourceConfig ---
+    if _is_db_uri(source_path):
+        resolved_type = (
+            source_type if source_type != "auto" else _connector_type_from_uri(source_path)
+        )
+        source = SourceConfig(name=source_name, type=resolved_type, uri=source_path)
+        connector = get_connector(resolved_type)
+        connector.connect(source)
 
-    discovery_result = discover(con, source_schema, source)
+        # Sample each table into DuckDB for profiling (no bulk copy — Arrow batches only)
+        import polars as _pl
+
+        table_names = connector.list_tables()
+        if not table_names:
+            raise HTTPException(status_code=400, detail="No tables found in the database.")
+
+        _duckdb_schema = source_schema.replace(".", "_")
+        con.execute(f'CREATE SCHEMA IF NOT EXISTS "{_duckdb_schema}"')
+
+        for tname in table_names:
+            arrow_batch = connector.sample(tname, n=10_000)
+            df = _pl.from_arrow(arrow_batch)
+            safe_name = tname.replace(".", "_")
+            con.register(f"_arrow_{safe_name}", df)
+            con.execute(
+                f'CREATE OR REPLACE TABLE "{_duckdb_schema}"."{safe_name}" AS '
+                f'SELECT * FROM "_arrow_{safe_name}"'
+            )
+            con.unregister(f"_arrow_{safe_name}")
+
+        tables_loaded = [t.replace(".", "_") for t in table_names]
+
+    else:
+        # File-based source (JSON / CSV)
+        resolved_type = source_type if source_type != "auto" else "json"
+        data_path = Path(source_path).resolve()
+        if not data_path.exists():
+            raise HTTPException(status_code=400, detail=f"Path not found: {data_path}")
+        source = SourceConfig(name=source_name, type=resolved_type, path=str(data_path))
+        connector = get_connector(resolved_type)
+        connector.connect(source)
+        tables_loaded = connector.load_to_duckdb(con, source_schema)
+        _duckdb_schema = source_schema
+
+    discovery_result = discover(con, _duckdb_schema, source)
     enrich_tables(
         discovery_result.tables, discovery_result.profiles, discovery_result.relationships
     )
@@ -53,7 +108,7 @@ async def run_full_pipeline(
 
     # Step 2: Generate
     staging = generate_staging_models(
-        discovery_result.tables, source_schema=source_schema, target_schema=target_schema
+        discovery_result.tables, source_schema=_duckdb_schema, target_schema=target_schema
     )
     marts = generate_mart_models(discovery_result, target_schema="marts")
     contracts = generate_contracts(discovery_result.profiles, target_schema=target_schema)

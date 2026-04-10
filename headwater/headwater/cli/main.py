@@ -125,7 +125,10 @@ def discover_cmd(
     from headwater.analyzer.heuristics import build_domain_map, enrich_tables
     from headwater.cli.display import console, show_discovery_summary
     from headwater.connectors.registry import get_connector
+    from headwater.core.config import get_settings
+    from headwater.core.metadata import MetadataStore
     from headwater.core.models import SourceConfig
+    from headwater.drift.schema import compare_schemas
     from headwater.profiler.engine import discover
 
     data_path = Path(source_path).resolve()
@@ -145,6 +148,72 @@ def discover_cmd(
     discovery.domains = build_domain_map(discovery.tables)
 
     show_discovery_summary(discovery)
+
+    # -- Schema drift detection (US-401, US-402) ---------------------------
+    # Non-fatal: drift tracking is advisory. Errors here do not abort the run.
+    settings = get_settings()
+    try:
+        settings.ensure_dirs()
+        store = MetadataStore(settings.metadata_db_path)
+        try:
+            store.init()
+            store.upsert_source(name, source_type, str(data_path), None)
+            run_id = store.start_run(name)
+
+            # Build current snapshot
+            snapshot: dict = {}
+            for table in discovery.tables:
+                snapshot[table.name] = {
+                    "columns": [
+                        {"name": col.name, "dtype": str(col.dtype), "nullable": col.nullable}
+                        for col in table.columns
+                    ],
+                    "row_count": table.row_count,
+                }
+
+            # Get previous snapshot (before this run)
+            prev_snapshot = store.get_latest_snapshot(name, before_run_id=run_id)
+
+            # Save current snapshot
+            store.save_snapshot(run_id, name, snapshot)
+            store.finish_run(run_id, table_count=len(discovery.tables))
+
+            # Compare and report drift
+            run_id_from = None if prev_snapshot is None else run_id - 1
+            diff = compare_schemas(prev_snapshot, snapshot, name, run_id_from, run_id)
+
+            if diff.no_changes:
+                console.print("[dim]No schema changes since last run.[/dim]")
+            else:
+                n_added = len(diff.tables_added)
+                n_removed = len(diff.tables_removed)
+                n_changed = len(diff.tables_changed)
+                n_col_added = sum(
+                    sum(1 for c in t.column_changes if c.change_type == "added")
+                    for t in diff.tables_changed
+                )
+                n_col_removed = sum(
+                    sum(1 for c in t.column_changes if c.change_type == "removed")
+                    for t in diff.tables_changed
+                )
+                console.print(
+                    f"[yellow]Schema drift detected:[/yellow] "
+                    f"{n_changed} table(s) changed, "
+                    f"{n_added} added, "
+                    f"{n_removed} removed, "
+                    f"{n_col_added} column(s) added, "
+                    f"{n_col_removed} column(s) removed."
+                )
+                store.save_drift_report(
+                    name,
+                    diff.run_id_from,
+                    run_id,
+                    diff.model_dump(),
+                )
+        finally:
+            store.close()
+    except Exception as exc:
+        console.print(f"[dim]Warning: drift tracking unavailable: {exc}[/dim]")
 
 
 @app.command()

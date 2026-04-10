@@ -319,7 +319,7 @@ export interface ExploreSuggestionsResponse {
 export const api = {
   status: () => fetchJSON<StatusResponse>("/status"),
 
-  pipelineRun: (sourcePath: string, sourceType = "json") =>
+  pipelineRun: (sourcePath: string, sourceType = "auto") =>
     fetchJSON<PipelineRunResponse>(
       `/pipeline/run?source_path=${encodeURIComponent(sourcePath)}&source_type=${sourceType}`,
       { method: "POST" }

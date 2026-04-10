@@ -27,6 +27,7 @@ from headwater.core.models import (
     SuggestedQuestion,
     TableInfo,
 )
+from headwater.explorer.utils import resolve_table_ref, table_exists
 from headwater.explorer.visualization import recommend_visualization
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,7 @@ def ask(
 
     # If no match, try heuristic SQL generation from metadata
     if sql is None:
-        sql = _heuristic_sql(question, discovery, models or [])
+        sql = _heuristic_sql(question, discovery, models or [], con=con)
 
     # If still no match and LLM is available, generate SQL
     if sql is None and has_llm:
@@ -247,6 +248,7 @@ Fix the SQL query so it executes successfully. Return ONLY the corrected SQL."""
 def _match_suggestion(
     question: str,
     suggestions: list[SuggestedQuestion],
+    con: duckdb.DuckDBPyConnection | None = None,
 ) -> str | None:
     """Find a suggested question that matches and has a SQL hint."""
     q_lower = question.lower().strip().rstrip("?")
@@ -296,10 +298,23 @@ _BREAKDOWN_WORDS = {"by", "across", "per", "breakdown", "break", "distribution",
 _TOP_WORDS = {"top", "most", "highest", "worst", "best", "largest", "lowest", "least", "smallest"}
 
 
+def _resolve_table_ref(
+    table_name: str,
+    con: duckdb.DuckDBPyConnection,
+    models: list[GeneratedModel],
+) -> str:
+    return resolve_table_ref(table_name, con, models)
+
+
+def _table_exists(con: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:
+    return table_exists(con, schema, table)
+
+
 def _heuristic_sql(
     question: str,
     discovery: DiscoveryResult,
     models: list[GeneratedModel],
+    con: duckdb.DuckDBPyConnection | None = None,
 ) -> str | None:
     """Build SQL from metadata heuristics when no suggestion matches.
 
@@ -331,9 +346,10 @@ def _heuristic_sql(
     metric_cols = [
         c for c in table.columns
         if c.dtype in ("int64", "float64")
-        and c.semantic_type not in ("id", "foreign_key")
+        and c.semantic_type not in ("id", "foreign_key", "dimension", "temporal")
         and not c.name.endswith("_id")
         and not c.is_primary_key
+        and not re.search(r"(code$|flag$|indicator$|_key$|_fk$|_pk$)", c.name, re.IGNORECASE)
     ]
     dimension_cols = [
         c for c in table.columns
@@ -343,13 +359,21 @@ def _heuristic_sql(
         and not c.is_primary_key
     ]
 
-    table_ref = f"staging.stg_{table.name}"
-
-    # Check if a mart table exists for this entity
-    for m in models:
-        if m.model_type == "mart" and table.name in m.source_tables and m.status == "executed":
-            table_ref = f"marts.{m.name}"
-            break
+    if con is not None:
+        table_ref = _resolve_table_ref(table.name, con, models)
+    else:
+        # No connection — prefer executed mart from models list if one covers this table
+        mart_ref = next(
+            (
+                f"marts.{m.name}"
+                for m in models
+                if m.model_type == "mart"
+                and table.name in m.source_tables
+                and m.status == "executed"
+            ),
+            None,
+        )
+        table_ref = mart_ref if mart_ref is not None else f"staging.stg_{table.name}"
 
     # Step 3: Detect the question intent and build SQL
     is_trend = bool(q_words & _TREND_WORDS) and temporal_cols
@@ -581,15 +605,22 @@ def _match_column(
 def _build_context(
     discovery: DiscoveryResult,
     models: list[GeneratedModel],
+    con: duckdb.DuckDBPyConnection | None = None,
 ) -> str:
-    """Build a metadata context prompt for the LLM. Never includes raw data."""
-    lines: list[str] = []
+    """Build a metadata context prompt for the LLM. Never includes raw data.
 
-    # Staging tables
+    Uses _resolve_table_ref so the LLM is told about tables that actually exist,
+    not tables that were planned but may not have been materialized.
+    """
+    lines: list[str] = []
     lines.append("=== Available Tables ===\n")
-    lines.append("-- Staging tables (staging schema, cleaned source data):")
+
     for table in discovery.tables:
-        lines.append(f"\nTable: staging.stg_{table.name} ({table.row_count} rows)")
+        if con is not None:
+            ref = _resolve_table_ref(table.name, con, models)
+        else:
+            ref = f"staging.stg_{table.name}"
+        lines.append(f"\nTable: {ref} ({table.row_count} rows)")
         if table.description:
             lines.append(f"  Description: {table.description}")
         for col in table.columns:
@@ -597,25 +628,29 @@ def _build_context(
             sem = f' [{col.semantic_type}]' if col.semantic_type else ''
             lines.append(f"  - {col.name} ({col.dtype}){sem}{desc}")
 
-    # Mart tables
+    # Mart tables (only executed ones)
     executed_marts = [m for m in models if m.model_type == "mart" and m.status == "executed"]
     if executed_marts:
         lines.append("\n-- Mart tables (marts schema, analytical models):")
         for mart in executed_marts:
-            lines.append(f"\nTable: marts.{mart.name}")
-            lines.append(f"  Description: {mart.description}")
-            lines.append(f"  Source tables: {', '.join(mart.source_tables)}")
-            if mart.assumptions:
-                lines.append(f"  Assumptions: {'; '.join(mart.assumptions[:2])}")
+            if con is None or _table_exists(con, "marts", mart.name):
+                lines.append(f"\nTable: marts.{mart.name}")
+                lines.append(f"  Description: {mart.description}")
+                lines.append(f"  Source tables: {', '.join(mart.source_tables)}")
+                if mart.assumptions:
+                    lines.append(f"  Assumptions: {'; '.join(mart.assumptions[:2])}")
 
-    # Relationships
+    # Relationships — use resolved refs so the LLM gets correct table names
     if discovery.relationships:
         lines.append("\n=== Relationships ===")
         for r in discovery.relationships:
-            lines.append(
-                f"  staging.stg_{r.from_table}.{r.from_column} -> "
-                f"staging.stg_{r.to_table}.{r.to_column} ({r.type})"
-            )
+            if con is not None:
+                from_ref = _resolve_table_ref(r.from_table, con, models)
+                to_ref = _resolve_table_ref(r.to_table, con, models)
+            else:
+                from_ref = f"staging.stg_{r.from_table}"
+                to_ref = f"staging.stg_{r.to_table}"
+            lines.append(f"  {from_ref}.{r.from_column} -> {to_ref}.{r.to_column} ({r.type})")
 
     return "\n".join(lines)
 

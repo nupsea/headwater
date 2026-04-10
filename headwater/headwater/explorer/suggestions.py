@@ -1,11 +1,27 @@
 """Suggestion engine -- auto-generates BI-oriented questions from metadata.
 
-Generates business-level questions that a data analyst or decision-maker would ask,
-not engineering-level column queries. Sources from: mart definitions, semantic column
-analysis, cross-entity relationships, and quality findings.
+Generates analytical questions that a data professional would actually ask,
+derived entirely from the discovered schema: column names, dtypes, semantic types,
+detected relationships, and mart model definitions.
+
+No hardcoded table names, column names, or domain knowledge -- everything is
+inferred from what the data actually contains.
+
+Priority order (highest to lowest):
+  mart > relationship > semantic > quality
+
+Quality questions are intentionally de-prioritized and capped:
+  - Only for numeric metric columns with actual nulls present
+  - Hard cap of MAX_QUALITY_SUGGESTIONS regardless of how many contracts exist
+
+Total output is capped at MAX_TOTAL_SUGGESTIONS, deduplicated.
 """
 
 from __future__ import annotations
+
+import re
+
+import duckdb
 
 from headwater.core.models import (
     ColumnProfile,
@@ -17,6 +33,29 @@ from headwater.core.models import (
     SuggestedQuestion,
     TableInfo,
 )
+from headwater.explorer.utils import resolve_table_ref, table_exists
+
+MAX_TOTAL_SUGGESTIONS = 15
+MAX_QUALITY_SUGGESTIONS = 3
+
+# Numeric dtypes that represent measurable quantities
+_NUMERIC_DTYPES = ("int", "float", "double", "decimal", "numeric", "real", "bigint", "hugeint")
+
+# Temporal dtype/name patterns
+_TEMPORAL_DTYPES = ("timestamp", "date", "time", "datetime")
+_TEMPORAL_NAME_RE = re.compile(
+    r"(date|time|month|year|day|week|quarter|period|_at$|_ts$)", re.IGNORECASE
+)
+
+# Column name patterns that indicate IDs/codes -- not useful as metrics
+_ID_NAME_RE = re.compile(
+    r"(_id|_key|_fk|_pk|^id$|^key$|^uuid$|code$|flag$|indicator$)", re.IGNORECASE
+)
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 
 def generate_suggestions(
@@ -24,488 +63,250 @@ def generate_suggestions(
     models: list[GeneratedModel] | None = None,
     contracts: list[ContractRule] | None = None,
     quality_results: list[ContractCheckResult] | None = None,
+    con: duckdb.DuckDBPyConnection | None = None,
 ) -> list[SuggestedQuestion]:
-    """Generate suggested NL questions from all available metadata.
+    """Generate suggested questions from all available metadata.
 
-    Priority order: mart questions first (highest BI value), then cross-entity,
-    then domain-specific, then quality investigations.
+    All questions are derived from actual schema -- no hardcoded names.
+    Returns at most MAX_TOTAL_SUGGESTIONS questions in priority order.
     """
-    questions: list[SuggestedQuestion] = []
+    all_models = models or []
+    profile_index = {(p.table_name, p.column_name): p for p in discovery.profiles}
 
-    questions.extend(_from_mart_models(models or []))
-    questions.extend(_from_relationships(discovery.tables, discovery.relationships))
-    questions.extend(_from_domain_analysis(discovery.tables, discovery.profiles))
-    questions.extend(_from_quality_findings(contracts or [], quality_results or []))
+    buckets: dict[str, list[SuggestedQuestion]] = {
+        "mart": _from_mart_models(all_models, con),
+        "relationship": _from_relationships(
+            discovery.tables, discovery.relationships, all_models, con
+        ),
+        "semantic": _from_table_structure(discovery.tables, profile_index, all_models, con),
+        "quality": _from_quality_findings(
+            contracts or [],
+            quality_results or [],
+            profile_index=profile_index,
+            tables=discovery.tables,
+        ),
+    }
 
-    return questions
+    result: list[SuggestedQuestion] = []
+    seen: set[str] = set()
+
+    for source in ("mart", "relationship", "semantic", "quality"):
+        for q in buckets[source]:
+            key = " ".join(q.question.lower().split())
+            if key not in seen:
+                seen.add(key)
+                result.append(q)
+
+    return result[:MAX_TOTAL_SUGGESTIONS]
 
 
 # ---------------------------------------------------------------------------
-# Mart-derived questions (highest BI value)
+# Mart-derived questions
 # ---------------------------------------------------------------------------
 
-# These are the best questions -- they map to pre-built analytical models
-# that encode real business logic. Show them whenever the mart exists,
-# regardless of approval status, so users see the system's analytical value.
-_MART_QUESTIONS: dict[str, list[dict[str, str]]] = {
-    "mart_air_quality_daily": [
-        {
-            "q": "Which zones consistently exceed unhealthy air quality thresholds?",
-            "cat": "Air Quality",
-            "sql": (
-                "SELECT zone_name, aqi_category, COUNT(*) AS days "
-                "FROM marts.mart_air_quality_daily "
-                "WHERE aqi_category IS NOT NULL "
-                "GROUP BY zone_name, aqi_category ORDER BY zone_name"
-            ),
-        },
-        {
-            "q": "How are PM2.5 levels trending across zones over time?",
-            "cat": "Air Quality",
-            "sql": (
-                "SELECT reading_date, zone_name, AVG(avg_value) AS avg_pm25 "
-                "FROM marts.mart_air_quality_daily "
-                "WHERE sensor_type = 'pm25' "
-                "GROUP BY reading_date, zone_name ORDER BY reading_date"
-            ),
-        },
-        {
-            "q": "Which monitoring sites report the worst air quality?",
-            "cat": "Air Quality",
-            "sql": (
-                "SELECT site_name, zone_name, sensor_type, "
-                "AVG(avg_value) AS mean_value, MAX(max_value) AS peak_value, "
-                "COUNT(*) AS days_monitored "
-                "FROM marts.mart_air_quality_daily "
-                "GROUP BY site_name, zone_name, sensor_type "
-                "ORDER BY mean_value DESC LIMIT 15"
-            ),
-        },
-    ],
-    "mart_incident_summary": [
-        {
-            "q": "Are public health incidents increasing or decreasing over time?",
-            "cat": "Public Health",
-            "sql": (
-                "SELECT DATE_TRUNC('month', CAST(i.date_reported AS DATE)) AS report_month, "
-                "i.severity, COUNT(*) AS total "
-                "FROM staging.stg_incidents i "
-                "GROUP BY report_month, i.severity ORDER BY report_month"
-            ),
-        },
-        {
-            "q": "Which communities face the highest incident rates per capita?",
-            "cat": "Public Health",
-            "sql": (
-                "SELECT z.name AS zone_name, z.population, "
-                "COUNT(*) AS total_incidents, "
-                "ROUND(COUNT(*) * 1000.0 / z.population, 2) AS per_1k "
-                "FROM staging.stg_incidents i "
-                "JOIN staging.stg_zones z ON i.zone_id = z.zone_id "
-                "GROUP BY z.name, z.population ORDER BY per_1k DESC"
-            ),
-        },
-        {
-            "q": "Do lower-income zones experience more health incidents?",
-            "cat": "Public Health",
-            "sql": (
-                "SELECT z.name AS zone_name, z.pct_below_poverty, "
-                "z.environmental_risk_score, "
-                "COUNT(*) AS total_incidents, "
-                "SUM(CASE WHEN i.outcome = 'hospitalized' THEN 1 ELSE 0 END) "
-                "AS hospitalizations "
-                "FROM staging.stg_incidents i "
-                "JOIN staging.stg_zones z ON i.zone_id = z.zone_id "
-                "GROUP BY z.name, z.pct_below_poverty, z.environmental_risk_score "
-                "ORDER BY z.pct_below_poverty DESC"
-            ),
-        },
-    ],
-    "mart_inspection_scores": [
-        {
-            "q": "Which zones have the lowest inspection pass rates?",
-            "cat": "Inspections",
-            "sql": (
-                "SELECT zone_name, site_type, total_inspections, "
-                "pass_rate_pct, avg_score, total_critical "
-                "FROM marts.mart_inspection_scores "
-                "ORDER BY pass_rate_pct ASC"
-            ),
-        },
-        {
-            "q": "What site types are most likely to have critical violations?",
-            "cat": "Inspections",
-            "sql": (
-                "SELECT site_type, SUM(total_critical) AS critical_violations, "
-                "SUM(total_violations) AS total_violations, "
-                "ROUND(AVG(pass_rate_pct), 1) AS avg_pass_rate "
-                "FROM marts.mart_inspection_scores "
-                "GROUP BY site_type ORDER BY critical_violations DESC"
-            ),
-        },
-    ],
-    "mart_complaint_response": [
-        {
-            "q": "Are we meeting response time SLAs across priority levels?",
-            "cat": "Complaints",
-            "sql": (
-                "SELECT priority, "
-                "ROUND(AVG(avg_acknowledgment_days), 1) AS avg_ack_days, "
-                "ROUND(AVG(avg_resolution_days), 1) AS avg_resolve_days, "
-                "SUM(total_complaints) AS total, "
-                "ROUND(AVG(resolution_rate_pct), 1) AS resolution_rate "
-                "FROM marts.mart_complaint_response "
-                "GROUP BY priority ORDER BY priority"
-            ),
-        },
-        {
-            "q": "Which communities wait the longest for complaint resolution?",
-            "cat": "Complaints",
-            "sql": (
-                "SELECT zone_name, "
-                "ROUND(AVG(avg_acknowledgment_days), 1) AS avg_ack_days, "
-                "ROUND(AVG(avg_resolution_days), 1) AS avg_resolve_days, "
-                "SUM(total_complaints) AS total, "
-                "SUM(open_count) AS still_open "
-                "FROM marts.mart_complaint_response "
-                "GROUP BY zone_name ORDER BY avg_resolve_days DESC"
-            ),
-        },
-    ],
-    "mart_program_effectiveness": [
-        {
-            "q": "Are intervention programs associated with lower incident rates?",
-            "cat": "Programs",
-            "sql": (
-                "SELECT program_name, program_type, zone_name, "
-                "incidents_per_1k, budget_usd, program_status "
-                "FROM marts.mart_program_effectiveness "
-                "WHERE program_status = 'active' "
-                "ORDER BY incidents_per_1k ASC"
-            ),
-        },
-        {
-            "q": "How is program budget distributed relative to community risk?",
-            "cat": "Programs",
-            "sql": (
-                "SELECT program_name, budget_usd, zone_name, "
-                "environmental_risk_score, incidents_per_1k "
-                "FROM marts.mart_program_effectiveness "
-                "WHERE program_status = 'active' "
-                "ORDER BY budget_usd DESC"
-            ),
-        },
-    ],
-}
 
+def _from_mart_models(
+    models: list[GeneratedModel],
+    con: duckdb.DuckDBPyConnection | None,
+) -> list[SuggestedQuestion]:
+    """Generate analytical questions from mart model definitions.
 
-def _from_mart_models(models: list[GeneratedModel]) -> list[SuggestedQuestion]:
-    """Generate BI questions from mart model definitions.
-
-    Shows questions whenever a mart model exists (proposed, approved, or executed).
-    The SQL targets the marts schema -- queries work once a mart is materialized.
+    Uses the mart's name, description, and source_tables -- no hardcoded content.
+    Only generates questions for marts that are materialized (status == "executed")
+    or have been approved; the sql_hint targets `marts.{name}` which must exist.
     """
     questions: list[SuggestedQuestion] = []
 
-    known_marts = {m.name for m in models if m.model_type == "mart"}
-
-    for model_name, qs in _MART_QUESTIONS.items():
-        if model_name not in known_marts:
+    for model in models:
+        if model.model_type != "mart":
             continue
-        source_model = next((m for m in models if m.name == model_name), None)
-        tables = source_model.source_tables if source_model else []
-        for q in qs:
-            questions.append(
-                SuggestedQuestion(
-                    question=q["q"],
-                    source="mart",
-                    category=q["cat"],
-                    relevant_tables=tables,
-                    sql_hint=q["sql"],
-                )
+        # Only suggest queries against marts we know are materialized
+        if con is not None and not table_exists(con, "marts", model.name):
+            continue
+
+        label = _humanize(model.name)
+        ref = f"marts.{model.name}"
+
+        # One clean question per mart -- no description leakage
+        questions.append(
+            SuggestedQuestion(
+                question=f"What are the key metrics in {label}?",
+                source="mart",
+                category=label.title(),
+                relevant_tables=model.source_tables,
+                sql_hint=f"SELECT * FROM {ref} LIMIT 50",
             )
+        )
 
     return questions
 
 
 # ---------------------------------------------------------------------------
-# Cross-entity questions (from detected relationships)
+# Relationship-derived questions
 # ---------------------------------------------------------------------------
-
-# Pre-built BI questions for known entity pairs in the environmental health domain
-_RELATIONSHIP_QUESTIONS: dict[tuple[str, str], list[dict[str, str]]] = {
-    ("readings", "sites"): [
-        {
-            "q": "Which monitoring sites report the highest average sensor readings?",
-            "cat": "Environmental Monitoring",
-            "sql": (
-                "SELECT s.name AS site_name, s.site_type, "
-                "AVG(r.value) AS avg_reading, COUNT(*) AS total_readings "
-                "FROM staging.stg_readings r "
-                "JOIN staging.stg_sites s ON r.site_id = s.site_id "
-                "GROUP BY s.name, s.site_type "
-                "ORDER BY avg_reading DESC LIMIT 15"
-            ),
-        },
-    ],
-    ("readings", "sensors"): [
-        {
-            "q": "What is the average reading by sensor type and operational status?",
-            "cat": "Environmental Monitoring",
-            "sql": (
-                "SELECT sn.sensor_type, sn.status, "
-                "AVG(r.value) AS avg_reading, COUNT(*) AS measurements "
-                "FROM staging.stg_readings r "
-                "JOIN staging.stg_sensors sn ON r.sensor_id = sn.sensor_id "
-                "GROUP BY sn.sensor_type, sn.status "
-                "ORDER BY avg_reading DESC"
-            ),
-        },
-    ],
-    ("inspections", "sites"): [
-        {
-            "q": "Which sites consistently fail inspections?",
-            "cat": "Facility & Inspection",
-            "sql": (
-                "SELECT s.name AS site_name, s.site_type, "
-                "COUNT(*) AS total_inspections, "
-                "ROUND(AVG(i.score), 1) AS avg_score, "
-                "SUM(CASE WHEN i.result = 'fail' THEN 1 ELSE 0 END) AS failures, "
-                "SUM(i.critical_violations) AS critical_violations "
-                "FROM staging.stg_inspections i "
-                "JOIN staging.stg_sites s ON i.site_id = s.site_id "
-                "GROUP BY s.name, s.site_type "
-                "ORDER BY avg_score ASC LIMIT 15"
-            ),
-        },
-    ],
-    ("incidents", "zones"): [
-        {
-            "q": "How do incident rates compare across zones by severity?",
-            "cat": "Public Health",
-            "sql": (
-                "SELECT z.name AS zone_name, z.population, i.severity, "
-                "COUNT(*) AS incidents, "
-                "ROUND(COUNT(*) * 1000.0 / z.population, 2) AS per_1k "
-                "FROM staging.stg_incidents i "
-                "JOIN staging.stg_zones z ON i.zone_id = z.zone_id "
-                "GROUP BY z.name, z.population, i.severity "
-                "ORDER BY per_1k DESC"
-            ),
-        },
-    ],
-    ("complaints", "zones"): [
-        {
-            "q": "Which neighborhoods have the most unresolved complaints?",
-            "cat": "Community Engagement",
-            "sql": (
-                "SELECT z.name AS zone_name, c.category, "
-                "COUNT(*) AS total_complaints, "
-                "SUM(CASE WHEN c.status = 'open' THEN 1 ELSE 0 END) AS open, "
-                "SUM(CASE WHEN c.status = 'resolved' THEN 1 ELSE 0 END) AS resolved "
-                "FROM staging.stg_complaints c "
-                "JOIN staging.stg_zones z ON c.zone_id = z.zone_id "
-                "GROUP BY z.name, c.category "
-                "ORDER BY open DESC LIMIT 20"
-            ),
-        },
-    ],
-    ("sites", "zones"): [
-        {
-            "q": "How are monitoring sites distributed across zones?",
-            "cat": "Infrastructure",
-            "sql": (
-                "SELECT z.name AS zone_name, z.population, s.site_type, "
-                "COUNT(*) AS site_count "
-                "FROM staging.stg_sites s "
-                "JOIN staging.stg_zones z ON s.zone_id = z.zone_id "
-                "GROUP BY z.name, z.population, s.site_type "
-                "ORDER BY zone_name"
-            ),
-        },
-    ],
-}
 
 
 def _from_relationships(
     tables: list[TableInfo],
     relationships: list[Relationship],
+    models: list[GeneratedModel],
+    con: duckdb.DuckDBPyConnection | None,
 ) -> list[SuggestedQuestion]:
-    """Generate cross-entity BI questions from detected relationships."""
+    """Generate cross-entity questions from detected foreign key relationships.
+
+    For each relationship A.col -> B.col, generates a question about the
+    distribution of A records per B entity using the actual column names.
+    """
     questions: list[SuggestedQuestion] = []
-    table_names = {t.name for t in tables}
-    seen_pairs: set[tuple[str, str]] = set()
+    table_map = {t.name: t for t in tables}
+    seen_pairs: set[frozenset[str]] = set()
 
     for rel in relationships:
-        if rel.from_table not in table_names or rel.to_table not in table_names:
+        if rel.from_table not in table_map or rel.to_table not in table_map:
             continue
 
-        # Normalize pair order for lookup
-        pair = (rel.from_table, rel.to_table)
-        pair_rev = (rel.to_table, rel.from_table)
-        if pair in seen_pairs or pair_rev in seen_pairs:
+        pair = frozenset([rel.from_table, rel.to_table])
+        if pair in seen_pairs:
             continue
         seen_pairs.add(pair)
 
-        # Try both orderings against the pre-built question map
-        matched = _RELATIONSHIP_QUESTIONS.get(pair) or _RELATIONSHIP_QUESTIONS.get(pair_rev)
-        if matched:
-            for q in matched:
-                questions.append(
-                    SuggestedQuestion(
-                        question=q["q"],
-                        source="relationship",
-                        category=q["cat"],
-                        relevant_tables=[rel.from_table, rel.to_table],
-                        sql_hint=q["sql"],
-                    )
-                )
+        from_label = _humanize(rel.from_table)
+        to_label = _humanize(rel.to_table)
+
+        from_ref = (
+            resolve_table_ref(rel.from_table, con, models)
+            if con is not None
+            else rel.from_table
+        )
+        to_ref = (
+            resolve_table_ref(rel.to_table, con, models)
+            if con is not None
+            else rel.to_table
+        )
+
+        # Find a useful metric from the from_table to aggregate
+        from_table_info = table_map[rel.from_table]
+        metric_col = _pick_metric_col(from_table_info)
+
+        if metric_col:
+            sql = (
+                f'SELECT t."{rel.to_column}", COUNT(*) AS {from_label}_count, '
+                f'AVG(f."{metric_col}") AS avg_{metric_col} '
+                f"FROM {from_ref} f "
+                f'JOIN {to_ref} t ON f."{rel.from_column}" = t."{rel.to_column}" '
+                f'GROUP BY t."{rel.to_column}" '
+                f"ORDER BY {from_label}_count DESC LIMIT 20"
+            )
+        else:
+            sql = (
+                f'SELECT t."{rel.to_column}", COUNT(*) AS {from_label}_count '
+                f"FROM {from_ref} f "
+                f'JOIN {to_ref} t ON f."{rel.from_column}" = t."{rel.to_column}" '
+                f'GROUP BY t."{rel.to_column}" '
+                f"ORDER BY {from_label}_count DESC LIMIT 20"
+            )
+
+        questions.append(
+            SuggestedQuestion(
+                question=f"How many {from_label} records are there per {to_label}?",
+                source="relationship",
+                category="Cross-Entity Analysis",
+                relevant_tables=[rel.from_table, rel.to_table],
+                sql_hint=sql,
+            )
+        )
 
     return questions
 
 
 # ---------------------------------------------------------------------------
-# Domain-specific questions (from column semantics)
+# Table-structure-derived questions (semantic)
 # ---------------------------------------------------------------------------
 
-# Instead of raw column templates, generate domain-aware BI questions
-# based on what we know about the table's role and column types.
-_DOMAIN_QUESTIONS: dict[str, list[dict[str, str]]] = {
-    "inspections": [
-        {
-            "q": "How have inspection scores trended over time?",
-            "cat": "Facility & Inspection",
-            "sql": (
-                "SELECT CAST(inspection_date AS DATE) AS inspection_day, "
-                "ROUND(AVG(score), 1) AS avg_score, COUNT(*) AS inspections "
-                "FROM staging.stg_inspections "
-                "GROUP BY inspection_day ORDER BY inspection_day"
-            ),
-        },
-        {
-            "q": "Which inspectors have the highest violation discovery rate?",
-            "cat": "Facility & Inspection",
-            "sql": (
-                "SELECT inspector_name, COUNT(*) AS inspections, "
-                "ROUND(AVG(score), 1) AS avg_score, "
-                "SUM(violation_count) AS total_violations, "
-                "ROUND(AVG(violation_count), 1) AS avg_violations_per_inspection "
-                "FROM staging.stg_inspections "
-                "GROUP BY inspector_name "
-                "ORDER BY avg_violations_per_inspection DESC"
-            ),
-        },
-        {
-            "q": "Are complaint-driven inspections finding more violations than routine ones?",
-            "cat": "Facility & Inspection",
-            "sql": (
-                "SELECT inspection_type, COUNT(*) AS inspections, "
-                "ROUND(AVG(score), 1) AS avg_score, "
-                "ROUND(AVG(violation_count), 1) AS avg_violations, "
-                "ROUND(AVG(critical_violations), 1) AS avg_critical "
-                "FROM staging.stg_inspections "
-                "GROUP BY inspection_type ORDER BY avg_violations DESC"
-            ),
-        },
-    ],
-    "complaints": [
-        {
-            "q": "What are the most common complaint categories?",
-            "cat": "Community Engagement",
-            "sql": (
-                "SELECT category, priority, COUNT(*) AS total, "
-                "SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved, "
-                "SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open "
-                "FROM staging.stg_complaints "
-                "GROUP BY category, priority "
-                "ORDER BY total DESC"
-            ),
-        },
-    ],
-    "programs": [
-        {
-            "q": "How is budget allocated across active programs?",
-            "cat": "Programs & Interventions",
-            "sql": (
-                "SELECT name AS program_name, type, status, budget_usd "
-                "FROM staging.stg_programs "
-                "ORDER BY budget_usd DESC"
-            ),
-        },
-    ],
-    "zones": [
-        {
-            "q": "Which zones have the highest environmental risk scores?",
-            "cat": "Geography & Demographics",
-            "sql": (
-                "SELECT name AS zone_name, population, "
-                "median_household_income, pct_below_poverty, "
-                "environmental_risk_score "
-                "FROM staging.stg_zones "
-                "ORDER BY environmental_risk_score DESC"
-            ),
-        },
-        {
-            "q": "Is there a demographic pattern in environmental risk?",
-            "cat": "Geography & Demographics",
-            "sql": (
-                "SELECT name AS zone_name, "
-                "pct_below_poverty, pct_minority, "
-                "environmental_risk_score, median_household_income "
-                "FROM staging.stg_zones "
-                "ORDER BY environmental_risk_score DESC"
-            ),
-        },
-    ],
-    "readings": [
-        {
-            "q": "What are the daily average readings by sensor type?",
-            "cat": "Environmental Monitoring",
-            "sql": (
-                "SELECT sensor_type, CAST(\"timestamp\" AS DATE) AS reading_day, "
-                "ROUND(AVG(value), 2) AS avg_reading, COUNT(*) AS measurements "
-                "FROM staging.stg_readings "
-                "GROUP BY sensor_type, reading_day "
-                "ORDER BY sensor_type, reading_day"
-            ),
-        },
-    ],
-    "incidents": [
-        {
-            "q": "What types of health incidents are most common?",
-            "cat": "Public Health",
-            "sql": (
-                "SELECT incident_type, severity, "
-                "COUNT(*) AS total, "
-                "SUM(CASE WHEN outcome = 'hospitalized' THEN 1 ELSE 0 END) AS hospitalizations "
-                "FROM staging.stg_incidents "
-                "GROUP BY incident_type, severity "
-                "ORDER BY total DESC"
-            ),
-        },
-    ],
-}
 
-
-def _from_domain_analysis(
+def _from_table_structure(
     tables: list[TableInfo],
-    profiles: list[ColumnProfile],
+    profile_index: dict[tuple[str, str], ColumnProfile],
+    models: list[GeneratedModel],
+    con: duckdb.DuckDBPyConnection | None,
 ) -> list[SuggestedQuestion]:
-    """Generate domain-aware BI questions based on known table roles."""
-    questions: list[SuggestedQuestion] = []
-    table_names = {t.name for t in tables}
+    """Generate analytical questions by inspecting each table's actual column structure.
 
-    for table_name, qs in _DOMAIN_QUESTIONS.items():
-        if table_name not in table_names:
-            continue
-        for q in qs:
+    For each table, identifies temporal, metric, and dimension columns and
+    generates the most relevant question type:
+      - temporal + metric  -> trend over time
+      - dimension + metric -> breakdown / ranking
+      - metric only        -> summary statistics
+    """
+    questions: list[SuggestedQuestion] = []
+
+    for table in tables:
+        ref = (
+            resolve_table_ref(table.name, con, models)
+            if con is not None
+            else table.name
+        )
+        label = _humanize(table.name)
+
+        temporal_cols = _get_temporal_cols(table)
+        metric_cols = _get_metric_cols(table, profile_index)
+        dim_cols = _get_dimension_cols(table, profile_index)
+
+        if temporal_cols and metric_cols:
+            t_col = temporal_cols[0]
+            m_col = metric_cols[0]
             questions.append(
                 SuggestedQuestion(
-                    question=q["q"],
+                    question=f"How has {_humanize(m_col)} in {label} changed over time?",
                     source="semantic",
-                    category=q["cat"],
-                    relevant_tables=[table_name],
-                    sql_hint=q["sql"],
+                    category=label.title(),
+                    relevant_tables=[table.name],
+                    sql_hint=(
+                        f'SELECT "{t_col}", AVG("{m_col}") AS avg_{m_col}, '
+                        f'COUNT(*) AS records '
+                        f"FROM {ref} "
+                        f'GROUP BY "{t_col}" ORDER BY "{t_col}" LIMIT 100'
+                    ),
+                )
+            )
+
+        if dim_cols and metric_cols:
+            d_col = dim_cols[0]
+            m_col = metric_cols[0]
+            questions.append(
+                SuggestedQuestion(
+                    question=(
+                        f"Which {_humanize(d_col)} has the highest {_humanize(m_col)} "
+                        f"in {label}?"
+                    ),
+                    source="semantic",
+                    category=label.title(),
+                    relevant_tables=[table.name],
+                    sql_hint=(
+                        f'SELECT "{d_col}", '
+                        f'COUNT(*) AS records, '
+                        f'ROUND(AVG("{m_col}"), 2) AS avg_{m_col}, '
+                        f'MAX("{m_col}") AS max_{m_col} '
+                        f"FROM {ref} "
+                        f'GROUP BY "{d_col}" '
+                        f"ORDER BY avg_{m_col} DESC LIMIT 20"
+                    ),
+                )
+            )
+
+        if metric_cols and not temporal_cols and not dim_cols:
+            m_col = metric_cols[0]
+            questions.append(
+                SuggestedQuestion(
+                    question=f"What is the distribution of {_humanize(m_col)} in {label}?",
+                    source="semantic",
+                    category=label.title(),
+                    relevant_tables=[table.name],
+                    sql_hint=(
+                        f'SELECT MIN("{m_col}") AS min, MAX("{m_col}") AS max, '
+                        f'ROUND(AVG("{m_col}"), 2) AS mean, COUNT(*) AS records '
+                        f"FROM {ref}"
+                    ),
                 )
             )
 
@@ -513,69 +314,93 @@ def _from_domain_analysis(
 
 
 # ---------------------------------------------------------------------------
-# Quality investigation questions
+# Quality-derived questions (lowest priority, heavily capped)
 # ---------------------------------------------------------------------------
 
 
 def _from_quality_findings(
     contracts: list[ContractRule],
     results: list[ContractCheckResult],
+    profile_index: dict[tuple[str, str], ColumnProfile],
+    tables: list[TableInfo],
 ) -> list[SuggestedQuestion]:
-    """Generate investigation questions from quality contract failures."""
-    questions: list[SuggestedQuestion] = []
+    """Generate data quality investigation questions from failed contract checks.
+
+    Only surfaces questions that are analytically meaningful:
+    - not_null: only for numeric metric columns with actual nulls
+    - cardinality/unique: included but counted against the cap
+
+    Hard cap: MAX_QUALITY_SUGGESTIONS. Quality never dominates the list.
+    """
+    table_map = {t.name: t for t in tables}
     failed_ids = {r.rule_id for r in results if not r.passed}
+    questions: list[SuggestedQuestion] = []
+    seen: set[tuple[str, str, str]] = set()
 
     for rule in contracts:
+        if len(questions) >= MAX_QUALITY_SUGGESTIONS:
+            break
         if rule.id not in failed_ids:
             continue
 
-        if rule.rule_type == "not_null" and rule.column_name:
+        col = rule.column_name or ""
+        dedup_key = (rule.model_name, col, rule.rule_type)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        base_table = _humanize_model(rule.model_name)
+
+        if rule.rule_type == "not_null" and col:
+            if not _is_metric_col(base_table, col, profile_index, table_map):
+                continue
             questions.append(
                 SuggestedQuestion(
                     question=(
                         f"Why are there missing values in "
-                        f"{_humanize_model(rule.model_name)} {rule.column_name}?"
+                        f"{base_table} {col}?"
                     ),
                     source="quality",
-                    category="Data Quality Investigation",
+                    category="Data Quality",
                     relevant_tables=[rule.model_name],
                     sql_hint=(
                         f"SELECT * FROM {rule.model_name} "
-                        f'WHERE "{rule.column_name}" IS NULL LIMIT 20'
+                        f'WHERE "{col}" IS NULL LIMIT 20'
                     ),
                 )
             )
-        elif rule.rule_type == "cardinality" and rule.column_name:
+
+        elif rule.rule_type == "cardinality" and col:
             questions.append(
                 SuggestedQuestion(
                     question=(
-                        f"What unexpected {rule.column_name} values appeared in "
-                        f"{_humanize_model(rule.model_name)}?"
+                        f"What unexpected {col} values appeared in "
+                        f"{base_table}?"
                     ),
                     source="quality",
-                    category="Data Quality Investigation",
+                    category="Data Quality",
                     relevant_tables=[rule.model_name],
                     sql_hint=(
-                        f'SELECT "{rule.column_name}", COUNT(*) AS cnt '
+                        f'SELECT "{col}", COUNT(*) AS cnt '
                         f"FROM {rule.model_name} "
-                        f'GROUP BY "{rule.column_name}" ORDER BY cnt DESC'
+                        f'GROUP BY "{col}" ORDER BY cnt DESC'
                     ),
                 )
             )
-        elif rule.rule_type == "unique" and rule.column_name:
+
+        elif rule.rule_type == "unique" and col:
             questions.append(
                 SuggestedQuestion(
                     question=(
-                        f"Which {rule.column_name} records have duplicates in "
-                        f"{_humanize_model(rule.model_name)}?"
+                        f"Which {col} values have duplicates in {base_table}?"
                     ),
                     source="quality",
-                    category="Data Quality Investigation",
+                    category="Data Quality",
                     relevant_tables=[rule.model_name],
                     sql_hint=(
-                        f'SELECT "{rule.column_name}", COUNT(*) AS cnt '
+                        f'SELECT "{col}", COUNT(*) AS cnt '
                         f"FROM {rule.model_name} "
-                        f'GROUP BY "{rule.column_name}" HAVING cnt > 1 '
+                        f'GROUP BY "{col}" HAVING cnt > 1 '
                         f"ORDER BY cnt DESC LIMIT 20"
                     ),
                 )
@@ -584,11 +409,134 @@ def _from_quality_findings(
     return questions
 
 
+# ---------------------------------------------------------------------------
+# Column classification helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_temporal_cols(table: TableInfo) -> list[str]:
+    return [
+        c.name
+        for c in table.columns
+        if not c.is_primary_key
+        and not _ID_NAME_RE.search(c.name)
+        and (
+            any(c.dtype.lower().startswith(t) for t in _TEMPORAL_DTYPES)
+            or c.semantic_type == "temporal"
+            or bool(_TEMPORAL_NAME_RE.search(c.name))
+        )
+    ]
+
+
+def _get_metric_cols(
+    table: TableInfo,
+    profile_index: dict[tuple[str, str], ColumnProfile],
+) -> list[str]:
+    cols = []
+    for c in table.columns:
+        if c.is_primary_key or _ID_NAME_RE.search(c.name):
+            continue
+        if c.semantic_type in ("id", "foreign_key", "primary_key", "dimension", "temporal"):
+            continue
+        if c.semantic_type in ("metric", "measure", "kpi"):
+            cols.append(c.name)
+            continue
+        profile = profile_index.get((table.name, c.name))
+        dtype = (profile.dtype if profile else c.dtype).lower()
+        if any(t in dtype for t in _NUMERIC_DTYPES):
+            cols.append(c.name)
+    return cols
+
+
+def _get_dimension_cols(
+    table: TableInfo,
+    profile_index: dict[tuple[str, str], ColumnProfile],
+) -> list[str]:
+    """Return low-cardinality columns suitable for GROUP BY.
+
+    Includes varchar/text columns and numeric "code" columns with low
+    cardinality (e.g. state_code, huc codes) that act as categorical dimensions.
+    """
+    cols = []
+    for c in table.columns:
+        if c.is_primary_key or _ID_NAME_RE.search(c.name):
+            continue
+        if c.semantic_type in ("id", "foreign_key", "primary_key"):
+            continue
+        profile = profile_index.get((table.name, c.name))
+        dtype = (profile.dtype if profile else c.dtype).lower()
+
+        is_text = "varchar" in dtype or "char" in dtype or "text" in dtype
+        is_numeric_code = (
+            any(t in dtype for t in _NUMERIC_DTYPES)
+            and c.semantic_type == "dimension"
+        )
+
+        if not is_text and not is_numeric_code:
+            continue
+        # Only good grouping columns if distinct count is reasonably low
+        if profile is not None and profile.distinct_count > 200:
+            continue
+        cols.append(c.name)
+    return cols
+
+
+def _pick_metric_col(table: TableInfo) -> str | None:
+    """Pick the first non-ID, non-code numeric column from a table."""
+    for c in table.columns:
+        if c.is_primary_key or _ID_NAME_RE.search(c.name):
+            continue
+        if c.semantic_type in ("id", "foreign_key", "primary_key", "dimension", "temporal"):
+            continue
+        dtype = c.dtype.lower()
+        if any(t in dtype for t in _NUMERIC_DTYPES):
+            return c.name
+    return None
+
+
+def _is_metric_col(
+    table_name: str,
+    column_name: str,
+    profile_index: dict[tuple[str, str], ColumnProfile],
+    table_map: dict[str, TableInfo],
+) -> bool:
+    """Return True if the column is a numeric metric with actual nulls."""
+    col_lower = column_name.lower()
+    if _ID_NAME_RE.search(col_lower):
+        return False
+    if bool(_TEMPORAL_NAME_RE.search(col_lower)):
+        return False
+    if col_lower in ("year", "month", "day", "date"):
+        return False
+
+    # Check semantic type
+    table = table_map.get(table_name)
+    if table:
+        col_info = next((c for c in table.columns if c.name == column_name), None)
+        if col_info and col_info.semantic_type in (
+            "id", "foreign_key", "primary_key", "temporal", "dimension",
+        ):
+            return False
+
+    # Use profile dtype to confirm it's numeric -- string/varchar columns are not metrics
+    profile = profile_index.get((table_name, column_name))
+    return profile is None or any(t in profile.dtype.lower() for t in _NUMERIC_DTYPES)
+
+
+# ---------------------------------------------------------------------------
+# String helpers
+# ---------------------------------------------------------------------------
+
+
+def _humanize(name: str) -> str:
+    """Convert snake_case or prefixed model names to readable label."""
+    name = name.split(".")[-1]  # drop schema prefix
+    for prefix in ("mart_", "stg_"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    return name.replace("_", " ")
+
+
 def _humanize_model(model_name: str) -> str:
     """Convert staging.stg_readings -> readings."""
-    name = model_name
-    if "." in name:
-        name = name.split(".")[-1]
-    if name.startswith("stg_"):
-        name = name[4:]
-    return name
+    return _humanize(model_name)

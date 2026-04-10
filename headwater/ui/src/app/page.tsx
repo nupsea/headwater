@@ -19,7 +19,7 @@ export default function DashboardPage() {
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [phase, setPhase] = useState("");
-  const [sourcePath, setSourcePath] = useState("/data/sample");
+  const [sourcePath, setSourcePath] = useState("postgresql://headwater:headwater@localhost:5434/headwater_dev");
   const [error, setError] = useState("");
 
   const refresh = async () => {
@@ -102,7 +102,7 @@ export default function DashboardPage() {
           <div className="flex items-end gap-3 justify-center">
             <div className="text-left">
               <label className="text-xs text-muted block mb-1">
-                Data source path
+                Data source (path or DSN)
               </label>
               <input
                 type="text"

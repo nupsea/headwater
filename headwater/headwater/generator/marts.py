@@ -11,6 +11,7 @@ US-503: Quality gate -- only yield a candidate if it meets minimum evidence thre
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -143,18 +144,29 @@ class PatternMatcher:
                 result.append(col.name)
         return result
 
-    _NON_METRIC_TYPES = {"id", "foreign_key", "geographic", "temporal"}
+    _NON_METRIC_TYPES = {"id", "foreign_key", "geographic", "temporal", "dimension", "text"}
     _NUMERIC_DTYPES = {"float64", "int64", "float32", "int32"}
+    _ID_NAME_RE = re.compile(
+        r"(_id|_key|_fk|_pk|^id$|^key$|^uuid$|code$|flag$|indicator$)",
+        re.IGNORECASE,
+    )
 
     def _get_metric_cols(self, columns: list[ColumnInfo]) -> list[str]:
         result = []
         for col in columns:
-            is_metric = col.semantic_type in _METRIC_SEMANTIC_TYPES or (
-                col.dtype in self._NUMERIC_DTYPES
-                and col.semantic_type not in self._NON_METRIC_TYPES
-            )
-            if is_metric:
+            # Explicit metric semantic type -- trust it
+            if col.semantic_type in _METRIC_SEMANTIC_TYPES:
                 result.append(col.name)
+                continue
+            # Numeric dtype but skip if semantic type excludes it
+            if col.dtype not in self._NUMERIC_DTYPES:
+                continue
+            if col.semantic_type in self._NON_METRIC_TYPES:
+                continue
+            # Name-based heuristic: codes, keys, flags are not metrics
+            if self._ID_NAME_RE.search(col.name):
+                continue
+            result.append(col.name)
         return result
 
     def _get_dimension_tables(
@@ -179,13 +191,6 @@ class PatternMatcher:
         metric_cols: list[str],
     ) -> MartCandidate:
         time_col = temporal_cols[0]
-        metrics_expr = ", ".join(
-            f"    AVG({c!r}) AS avg_{c},\n    MIN({c!r}) AS min_{c},\n    MAX({c!r}) AS max_{c}"
-            for c in (metric_cols[:3] if metric_cols else [])
-        )
-        metrics_select = f"\n{metrics_expr}\n" if metrics_expr else ""
-        table_ref = f"staging.stg_{table.name}"
-
         return MartCandidate(
             archetype="period_comparison",
             candidate_tables=[table.name],
@@ -323,8 +328,9 @@ def _render_entity_summary(
     if not metric_lines:
         metric_lines = "    COUNT(*) AS record_count,"
 
+    dim_key = dim_table[:-1] if dim_table.endswith("s") else dim_table
     join_clause = (
-        f"JOIN staging.stg_{dim_table} d ON f.{dim_table[:-1] if dim_table.endswith('s') else dim_table}_id = d.{dim_table[:-1] if dim_table.endswith('s') else dim_table}_id"
+        f"JOIN staging.stg_{dim_table} d ON f.{dim_key}_id = d.{dim_key}_id"
         if dim_table else ""
     )
 
@@ -384,16 +390,18 @@ FROM staging.stg_{table_name}"""
         name=candidate.proposed_name,
         model_type="mart",
         sql=sql.strip(),
-        description=(
-            f"Single-table aggregation of {table_name}. "
-            f"Summarizes numeric columns: {', '.join(metric_cols[:5])}."
-        ),
+        description=f"{_humanize_name(table_name)} summary",
         source_tables=candidate.candidate_tables,
         depends_on=[f"stg_{t}" for t in candidate.candidate_tables],
         status="proposed",
         assumptions=candidate.assumptions,
         questions=candidate.questions,
     )
+
+
+def _humanize_name(name: str) -> str:
+    """Convert snake_case to Title Case."""
+    return name.replace("_", " ").title()
 
 
 _ARCHETYPE_RENDERERS = {

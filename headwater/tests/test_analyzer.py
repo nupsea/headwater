@@ -10,6 +10,7 @@ import pytest
 from headwater.analyzer.heuristics import (
     build_domain_map,
     classify_domain,
+    classify_domains,
     classify_semantic_type,
     enrich_tables,
     generate_column_description,
@@ -51,7 +52,8 @@ class TestHeuristics:
         desc = generate_table_description(table)
         assert "832" in desc
 
-    def test_classify_domain_sensors(self):
+    def test_classify_domain_fallback(self):
+        """Standalone classify_domain returns 'General' (use classify_domains instead)."""
         table = TableInfo(
             name="sensors",
             columns=[
@@ -60,20 +62,81 @@ class TestHeuristics:
                 ColumnInfo(name="calibration_status", dtype="varchar"),
             ],
         )
-        domain = classify_domain(table)
-        assert "Environmental" in domain or "Monitoring" in domain
+        assert classify_domain(table) == "General"
 
-    def test_classify_domain_incidents(self):
-        table = TableInfo(
-            name="incidents",
-            columns=[
-                ColumnInfo(name="incident_id", dtype="varchar"),
-                ColumnInfo(name="patient_age", dtype="int64"),
-                ColumnInfo(name="severity", dtype="varchar"),
-            ],
-        )
-        domain = classify_domain(table)
-        assert "Health" in domain
+    def test_classify_domains_relationship_cluster(self):
+        """Tables connected by FK relationships are grouped into one domain."""
+        from headwater.core.models import Relationship
+
+        tables = [
+            TableInfo(name="orders", row_count=100, columns=[
+                ColumnInfo(name="order_id", dtype="varchar"),
+            ]),
+            TableInfo(name="order_items", row_count=500, columns=[
+                ColumnInfo(name="item_id", dtype="varchar"),
+                ColumnInfo(name="order_id", dtype="varchar"),
+            ]),
+            TableInfo(name="customers", row_count=50, columns=[
+                ColumnInfo(name="customer_id", dtype="varchar"),
+            ]),
+        ]
+        rels = [
+            Relationship(
+                from_table="order_items", from_column="order_id",
+                to_table="orders", to_column="order_id",
+                type="many_to_one", confidence=1.0,
+                referential_integrity=1.0, source="inferred_name",
+            ),
+        ]
+        result = classify_domains(tables, rels)
+        # orders and order_items share the same domain
+        assert result["orders"] == result["order_items"]
+        # customers is separate
+        assert result["customers"] != result["orders"]
+
+    def test_classify_domains_vocabulary_cluster(self):
+        """Unconnected tables with shared column tokens are grouped together."""
+        tables = [
+            TableInfo(name="sales_east", row_count=10, columns=[
+                ColumnInfo(name="region", dtype="varchar"),
+                ColumnInfo(name="product", dtype="varchar"),
+                ColumnInfo(name="revenue", dtype="float64"),
+                ColumnInfo(name="quarter", dtype="varchar"),
+            ]),
+            TableInfo(name="sales_west", row_count=10, columns=[
+                ColumnInfo(name="region", dtype="varchar"),
+                ColumnInfo(name="product", dtype="varchar"),
+                ColumnInfo(name="revenue", dtype="float64"),
+                ColumnInfo(name="quarter", dtype="varchar"),
+            ]),
+        ]
+        result = classify_domains(tables, [])
+        # Should be grouped together via shared vocabulary
+        assert result["sales_east"] == result["sales_west"]
+
+    def test_classify_domains_common_prefix(self):
+        """Tables sharing a name prefix get a label derived from that prefix."""
+        from headwater.core.models import Relationship
+
+        tables = [
+            TableInfo(name="aqs_sites", row_count=10, columns=[
+                ColumnInfo(name="site_id", dtype="varchar"),
+            ]),
+            TableInfo(name="aqs_monitors", row_count=20, columns=[
+                ColumnInfo(name="monitor_id", dtype="varchar"),
+            ]),
+        ]
+        rels = [
+            Relationship(
+                from_table="aqs_monitors", from_column="site_id",
+                to_table="aqs_sites", to_column="site_id",
+                type="many_to_one", confidence=1.0,
+                referential_integrity=1.0, source="inferred_name",
+            ),
+        ]
+        result = classify_domains(tables, rels)
+        assert "Aqs" in result["aqs_sites"]
+        assert result["aqs_sites"] == result["aqs_monitors"]
 
     def test_column_description_id(self):
         desc = generate_column_description("zone_id", "zones")
@@ -199,8 +262,8 @@ class TestSemanticAnalyzer:
             discovery_result.relationships,
         )
         domains = build_domain_map(discovery_result.tables)
-        # Should have multiple domains
-        assert len(domains) >= 3
+        # Should have at least one domain
+        assert len(domains) >= 1
         # All tables should be in some domain
         all_tables = {name for tables in domains.values() for name in tables}
         assert len(all_tables) == 8

@@ -273,7 +273,7 @@ class TestMartGenerator:
 
     def test_no_relationships_no_metrics_produces_zero_proposals(self):
         """US-503: Source with no relationships and no metric/temporal columns = 0 marts."""
-        from headwater.core.models import ColumnInfo as CI
+        from headwater.core.models import ColumnInfo
 
         discovery = DiscoveryResult(
             source=SourceConfig(name="simple", type="json", path="/data"),
@@ -282,8 +282,8 @@ class TestMartGenerator:
                     name="tags",
                     row_count=10,
                     columns=[
-                        CI(name="tag_id", dtype="varchar", semantic_type="id"),
-                        CI(name="tag_name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="tag_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="tag_name", dtype="varchar", semantic_type="dimension"),
                     ],
                 ),
             ],
@@ -294,7 +294,7 @@ class TestMartGenerator:
 
     def test_temporal_column_gets_period_comparison(self):
         """US-501: A source with a temporal column gets a period_comparison proposal."""
-        from headwater.core.models import ColumnInfo as CI, Relationship
+        from headwater.core.models import ColumnInfo
 
         discovery = DiscoveryResult(
             source=SourceConfig(name="events", type="json", path="/data"),
@@ -303,9 +303,9 @@ class TestMartGenerator:
                     name="events",
                     row_count=500,
                     columns=[
-                        CI(name="event_id", dtype="varchar", semantic_type="id"),
-                        CI(name="event_date", dtype="timestamp", semantic_type="temporal"),
-                        CI(name="revenue", dtype="float64", semantic_type="metric"),
+                        ColumnInfo(name="event_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="event_date", dtype="timestamp", semantic_type="temporal"),
+                        ColumnInfo(name="revenue", dtype="float64", semantic_type="metric"),
                     ],
                 ),
             ],
@@ -319,7 +319,7 @@ class TestMartGenerator:
 
     def test_metric_with_fk_gets_entity_summary(self):
         """US-501: A source with metric columns + FK to dimension gets entity_summary."""
-        from headwater.core.models import ColumnInfo as CI, Relationship
+        from headwater.core.models import ColumnInfo, Relationship
 
         discovery = DiscoveryResult(
             source=SourceConfig(name="sales", type="json", path="/data"),
@@ -328,18 +328,18 @@ class TestMartGenerator:
                     name="orders",
                     row_count=1000,
                     columns=[
-                        CI(name="order_id", dtype="varchar", semantic_type="id"),
-                        CI(name="customer_id", dtype="varchar", semantic_type="foreign_key"),
-                        CI(name="amount", dtype="float64", semantic_type="metric"),
-                        CI(name="quantity", dtype="int64", semantic_type="metric"),
+                        ColumnInfo(name="order_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="customer_id", dtype="varchar", semantic_type="foreign_key"),  # noqa: E501
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                        ColumnInfo(name="quantity", dtype="int64", semantic_type="metric"),
                     ],
                 ),
                 TableInfo(
                     name="customers",
                     row_count=200,
                     columns=[
-                        CI(name="customer_id", dtype="varchar", semantic_type="id"),
-                        CI(name="country", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="customer_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="country", dtype="varchar", semantic_type="dimension"),
                     ],
                 ),
             ],

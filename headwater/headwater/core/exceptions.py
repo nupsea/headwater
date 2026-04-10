@@ -13,6 +13,10 @@ class ConnectorError(HeadwaterError):
     """Error connecting to or reading from a data source."""
 
 
+class HeadwaterConnectionError(ConnectorError):
+    """Human-readable connection error for a named data source."""
+
+
 class ProfilerError(HeadwaterError):
     """Error during profiling or schema extraction."""
 

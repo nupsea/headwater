@@ -24,5 +24,17 @@ services:
     depends_on:
       - headwater
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: headwater
+      POSTGRES_PASSWORD: headwater
+      POSTGRES_DB: headwater_dev
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
 volumes:
   headwater-data:
+  postgres_data:

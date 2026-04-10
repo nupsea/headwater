@@ -31,15 +31,16 @@ async def get_suggestions(request: Request):
     quality_report = pipeline["quality_report"]
     quality_results = quality_report.results if quality_report else []
 
+    con = request.app.state.duckdb_con
     suggestions = generate_suggestions(
         discovery=discovery,
         models=all_models,
         contracts=contracts,
         quality_results=quality_results,
+        con=con,
     )
 
     # Statistical insights from materialized marts
-    con = request.app.state.duckdb_con
     insights = detect_insights(con, schema="staging")
     insights.extend(detect_insights(con, schema="marts"))
 
@@ -69,6 +70,7 @@ async def ask_question(request: Request, body: AskRequest):
         models=all_models,
         contracts=contracts,
         quality_results=quality_results,
+        con=con,
     )
 
     # Get LLM provider if configured

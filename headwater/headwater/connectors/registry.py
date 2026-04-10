@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from headwater.connectors.csv_loader import CsvLoader
 from headwater.connectors.json_loader import JsonLoader
+from headwater.connectors.postgres_loader import PostgresConnector
 from headwater.core.exceptions import ConnectorError
 
 _REGISTRY: dict[str, type] = {
     "json": JsonLoader,
     "csv": CsvLoader,
+    "postgres": PostgresConnector,
 }
 
 

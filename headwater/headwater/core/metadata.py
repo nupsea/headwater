@@ -134,6 +134,25 @@ CREATE TABLE IF NOT EXISTS llm_audit_log (
     cached      INTEGER DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS schema_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL,
+    source_name TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES discovery_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS drift_reports (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    run_id_from INTEGER,
+    run_id_to   INTEGER NOT NULL,
+    diff_json   TEXT NOT NULL,
+    detected_at TEXT NOT NULL,
+    acknowledged INTEGER DEFAULT 0
+);
 """
 
 
@@ -546,3 +565,76 @@ class MetadataStore:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- Schema snapshots (US-401) -----------------------------------------
+
+    def save_snapshot(self, run_id: int, source_name: str, snapshot: dict) -> None:
+        """Persist a schema snapshot for the given run."""
+        self.con.execute(
+            "INSERT INTO schema_snapshots (run_id, source_name, snapshot_json, captured_at) "
+            "VALUES (?, ?, ?, datetime('now'))",
+            (run_id, source_name, json.dumps(snapshot)),
+        )
+        self.con.commit()
+
+    def get_latest_snapshot(self, source_name: str, before_run_id: int) -> dict | None:
+        """Return the most recent snapshot for source_name before the given run_id.
+
+        Returns None if no prior snapshot exists (first run).
+        """
+        row = self.con.execute(
+            "SELECT snapshot_json FROM schema_snapshots "
+            "WHERE source_name = ? AND run_id < ? "
+            "ORDER BY run_id DESC LIMIT 1",
+            (source_name, before_run_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["snapshot_json"])
+
+    # -- Drift reports (US-401) --------------------------------------------
+
+    def save_drift_report(
+        self,
+        source_name: str,
+        run_id_from: int | None,
+        run_id_to: int,
+        diff: dict,
+    ) -> int:
+        """Persist a drift report. Returns the new report id."""
+        cur = self.con.execute(
+            "INSERT INTO drift_reports "
+            "(source_name, run_id_from, run_id_to, diff_json, detected_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            (source_name, run_id_from, run_id_to, json.dumps(diff)),
+        )
+        self.con.commit()
+        if cur.lastrowid is None:
+            raise MetadataError("Failed to create drift report")
+        return cur.lastrowid
+
+    def get_latest_drift_report(self, source_name: str | None = None) -> dict | None:
+        """Return the most recent drift report, optionally filtered by source."""
+        if source_name:
+            row = self.con.execute(
+                "SELECT * FROM drift_reports WHERE source_name = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (source_name,),
+            ).fetchone()
+        else:
+            row = self.con.execute(
+                "SELECT * FROM drift_reports ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["diff"] = json.loads(result["diff_json"])
+        return result
+
+    def acknowledge_drift_report(self, report_id: int) -> None:
+        """Mark a drift report as acknowledged."""
+        self.con.execute(
+            "UPDATE drift_reports SET acknowledged = 1 WHERE id = ?",
+            (report_id,),
+        )
+        self.con.commit()
