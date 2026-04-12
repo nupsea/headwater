@@ -28,6 +28,11 @@ class HeadwaterSettings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Mart quality gate thresholds (US-503)
+    mart_min_relationships: int = 2
+    mart_min_metric_columns: int = 1
+    mart_min_rows: int = 100
+
     @property
     def metadata_db_path(self) -> Path:
         return self.data_dir / "metadata.db"

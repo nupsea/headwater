@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlparse
 
 import pyarrow as pa
 
 from headwater.core.exceptions import ConnectorError, HeadwaterConnectionError
 from headwater.core.models import SourceConfig
+
+logger = logging.getLogger(__name__)
 
 # psycopg2 is an optional runtime dependency (not imported at module top level to
 # allow the test suite to import this module even when psycopg2 is absent).
@@ -96,7 +99,11 @@ class PostgresConnector:
             raise _wrap_operational_error(exc, self._dsn) from exc
 
     def list_tables(self) -> list[str]:
-        """Return all user tables as 'schema.table' (or just 'table' for public schema)."""
+        """Return all user tables as 'schema.table' (or just 'table' for public schema).
+
+        Tables where the current user lacks SELECT permission are logged as
+        warnings and skipped (the discovery run continues).
+        """
         self._assert_connected()
         query = """
             SELECT table_schema, table_name
@@ -111,6 +118,24 @@ class PostgresConnector:
 
         result = []
         for schema, table in rows:
+            # Check SELECT privilege; skip tables without access
+            qualified = f'"{schema}"."{table}"'
+            try:
+                with self._conn.cursor() as check_cur:  # type: ignore[union-attr]
+                    check_cur.execute(f"SELECT 1 FROM {qualified} LIMIT 0")
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "permission denied" in msg:
+                    full_name = table if schema == "public" else f"{schema}.{table}"
+                    logger.warning(
+                        "Permission denied on table '%s' -- skipping. "
+                        "Grant SELECT to include this table.",
+                        full_name,
+                    )
+                    self._conn.rollback()  # type: ignore[union-attr]
+                    continue
+                # Re-raise non-permission errors
+                raise
             if schema == "public":
                 result.append(table)
             else:
@@ -145,13 +170,24 @@ class PostgresConnector:
         """Run a single aggregate SQL query in Postgres and return column-level stats.
 
         No rows are transferred -- only aggregates.
+        If permission is denied on the table, logs a warning and returns empty stats.
 
         Returns:
             dict keyed by column name. Each value has keys:
             row_count, non_null, null_count, min, max, distinct_count.
         """
         self._assert_connected()
-        col_info = self.get_column_info(table_name)
+        try:
+            col_info = self.get_column_info(table_name)
+        except Exception as exc:
+            if "permission denied" in str(exc).lower():
+                logger.warning(
+                    "Permission denied profiling table '%s' -- skipping.",
+                    table_name,
+                )
+                self._conn.rollback()  # type: ignore[union-attr]
+                return {}
+            raise
         if not col_info:
             return {}
 

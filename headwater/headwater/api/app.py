@@ -10,6 +10,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from headwater.api.routes import (
+    confidence,
+    dictionary,
     discovery,
     drift,
     execute,
@@ -58,6 +60,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(dictionary.router, prefix="/api", tags=["dictionary"])
     app.include_router(discovery.router, prefix="/api", tags=["discovery"])
     app.include_router(models.router, prefix="/api", tags=["models"])
     app.include_router(quality.router, prefix="/api", tags=["quality"])
@@ -66,19 +69,24 @@ def create_app() -> FastAPI:
     app.include_router(explore.router, prefix="/api", tags=["explore"])
     app.include_router(pipeline.router, prefix="/api", tags=["pipeline"])
     app.include_router(drift.router, prefix="/api", tags=["drift"])
+    app.include_router(confidence.router, prefix="/api", tags=["confidence"])
 
     @app.get("/api/status")
     async def api_status():
         pipeline = app.state.pipeline
         has_discovery = pipeline["discovery"] is not None
+        tables = pipeline["discovery"].tables if has_discovery else []
+        reviewed = sum(1 for t in tables if t.review_status == "reviewed")
         return {
             "status": "ok",
             "discovered": has_discovery,
-            "tables": len(pipeline["discovery"].tables) if has_discovery else 0,
+            "tables": len(tables),
             "staging_models": len(pipeline["staging_models"]),
             "mart_models": len(pipeline["mart_models"]),
             "contracts": len(pipeline["contracts"]),
             "executed": len(pipeline["execution_results"]),
+            "dictionary_reviewed": reviewed,
+            "dictionary_complete": reviewed == len(tables) and len(tables) > 0,
         }
 
     return app

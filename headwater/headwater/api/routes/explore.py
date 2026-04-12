@@ -18,6 +18,18 @@ class AskRequest(BaseModel):
     question: str
 
 
+def _get_reviewed_tables(discovery) -> set[str] | None:
+    """Get set of reviewed table names. Returns None if all are reviewed."""
+    reviewed = {
+        t.name for t in discovery.tables
+        if t.review_status in ("reviewed", "skipped")
+    }
+    # If all tables are reviewed, don't filter (no gate needed)
+    if len(reviewed) == len(discovery.tables):
+        return None
+    return reviewed
+
+
 @router.get("/explore/suggestions")
 async def get_suggestions(request: Request):
     """Return auto-generated suggested questions and statistical insights."""
@@ -25,6 +37,20 @@ async def get_suggestions(request: Request):
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    reviewed = _get_reviewed_tables(discovery)
+
+    # If no tables reviewed, return empty with a message
+    if reviewed is not None and len(reviewed) == 0:
+        return {
+            "suggestions": [],
+            "insights": [],
+            "review_required": True,
+            "message": (
+                "No tables have been reviewed yet. "
+                "Visit the Data Dictionary to review table metadata before exploring."
+            ),
+        }
 
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     contracts = pipeline["contracts"]
@@ -40,6 +66,13 @@ async def get_suggestions(request: Request):
         con=con,
     )
 
+    # Filter suggestions to only reference reviewed tables
+    if reviewed is not None:
+        suggestions = [
+            s for s in suggestions
+            if not s.relevant_tables or any(t in reviewed for t in s.relevant_tables)
+        ]
+
     # Statistical insights from materialized marts
     insights = detect_insights(con, schema="staging")
     insights.extend(detect_insights(con, schema="marts"))
@@ -47,6 +80,7 @@ async def get_suggestions(request: Request):
     return {
         "suggestions": [s.model_dump() for s in suggestions],
         "insights": [i.model_dump() for i in insights],
+        "review_required": reviewed is not None and len(reviewed) < len(discovery.tables),
     }
 
 
@@ -57,6 +91,8 @@ async def ask_question(request: Request, body: AskRequest):
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    reviewed = _get_reviewed_tables(discovery)
 
     con = request.app.state.duckdb_con
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
@@ -87,6 +123,7 @@ async def ask_question(request: Request, body: AskRequest):
         models=all_models,
         suggestions=suggestions,
         provider=provider,
+        reviewed_tables=reviewed,
     )
 
     return result.model_dump()

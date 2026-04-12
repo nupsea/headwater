@@ -19,6 +19,8 @@ export interface StatusResponse {
   mart_models: number;
   contracts: number;
   executed: number;
+  dictionary_reviewed: number;
+  dictionary_complete: boolean;
 }
 
 export interface ColumnInfo {
@@ -314,6 +316,111 @@ export interface ExploreSuggestionsResponse {
   insights: StatisticalInsight[];
 }
 
+// ---------- Drift types (US-402, US-403) ----------
+
+export interface ColumnChange {
+  column_name: string;
+  change_type: "added" | "removed" | "type_changed" | "nullability_changed";
+  before: string | null;
+  after: string | null;
+}
+
+export interface TableChange {
+  table_name: string;
+  change_type: "added" | "removed" | "columns_changed";
+  column_changes: ColumnChange[];
+}
+
+export interface DriftReport {
+  id: number;
+  source_name: string;
+  run_id_from: number | null;
+  run_id_to: number;
+  diff_json: string;
+  diff: {
+    source_name: string;
+    run_id_from: number | null;
+    run_id_to: number;
+    no_changes: boolean;
+    tables_added: string[];
+    tables_removed: string[];
+    tables_changed: TableChange[];
+    detected_at: string;
+  };
+  detected_at: string;
+  acknowledged: number;
+}
+
+export interface DriftReportsResponse {
+  reports: DriftReport[];
+  message?: string;
+}
+
+// ---------- Confidence types (US-302, US-303) ----------
+
+export interface ConfidenceMetrics {
+  description_acceptance_rate: number | null;
+  description_sample_size: number;
+  description_reason: string | null;
+  model_edit_distance_avg: number | null;
+  model_edit_distance_sample_size: number;
+  contract_precision: number | null;
+  contract_precision_sample_size: number;
+}
+
+// ---------- Data Dictionary types ----------
+
+export interface DictColumn {
+  name: string;
+  dtype: string;
+  nullable: boolean;
+  is_primary_key: boolean;
+  is_foreign_key: boolean;
+  fk_references: string | null;
+  semantic_type: string | null;
+  role: string | null;
+  description: string | null;
+  confidence: number;
+  locked: boolean;
+  needs_review: boolean;
+}
+
+export interface DictTable {
+  name: string;
+  source_name: string;
+  row_count: number;
+  description: string | null;
+  domain: string | null;
+  review_status: "pending" | "in_review" | "reviewed" | "skipped";
+  columns: DictColumn[];
+  relationships: RelationshipEntry[];
+  questions: string[];
+}
+
+export interface DictReviewSummary {
+  total: number;
+  reviewed: number;
+  pending: number;
+  in_review: number;
+  skipped: number;
+  pct_complete: number;
+}
+
+export interface ColumnReviewPayload {
+  name: string;
+  semantic_type?: string | null;
+  role?: string | null;
+  description?: string | null;
+  is_primary_key?: boolean | null;
+}
+
+export interface TableReviewPayload {
+  columns: ColumnReviewPayload[];
+  table_description?: string | null;
+  table_domain?: string | null;
+  confirm: boolean;
+}
+
 // ---------- API calls ----------
 
 export const api = {
@@ -348,6 +455,37 @@ export const api = {
 
   contracts: () => fetchJSON<ContractSummary[]>("/contracts"),
 
+  // Data Dictionary
+  dictionary: () =>
+    fetchJSON<{ tables: DictTable[] }>("/dictionary"),
+
+  dictionaryTable: (name: string) =>
+    fetchJSON<DictTable>(`/dictionary/${name}`),
+
+  dictionarySummary: () =>
+    fetchJSON<DictReviewSummary>("/dictionary/summary"),
+
+  reviewTable: (name: string, body: TableReviewPayload) =>
+    fetchJSON<{ table: string; review_status: string; columns_updated: number }>(
+      `/dictionary/${name}/review`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    ),
+
+  skipTable: (name: string) =>
+    fetchJSON<{ table: string; review_status: string }>(
+      `/dictionary/${name}/skip`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+    ),
+
+  confirmAllTables: () =>
+    fetchJSON<{ confirmed: number; total: number }>("/dictionary/confirm-all", {
+      method: "POST",
+    }),
+
   exploreSuggestions: () =>
     fetchJSON<ExploreSuggestionsResponse>("/explore/suggestions"),
 
@@ -357,4 +495,27 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
     }),
+
+  // Drift (US-402, US-403)
+  driftReports: (source?: string) =>
+    fetchJSON<DriftReportsResponse>(
+      `/drift${source ? `?source=${encodeURIComponent(source)}` : ""}`
+    ),
+
+  driftLatest: (source?: string) =>
+    fetchJSON<DriftReport | { report: null; message: string }>(
+      `/drift?latest=true${source ? `&source=${encodeURIComponent(source)}` : ""}`
+    ),
+
+  acknowledgeDrift: (reportId: number) =>
+    fetchJSON<{ report_id: number; acknowledged: boolean }>(
+      `/drift/${reportId}/acknowledge`,
+      { method: "PATCH" }
+    ),
+
+  // Confidence (US-302, US-303)
+  confidence: (source?: string) =>
+    fetchJSON<ConfidenceMetrics>(
+      `/confidence${source ? `?source=${encodeURIComponent(source)}` : ""}`
+    ),
 };

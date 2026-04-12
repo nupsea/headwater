@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS tables (
     run_id      INTEGER REFERENCES discovery_runs(id),
     locked      INTEGER NOT NULL DEFAULT 0,
     locked_at   TEXT,
+    removed_in_run_id INTEGER,
     PRIMARY KEY (name, source_name)
 );
 
@@ -194,6 +195,14 @@ class MetadataStore:
             # US-201: add locked columns to columns
             "ALTER TABLE columns ADD COLUMN locked INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE columns ADD COLUMN locked_at TEXT",
+            # US-203: add removed_in_run_id to tables
+            "ALTER TABLE tables ADD COLUMN removed_in_run_id INTEGER",
+            # Data dictionary: review status on tables
+            "ALTER TABLE tables ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'",
+            "ALTER TABLE tables ADD COLUMN reviewed_at TEXT",
+            # Data dictionary: confidence and role on columns
+            "ALTER TABLE columns ADD COLUMN confidence REAL DEFAULT 0.0",
+            "ALTER TABLE columns ADD COLUMN role TEXT",
         ]
         for sql in migrations:
             try:
@@ -264,13 +273,37 @@ class MetadataStore:
         domain: str | None = None,
         tags: list[str] | None = None,
         run_id: int | None = None,
+        review_status: str | None = None,
     ) -> None:
+        # INSERT OR IGNORE to preserve existing lock state on re-runs.
         self.con.execute(
-            "INSERT OR REPLACE INTO tables "
+            "INSERT OR IGNORE INTO tables "
             "(name, source_name, schema_name, row_count, description, domain, tags, run_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (name, source_name, schema_name, row_count, description, domain,
              json.dumps(tags or []), run_id),
+        )
+        # Update non-locked fields; if locked=1 skip description/domain update.
+        # Also clear removed_in_run_id since the table is present again.
+        # Preserve review_status if already reviewed (don't regress on re-run).
+        review_clause = ""
+        review_params: list = []
+        if review_status is not None:
+            review_clause = (
+                ", review_status = CASE WHEN review_status = 'reviewed' "
+                "THEN review_status ELSE ? END"
+            )
+            review_params = [review_status]
+
+        self.con.execute(
+            "UPDATE tables SET "
+            "schema_name = ?, row_count = ?, tags = ?, run_id = ?, "
+            "removed_in_run_id = NULL, "
+            "description = CASE WHEN locked = 1 THEN description ELSE ? END, "
+            f"domain = CASE WHEN locked = 1 THEN domain ELSE ? END{review_clause} "
+            "WHERE name = ? AND source_name = ?",
+            [schema_name, row_count, json.dumps(tags or []), run_id,
+             description, domain] + review_params + [name, source_name],
         )
         self.con.commit()
 
@@ -285,6 +318,8 @@ class MetadataStore:
         is_primary_key: bool = False,
         description: str | None = None,
         semantic_type: str | None = None,
+        role: str | None = None,
+        confidence: float = 0.0,
         ordinal: int = 0,
     ) -> None:
         # INSERT OR IGNORE to preserve existing lock state on re-runs.
@@ -292,20 +327,22 @@ class MetadataStore:
         self.con.execute(
             "INSERT OR IGNORE INTO columns "
             "(table_name, source_name, name, dtype, nullable, is_primary_key, "
-            "description, semantic_type, ordinal) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "description, semantic_type, role, confidence, ordinal) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (table_name, source_name, name, dtype, int(nullable), int(is_primary_key),
-             description, semantic_type, ordinal),
+             description, semantic_type, role, confidence, ordinal),
         )
-        # Update non-locked columns; if locked=1 skip description/semantic_type update
+        # Update non-locked columns; if locked=1 skip description/semantic_type/role update
         self.con.execute(
             "UPDATE columns SET "
             "dtype = ?, nullable = ?, is_primary_key = ?, ordinal = ?, "
             "description = CASE WHEN locked = 1 THEN description ELSE ? END, "
-            "semantic_type = CASE WHEN locked = 1 THEN semantic_type ELSE ? END "
+            "semantic_type = CASE WHEN locked = 1 THEN semantic_type ELSE ? END, "
+            "role = CASE WHEN locked = 1 THEN role ELSE ? END, "
+            "confidence = CASE WHEN locked = 1 THEN confidence ELSE ? END "
             "WHERE table_name = ? AND source_name = ? AND name = ?",
             (dtype, int(nullable), int(is_primary_key), ordinal,
-             description, semantic_type,
+             description, semantic_type, role, confidence,
              table_name, source_name, name),
         )
         self.con.commit()
@@ -352,6 +389,337 @@ class MetadataStore:
                 (table_name, source_name),
             ).fetchall()
         ]
+
+    def mark_removed_tables(
+        self, source_name: str, current_table_names: list[str], run_id: int,
+    ) -> list[str]:
+        """Mark tables not in current_table_names as removed.
+
+        Returns list of table names that were marked as removed.
+        """
+        existing = self.get_tables(source_name)
+        current_set = set(current_table_names)
+        removed: list[str] = []
+        for t in existing:
+            if t["name"] not in current_set and t.get("removed_in_run_id") is None:
+                self.con.execute(
+                    "UPDATE tables SET removed_in_run_id = ? "
+                    "WHERE name = ? AND source_name = ?",
+                    (run_id, t["name"], source_name),
+                )
+                removed.append(t["name"])
+        if removed:
+            self.con.commit()
+        return removed
+
+    def get_active_tables(self, source_name: str) -> list[dict]:
+        """Return tables that have not been marked as removed."""
+        return [
+            dict(r)
+            for r in self.con.execute(
+                "SELECT * FROM tables WHERE source_name = ? AND removed_in_run_id IS NULL",
+                (source_name,),
+            ).fetchall()
+        ]
+
+    # -- Data Dictionary review ------------------------------------------------
+
+    def update_table_review_status(
+        self,
+        name: str,
+        source_name: str,
+        status: str,
+    ) -> None:
+        """Set review_status on a table. 'reviewed' also sets reviewed_at."""
+        if status == "reviewed":
+            self.con.execute(
+                "UPDATE tables SET review_status = ?, reviewed_at = datetime('now') "
+                "WHERE name = ? AND source_name = ?",
+                (status, name, source_name),
+            )
+        else:
+            self.con.execute(
+                "UPDATE tables SET review_status = ? "
+                "WHERE name = ? AND source_name = ?",
+                (status, name, source_name),
+            )
+        self.con.commit()
+
+    def bulk_update_columns(
+        self,
+        table_name: str,
+        source_name: str,
+        updates: list[dict],
+        lock: bool = False,
+    ) -> None:
+        """Bulk update columns for a table during review.
+
+        Each dict in *updates* may contain: name (required), description,
+        semantic_type, role, is_primary_key, confidence.
+        If *lock* is True, all updated columns get locked=1.
+        """
+        for col in updates:
+            col_name = col["name"]
+            sets: list[str] = []
+            params: list = []
+
+            for field in ("description", "semantic_type", "role"):
+                if field in col and col[field] is not None:
+                    sets.append(f"{field} = ?")
+                    params.append(col[field])
+
+            if "confidence" in col:
+                sets.append("confidence = ?")
+                params.append(col["confidence"])
+
+            if "is_primary_key" in col and col["is_primary_key"] is not None:
+                sets.append("is_primary_key = ?")
+                params.append(int(col["is_primary_key"]))
+
+            if lock:
+                sets.append("locked = 1")
+                sets.append("locked_at = datetime('now')")
+
+            if not sets:
+                continue
+
+            sql = (
+                f"UPDATE columns SET {', '.join(sets)} "
+                "WHERE table_name = ? AND source_name = ? AND name = ?"
+            )
+            params.extend([table_name, source_name, col_name])
+            self.con.execute(sql, params)
+
+        self.con.commit()
+
+    def get_reviewed_tables(self, source_name: str) -> list[dict]:
+        """Return tables where review_status is 'reviewed' or 'skipped'."""
+        return [
+            dict(r)
+            for r in self.con.execute(
+                "SELECT * FROM tables WHERE source_name = ? "
+                "AND review_status IN ('reviewed', 'skipped') "
+                "AND removed_in_run_id IS NULL",
+                (source_name,),
+            ).fetchall()
+        ]
+
+    def get_review_summary(self, source_name: str) -> dict:
+        """Return review progress counts for a source."""
+        rows = self.con.execute(
+            "SELECT review_status, COUNT(*) as cnt FROM tables "
+            "WHERE source_name = ? AND removed_in_run_id IS NULL "
+            "GROUP BY review_status",
+            (source_name,),
+        ).fetchall()
+        counts = {r["review_status"]: r["cnt"] for r in rows}
+        total = sum(counts.values())
+        reviewed = counts.get("reviewed", 0)
+        return {
+            "total": total,
+            "reviewed": reviewed,
+            "pending": counts.get("pending", 0),
+            "in_review": counts.get("in_review", 0),
+            "skipped": counts.get("skipped", 0),
+            "pct_complete": round(reviewed / total * 100, 1) if total > 0 else 0.0,
+        }
+
+    def compute_rerun_summary(
+        self,
+        source_name: str,
+        current_table_names: list[str],
+        previous_table_names: list[str],
+    ) -> dict:
+        """Compute re-run summary: unchanged, updated, added, removed counts.
+
+        Args:
+            source_name: The source being re-run.
+            current_table_names: Table names discovered in the current run.
+            previous_table_names: Table names from the previous run (active only).
+
+        Returns:
+            dict with keys: unchanged, updated, added, removed.
+        """
+        current_set = set(current_table_names)
+        previous_set = set(previous_table_names)
+
+        added = current_set - previous_set
+        removed = previous_set - current_set
+        # Tables in both runs are either unchanged or updated (we treat them
+        # as "updated" since profiles/stats may have changed).
+        common = current_set & previous_set
+
+        return {
+            "unchanged": 0,  # All common tables get re-profiled so they are "updated"
+            "updated": len(common),
+            "added": len(added),
+            "removed": len(removed),
+        }
+
+    # -- Confidence metrics (US-302, US-303) --------------------------------
+
+    def get_description_acceptance_rate(
+        self, source_name: str | None = None, min_decisions: int = 5,
+    ) -> dict:
+        """Compute description acceptance rate from decisions.
+
+        Looks at decisions where artifact_type='column' and action in
+        ('locked', 'description_accepted', 'description_edited').
+        An 'accepted' action means the auto-generated description was kept as-is.
+        An 'edited' or 'locked' action with a changed description means it was modified.
+
+        Returns:
+            dict with keys: acceptance_rate (float|None), sample_size, reason (str|None)
+        """
+        if source_name:
+            rows = self.con.execute(
+                "SELECT action, payload_json FROM decisions "
+                "WHERE artifact_type = 'column' AND artifact_id LIKE ? "
+                "AND action IN ('locked', 'description_accepted', 'description_edited') "
+                "ORDER BY created_at",
+                (f"{source_name}.%",),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT action, payload_json FROM decisions "
+                "WHERE artifact_type = 'column' "
+                "AND action IN ('locked', 'description_accepted', 'description_edited') "
+                "ORDER BY created_at",
+            ).fetchall()
+
+        total = len(rows)
+        if total < min_decisions:
+            return {
+                "acceptance_rate": None,
+                "sample_size": total,
+                "reason": f"Below minimum threshold ({total}/{min_decisions} decisions)",
+            }
+
+        accepted = sum(1 for r in rows if r["action"] == "description_accepted")
+        return {
+            "acceptance_rate": round(accepted / total, 4) if total > 0 else 0.0,
+            "sample_size": total,
+            "reason": None,
+        }
+
+    def get_model_edit_distance_avg(self, source_name: str | None = None) -> dict:
+        """Compute average model edit distance from decisions.
+
+        Looks at decisions with artifact_type='model' and action='edited'
+        that include 'edit_distance' in payload_json.
+
+        Returns:
+            dict with keys: edit_distance_avg (float|None), sample_size
+        """
+        if source_name:
+            rows = self.con.execute(
+                "SELECT payload_json FROM decisions "
+                "WHERE artifact_type = 'model' AND action = 'edited' "
+                "AND artifact_id LIKE ?",
+                (f"{source_name}%",),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT payload_json FROM decisions "
+                "WHERE artifact_type = 'model' AND action = 'edited'",
+            ).fetchall()
+
+        distances = []
+        for r in rows:
+            if r["payload_json"]:
+                payload = json.loads(r["payload_json"])
+                if "edit_distance" in payload:
+                    distances.append(payload["edit_distance"])
+
+        if not distances:
+            return {"edit_distance_avg": None, "sample_size": 0}
+
+        avg = round(sum(distances) / len(distances), 4)
+        return {"edit_distance_avg": avg, "sample_size": len(distances)}
+
+    def get_contract_precision(self, source_name: str | None = None) -> dict:
+        """Compute contract precision from decisions.
+
+        Precision = true alerts / (true alerts + false positives).
+        Looks at decisions with artifact_type='contract'.
+
+        Returns:
+            dict with keys: precision (float|None), sample_size
+        """
+        if source_name:
+            rows = self.con.execute(
+                "SELECT action FROM decisions "
+                "WHERE artifact_type = 'contract' "
+                "AND action IN ('false_positive', 'true_positive', 'acknowledged') "
+                "AND artifact_id IN ("
+                "  SELECT id FROM contracts WHERE model_name LIKE ?"
+                ")",
+                (f"%{source_name}%",),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT action FROM decisions "
+                "WHERE artifact_type = 'contract' "
+                "AND action IN ('false_positive', 'true_positive', 'acknowledged')",
+            ).fetchall()
+
+        total = len(rows)
+        if total == 0:
+            return {"precision": None, "sample_size": 0}
+
+        false_positives = sum(1 for r in rows if r["action"] == "false_positive")
+        true_positives = total - false_positives
+        precision = round(true_positives / total, 4) if total > 0 else None
+        return {"precision": precision, "sample_size": total}
+
+    # -- Schema snapshot building -------------------------------------------
+
+    def build_snapshot_from_tables(self, source_name: str) -> dict:
+        """Build a schema snapshot dict from current metadata for a source.
+
+        Returns:
+            dict mapping table_name -> {columns: [...], row_count: int}
+        """
+        snapshot: dict = {}
+        tables = self.get_active_tables(source_name)
+        for t in tables:
+            columns = self.get_columns(t["name"], source_name)
+            snapshot[t["name"]] = {
+                "columns": [
+                    {
+                        "name": c["name"],
+                        "dtype": c["dtype"],
+                        "nullable": bool(c["nullable"]),
+                    }
+                    for c in columns
+                ],
+                "row_count": t["row_count"],
+            }
+        return snapshot
+
+    # -- Drift reports (list all) -------------------------------------------
+
+    def get_drift_reports(
+        self, source_name: str | None = None, limit: int = 50,
+    ) -> list[dict]:
+        """Return drift reports, optionally filtered by source."""
+        if source_name:
+            rows = self.con.execute(
+                "SELECT * FROM drift_reports WHERE source_name = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (source_name, limit),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM drift_reports ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r["diff"] = json.loads(r["diff_json"])
+            results.append(r)
+        return results
 
     # -- Profiles ----------------------------------------------------------
 

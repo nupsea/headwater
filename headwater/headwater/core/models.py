@@ -36,6 +36,8 @@ class ColumnInfo(BaseModel):
     is_primary_key: bool = False
     description: str | None = None  # Filled by analyzer
     semantic_type: str | None = None  # pii, metric, dimension, id, foreign_key, etc.
+    role: str | None = None  # metric, dimension, temporal, identifier, geographic, text
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)  # Classification confidence
     locked: bool = False  # True = description approved by human; skip re-enrichment
 
 
@@ -50,6 +52,8 @@ class TableInfo(BaseModel):
     domain: str | None = None  # Filled by analyzer
     tags: list[str] = Field(default_factory=list)
     locked: bool = False  # True = description approved by human; skip re-enrichment
+    review_status: Literal["pending", "in_review", "reviewed", "skipped"] = "pending"
+    reviewed_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +208,37 @@ class DiscoveryResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Re-run summary (US-203)
+# ---------------------------------------------------------------------------
+
+
+class RerunSummary(BaseModel):
+    """Summary of a re-run: how many tables unchanged/updated/added/removed."""
+
+    unchanged: int = 0
+    updated: int = 0
+    added: int = 0
+    removed: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Confidence metrics (US-302, US-303)
+# ---------------------------------------------------------------------------
+
+
+class ConfidenceMetrics(BaseModel):
+    """Aggregated confidence metrics for the system."""
+
+    description_acceptance_rate: float | None = None
+    description_sample_size: int = 0
+    description_reason: str | None = None
+    model_edit_distance_avg: float | None = None
+    model_edit_distance_sample_size: int = 0
+    contract_precision: float | None = None
+    contract_precision_sample_size: int = 0
+
+
+# ---------------------------------------------------------------------------
 # Explorer -- NL questions, statistical insights, visualization
 # ---------------------------------------------------------------------------
 
@@ -245,6 +280,72 @@ class VisualizationSpec(BaseModel):
     y_axis: str | None = None
     group_by: str | None = None
     description: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Data Dictionary (review workflow)
+# ---------------------------------------------------------------------------
+
+
+class DataDictionaryColumn(BaseModel):
+    """Column entry in the data dictionary for review."""
+
+    name: str
+    dtype: str
+    nullable: bool
+    is_primary_key: bool
+    is_foreign_key: bool = False
+    fk_references: str | None = None  # "table.column" if FK
+    semantic_type: str | None = None
+    role: str | None = None  # metric/dimension/temporal/identifier/geographic/text
+    description: str | None = None
+    confidence: float = 0.0
+    locked: bool = False
+    needs_review: bool = False  # True when confidence < threshold
+
+
+class DataDictionaryTable(BaseModel):
+    """Table entry in the data dictionary for review."""
+
+    name: str
+    source_name: str
+    row_count: int
+    description: str | None = None
+    domain: str | None = None
+    review_status: Literal["pending", "in_review", "reviewed", "skipped"]
+    columns: list[DataDictionaryColumn]
+    relationships: list[Relationship] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)  # Clarifying questions
+
+
+class ColumnReview(BaseModel):
+    """User's correction for a single column during review."""
+
+    name: str
+    semantic_type: str | None = None
+    role: str | None = None
+    description: str | None = None
+    is_primary_key: bool | None = None
+
+
+class TableReviewRequest(BaseModel):
+    """Request body for reviewing a table's data dictionary."""
+
+    columns: list[ColumnReview] = Field(default_factory=list)
+    table_description: str | None = None
+    table_domain: str | None = None
+    confirm: bool = True  # If True, mark table as reviewed and lock columns
+
+
+class ReviewSummary(BaseModel):
+    """Progress summary for data dictionary review."""
+
+    total: int = 0
+    reviewed: int = 0
+    pending: int = 0
+    in_review: int = 0
+    skipped: int = 0
+    pct_complete: float = 0.0
 
 
 class ExplorationResult(BaseModel):

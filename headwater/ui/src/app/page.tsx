@@ -6,6 +6,7 @@ import {
   type StatusResponse,
   type InsightsResponse,
   type PipelineRunResponse,
+  type DriftReport,
 } from "@/lib/api";
 import { WorkflowProgress } from "@/components/workflow-progress";
 import { DataSummary } from "@/components/data-summary";
@@ -13,10 +14,12 @@ import { AdvisoryActions } from "@/components/advisory-actions";
 import { CompletenessChart } from "@/components/completeness-chart";
 import { DomainMap } from "@/components/domain-map";
 import { RelationshipDiagram } from "@/components/relationship-diagram";
+import { DriftBanner } from "@/components/drift-banner";
 
 export default function DashboardPage() {
   const [, setStatus] = useState<StatusResponse | null>(null);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
+  const [driftReport, setDriftReport] = useState<DriftReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [phase, setPhase] = useState("");
   const [sourcePath, setSourcePath] = useState("postgresql://headwater:headwater@localhost:5434/headwater_dev");
@@ -29,6 +32,17 @@ export default function DashboardPage() {
       if (s.discovered) {
         const ins = await api.insights();
         setInsights(ins);
+        // Fetch latest drift report
+        try {
+          const dr = await api.driftLatest();
+          if ("id" in dr && !dr.acknowledged) {
+            setDriftReport(dr as DriftReport);
+          } else {
+            setDriftReport(null);
+          }
+        } catch {
+          /* drift endpoint may not be available yet */
+        }
       }
     } catch {
       /* server not ready */
@@ -135,6 +149,14 @@ export default function DashboardPage() {
       {/* Full dashboard */}
       {insights && (
         <div className="space-y-5">
+          {/* Drift banner (US-403) */}
+          {driftReport && (
+            <DriftBanner
+              report={driftReport}
+              onDismiss={() => setDriftReport(null)}
+            />
+          )}
+
           {/* Row 1: Workflow progress bar */}
           <WorkflowProgress workflow={insights.workflow} />
 

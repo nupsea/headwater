@@ -335,3 +335,135 @@ def test_init_creates_snapshot_and_drift_tables(meta: MetadataStore):
     names = {r["name"] for r in tables}
     assert "schema_snapshots" in names
     assert "drift_reports" in names
+
+
+# ---------------------------------------------------------------------------
+# US-401: Build snapshot from metadata
+# ---------------------------------------------------------------------------
+
+
+def test_build_snapshot_from_tables(meta: MetadataStore):
+    """build_snapshot_from_tables builds snapshot from stored metadata."""
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_table("orders", "src", row_count=100)
+    meta.upsert_column("orders", "src", "id", "int64", nullable=False, ordinal=0)
+    meta.upsert_column("orders", "src", "amount", "float64", nullable=True, ordinal=1)
+
+    snapshot = meta.build_snapshot_from_tables("src")
+    assert "orders" in snapshot
+    assert snapshot["orders"]["row_count"] == 100
+    assert len(snapshot["orders"]["columns"]) == 2
+    col_names = {c["name"] for c in snapshot["orders"]["columns"]}
+    assert col_names == {"id", "amount"}
+
+
+def test_build_snapshot_excludes_removed_tables(meta: MetadataStore):
+    """build_snapshot_from_tables excludes tables with removed_in_run_id set."""
+    meta.upsert_source("src", "json", "/data", None)
+    run1 = meta.start_run("src")
+    meta.upsert_table("orders", "src", row_count=100, run_id=run1)
+    meta.upsert_table("old_table", "src", row_count=50, run_id=run1)
+    meta.finish_run(run1, table_count=2)
+
+    # Mark old_table as removed
+    run2 = meta.start_run("src")
+    meta.mark_removed_tables("src", ["orders"], run2)
+
+    snapshot = meta.build_snapshot_from_tables("src")
+    assert "orders" in snapshot
+    assert "old_table" not in snapshot
+
+
+# ---------------------------------------------------------------------------
+# US-402: End-to-end drift detection with metadata
+# ---------------------------------------------------------------------------
+
+
+def test_drift_detection_end_to_end(meta: MetadataStore):
+    """Full round-trip: save snapshot -> change schema -> compare -> detect drift."""
+    meta.upsert_source("src", "json", "/data", None)
+
+    # Run 1: initial schema
+    run1 = meta.start_run("src")
+    meta.upsert_table("orders", "src", row_count=100, run_id=run1)
+    meta.upsert_column("orders", "src", "id", "int64", nullable=False)
+    meta.upsert_column("orders", "src", "amount", "float64", nullable=True)
+    meta.finish_run(run1, table_count=1)
+
+    snap1 = meta.build_snapshot_from_tables("src")
+    meta.save_snapshot(run1, "src", snap1)
+
+    # Run 2: add a column, change a type
+    run2 = meta.start_run("src")
+    meta.upsert_table("orders", "src", row_count=150, run_id=run2)
+    meta.upsert_column("orders", "src", "id", "int64", nullable=False)
+    meta.upsert_column("orders", "src", "amount", "varchar", nullable=True)  # type changed
+    meta.upsert_column("orders", "src", "created_at", "timestamp", nullable=True)  # new
+    meta.finish_run(run2, table_count=1)
+
+    snap2 = meta.build_snapshot_from_tables("src")
+    meta.save_snapshot(run2, "src", snap2)
+
+    # Compare
+    prev_snap = meta.get_latest_snapshot("src", before_run_id=run2)
+    assert prev_snap is not None
+
+    diff = compare_schemas(prev_snap, snap2, "src", run_id_from=run1, run_id_to=run2)
+    assert diff.no_changes is False
+    assert len(diff.tables_changed) == 1
+
+    table_change = diff.tables_changed[0]
+    change_types = {c.change_type for c in table_change.column_changes}
+    assert "added" in change_types  # created_at
+    assert "type_changed" in change_types  # amount
+
+    # Save drift report
+    report_id = meta.save_drift_report("src", run1, run2, diff.model_dump())
+    assert report_id > 0
+
+    report = meta.get_latest_drift_report("src")
+    assert report is not None
+    assert report["run_id_to"] == run2
+
+
+def test_first_run_no_previous_snapshot(meta: MetadataStore):
+    """First run with no previous snapshot handled gracefully."""
+    meta.upsert_source("src", "json", "/data", None)
+    run1 = meta.start_run("src")
+    meta.upsert_table("orders", "src", row_count=100, run_id=run1)
+    meta.upsert_column("orders", "src", "id", "int64", nullable=False)
+    meta.finish_run(run1, table_count=1)
+
+    snap1 = meta.build_snapshot_from_tables("src")
+    prev = meta.get_latest_snapshot("src", before_run_id=run1)
+    assert prev is None
+
+    diff = compare_schemas(prev, snap1, "src", run_id_from=None, run_id_to=run1)
+    assert diff.no_changes is False
+    assert "orders" in diff.tables_added
+
+
+# ---------------------------------------------------------------------------
+# US-402: get_drift_reports (list)
+# ---------------------------------------------------------------------------
+
+
+def test_get_drift_reports_list(meta: MetadataStore):
+    """get_drift_reports returns all reports in reverse chronological order."""
+    meta.upsert_source("src", "json", "/data", None)
+    run1 = meta.start_run("src")
+    meta.finish_run(run1, table_count=1)
+    run2 = meta.start_run("src")
+    meta.finish_run(run2, table_count=1)
+    run3 = meta.start_run("src")
+    meta.finish_run(run3, table_count=1)
+
+    meta.save_drift_report("src", None, run1, {"no_changes": True})
+    meta.save_drift_report("src", run1, run2, {"no_changes": False})
+    meta.save_drift_report("src", run2, run3, {"no_changes": False})
+
+    reports = meta.get_drift_reports("src")
+    assert len(reports) == 3
+    # Most recent first
+    assert reports[0]["run_id_to"] == run3
+    assert reports[2]["run_id_to"] == run1

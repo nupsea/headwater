@@ -37,7 +37,9 @@ class TestCLIDemo:
         result = runner.invoke(app, ["demo", "--dataset", SAMPLE_DATA])
         assert result.exit_code == 0
         assert "Loaded" in result.output
-        assert "Demo complete" in result.output
+        assert "Demo Complete" in result.output or "Demo complete" in result.output
+        # US-701: verify "What happened" summary and next-step instructions
+        assert "Next steps" in result.output or "next steps" in result.output
 
     def test_demo_bad_path(self):
         result = runner.invoke(app, ["demo", "--dataset", "/nonexistent/path"])
@@ -46,13 +48,27 @@ class TestCLIDemo:
 
 class TestCLIDiscover:
     def test_discover(self):
-        result = runner.invoke(app, ["discover-cmd", SAMPLE_DATA])
+        result = runner.invoke(app, ["discover", "--source", SAMPLE_DATA])
         assert result.exit_code == 0
         assert "zones" in result.output
 
     def test_discover_bad_path(self):
-        result = runner.invoke(app, ["discover-cmd", "/nonexistent"])
+        result = runner.invoke(app, ["discover", "--source", "/nonexistent"])
         assert result.exit_code == 1
+
+    def test_discover_with_explicit_type(self):
+        result = runner.invoke(app, ["discover", "--source", SAMPLE_DATA, "--type", "json"])
+        assert result.exit_code == 0
+        assert "zones" in result.output
+
+    def test_discover_with_name(self):
+        result = runner.invoke(app, ["discover", "--source", SAMPLE_DATA, "--name", "mydata"])
+        assert result.exit_code == 0
+
+    def test_discover_observe_mode_not_implemented(self):
+        result = runner.invoke(app, ["discover", "--source", SAMPLE_DATA, "--mode", "observe"])
+        assert result.exit_code == 1
+        assert "not yet implemented" in result.output.lower()
 
 
 class TestCLIGenerate:

@@ -324,6 +324,66 @@ class TestSuggestions:
         questions = generate_suggestions(discovery=empty)
         assert isinstance(questions, list)
 
+    def test_no_latitude_in_suggested_questions(self):
+        """Latitude/longitude should never appear as metrics in suggestions."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="sites",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(
+                            name="site_id", dtype="varchar",
+                            semantic_type="id",
+                        ),
+                        ColumnInfo(
+                            name="site_name", dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(
+                            name="latitude", dtype="float64",
+                            semantic_type="geographic",
+                        ),
+                        ColumnInfo(
+                            name="longitude", dtype="float64",
+                            semantic_type="geographic",
+                        ),
+                        ColumnInfo(
+                            name="reading_value", dtype="float64",
+                            semantic_type="metric",
+                        ),
+                        ColumnInfo(
+                            name="created_date", dtype="date",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="sites", column_name="latitude",
+                    dtype="float64", distinct_count=900,
+                ),
+                ColumnProfile(
+                    table_name="sites", column_name="longitude",
+                    dtype="float64", distinct_count=900,
+                ),
+                ColumnProfile(
+                    table_name="sites", column_name="reading_value",
+                    dtype="float64", distinct_count=500,
+                ),
+            ],
+        )
+        questions = generate_suggestions(discovery=discovery)
+        for q in questions:
+            assert "latitude" not in q.question.lower(), (
+                f"latitude should not appear in: {q.question}"
+            )
+            assert "longitude" not in q.question.lower(), (
+                f"longitude should not appear in: {q.question}"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Statistical tests
@@ -825,6 +885,383 @@ class TestHeuristicSql:
         # Should prefer the executed mart over staging
         assert "marts." in sql
 
+    def test_join_query_with_fk_relationship(self, sample_discovery, duckdb_con):
+        """Cross-table question builds JOIN when FK relationship exists."""
+        # Create the sites staging table so it can resolve
+        import polars as pl
+
+        df_sites = pl.DataFrame({
+            "site_id": ["S1", "S2", "S3"],
+            "name": ["Alpha Station", "Beta Station", "Gamma Station"],
+            "zone_id": ["Z1", "Z2", "Z1"],
+        })
+        duckdb_con.register("_tmp_sites", df_sites.to_arrow())
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_sites AS SELECT * FROM _tmp_sites"
+        )
+        duckdb_con.unregister("_tmp_sites")
+
+        sql = _heuristic_sql(
+            "Give me readings per site?",
+            sample_discovery,
+            [],
+            con=duckdb_con,
+        )
+        assert sql is not None
+        assert "JOIN" in sql
+        assert "site" in sql.lower()
+
+    def test_indirect_join_through_shared_table(self, duckdb_con):
+        """Two tables related through a shared intermediate table produce a multi-hop JOIN."""
+        # Schema: complaints --(zone_id)--> zones <--(zone_id)-- sites
+        # No direct FK between complaints and sites.
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="complaints",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="zone_id", dtype="varchar", semantic_type="foreign_key"),
+                        ColumnInfo(name="severity", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=50,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="site_name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="zone_id", dtype="varchar", semantic_type="foreign_key"),
+                    ],
+                ),
+                TableInfo(
+                    name="zones",
+                    row_count=10,
+                    columns=[
+                        ColumnInfo(name="zone_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="zone_name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="complaints", from_column="zone_id",
+                    to_table="zones", to_column="zone_id",
+                    type="many_to_one", confidence=0.95,
+                    referential_integrity=0.98, source="inferred_name",
+                ),
+                Relationship(
+                    from_table="sites", from_column="zone_id",
+                    to_table="zones", to_column="zone_id",
+                    type="many_to_one", confidence=0.95,
+                    referential_integrity=0.98, source="inferred_name",
+                ),
+            ],
+        )
+
+        # Create the tables in DuckDB
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_complaints AS "
+            "SELECT * FROM (VALUES "
+            "  (1, 'Z1', 'high', 8.5), (2, 'Z1', 'low', 3.0), "
+            "  (3, 'Z2', 'high', 9.0), (4, 'Z2', 'medium', 5.5)"
+            ") AS t(complaint_id, zone_id, severity, score)"
+        )
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_zones AS "
+            "SELECT * FROM (VALUES ('Z1', 'Downtown'), ('Z2', 'Uptown')) "
+            "AS t(zone_id, zone_name)"
+        )
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_sites AS "
+            "SELECT * FROM (VALUES "
+            "  ('S1', 'Alpha', 'Z1'), ('S2', 'Beta', 'Z2'), ('S3', 'Gamma', 'Z1')"
+            ") AS t(site_id, site_name, zone_id)"
+        )
+
+        sql = _heuristic_sql(
+            "Give me complaints per site?",
+            discovery,
+            [],
+            con=duckdb_con,
+        )
+        assert sql is not None
+        assert "JOIN" in sql
+        # Should have two JOINs (through zones)
+        assert sql.count("JOIN") == 2
+
+        # Verify it actually executes
+        result = duckdb_con.execute(sql).fetchall()
+        assert len(result) > 0
+
+    def test_no_join_path_falls_back_to_single_table(self):
+        """When secondary table found but no FK path, fall through to single-table."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="complaints",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="severity", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=50,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="site_name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[],  # No relationships at all
+        )
+        sql = _heuristic_sql(
+            "Give me complaints per site?",
+            discovery,
+            [],
+        )
+        # Should NOT return None -- should fall back to single-table analysis
+        # (whichever table _match_table picks as primary)
+        assert sql is not None
+        assert "COUNT" in sql or "AVG" in sql
+
+    def test_complaints_per_county_picks_correct_columns(self):
+        """'complaints per county' must group by county, not complaint_number.
+
+        Validates that:
+        1. Table-name words ('env', 'complaints') don't shadow column matching
+        2. 'county' matches the county column, not complaint_number
+        3. latitude is excluded from metrics (geographic)
+        4. complaint_number is excluded from metrics (_number suffix)
+        """
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="complaint_type", dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="status", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="latitude", dtype="float64", semantic_type="geographic"),
+                        ColumnInfo(name="longitude", dtype="float64", semantic_type="geographic"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                        ColumnInfo(name="response_days", dtype="int64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+        sql = _heuristic_sql("Give me complaints per county", discovery, [])
+        assert sql is not None
+        assert '"county"' in sql, f"Expected county in SQL, got: {sql}"
+        assert "latitude" not in sql, f"latitude should not be a metric: {sql}"
+        assert "complaint_number" not in sql, f"complaint_number should not appear: {sql}"
+        assert "GROUP BY" in sql
+
+    def test_various_question_patterns(self):
+        """Validate multiple question patterns against the same schema."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="complaint_type", dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="received_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="latitude", dtype="float64", semantic_type="geographic"),
+                        ColumnInfo(name="longitude", dtype="float64", semantic_type="geographic"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+
+        # "complaints by type" -> group by complaint_type
+        sql = _heuristic_sql("How many complaints by type?", discovery, [])
+        assert sql is not None
+        assert '"complaint_type"' in sql
+
+        # "top counties" -> group by county, order desc
+        sql = _heuristic_sql("Top counties by severity score?", discovery, [])
+        assert sql is not None
+        assert '"county"' in sql
+        assert "severity_score" in sql
+
+        # "complaints over time" -> trend query
+        sql = _heuristic_sql(
+            "How have complaints changed over time?", discovery, []
+        )
+        assert sql is not None
+        assert "period" in sql.lower()
+
+    def test_join_query_executes(self, sample_discovery, duckdb_con):
+        """JOIN query actually runs against DuckDB without error."""
+        import polars as pl
+
+        df_sites = pl.DataFrame({
+            "site_id": ["S1", "S2", "S3"],
+            "name": ["Alpha Station", "Beta Station", "Gamma Station"],
+            "zone_id": ["Z1", "Z2", "Z1"],
+        })
+        duckdb_con.register("_tmp_sites2", df_sites.to_arrow())
+        duckdb_con.execute(
+            "CREATE OR REPLACE TABLE staging.stg_sites AS SELECT * FROM _tmp_sites2"
+        )
+        duckdb_con.unregister("_tmp_sites2")
+
+        result = ask(
+            question="Give me readings per site?",
+            con=duckdb_con,
+            discovery=sample_discovery,
+        )
+        assert result.error is None
+        assert result.row_count > 0
+
+    def test_trend_prefers_date_over_year(self):
+        """Trend query should prefer date/timestamp columns over 'year'."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="aqi_by_county",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="year", dtype="int64", semantic_type="temporal"),
+                        ColumnInfo(name="date_local", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="days_with_aqi", dtype="int64", semantic_type="metric"),
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+        sql = _heuristic_sql(
+            "How has days with aqi changed over time?", discovery, [],
+        )
+        assert sql is not None
+        # Should prefer date_local (actual date) over year (integer)
+        assert "date_local" in sql, f"Expected date_local in trend SQL, got: {sql}"
+
+    def test_trend_year_only_uses_raw_value(self):
+        """When 'year' is the only temporal column, use raw value (no CAST)."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="aqi_by_county",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="year", dtype="int64", semantic_type="temporal"),
+                        ColumnInfo(name="days_with_aqi", dtype="int64", semantic_type="metric"),
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+        sql = _heuristic_sql(
+            "How has days with aqi changed over time?", discovery, [],
+        )
+        assert sql is not None
+        assert '"year"' in sql
+        # Should NOT try to CAST year as DATE
+        assert "CAST" not in sql, f"Should not CAST integer year as DATE: {sql}"
+
+    def test_fallback_returns_none_for_missing_column(self):
+        """'complaints per county' when table has no county column -> None."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
+                        ColumnInfo(
+                            name="complaint_type_311", dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="status", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+        sql = _heuristic_sql("complaints per county", discovery, [])
+        assert sql is None, (
+            f"Should return None when 'county' column not found, got: {sql}"
+        )
+
+    def test_fallback_works_for_vague_question(self):
+        """'show me complaints' (no specific column) gets a summary."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="status", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+        sql = _heuristic_sql("show me complaints", discovery, [])
+        assert sql is not None, "Vague question should get a fallback summary"
+        assert "GROUP BY" in sql
+
+
+# ---------------------------------------------------------------------------
+# Suggestion quality tests
+# ---------------------------------------------------------------------------
+
+
+class TestSuggestionQuality:
+    def test_humanize_strips_numeric_suffix(self):
+        from headwater.explorer.suggestions import _humanize
+
+        assert _humanize("complaint_type_311") == "complaint type"
+        assert _humanize("incident_type_2") == "incident type"
+        # Regular names should not be affected
+        assert _humanize("severity_score") == "severity score"
+        # Model prefixes stripped as before
+        assert _humanize("mart_complaints_by_period") == "complaints by period"
+
+    def test_prefer_name_over_code(self):
+        from headwater.explorer.suggestions import _prefer_display_dim
+
+        cols = ["state_code", "state_name", "borough", "zip_code"]
+        ranked = _prefer_display_dim(cols)
+        # state_name should come before state_code and zip_code
+        assert ranked.index("state_name") < ranked.index("state_code")
+        assert ranked.index("state_name") < ranked.index("zip_code")
+        # borough (plain) should come before code columns
+        assert ranked.index("borough") < ranked.index("state_code")
+
 
 # ---------------------------------------------------------------------------
 # Visualization tests
@@ -911,3 +1348,534 @@ class TestVisualization:
         )
         assert viz.chart_type == "line"
         assert viz.group_by == "zone_name"
+
+
+# ---------------------------------------------------------------------------
+# Schema graph tests
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaGraph:
+    def test_resolve_table_exact(self, sample_discovery):
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        graph = SchemaGraph(sample_discovery)
+        matches = graph.resolve_table("readings")
+        assert len(matches) > 0
+        assert matches[0].table_name == "readings"
+        assert matches[0].match_type == "exact"
+
+    def test_resolve_table_stem(self, sample_discovery):
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        graph = SchemaGraph(sample_discovery)
+        matches = graph.resolve_table("reading")
+        assert len(matches) > 0
+        assert matches[0].table_name == "readings"
+        assert matches[0].match_type == "stem"
+
+    def test_resolve_column_same_table(self, sample_discovery):
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        graph = SchemaGraph(sample_discovery)
+        matches = graph.resolve_column("sensor_type", preferred_table="readings")
+        assert len(matches) > 0
+        assert matches[0].table_name == "readings"
+        assert matches[0].column_name == "sensor_type"
+        assert matches[0].role == "dimension"
+
+    def test_resolve_column_cross_table(self):
+        """Resolve 'county' when it exists in a different table."""
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="borough", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="aqi_by_county",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="state", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="days_with_aqi", dtype="int64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        matches = graph.resolve_column("county")
+        assert len(matches) > 0
+        assert matches[0].column_name == "county"
+        assert matches[0].table_name == "aqi_by_county"
+
+    def test_column_role_classification(self, sample_discovery):
+        from headwater.explorer.schema_graph import (
+            ROLE_DIMENSION,
+            ROLE_IDENTIFIER,
+            ROLE_METRIC,
+            ROLE_TEMPORAL,
+            SchemaGraph,
+        )
+
+        graph = SchemaGraph(sample_discovery)
+        readings = graph.tables["readings"]
+        assert readings.columns["reading_id"].role == ROLE_IDENTIFIER
+        assert readings.columns["value"].role == ROLE_METRIC
+        assert readings.columns["timestamp"].role == ROLE_TEMPORAL
+        assert readings.columns["sensor_type"].role == ROLE_DIMENSION
+
+    def test_find_join_path_direct(self, sample_discovery):
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        graph = SchemaGraph(sample_discovery)
+        path = graph.find_join_path("readings", "sites")
+        assert path is not None
+        assert len(path) == 1
+        assert path[0].from_table == "readings"
+        assert path[0].to_table == "sites"
+        assert path[0].from_column == "site_id"
+
+    def test_find_join_path_indirect(self):
+        """Two-hop join: complaints -> zones -> sites."""
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(name="complaints", row_count=500, columns=[
+                    ColumnInfo(name="id", dtype="int64", semantic_type="id"),
+                    ColumnInfo(name="zone_id", dtype="varchar", semantic_type="foreign_key"),
+                ]),
+                TableInfo(name="zones", row_count=10, columns=[
+                    ColumnInfo(name="zone_id", dtype="varchar", semantic_type="id"),
+                    ColumnInfo(name="zone_name", dtype="varchar", semantic_type="dimension"),
+                ]),
+                TableInfo(name="sites", row_count=50, columns=[
+                    ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                    ColumnInfo(name="zone_id", dtype="varchar", semantic_type="foreign_key"),
+                    ColumnInfo(name="site_name", dtype="varchar", semantic_type="dimension"),
+                ]),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="complaints", from_column="zone_id",
+                    to_table="zones", to_column="zone_id",
+                    type="many_to_one", confidence=0.95,
+                    referential_integrity=0.98, source="inferred_name",
+                ),
+                Relationship(
+                    from_table="sites", from_column="zone_id",
+                    to_table="zones", to_column="zone_id",
+                    type="many_to_one", confidence=0.95,
+                    referential_integrity=0.98, source="inferred_name",
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        path = graph.find_join_path("complaints", "sites")
+        assert path is not None
+        assert len(path) == 2
+
+    def test_find_join_path_no_path(self):
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(name="a", row_count=10, columns=[]),
+                TableInfo(name="b", row_count=10, columns=[]),
+            ],
+            relationships=[],
+        )
+        graph = SchemaGraph(discovery)
+        assert graph.find_join_path("a", "b") is None
+
+    def test_get_best_dimension_prefers_table_name(self):
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="aqi_by_county",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="state", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="days_with_aqi", dtype="int64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        best = graph.get_best_dimension("aqi_by_county")
+        assert best is not None
+        assert best.info.name == "county"  # county matches table name
+
+
+# ---------------------------------------------------------------------------
+# Query planner tests
+# ---------------------------------------------------------------------------
+
+
+class TestQueryPlanner:
+    def test_complaints_per_county(self):
+        """The foundational case: 'complaints per county' with county in the table."""
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="complaint_type_311", dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="bin", dtype="int64", semantic_type=None),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="env_complaints", column_name="bin",
+                    dtype="int64", distinct_count=8000, uniqueness_ratio=0.8,
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        planner = QueryPlanner(graph)
+        sql = planner.plan_sql("complaints per county?")
+        assert sql is not None
+        assert '"county"' in sql, f"Expected county in SQL, got: {sql}"
+        assert "COUNT(*)" in sql
+        assert "GROUP BY" in sql
+        # Must NOT pick bin or complaint_type_311
+        assert "bin" not in sql.lower() or '"county"' in sql
+        assert "complaint_type_311" not in sql
+
+    def test_average_metric_by_dimension(self):
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="readings",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(name="reading_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                        ColumnInfo(name="sensor_type", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        planner = QueryPlanner(graph)
+        sql = planner.plan_sql("average value by sensor type?")
+        assert sql is not None
+        assert "AVG" in sql
+        assert '"sensor_type"' in sql
+        assert '"value"' in sql
+
+    def test_trend_query(self, sample_discovery):
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        graph = SchemaGraph(sample_discovery)
+        planner = QueryPlanner(graph)
+        sql = planner.plan_sql("How have readings changed over time?")
+        assert sql is not None
+        assert "FROM" in sql
+        assert "GROUP BY" in sql
+
+    def test_top_query(self):
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        planner = QueryPlanner(graph)
+        sql = planner.plan_sql("top counties by severity score?")
+        assert sql is not None
+        assert '"county"' in sql
+        assert "severity_score" in sql
+        assert "DESC" in sql
+
+    def test_cross_table_join(self):
+        """Question references a column from another table -- planner finds join."""
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="readings",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(name="reading_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="foreign_key"),
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=50,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="site_name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="readings", from_column="site_id",
+                    to_table="sites", to_column="site_id",
+                    type="many_to_one", confidence=0.95,
+                    referential_integrity=0.98, source="inferred_name",
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        planner = QueryPlanner(graph)
+        sql = planner.plan_sql("readings per site name?")
+        assert sql is not None
+        assert "JOIN" in sql
+        assert "site_name" in sql
+
+    def test_unrelated_question_returns_none(self):
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(name="readings", row_count=100, columns=[
+                    ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                ]),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        planner = QueryPlanner(graph)
+        sql = planner.plan_sql("tell me about bananas and galaxies")
+        assert sql is None
+
+    def test_planner_uses_mart_when_available(self, sample_discovery, sample_models):
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        graph = SchemaGraph(sample_discovery, sample_models)
+        planner = QueryPlanner(graph, models=sample_models)
+        sql = planner.plan_sql("reading trends over time?")
+        assert sql is not None
+        assert "marts." in sql
+
+    def test_bin_excluded_as_metric_with_high_uniqueness(self):
+        """bin (building ID number) with high uniqueness should be classified as identifier."""
+        from headwater.explorer.schema_graph import ROLE_IDENTIFIER, SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="bin", dtype="int64", semantic_type=None),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="env_complaints", column_name="bin",
+                    dtype="int64", distinct_count=8000, uniqueness_ratio=0.8,
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        assert graph.tables["env_complaints"].columns["bin"].role == ROLE_IDENTIFIER
+
+    def test_planner_executes_against_duckdb(self, duckdb_con, sample_discovery):
+        """Planner-generated SQL actually runs without errors."""
+        from headwater.explorer.nl_to_sql import _planned_sql
+
+        sql = _planned_sql(
+            "How many readings per sensor type?",
+            sample_discovery, [], con=duckdb_con,
+        )
+        assert sql is not None
+        result = duckdb_con.execute(sql).fetchall()
+        assert len(result) > 0
+
+    def test_subject_predicate_split_drives_table_selection(self):
+        """'complaints per county' picks env_complaints, not aqi_by_county.
+
+        Without subject/predicate splitting, 'county' matches the table name
+        aqi_by_county (score 10) and hijacks table selection away from the
+        actual subject 'complaints'.
+        """
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="borough", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="complaint_type", dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="aqi_by_county",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="state", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="days_with_aqi", dtype="int64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="aqs_sites",
+                    row_count=200,
+                    columns=[
+                        ColumnInfo(name="site_number", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="county_code", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="county_name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="state_name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        planner = QueryPlanner(graph)
+        sql = planner.plan_sql("complaints per county?")
+        assert sql is not None
+        # Primary table must be env_complaints (the subject)
+        assert "env_complaints" in sql or "stg_env_complaints" in sql, (
+            f"Expected env_complaints as primary table, got: {sql}"
+        )
+        # Should NOT pick aqi_by_county or aqs_sites as primary
+        assert "aqi_by_county" not in sql.split("FROM")[1].split("JOIN")[0], (
+            f"aqi_by_county should not be the primary table: {sql}"
+        )
+
+    def test_complaints_per_county_cross_table_join(self):
+        """When env_complaints has no county column but a joinable table does,
+        planner should find the join path and generate a JOIN query."""
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="zone_id", dtype="varchar", semantic_type="foreign_key"),
+                        ColumnInfo(name="borough", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="zones",
+                    row_count=10,
+                    columns=[
+                        ColumnInfo(name="zone_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="zone_name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="env_complaints", from_column="zone_id",
+                    to_table="zones", to_column="zone_id",
+                    type="many_to_one", confidence=0.95,
+                    referential_integrity=0.98, source="inferred_name",
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        planner = QueryPlanner(graph)
+        sql = planner.plan_sql("complaints per county?")
+        assert sql is not None
+        # Should JOIN to zones to get the county column
+        assert "JOIN" in sql, f"Expected JOIN for cross-table county: {sql}"
+        assert "county" in sql.lower()
+        assert "COUNT" in sql
+
+    def test_aqi_by_county_is_primary_when_subject(self):
+        """'AQI by county' should pick aqi_by_county as primary."""
+        from headwater.explorer.query_planner import QueryPlanner
+        from headwater.explorer.schema_graph import SchemaGraph
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="env_complaints",
+                    row_count=10000,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="borough", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+                TableInfo(
+                    name="aqi_by_county",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="days_with_aqi", dtype="int64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+        )
+        graph = SchemaGraph(discovery)
+        planner = QueryPlanner(graph)
+        sql = planner.plan_sql("AQI by county?")
+        assert sql is not None
+        assert "aqi_by_county" in sql or "stg_aqi_by_county" in sql, (
+            f"Expected aqi_by_county as primary table, got: {sql}"
+        )

@@ -35,8 +35,19 @@ export default function DiscoveryPage() {
   if (error) {
     return (
       <div>
-        <h1 className="text-2xl font-bold mb-4">Discovery</h1>
-        <p className="text-muted">{error}</p>
+        <h1 className="text-2xl font-bold mb-4">Discovery Explorer</h1>
+        <div className="bg-card border border-border rounded-lg p-8 max-w-xl mx-auto text-center">
+          <h2 className="text-lg font-semibold mb-2">No Data Discovered Yet</h2>
+          <p className="text-sm text-muted mb-4">
+            The Discovery Explorer shows table schemas, column profiles, relationships,
+            and data quality insights after you run the Headwater pipeline.
+          </p>
+          <div className="bg-background border border-border rounded p-4 text-left text-sm font-mono text-muted">
+            <p className="mb-1"># From the Dashboard, click &quot;Run Full Pipeline&quot;, or:</p>
+            <p className="mb-1">headwater discover --source /path/to/data</p>
+            <p>headwater discover --source postgres://user:pass@host/db</p>
+          </div>
+        </div>
       </div>
     );
   }
