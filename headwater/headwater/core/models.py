@@ -23,6 +23,21 @@ class SourceConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Companion documentation
+# ---------------------------------------------------------------------------
+
+
+class CompanionDoc(BaseModel):
+    """A documentation file discovered alongside a data source."""
+
+    filename: str
+    content: str
+    doc_type: Literal["markdown", "text", "yaml", "csv", "unknown"] = "unknown"
+    matched_tables: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+# ---------------------------------------------------------------------------
 # Schema / Discovery
 # ---------------------------------------------------------------------------
 
@@ -41,6 +56,31 @@ class ColumnInfo(BaseModel):
     locked: bool = False  # True = description approved by human; skip re-enrichment
 
 
+class ColumnSemanticDetail(BaseModel):
+    """Rich semantic description for a single column (deep inference output)."""
+
+    business_description: str | None = None  # Rich business-level explanation
+    data_quality_notes: str | None = None  # Observations from profiling stats
+    business_rules: list[str] = Field(default_factory=list)
+    semantic_group: str | None = None  # e.g. "location_identifiers", "measurement_values"
+    example_interpretation: str | None = None  # "A value of 35 means 35 ug/m3"
+
+
+class TableSemanticDetail(BaseModel):
+    """Rich semantic description for a table (deep inference output)."""
+
+    narrative: str | None = None  # 3-5 sentence explanation
+    row_semantics: str | None = None  # "Each row represents a daily reading..."
+    business_process: str | None = None  # "Captures the EPA AQS monitoring workflow"
+    temporal_grain: str | None = None  # daily|monthly|event-based|snapshot|none
+    key_dimensions: list[str] = Field(default_factory=list)
+    key_metrics: list[str] = Field(default_factory=list)
+    column_groups: dict[str, list[str]] = Field(default_factory=dict)
+    semantic_columns: dict[str, ColumnSemanticDetail] = Field(default_factory=dict)
+    companion_context: str | None = None
+    inference_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class TableInfo(BaseModel):
     """Metadata for a single table."""
 
@@ -54,6 +94,7 @@ class TableInfo(BaseModel):
     locked: bool = False  # True = description approved by human; skip re-enrichment
     review_status: Literal["pending", "in_review", "reviewed", "skipped"] = "pending"
     reviewed_at: datetime | None = None
+    semantic_detail: TableSemanticDetail | None = None  # Deep inference output
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +245,7 @@ class DiscoveryResult(BaseModel):
     profiles: list[ColumnProfile] = Field(default_factory=list)
     relationships: list[Relationship] = Field(default_factory=list)
     domains: dict[str, list[str]] = Field(default_factory=dict)  # domain -> [table_names]
+    companion_docs: list[CompanionDoc] = Field(default_factory=list)
     discovered_at: datetime = Field(default_factory=datetime.now)
 
 

@@ -6,7 +6,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
-from headwater.analyzer.heuristics import build_domain_map, enrich_tables
+from headwater.analyzer.companion import discover_companion_docs, match_docs_to_tables
+from headwater.analyzer.semantic import analyze
 from headwater.connectors.registry import get_connector
 from headwater.core.models import SourceConfig
 from headwater.executor.duckdb_backend import DuckDBBackend
@@ -100,10 +101,16 @@ async def run_full_pipeline(
         _duckdb_schema = source_schema
 
     discovery_result = discover(con, _duckdb_schema, source)
-    enrich_tables(
-        discovery_result.tables, discovery_result.profiles, discovery_result.relationships
-    )
-    discovery_result.domains = build_domain_map(discovery_result.tables)
+
+    # Companion doc discovery (file-based sources only)
+    companion_docs = discover_companion_docs(source)
+    if companion_docs:
+        table_names = [t.name for t in discovery_result.tables]
+        match_docs_to_tables(companion_docs, table_names)
+        discovery_result.companion_docs = companion_docs
+
+    # Semantic analysis (heuristic enrichment + deep descriptions)
+    analyze(discovery_result)
     pipeline["discovery"] = discovery_result
 
     # Step 2: Generate

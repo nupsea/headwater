@@ -22,6 +22,10 @@ class HeadwaterSettings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "claude-sonnet-4-20250514"
 
+    # Ollama (local LLM)
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_timeout: int = 120  # seconds
+
     # Profiling
     sample_size: int = 50_000
 

@@ -5,7 +5,11 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from headwater.analyzer.heuristics import build_domain_map, enrich_tables
+from headwater.analyzer.companion import (
+    discover_companion_docs,
+    match_docs_to_tables,
+)
+from headwater.analyzer.semantic import analyze
 from headwater.connectors.registry import get_connector
 from headwater.core.models import SourceConfig
 from headwater.profiler.engine import discover
@@ -36,8 +40,19 @@ async def run_discovery(
     connector.load_to_duckdb(con, source_schema)
 
     discovery = discover(con, source_schema, source)
-    enrich_tables(discovery.tables, discovery.profiles, discovery.relationships)
-    discovery.domains = build_domain_map(discovery.tables)
+
+    # Companion doc discovery
+    companion_docs = discover_companion_docs(source)
+    if companion_docs:
+        table_names = [t.name for t in discovery.tables]
+        match_docs_to_tables(companion_docs, table_names)
+        discovery.companion_docs = companion_docs
+
+    # Semantic analysis (heuristic-only in discovery route)
+    analyze(discovery)
+
+    # Persist semantic details and companion docs
+    _persist_semantic_data(request, discovery, source_name)
 
     request.app.state.pipeline["discovery"] = discovery
 
@@ -46,6 +61,7 @@ async def run_discovery(
         "profiles": len(discovery.profiles),
         "relationships": len(discovery.relationships),
         "domains": discovery.domains,
+        "companion_docs": len(discovery.companion_docs),
     }
 
 
@@ -64,6 +80,7 @@ async def list_tables(request: Request):
             "columns": len(t.columns),
             "domain": t.domain,
             "description": t.description,
+            "has_semantic_detail": t.semantic_detail is not None,
         }
         for t in discovery.tables
     ]
@@ -79,6 +96,23 @@ async def get_table(request: Request, table_name: str):
     if not table:
         raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
     return table.model_dump()
+
+
+@router.get("/tables/{table_name}/semantic-detail")
+async def get_table_semantic_detail(request: Request, table_name: str):
+    """Get deep semantic detail for a table."""
+    discovery = request.app.state.pipeline.get("discovery")
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+    table = next((t for t in discovery.tables if t.name == table_name), None)
+    if not table:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
+    if not table.semantic_detail:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No semantic detail available for '{table_name}'.",
+        )
+    return table.semantic_detail.model_dump()
 
 
 @router.get("/tables/{table_name}/profile")
@@ -166,3 +200,28 @@ async def patch_column(
         "description": col.description,
         "locked": should_lock,
     }
+
+
+def _persist_semantic_data(request: Request, discovery, source_name: str) -> None:
+    """Persist semantic details and companion docs to metadata store."""
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        return
+
+    for table in discovery.tables:
+        if table.semantic_detail:
+            store.upsert_semantic_detail(
+                table.name,
+                source_name,
+                table.semantic_detail.model_dump(),
+            )
+
+    for doc in discovery.companion_docs:
+        store.upsert_companion_doc(
+            source_name=source_name,
+            filename=doc.filename,
+            content=doc.content,
+            doc_type=doc.doc_type,
+            matched_tables=doc.matched_tables,
+            confidence=doc.confidence,
+        )

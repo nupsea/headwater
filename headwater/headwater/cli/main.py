@@ -32,7 +32,8 @@ def demo(
     """Run the full Headwater demo: discover, generate, execute, and report."""
     import duckdb
 
-    from headwater.analyzer.heuristics import build_domain_map, enrich_tables
+    from headwater.analyzer.companion import discover_companion_docs, match_docs_to_tables
+    from headwater.analyzer.semantic import analyze
     from headwater.cli.display import (
         console,
         show_contracts,
@@ -96,9 +97,13 @@ def demo(
     ))
     discovery = discover(con, "raw", source)
 
-    # Enrich with heuristics
-    enrich_tables(discovery.tables, discovery.profiles, discovery.relationships)
-    discovery.domains = build_domain_map(discovery.tables)
+    # Companion doc discovery + semantic analysis
+    companion_docs = discover_companion_docs(source)
+    if companion_docs:
+        table_names = [t.name for t in discovery.tables]
+        match_docs_to_tables(companion_docs, table_names)
+        discovery.companion_docs = companion_docs
+    analyze(discovery)
 
     show_discovery_summary(discovery)
 
@@ -194,7 +199,8 @@ def discover(
     """Discover tables, profiles, and relationships from a data source."""
     import duckdb
 
-    from headwater.analyzer.heuristics import build_domain_map, enrich_tables
+    from headwater.analyzer.companion import discover_companion_docs, match_docs_to_tables
+    from headwater.analyzer.semantic import analyze
     from headwater.cli.display import console, show_discovery_summary
     from headwater.connectors.registry import get_connector
     from headwater.core.config import get_settings
@@ -272,8 +278,17 @@ def discover(
 
     console.print("Profiling...")
     discovery = run_discover(con, schema_name, config)
-    enrich_tables(discovery.tables, discovery.profiles, discovery.relationships)
-    discovery.domains = build_domain_map(discovery.tables)
+
+    # Companion doc discovery
+    companion_docs = discover_companion_docs(config)
+    if companion_docs:
+        table_names = [t.name for t in discovery.tables]
+        match_docs_to_tables(companion_docs, table_names)
+        discovery.companion_docs = companion_docs
+        console.print(f"  Found {len(companion_docs)} companion doc(s)")
+
+    # Semantic analysis (heuristic enrichment + deep descriptions)
+    analyze(discovery)
 
     show_discovery_summary(discovery)
 
@@ -305,6 +320,24 @@ def discover(
             # Save current snapshot
             store.save_snapshot(run_id, name, snapshot)
             store.finish_run(run_id, table_count=len(discovery.tables))
+
+            # Persist semantic details and companion docs
+            for table in discovery.tables:
+                if table.semantic_detail:
+                    store.upsert_semantic_detail(
+                        table.name, name, table.semantic_detail.model_dump(),
+                        run_id=run_id,
+                    )
+            for doc in discovery.companion_docs:
+                store.upsert_companion_doc(
+                    source_name=name,
+                    filename=doc.filename,
+                    content=doc.content,
+                    doc_type=doc.doc_type,
+                    matched_tables=doc.matched_tables,
+                    confidence=doc.confidence,
+                    run_id=run_id,
+                )
 
             # Compare and report drift
             run_id_from = None if prev_snapshot is None else run_id - 1

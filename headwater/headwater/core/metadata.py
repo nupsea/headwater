@@ -154,6 +154,27 @@ CREATE TABLE IF NOT EXISTS drift_reports (
     detected_at TEXT NOT NULL,
     acknowledged INTEGER DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS table_semantic_details (
+    table_name  TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    run_id      INTEGER REFERENCES discovery_runs(id),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (table_name, source_name)
+);
+
+CREATE TABLE IF NOT EXISTS companion_docs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name     TEXT NOT NULL REFERENCES sources(name),
+    filename        TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    doc_type        TEXT NOT NULL DEFAULT 'unknown',
+    matched_tables  TEXT DEFAULT '[]',
+    confidence      REAL DEFAULT 0.5,
+    run_id          INTEGER REFERENCES discovery_runs(id),
+    UNIQUE(source_name, filename)
+);
 """
 
 
@@ -1006,3 +1027,74 @@ class MetadataStore:
             (report_id,),
         )
         self.con.commit()
+
+    # -- Semantic details --------------------------------------------------
+
+    def upsert_semantic_detail(
+        self,
+        table_name: str,
+        source_name: str,
+        detail: dict,
+        run_id: int | None = None,
+    ) -> None:
+        """Persist a TableSemanticDetail as JSON for a table."""
+        self.con.execute(
+            "INSERT INTO table_semantic_details "
+            "(table_name, source_name, detail_json, run_id, updated_at) "
+            "VALUES (?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(table_name, source_name) DO UPDATE SET "
+            "detail_json = excluded.detail_json, run_id = excluded.run_id, "
+            "updated_at = datetime('now')",
+            (table_name, source_name, json.dumps(detail), run_id),
+        )
+        self.con.commit()
+
+    def get_semantic_detail(self, table_name: str, source_name: str) -> dict | None:
+        """Return the semantic detail dict for a table, or None."""
+        row = self.con.execute(
+            "SELECT detail_json FROM table_semantic_details "
+            "WHERE table_name = ? AND source_name = ?",
+            (table_name, source_name),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["detail_json"])
+
+    # -- Companion docs ----------------------------------------------------
+
+    def upsert_companion_doc(
+        self,
+        source_name: str,
+        filename: str,
+        content: str,
+        doc_type: str = "unknown",
+        matched_tables: list[str] | None = None,
+        confidence: float = 0.5,
+        run_id: int | None = None,
+    ) -> None:
+        """Persist a companion documentation file."""
+        self.con.execute(
+            "INSERT INTO companion_docs "
+            "(source_name, filename, content, doc_type, matched_tables, confidence, run_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(source_name, filename) DO UPDATE SET "
+            "content = excluded.content, doc_type = excluded.doc_type, "
+            "matched_tables = excluded.matched_tables, confidence = excluded.confidence, "
+            "run_id = excluded.run_id",
+            (source_name, filename, content, doc_type,
+             json.dumps(matched_tables or []), confidence, run_id),
+        )
+        self.con.commit()
+
+    def get_companion_docs(self, source_name: str) -> list[dict]:
+        """Return all companion docs for a source."""
+        rows = self.con.execute(
+            "SELECT * FROM companion_docs WHERE source_name = ?",
+            (source_name,),
+        ).fetchall()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r["matched_tables"] = json.loads(r["matched_tables"])
+            results.append(r)
+        return results

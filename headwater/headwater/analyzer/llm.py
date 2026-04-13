@@ -105,6 +105,10 @@ def get_provider(
     """Factory: return the appropriate LLM provider based on settings."""
     if settings.llm_provider == "anthropic":
         return AnthropicProvider(settings, store=store)
+    if settings.llm_provider == "ollama":
+        from headwater.analyzer.ollama import OllamaProvider
+
+        return OllamaProvider(settings, store=store)
     return NoLLMProvider()
 
 

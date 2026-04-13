@@ -6,7 +6,14 @@ import math
 import re
 from collections import defaultdict
 
-from headwater.core.models import ColumnInfo, ColumnProfile, Relationship, TableInfo
+from headwater.core.models import (
+    ColumnInfo,
+    ColumnProfile,
+    ColumnSemanticDetail,
+    Relationship,
+    TableInfo,
+    TableSemanticDetail,
+)
 
 # Common column-name suffixes that carry no domain signal
 _NOISE_TOKENS = frozenset({
@@ -763,3 +770,274 @@ def _is_likely_pk(col_name: str, table_name: str) -> bool:
     if table_name.endswith("s") and table_name[:-1] == prefix:
         return True
     return table_name == prefix
+
+
+# ---------------------------------------------------------------------------
+# Deep semantic descriptions (heuristic-only)
+# ---------------------------------------------------------------------------
+
+
+def generate_deep_table_description(
+    table: TableInfo,
+    profiles: list[ColumnProfile],
+    relationships: list[Relationship],
+    companion_context: str | None = None,
+) -> TableSemanticDetail:
+    """Generate a structured semantic description using heuristics only.
+
+    Produces row_semantics, column_groups, temporal_grain, key_dimensions,
+    key_metrics, and per-column ColumnSemanticDetail from classification
+    data already computed by enrich_tables().
+    """
+
+    profile_index = {p.column_name: p for p in profiles if p.table_name == table.name}
+
+    # Classify columns by role
+    dims = [c for c in table.columns if c.role == "dimension"]
+    metrics = [c for c in table.columns if c.role == "metric"]
+    temporals = [c for c in table.columns if c.role == "temporal"]
+    identifiers = [c for c in table.columns if c.role == "identifier"]
+    geos = [c for c in table.columns if c.role == "geographic"]
+    texts = [c for c in table.columns if c.role == "text"]
+
+    # --- Row semantics ---
+    row_semantics = _infer_row_semantics(table, dims, metrics, temporals, relationships)
+
+    # --- Temporal grain ---
+    temporal_grain = _infer_temporal_grain(temporals, profile_index)
+
+    # --- Column groups ---
+    column_groups: dict[str, list[str]] = {}
+    if identifiers:
+        column_groups["identifiers"] = [c.name for c in identifiers]
+    if dims:
+        column_groups["dimensions"] = [c.name for c in dims]
+    if metrics:
+        column_groups["metrics"] = [c.name for c in metrics]
+    if temporals:
+        column_groups["temporal"] = [c.name for c in temporals]
+    if geos:
+        column_groups["geographic"] = [c.name for c in geos]
+    if texts:
+        column_groups["text_fields"] = [c.name for c in texts]
+
+    # --- Per-column semantic detail ---
+    semantic_columns: dict[str, ColumnSemanticDetail] = {}
+    for col in table.columns:
+        profile = profile_index.get(col.name)
+        semantic_columns[col.name] = _build_column_semantic_detail(col, profile, table)
+
+    # --- Narrative ---
+    narrative = _build_heuristic_narrative(
+        table, dims, metrics, temporals, geos, relationships,
+    )
+
+    # --- Business process ---
+    business_process = None
+    if table.domain and table.domain != "General":
+        business_process = f"Part of the {table.domain} domain"
+        if relationships:
+            related = {r.to_table for r in relationships if r.from_table == table.name}
+            related |= {r.from_table for r in relationships if r.to_table == table.name}
+            if related:
+                business_process += (
+                    f", connected to {', '.join(sorted(related)[:3])}"
+                )
+
+    return TableSemanticDetail(
+        narrative=narrative,
+        row_semantics=row_semantics,
+        business_process=business_process,
+        temporal_grain=temporal_grain,
+        key_dimensions=[c.name for c in dims],
+        key_metrics=[c.name for c in metrics],
+        column_groups=column_groups,
+        semantic_columns=semantic_columns,
+        companion_context=companion_context,
+        inference_confidence=0.4,  # Heuristic-only = lower confidence
+    )
+
+
+def _infer_row_semantics(
+    table: TableInfo,
+    dims: list[ColumnInfo],
+    metrics: list[ColumnInfo],
+    temporals: list[ColumnInfo],
+    relationships: list[Relationship],
+) -> str:
+    """Infer what each row in the table represents."""
+    name = _humanize_name(table.name)
+    # Singular form of table name for row description
+    singular = name.rstrip("s") if name.endswith("s") and len(name) > 2 else name
+
+    parts = [f"Each row represents a {singular.lower()} record"]
+
+    if temporals:
+        temporal_names = ", ".join(c.name for c in temporals[:2])
+        parts.append(f"with temporal context ({temporal_names})")
+
+    if dims:
+        dim_names = ", ".join(c.name for c in dims[:3])
+        suffix = f" and {len(dims) - 3} more" if len(dims) > 3 else ""
+        parts.append(f"categorized by {dim_names}{suffix}")
+
+    if metrics:
+        metric_names = ", ".join(c.name for c in metrics[:3])
+        suffix = f" and {len(metrics) - 3} more" if len(metrics) > 3 else ""
+        parts.append(f"measuring {metric_names}{suffix}")
+
+    # FK references give entity context
+    fk_targets = set()
+    for rel in relationships:
+        if rel.from_table == table.name:
+            fk_targets.add(rel.to_table)
+    if fk_targets:
+        refs = ", ".join(sorted(fk_targets)[:3])
+        parts.append(f"linked to {refs}")
+
+    return ", ".join(parts) + "."
+
+
+def _infer_temporal_grain(
+    temporals: list[ColumnInfo],
+    profile_index: dict[str, ColumnProfile],
+) -> str | None:
+    """Infer temporal grain from temporal column profiles."""
+    if not temporals:
+        return None
+
+    for col in temporals:
+        profile = profile_index.get(col.name)
+        if profile is None:
+            continue
+
+        # Check column name for grain hints
+        lower = col.name.lower()
+        if "year" in lower:
+            return "yearly"
+        if "month" in lower:
+            return "monthly"
+        if "week" in lower:
+            return "weekly"
+
+        # Check date range vs distinct count
+        if profile.min_date and profile.max_date and profile.distinct_count > 0:
+            from datetime import datetime
+
+            try:
+                min_dt = datetime.fromisoformat(profile.min_date)
+                max_dt = datetime.fromisoformat(profile.max_date)
+                span_days = (max_dt - min_dt).days
+                if span_days <= 0:
+                    continue
+
+                # Ratio of distinct dates to span gives grain estimate
+                ratio = profile.distinct_count / span_days
+                if ratio > 0.8:
+                    return "daily"
+                if ratio > 0.2:
+                    return "weekly"
+                if ratio > 0.02:
+                    return "monthly"
+                return "yearly"
+            except (ValueError, TypeError):
+                continue
+
+    return "event-based"
+
+
+def _build_column_semantic_detail(
+    col: ColumnInfo,
+    profile: ColumnProfile | None,
+    table: TableInfo,
+) -> ColumnSemanticDetail:
+    """Build a ColumnSemanticDetail from heuristic analysis."""
+
+    business_desc = col.description  # Start with existing heuristic description
+
+    # Enhance with context from profile
+    data_quality_notes = None
+    if profile is not None:
+        quality_parts = []
+        if profile.null_rate > 0.05:
+            quality_parts.append(f"{profile.null_rate:.0%} null values")
+        if profile.uniqueness_ratio > 0.99:
+            quality_parts.append("nearly all values are unique")
+        elif profile.distinct_count <= 5:
+            quality_parts.append(f"only {profile.distinct_count} distinct values")
+        if quality_parts:
+            data_quality_notes = "; ".join(quality_parts)
+
+    # Determine semantic group based on role
+    group_map = {
+        "identifier": "identifiers",
+        "dimension": "dimensions",
+        "metric": "measurements",
+        "temporal": "temporal",
+        "geographic": "geographic",
+        "text": "text_fields",
+    }
+    semantic_group = group_map.get(col.role or "")
+
+    # Example interpretation for metrics
+    example_interpretation = None
+    if col.role == "metric" and profile is not None and profile.mean is not None:
+        example_interpretation = (
+            f"Typical value around {profile.mean:.1f}"
+        )
+        if profile.min_value is not None and profile.max_value is not None:
+            example_interpretation += (
+                f", ranging from {profile.min_value:.1f} to {profile.max_value:.1f}"
+            )
+
+    return ColumnSemanticDetail(
+        business_description=business_desc,
+        data_quality_notes=data_quality_notes,
+        semantic_group=semantic_group,
+        example_interpretation=example_interpretation,
+    )
+
+
+def _build_heuristic_narrative(
+    table: TableInfo,
+    dims: list[ColumnInfo],
+    metrics: list[ColumnInfo],
+    temporals: list[ColumnInfo],
+    geos: list[ColumnInfo],
+    relationships: list[Relationship],
+) -> str:
+    """Build a multi-sentence narrative about the table from heuristics."""
+    name = _humanize_name(table.name)
+    parts = [f"The {name} table contains {table.row_count:,} records."]
+
+    if metrics and dims:
+        parts.append(
+            f"It captures {len(metrics)} measurement(s) "
+            f"across {len(dims)} categorical dimension(s)."
+        )
+    elif metrics:
+        parts.append(f"It tracks {len(metrics)} measurement(s).")
+    elif dims:
+        parts.append(f"It contains {len(dims)} categorical dimension(s).")
+
+    if temporals:
+        parts.append("The data has a temporal component, enabling time-based analysis.")
+
+    if geos:
+        parts.append("Geographic information is present, supporting spatial analysis.")
+
+    # Relationship context
+    related_tables = set()
+    for rel in relationships:
+        if rel.from_table == table.name:
+            related_tables.add(rel.to_table)
+        elif rel.to_table == table.name:
+            related_tables.add(rel.from_table)
+    if related_tables:
+        refs = ", ".join(sorted(related_tables)[:4])
+        parts.append(f"Related to: {refs}.")
+
+    if table.domain and table.domain != "General":
+        parts.append(f"Domain: {table.domain}.")
+
+    return " ".join(parts)
