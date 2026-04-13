@@ -24,6 +24,7 @@ const navItems = [
   { href: "/dictionary", label: "Dictionary" },
   { href: "/models", label: "Models" },
   { href: "/quality", label: "Quality" },
+  { href: "/data", label: "Data" },
   { href: "/explore", label: "Explore" },
 ];
 

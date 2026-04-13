@@ -421,6 +421,45 @@ export interface TableReviewPayload {
   confirm: boolean;
 }
 
+// ---------- Data Viewer types ----------
+
+export interface DataPreviewResponse {
+  columns: string[];
+  data: Record<string, unknown>[];
+  row_count: number;
+  total_rows: number;
+  sql: string;
+  table_name: string;
+}
+
+export interface DataQueryResponse {
+  columns: string[];
+  data: Record<string, unknown>[];
+  row_count: number;
+  sql: string;
+  error: string | null;
+}
+
+export interface CatalogColumn {
+  name: string;
+  dtype: string;
+}
+
+export interface CatalogTable {
+  schema: string;
+  table_name: string;
+  qualified_name: string;
+  row_count: number | null;
+  column_count: number;
+  columns: CatalogColumn[];
+}
+
+export interface CatalogResponse {
+  schemas: string[];
+  tables: CatalogTable[];
+  total: number;
+}
+
 // ---------- API calls ----------
 
 export const api = {
@@ -484,6 +523,21 @@ export const api = {
   confirmAllTables: () =>
     fetchJSON<{ confirmed: number; total: number }>("/dictionary/confirm-all", {
       method: "POST",
+    }),
+
+  // Data Viewer
+  dataCatalog: () => fetchJSON<CatalogResponse>("/data/catalog"),
+
+  dataPreview: (tableName: string, limit = 100) =>
+    fetchJSON<DataPreviewResponse>(
+      `/data/${tableName}/preview?limit=${limit}`
+    ),
+
+  dataQuery: (sql: string) =>
+    fetchJSON<DataQueryResponse>("/data/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql }),
     }),
 
   exploreSuggestions: () =>

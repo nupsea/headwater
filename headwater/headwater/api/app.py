@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from headwater.api.routes import (
     confidence,
+    data,
     dictionary,
     discovery,
     drift,
@@ -60,6 +61,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(data.router, prefix="/api", tags=["data"])
     app.include_router(dictionary.router, prefix="/api", tags=["dictionary"])
     app.include_router(discovery.router, prefix="/api", tags=["discovery"])
     app.include_router(models.router, prefix="/api", tags=["models"])
