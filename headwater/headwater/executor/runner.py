@@ -68,8 +68,6 @@ def run_models(
         result = backend.materialize(model)
         results.append(result)
         if not result.success:
-            logger.error(
-                "Model %s failed, skipping downstream dependents", model.name
-            )
+            logger.error("Model %s failed, skipping downstream dependents", model.name)
 
     return results

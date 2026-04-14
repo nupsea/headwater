@@ -61,8 +61,11 @@ def client():
         ],
         profiles=[
             ColumnProfile(
-                table_name="readings", column_name="site_id",
-                dtype="int64", distinct_count=3, uniqueness_ratio=0.6,
+                table_name="readings",
+                column_name="site_id",
+                dtype="int64",
+                distinct_count=3,
+                uniqueness_ratio=0.6,
             ),
         ],
     )
@@ -157,9 +160,12 @@ class TestDataQuery:
     """Test POST /data/query."""
 
     def test_query_returns_data(self, client):
-        resp = client.post("/api/data/query", json={
-            "sql": "SELECT * FROM staging.stg_readings LIMIT 3",
-        })
+        resp = client.post(
+            "/api/data/query",
+            json={
+                "sql": "SELECT * FROM staging.stg_readings LIMIT 3",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["row_count"] == 3
@@ -167,9 +173,12 @@ class TestDataQuery:
         assert data["error"] is None
 
     def test_query_aggregation(self, client):
-        resp = client.post("/api/data/query", json={
-            "sql": "SELECT status, COUNT(*) AS cnt FROM staging.stg_readings GROUP BY status",
-        })
+        resp = client.post(
+            "/api/data/query",
+            json={
+                "sql": "SELECT status, COUNT(*) AS cnt FROM staging.stg_readings GROUP BY status",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["row_count"] > 0
@@ -190,9 +199,12 @@ class TestDataQuery:
             assert "blocked" in data["error"].lower() or "read-only" in data["error"].lower()
 
     def test_query_bad_sql(self, client):
-        resp = client.post("/api/data/query", json={
-            "sql": "SELECT * FROM nonexistent_table_xyz",
-        })
+        resp = client.post(
+            "/api/data/query",
+            json={
+                "sql": "SELECT * FROM nonexistent_table_xyz",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["error"] is not None
@@ -205,7 +217,10 @@ class TestDataQuery:
 
     def test_query_no_discovery(self, client):
         client.app.state.pipeline["discovery"] = None
-        resp = client.post("/api/data/query", json={
-            "sql": "SELECT 1",
-        })
+        resp = client.post(
+            "/api/data/query",
+            json={
+                "sql": "SELECT 1",
+            },
+        )
         assert resp.status_code == 400

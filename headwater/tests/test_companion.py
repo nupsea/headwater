@@ -117,8 +117,7 @@ def test_parse_text(tmp_path: Path) -> None:
 def test_parse_yaml(tmp_path: Path) -> None:
     fp = tmp_path / "schema.yml"
     fp.write_text(
-        "sensors:\n  description: Sensor metadata\n"
-        "readings:\n  description: Measurements\n"
+        "sensors:\n  description: Sensor metadata\nreadings:\n  description: Measurements\n"
     )
     content = parse_doc_file(fp)
     assert "sensors" in content
@@ -201,9 +200,7 @@ def test_csv_dictionary_detection(tmp_path: Path) -> None:
     )
     # Also create a data CSV that should NOT be picked up
     (tmp_path / "sales_data.csv").write_text(
-        "date,amount,customer\n"
-        "2024-01-01,100,acme\n"
-        "2024-01-02,200,globex\n"
+        "date,amount,customer\n2024-01-01,100,acme\n2024-01-02,200,globex\n"
     )
 
     source = SourceConfig(name="test", type="json", path=str(tmp_path))

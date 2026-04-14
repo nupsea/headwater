@@ -87,7 +87,9 @@ async def approve_model(request: Request, model_name: str):
     store = getattr(request.app.state, "metadata_store", None)
     if store is not None:
         store.record_decision(
-            "model", model_name, "approved",
+            "model",
+            model_name,
+            "approved",
             payload={"previous_status": prev_status},
         )
     return {"name": model.name, "status": model.status}
@@ -106,7 +108,9 @@ async def reject_model(request: Request, model_name: str):
     store = getattr(request.app.state, "metadata_store", None)
     if store is not None:
         store.record_decision(
-            "model", model_name, "rejected",
+            "model",
+            model_name,
+            "rejected",
             payload={"previous_status": prev_status},
         )
     return {"name": model.name, "status": model.status}

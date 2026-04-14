@@ -68,8 +68,11 @@ class TestStatisticalProfiler:
         profiles = profile_all(loaded_ddb, "env_health", tables)
         # complaints.resolution_date has nulls (unresolved complaints)
         res = next(
-            (p for p in profiles
-             if p.table_name == "complaints" and p.column_name == "resolution_date"),
+            (
+                p
+                for p in profiles
+                if p.table_name == "complaints" and p.column_name == "resolution_date"
+            ),
             None,
         )
         assert res is not None

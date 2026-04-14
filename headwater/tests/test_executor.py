@@ -18,23 +18,13 @@ def _make_con() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(":memory:")
     con.execute("CREATE SCHEMA IF NOT EXISTS raw")
     con.execute("CREATE SCHEMA IF NOT EXISTS staging")
+    con.execute("CREATE TABLE raw.users (  user_id VARCHAR, name VARCHAR, age INTEGER)")
     con.execute(
-        "CREATE TABLE raw.users ("
-        "  user_id VARCHAR, name VARCHAR, age INTEGER"
-        ")"
+        "INSERT INTO raw.users VALUES ('u1', 'Alice', 30), ('u2', 'Bob', 25), ('u3', 'Carol', 35)"
     )
+    con.execute("CREATE TABLE raw.orders (  order_id VARCHAR, user_id VARCHAR, amount DOUBLE)")
     con.execute(
-        "INSERT INTO raw.users VALUES "
-        "('u1', 'Alice', 30), ('u2', 'Bob', 25), ('u3', 'Carol', 35)"
-    )
-    con.execute(
-        "CREATE TABLE raw.orders ("
-        "  order_id VARCHAR, user_id VARCHAR, amount DOUBLE"
-        ")"
-    )
-    con.execute(
-        "INSERT INTO raw.orders VALUES "
-        "('o1', 'u1', 100.0), ('o2', 'u2', 200.0), ('o3', 'u1', 50.0)"
+        "INSERT INTO raw.orders VALUES ('o1', 'u1', 100.0), ('o2', 'u2', 200.0), ('o3', 'u1', 50.0)"
     )
     return con
 

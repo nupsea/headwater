@@ -12,21 +12,38 @@ import re
 from headwater.core.models import ColumnInfo, ColumnProfile
 
 # -- Semantic types that are NEVER metrics -----------------------------------
-NON_METRIC_SEMANTIC_TYPES: frozenset[str] = frozenset({
-    "id", "foreign_key", "primary_key",
-    "dimension", "temporal",
-    "geographic", "pii", "text",
-})
+NON_METRIC_SEMANTIC_TYPES: frozenset[str] = frozenset(
+    {
+        "id",
+        "foreign_key",
+        "primary_key",
+        "dimension",
+        "temporal",
+        "geographic",
+        "pii",
+        "text",
+    }
+)
 
 # -- Semantic types that are explicitly metrics ------------------------------
-METRIC_SEMANTIC_TYPES: frozenset[str] = frozenset({
-    "metric", "measure", "kpi",
-})
+METRIC_SEMANTIC_TYPES: frozenset[str] = frozenset(
+    {
+        "metric",
+        "measure",
+        "kpi",
+    }
+)
 
 # -- Numeric dtype substrings ------------------------------------------------
 NUMERIC_DTYPES: tuple[str, ...] = (
-    "int", "float", "double", "decimal", "numeric", "real",
-    "bigint", "hugeint",
+    "int",
+    "float",
+    "double",
+    "decimal",
+    "numeric",
+    "real",
+    "bigint",
+    "hugeint",
 )
 
 # -- Name patterns for IDs/codes (never useful as metrics) -------------------
@@ -106,11 +123,7 @@ def is_dimension_column(
         return not (profile is not None and profile.distinct_count > max_cardinality)
 
     # Numeric column with low cardinality from profile -> dimension
-    if (
-        is_numeric
-        and profile is not None
-        and profile.distinct_count <= max_cardinality
-    ):
+    if is_numeric and profile is not None and profile.distinct_count <= max_cardinality:
         return col.semantic_type not in METRIC_SEMANTIC_TYPES
 
     return False

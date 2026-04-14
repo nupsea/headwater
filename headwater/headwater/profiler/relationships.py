@@ -34,9 +34,7 @@ def detect_relationships(
     relationships: list[Relationship] = []
 
     for fk_table, fk_col, pk_table, pk_col in candidates:
-        integrity = _check_referential_integrity(
-            con, schema, fk_table, fk_col, pk_table, pk_col
-        )
+        integrity = _check_referential_integrity(con, schema, fk_table, fk_col, pk_table, pk_col)
         if integrity < 0.5:
             continue  # Too low -- probably not a real FK
 

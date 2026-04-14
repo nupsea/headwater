@@ -67,16 +67,20 @@ def _build_column_mappings(table: TableInfo) -> list[dict]:
         elif col.dtype == "date":
             expression = f'CAST("{col.name}" AS DATE)'
 
-        columns.append({
-            "expression": expression,
-            "target_name": target_name,
-        })
+        columns.append(
+            {
+                "expression": expression,
+                "target_name": target_name,
+            }
+        )
 
     # Add metadata column
-    columns.append({
-        "expression": "CURRENT_TIMESTAMP",
-        "target_name": "_loaded_at",
-    })
+    columns.append(
+        {
+            "expression": "CURRENT_TIMESTAMP",
+            "target_name": "_loaded_at",
+        }
+    )
 
     return columns
 

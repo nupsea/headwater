@@ -151,25 +151,27 @@ def duckdb_con() -> duckdb.DuckDBPyConnection:
             values.append(50.0 + (i % 7) * 3)
     zones = ["Zone A" if i % 2 == 0 else "Zone B" for i in range(180)]
 
-    df = pl.DataFrame({
-        "reading_date": dates,
-        "avg_value": values,
-        "zone_name": zones,
-        "reading_count": [10 + i % 5 for i in range(180)],
-    })
+    df = pl.DataFrame(
+        {
+            "reading_date": dates,
+            "avg_value": values,
+            "zone_name": zones,
+            "reading_count": [10 + i % 5 for i in range(180)],
+        }
+    )
     arrow = df.to_arrow()
     con.register("_tmp_mart", arrow)
-    con.execute(
-        "CREATE TABLE marts.mart_air_quality_daily AS SELECT * FROM _tmp_mart"
-    )
+    con.execute("CREATE TABLE marts.mart_air_quality_daily AS SELECT * FROM _tmp_mart")
     con.unregister("_tmp_mart")
 
     # Create a staging table
-    df2 = pl.DataFrame({
-        "site_id": ["S1", "S2", "S3"] * 60,
-        "value": [float(i) + 10.5 for i in range(180)],
-        "sensor_type": ["pm25", "ozone", "no2"] * 60,
-    })
+    df2 = pl.DataFrame(
+        {
+            "site_id": ["S1", "S2", "S3"] * 60,
+            "value": [float(i) + 10.5 for i in range(180)],
+            "sensor_type": ["pm25", "ozone", "no2"] * 60,
+        }
+    )
     arrow2 = df2.to_arrow()
     con.register("_tmp_stg", arrow2)
     con.execute("CREATE TABLE staging.stg_readings AS SELECT * FROM _tmp_stg")
@@ -334,27 +336,33 @@ class TestSuggestions:
                     row_count=1000,
                     columns=[
                         ColumnInfo(
-                            name="site_id", dtype="varchar",
+                            name="site_id",
+                            dtype="varchar",
                             semantic_type="id",
                         ),
                         ColumnInfo(
-                            name="site_name", dtype="varchar",
+                            name="site_name",
+                            dtype="varchar",
                             semantic_type="dimension",
                         ),
                         ColumnInfo(
-                            name="latitude", dtype="float64",
+                            name="latitude",
+                            dtype="float64",
                             semantic_type="geographic",
                         ),
                         ColumnInfo(
-                            name="longitude", dtype="float64",
+                            name="longitude",
+                            dtype="float64",
                             semantic_type="geographic",
                         ),
                         ColumnInfo(
-                            name="reading_value", dtype="float64",
+                            name="reading_value",
+                            dtype="float64",
                             semantic_type="metric",
                         ),
                         ColumnInfo(
-                            name="created_date", dtype="date",
+                            name="created_date",
+                            dtype="date",
                             semantic_type="temporal",
                         ),
                     ],
@@ -362,16 +370,22 @@ class TestSuggestions:
             ],
             profiles=[
                 ColumnProfile(
-                    table_name="sites", column_name="latitude",
-                    dtype="float64", distinct_count=900,
+                    table_name="sites",
+                    column_name="latitude",
+                    dtype="float64",
+                    distinct_count=900,
                 ),
                 ColumnProfile(
-                    table_name="sites", column_name="longitude",
-                    dtype="float64", distinct_count=900,
+                    table_name="sites",
+                    column_name="longitude",
+                    dtype="float64",
+                    distinct_count=900,
                 ),
                 ColumnProfile(
-                    table_name="sites", column_name="reading_value",
-                    dtype="float64", distinct_count=500,
+                    table_name="sites",
+                    column_name="reading_value",
+                    dtype="float64",
+                    distinct_count=500,
                 ),
             ],
         )
@@ -392,19 +406,23 @@ class TestSuggestions:
 
 class TestStatistical:
     def test_find_temporal_columns(self):
-        df = pl.DataFrame({
-            "d": [date(2024, 1, 1), date(2024, 1, 2)],
-            "v": [1.0, 2.0],
-        })
+        df = pl.DataFrame(
+            {
+                "d": [date(2024, 1, 1), date(2024, 1, 2)],
+                "v": [1.0, 2.0],
+            }
+        )
         assert _find_temporal_columns(df) == ["d"]
 
     def test_find_metric_columns(self):
-        df = pl.DataFrame({
-            "id": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            "site_id": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
-            "value": [1.0, 2.5, 3.0, 4.5, 5.0, 6.5, 7.0, 8.5, 9.0, 10.5],
-            "count": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
-        })
+        df = pl.DataFrame(
+            {
+                "id": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                "site_id": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                "value": [1.0, 2.5, 3.0, 4.5, 5.0, 6.5, 7.0, 8.5, 9.0, 10.5],
+                "count": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+            }
+        )
         metrics = _find_metric_columns(df)
         assert "value" in metrics
         assert "count" in metrics
@@ -412,9 +430,7 @@ class TestStatistical:
         assert "id" not in metrics
 
     def test_detect_temporal_anomalies(self, duckdb_con):
-        arrow = duckdb_con.execute(
-            "SELECT * FROM marts.mart_air_quality_daily"
-        ).arrow()
+        arrow = duckdb_con.execute("SELECT * FROM marts.mart_air_quality_daily").arrow()
         df = pl.from_arrow(arrow)
         insights = _detect_temporal_anomalies(
             df, "mart_air_quality_daily", "reading_date", "avg_value"
@@ -426,13 +442,9 @@ class TestStatistical:
         assert any(i.magnitude > 0 for i in anomalies)
 
     def test_detect_period_shifts(self, duckdb_con):
-        arrow = duckdb_con.execute(
-            "SELECT * FROM marts.mart_air_quality_daily"
-        ).arrow()
+        arrow = duckdb_con.execute("SELECT * FROM marts.mart_air_quality_daily").arrow()
         df = pl.from_arrow(arrow)
-        insights = _detect_period_shifts(
-            df, "mart_air_quality_daily", "reading_date", "avg_value"
-        )
+        insights = _detect_period_shifts(df, "mart_air_quality_daily", "reading_date", "avg_value")
         # Period shift should be detected (first half has the anomaly spike)
         assert isinstance(insights, list)
 
@@ -661,9 +673,7 @@ class TestAutoRepair:
     def test_repair_history_tracks_attempts(self, duckdb_con):
         """Repair history records each failed attempt."""
         # Provider returns a query that is valid SQL but hits wrong table
-        provider = _FixingProvider(
-            "SELECT * FROM staging.also_nonexistent"
-        )
+        provider = _FixingProvider("SELECT * FROM staging.also_nonexistent")
         result = _repair_loop(
             question="Bad query",
             original_sql="SELECT * FROM staging.ghost",
@@ -775,14 +785,10 @@ class TestGrounding:
         )
         assert len(warnings) == 0
 
-    def test_grounding_warns_on_unrecognized_terms(
-        self, duckdb_con, sample_discovery
-    ):
+    def test_grounding_warns_on_unrecognized_terms(self, duckdb_con, sample_discovery):
         """Free-form query with terms absent from schema and suggestions gets warned."""
         # LLM provider that returns valid SQL (simulates LLM ignoring "toys")
-        provider = _FixingProvider(
-            "SELECT COUNT(*) AS cnt FROM staging.stg_readings"
-        )
+        provider = _FixingProvider("SELECT COUNT(*) AS cnt FROM staging.stg_readings")
         result = ask(
             question="How are toys trending?",
             con=duckdb_con,
@@ -794,9 +800,7 @@ class TestGrounding:
         assert len(result.warnings) >= 1
         assert "toys" in result.warnings[0].lower()
 
-    def test_grounded_suggestion_has_no_warnings(
-        self, duckdb_con, sample_discovery
-    ):
+    def test_grounded_suggestion_has_no_warnings(self, duckdb_con, sample_discovery):
         """A well-grounded curated question should produce no warnings."""
         suggestions = [
             SuggestedQuestion(
@@ -804,8 +808,7 @@ class TestGrounding:
                 source="semantic",
                 category="Test",
                 sql_hint=(
-                    "SELECT sensor_type, AVG(value) "
-                    "FROM staging.stg_readings GROUP BY sensor_type"
+                    "SELECT sensor_type, AVG(value) FROM staging.stg_readings GROUP BY sensor_type"
                 ),
             ),
         ]
@@ -863,9 +866,7 @@ class TestHeuristicSql:
         )
         assert sql is None
 
-    def test_ask_uses_heuristic_without_llm(
-        self, duckdb_con, sample_discovery
-    ):
+    def test_ask_uses_heuristic_without_llm(self, duckdb_con, sample_discovery):
         """ask() falls back to heuristic when no suggestion match and no LLM."""
         result = ask(
             question="How many readings by sensor type?",
@@ -890,15 +891,15 @@ class TestHeuristicSql:
         # Create the sites staging table so it can resolve
         import polars as pl
 
-        df_sites = pl.DataFrame({
-            "site_id": ["S1", "S2", "S3"],
-            "name": ["Alpha Station", "Beta Station", "Gamma Station"],
-            "zone_id": ["Z1", "Z2", "Z1"],
-        })
-        duckdb_con.register("_tmp_sites", df_sites.to_arrow())
-        duckdb_con.execute(
-            "CREATE TABLE staging.stg_sites AS SELECT * FROM _tmp_sites"
+        df_sites = pl.DataFrame(
+            {
+                "site_id": ["S1", "S2", "S3"],
+                "name": ["Alpha Station", "Beta Station", "Gamma Station"],
+                "zone_id": ["Z1", "Z2", "Z1"],
+            }
         )
+        duckdb_con.register("_tmp_sites", df_sites.to_arrow())
+        duckdb_con.execute("CREATE TABLE staging.stg_sites AS SELECT * FROM _tmp_sites")
         duckdb_con.unregister("_tmp_sites")
 
         sql = _heuristic_sql(
@@ -948,16 +949,24 @@ class TestHeuristicSql:
             ],
             relationships=[
                 Relationship(
-                    from_table="complaints", from_column="zone_id",
-                    to_table="zones", to_column="zone_id",
-                    type="many_to_one", confidence=0.95,
-                    referential_integrity=0.98, source="inferred_name",
+                    from_table="complaints",
+                    from_column="zone_id",
+                    to_table="zones",
+                    to_column="zone_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
                 ),
                 Relationship(
-                    from_table="sites", from_column="zone_id",
-                    to_table="zones", to_column="zone_id",
-                    type="many_to_one", confidence=0.95,
-                    referential_integrity=0.98, source="inferred_name",
+                    from_table="sites",
+                    from_column="zone_id",
+                    to_table="zones",
+                    to_column="zone_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
                 ),
             ],
         )
@@ -1051,7 +1060,8 @@ class TestHeuristicSql:
                         ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
                         ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
                         ColumnInfo(
-                            name="complaint_type", dtype="varchar",
+                            name="complaint_type",
+                            dtype="varchar",
                             semantic_type="dimension",
                         ),
                         ColumnInfo(name="status", dtype="varchar", semantic_type="dimension"),
@@ -1083,7 +1093,8 @@ class TestHeuristicSql:
                         ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
                         ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
                         ColumnInfo(
-                            name="complaint_type", dtype="varchar",
+                            name="complaint_type",
+                            dtype="varchar",
                             semantic_type="dimension",
                         ),
                         ColumnInfo(name="received_date", dtype="date", semantic_type="temporal"),
@@ -1108,9 +1119,7 @@ class TestHeuristicSql:
         assert "severity_score" in sql
 
         # "complaints over time" -> trend query
-        sql = _heuristic_sql(
-            "How have complaints changed over time?", discovery, []
-        )
+        sql = _heuristic_sql("How have complaints changed over time?", discovery, [])
         assert sql is not None
         assert "period" in sql.lower()
 
@@ -1118,15 +1127,15 @@ class TestHeuristicSql:
         """JOIN query actually runs against DuckDB without error."""
         import polars as pl
 
-        df_sites = pl.DataFrame({
-            "site_id": ["S1", "S2", "S3"],
-            "name": ["Alpha Station", "Beta Station", "Gamma Station"],
-            "zone_id": ["Z1", "Z2", "Z1"],
-        })
-        duckdb_con.register("_tmp_sites2", df_sites.to_arrow())
-        duckdb_con.execute(
-            "CREATE OR REPLACE TABLE staging.stg_sites AS SELECT * FROM _tmp_sites2"
+        df_sites = pl.DataFrame(
+            {
+                "site_id": ["S1", "S2", "S3"],
+                "name": ["Alpha Station", "Beta Station", "Gamma Station"],
+                "zone_id": ["Z1", "Z2", "Z1"],
+            }
         )
+        duckdb_con.register("_tmp_sites2", df_sites.to_arrow())
+        duckdb_con.execute("CREATE OR REPLACE TABLE staging.stg_sites AS SELECT * FROM _tmp_sites2")
         duckdb_con.unregister("_tmp_sites2")
 
         result = ask(
@@ -1156,7 +1165,9 @@ class TestHeuristicSql:
             relationships=[],
         )
         sql = _heuristic_sql(
-            "How has days with aqi changed over time?", discovery, [],
+            "How has days with aqi changed over time?",
+            discovery,
+            [],
         )
         assert sql is not None
         # Should prefer date_local (actual date) over year (integer)
@@ -1180,7 +1191,9 @@ class TestHeuristicSql:
             relationships=[],
         )
         sql = _heuristic_sql(
-            "How has days with aqi changed over time?", discovery, [],
+            "How has days with aqi changed over time?",
+            discovery,
+            [],
         )
         assert sql is not None
         assert '"year"' in sql
@@ -1198,7 +1211,8 @@ class TestHeuristicSql:
                     columns=[
                         ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
                         ColumnInfo(
-                            name="complaint_type_311", dtype="varchar",
+                            name="complaint_type_311",
+                            dtype="varchar",
                             semantic_type="dimension",
                         ),
                         ColumnInfo(name="status", dtype="varchar", semantic_type="dimension"),
@@ -1209,9 +1223,7 @@ class TestHeuristicSql:
             relationships=[],
         )
         sql = _heuristic_sql("complaints per county", discovery, [])
-        assert sql is None, (
-            f"Should return None when 'county' column not found, got: {sql}"
-        )
+        assert sql is None, f"Should return None when 'county' column not found, got: {sql}"
 
     def test_fallback_works_for_vague_question(self):
         """'show me complaints' (no specific column) gets a summary."""
@@ -1343,9 +1355,7 @@ class TestVisualization:
             {"month": "2024-02", "zone_name": "A", "incidents": 3},
             {"month": "2024-02", "zone_name": "B", "incidents": 7},
         ]
-        viz = recommend_visualization(
-            ["month", "zone_name", "incidents"], data
-        )
+        viz = recommend_visualization(["month", "zone_name", "incidents"], data)
         assert viz.chart_type == "line"
         assert viz.group_by == "zone_name"
 
@@ -1451,32 +1461,52 @@ class TestSchemaGraph:
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
             tables=[
-                TableInfo(name="complaints", row_count=500, columns=[
-                    ColumnInfo(name="id", dtype="int64", semantic_type="id"),
-                    ColumnInfo(name="zone_id", dtype="varchar", semantic_type="foreign_key"),
-                ]),
-                TableInfo(name="zones", row_count=10, columns=[
-                    ColumnInfo(name="zone_id", dtype="varchar", semantic_type="id"),
-                    ColumnInfo(name="zone_name", dtype="varchar", semantic_type="dimension"),
-                ]),
-                TableInfo(name="sites", row_count=50, columns=[
-                    ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
-                    ColumnInfo(name="zone_id", dtype="varchar", semantic_type="foreign_key"),
-                    ColumnInfo(name="site_name", dtype="varchar", semantic_type="dimension"),
-                ]),
+                TableInfo(
+                    name="complaints",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="zone_id", dtype="varchar", semantic_type="foreign_key"),
+                    ],
+                ),
+                TableInfo(
+                    name="zones",
+                    row_count=10,
+                    columns=[
+                        ColumnInfo(name="zone_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="zone_name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=50,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="zone_id", dtype="varchar", semantic_type="foreign_key"),
+                        ColumnInfo(name="site_name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
             ],
             relationships=[
                 Relationship(
-                    from_table="complaints", from_column="zone_id",
-                    to_table="zones", to_column="zone_id",
-                    type="many_to_one", confidence=0.95,
-                    referential_integrity=0.98, source="inferred_name",
+                    from_table="complaints",
+                    from_column="zone_id",
+                    to_table="zones",
+                    to_column="zone_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
                 ),
                 Relationship(
-                    from_table="sites", from_column="zone_id",
-                    to_table="zones", to_column="zone_id",
-                    type="many_to_one", confidence=0.95,
-                    referential_integrity=0.98, source="inferred_name",
+                    from_table="sites",
+                    from_column="zone_id",
+                    to_table="zones",
+                    to_column="zone_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
                 ),
             ],
         )
@@ -1543,7 +1573,8 @@ class TestQueryPlanner:
                         ColumnInfo(name="complaint_number", dtype="int64", semantic_type="id"),
                         ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
                         ColumnInfo(
-                            name="complaint_type_311", dtype="varchar",
+                            name="complaint_type_311",
+                            dtype="varchar",
                             semantic_type="dimension",
                         ),
                         ColumnInfo(name="bin", dtype="int64", semantic_type=None),
@@ -1553,8 +1584,11 @@ class TestQueryPlanner:
             ],
             profiles=[
                 ColumnProfile(
-                    table_name="env_complaints", column_name="bin",
-                    dtype="int64", distinct_count=8000, uniqueness_ratio=0.8,
+                    table_name="env_complaints",
+                    column_name="bin",
+                    dtype="int64",
+                    distinct_count=8000,
+                    uniqueness_ratio=0.8,
                 ),
             ],
         )
@@ -1660,10 +1694,14 @@ class TestQueryPlanner:
             ],
             relationships=[
                 Relationship(
-                    from_table="readings", from_column="site_id",
-                    to_table="sites", to_column="site_id",
-                    type="many_to_one", confidence=0.95,
-                    referential_integrity=0.98, source="inferred_name",
+                    from_table="readings",
+                    from_column="site_id",
+                    to_table="sites",
+                    to_column="site_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
                 ),
             ],
         )
@@ -1681,9 +1719,13 @@ class TestQueryPlanner:
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
             tables=[
-                TableInfo(name="readings", row_count=100, columns=[
-                    ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
-                ]),
+                TableInfo(
+                    name="readings",
+                    row_count=100,
+                    columns=[
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
             ],
         )
         graph = SchemaGraph(discovery)
@@ -1719,8 +1761,11 @@ class TestQueryPlanner:
             ],
             profiles=[
                 ColumnProfile(
-                    table_name="env_complaints", column_name="bin",
-                    dtype="int64", distinct_count=8000, uniqueness_ratio=0.8,
+                    table_name="env_complaints",
+                    column_name="bin",
+                    dtype="int64",
+                    distinct_count=8000,
+                    uniqueness_ratio=0.8,
                 ),
             ],
         )
@@ -1733,7 +1778,9 @@ class TestQueryPlanner:
 
         sql = _planned_sql(
             "How many readings per sensor type?",
-            sample_discovery, [], con=duckdb_con,
+            sample_discovery,
+            [],
+            con=duckdb_con,
         )
         assert sql is not None
         result = duckdb_con.execute(sql).fetchall()
@@ -1759,7 +1806,8 @@ class TestQueryPlanner:
                         ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
                         ColumnInfo(name="borough", dtype="varchar", semantic_type="dimension"),
                         ColumnInfo(
-                            name="complaint_type", dtype="varchar",
+                            name="complaint_type",
+                            dtype="varchar",
                             semantic_type="dimension",
                         ),
                         ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
@@ -1830,10 +1878,14 @@ class TestQueryPlanner:
             ],
             relationships=[
                 Relationship(
-                    from_table="env_complaints", from_column="zone_id",
-                    to_table="zones", to_column="zone_id",
-                    type="many_to_one", confidence=0.95,
-                    referential_integrity=0.98, source="inferred_name",
+                    from_table="env_complaints",
+                    from_column="zone_id",
+                    to_table="zones",
+                    to_column="zone_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
                 ),
             ],
         )

@@ -52,18 +52,47 @@ INTENT_BREAKDOWN = "breakdown"
 
 # Word sets for intent detection (order matters -- first match wins for ties)
 _INTENT_SIGNALS: list[tuple[str, set[str]]] = [
-    (INTENT_TREND, {
-        "trend", "trends", "trending", "trended",
-        "changing", "changed", "growth", "growing",
-        "increasing", "decreasing", "over",
-    }),
-    (INTENT_TOP, {
-        "top", "highest", "lowest", "most", "least", "worst", "best",
-        "largest", "smallest", "which",
-    }),
-    (INTENT_COUNT, {
-        "how", "many", "count", "number", "per",
-    }),
+    (
+        INTENT_TREND,
+        {
+            "trend",
+            "trends",
+            "trending",
+            "trended",
+            "changing",
+            "changed",
+            "growth",
+            "growing",
+            "increasing",
+            "decreasing",
+            "over",
+        },
+    ),
+    (
+        INTENT_TOP,
+        {
+            "top",
+            "highest",
+            "lowest",
+            "most",
+            "least",
+            "worst",
+            "best",
+            "largest",
+            "smallest",
+            "which",
+        },
+    ),
+    (
+        INTENT_COUNT,
+        {
+            "how",
+            "many",
+            "count",
+            "number",
+            "per",
+        },
+    ),
     (INTENT_AVERAGE, {"average", "avg", "mean"}),
     (INTENT_SUM, {"sum", "total", "cumulative"}),
     (INTENT_DISTRIBUTION, {"distribution", "spread", "histogram", "range", "percentile"}),
@@ -71,31 +100,137 @@ _INTENT_SIGNALS: list[tuple[str, set[str]]] = [
     (INTENT_BREAKDOWN, {"breakdown", "break", "across", "between"}),
 ]
 
-_STOP_WORDS: frozenset[str] = frozenset({
-    "what", "is", "the", "a", "an", "are", "how", "do", "does", "which",
-    "where", "when", "who", "in", "on", "by", "for", "to", "of", "and",
-    "or", "from", "with", "that", "this", "there", "have", "has", "was",
-    "were", "be", "been", "being", "my", "your", "their", "its",
-    "we", "our", "us", "i", "me", "more", "less", "than", "not", "no",
-    "one", "ones", "other", "each", "every", "any", "some", "all",
-    "give", "tell", "can", "could", "would", "should", "please", "just",
-    "about", "also",
-})
+_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "what",
+        "is",
+        "the",
+        "a",
+        "an",
+        "are",
+        "how",
+        "do",
+        "does",
+        "which",
+        "where",
+        "when",
+        "who",
+        "in",
+        "on",
+        "by",
+        "for",
+        "to",
+        "of",
+        "and",
+        "or",
+        "from",
+        "with",
+        "that",
+        "this",
+        "there",
+        "have",
+        "has",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "my",
+        "your",
+        "their",
+        "its",
+        "we",
+        "our",
+        "us",
+        "i",
+        "me",
+        "more",
+        "less",
+        "than",
+        "not",
+        "no",
+        "one",
+        "ones",
+        "other",
+        "each",
+        "every",
+        "any",
+        "some",
+        "all",
+        "give",
+        "tell",
+        "can",
+        "could",
+        "would",
+        "should",
+        "please",
+        "just",
+        "about",
+        "also",
+    }
+)
 
-_ANALYTICAL_WORDS: frozenset[str] = frozenset({
-    "average", "avg", "mean", "sum", "total", "count", "max", "min",
-    "median", "rate", "ratio", "percent", "percentage",
-    "trend", "trends", "compare", "comparison",
-    "increase", "decrease", "change", "changes",
-    "distribution", "breakdown", "across", "between", "per",
-    "over", "time", "daily", "weekly", "monthly", "yearly",
-    "top", "bottom", "highest", "lowest", "most", "least",
-    "show", "list", "get", "find", "display",
-    "number", "many", "much", "often",
-    "changing", "changed", "growing", "growth",
-    "increasing", "decreasing",
-    "worst", "best", "largest", "smallest",
-})
+_ANALYTICAL_WORDS: frozenset[str] = frozenset(
+    {
+        "average",
+        "avg",
+        "mean",
+        "sum",
+        "total",
+        "count",
+        "max",
+        "min",
+        "median",
+        "rate",
+        "ratio",
+        "percent",
+        "percentage",
+        "trend",
+        "trends",
+        "compare",
+        "comparison",
+        "increase",
+        "decrease",
+        "change",
+        "changes",
+        "distribution",
+        "breakdown",
+        "across",
+        "between",
+        "per",
+        "over",
+        "time",
+        "daily",
+        "weekly",
+        "monthly",
+        "yearly",
+        "top",
+        "bottom",
+        "highest",
+        "lowest",
+        "most",
+        "least",
+        "show",
+        "list",
+        "get",
+        "find",
+        "display",
+        "number",
+        "many",
+        "much",
+        "often",
+        "changing",
+        "changed",
+        "growing",
+        "growth",
+        "increasing",
+        "decreasing",
+        "worst",
+        "best",
+        "largest",
+        "smallest",
+    }
+)
 
 
 # ── Query plan ───────────────────────────────────────────────────────────────
@@ -155,7 +290,9 @@ class QueryPlanner:
             return None
         if plan.confidence < 0.3:
             logger.info(
-                "Planner confidence %.2f too low for: %s", plan.confidence, question,
+                "Planner confidence %.2f too low for: %s",
+                plan.confidence,
+                question,
             )
             return None
         return self._plan_to_sql(plan)
@@ -204,13 +341,16 @@ class QueryPlanner:
 
         # Column candidates = predicate words + any non-table subject words
         col_words = [
-            w for w in content_words
-            if w not in table_words and not _stems_overlap(w, table_words)
+            w for w in content_words if w not in table_words and not _stems_overlap(w, table_words)
         ]
 
         # Step 3: Resolve columns from the question
         dimensions, metrics, temporal = self._resolve_columns(
-            col_words, content_words, primary_table, intent, tokens,
+            col_words,
+            content_words,
+            primary_table,
+            intent,
+            tokens,
         )
 
         # Step 4: Find joins for cross-table columns.
@@ -255,9 +395,7 @@ class QueryPlanner:
         for word in content_words:
             # Signal 1: direct table name matching
             for match in self.graph.resolve_table(word):
-                table_scores[match.table_name] = (
-                    table_scores.get(match.table_name, 0) + match.score
-                )
+                table_scores[match.table_name] = table_scores.get(match.table_name, 0) + match.score
 
             # Signal 2: column name matching -> boosts the column's table
             for match in self.graph.resolve_column(word):
@@ -305,28 +443,34 @@ class QueryPlanner:
         # First pass: single-word matches from col_words
         for word in col_words:
             resolved = self._try_resolve_word(
-                word, primary_table, dimensions, metrics, temporal,
+                word,
+                primary_table,
+                dimensions,
+                metrics,
+                temporal,
             )
             if resolved is not None:
                 temporal = resolved
                 used_words.add(word)
-            elif word in {c.info.name.lower() for t in self.graph.tables.values()
-                          for c in t.columns.values()}:
+            elif word in {
+                c.info.name.lower() for t in self.graph.tables.values() for c in t.columns.values()
+            }:
                 used_words.add(word)
 
         # Second pass: compound column names from ALL tokens (including
         # analytical words like "max", "good", "median").  This handles
         # "average max AQI by state" -> "max_aqi" column.
         if not metrics:
-            compound_tokens = all_tokens if all_tokens else _tokenize(
-                " ".join(all_content_words)
-            )
+            compound_tokens = all_tokens if all_tokens else _tokenize(" ".join(all_content_words))
             compounds = _build_compound_candidates(
-                compound_tokens, primary_table, self.graph,
+                compound_tokens,
+                primary_table,
+                self.graph,
             )
             for compound, words in compounds:
                 matches = self.graph.resolve_column(
-                    compound, preferred_table=primary_table,
+                    compound,
+                    preferred_table=primary_table,
                 )
                 if not matches or matches[0].score < 10:
                     continue
@@ -334,7 +478,9 @@ class QueryPlanner:
                 if best.column_name is None:
                     continue
                 resolved_col = ResolvedColumn(
-                    best.table_name, best.column_name, best.role or "",
+                    best.table_name,
+                    best.column_name,
+                    best.role or "",
                 )
                 if best.role == ROLE_METRIC:
                     metrics.append(resolved_col)
@@ -349,7 +495,11 @@ class QueryPlanner:
                 if word in used_words:
                     continue
                 resolved = self._try_resolve_word(
-                    word, primary_table, dimensions, metrics, temporal,
+                    word,
+                    primary_table,
+                    dimensions,
+                    metrics,
+                    temporal,
                     min_score=6,
                 )
                 if resolved is not None:
@@ -380,7 +530,9 @@ class QueryPlanner:
             return None
 
         resolved = ResolvedColumn(
-            best.table_name, best.column_name, best.role or "",
+            best.table_name,
+            best.column_name,
+            best.role or "",
         )
         if best.role == ROLE_TEMPORAL:
             if temporal is None:
@@ -429,7 +581,9 @@ class QueryPlanner:
                 resolved_cols.remove(col)
                 logger.info(
                     "Dropped column %s.%s -- no join path from %s",
-                    col.table_name, col.column_name, primary_table,
+                    col.table_name,
+                    col.column_name,
+                    primary_table,
                 )
 
         return joins
@@ -453,18 +607,16 @@ class QueryPlanner:
         # If we have dimensions but no metrics, and intent needs a metric
         # (AVERAGE, SUM), add the best metric from the primary table.
         # For COUNT/TOP/BREAKDOWN, implicit COUNT(*) is added in SQL generation.
-        if (
-            plan.dimensions
-            and not plan.measures
-            and plan.intent in (INTENT_AVERAGE, INTENT_SUM)
-        ):
-                metric = self.graph.get_best_metric(plan.primary_table)
-                if metric:
-                    plan.measures.append(
-                        ResolvedColumn(
-                            metric.table_name, metric.info.name, ROLE_METRIC,
-                        )
+        if plan.dimensions and not plan.measures and plan.intent in (INTENT_AVERAGE, INTENT_SUM):
+            metric = self.graph.get_best_metric(plan.primary_table)
+            if metric:
+                plan.measures.append(
+                    ResolvedColumn(
+                        metric.table_name,
+                        metric.info.name,
+                        ROLE_METRIC,
                     )
+                )
 
         # If we have metrics but no dimensions, add the best dimension
         if plan.measures and not plan.dimensions and plan.intent != INTENT_TREND:
@@ -527,8 +679,7 @@ class QueryPlanner:
                 resolved_tables_and_cols.update(_split_name(plan.time_axis.column_name))
 
             matched = sum(
-                1 for w in col_words
-                if any(_stem(w) & _stem(rw) for rw in resolved_tables_and_cols)
+                1 for w in col_words if any(_stem(w) & _stem(rw) for rw in resolved_tables_and_cols)
             )
             if col_words:
                 match_ratio = matched / len(col_words)
@@ -536,16 +687,13 @@ class QueryPlanner:
 
         # Joins resolved successfully
         cross_table_cols = [
-            c for c in plan.dimensions + plan.measures
-            if c.table_name != plan.primary_table
+            c for c in plan.dimensions + plan.measures if c.table_name != plan.primary_table
         ]
         if cross_table_cols and plan.joins:
             score += 0.1
         elif cross_table_cols and not plan.joins:
             score -= 0.2  # needed a join but couldn't find one
-            plan.warnings.append(
-                "Column(s) in other table(s) but no join path found"
-            )
+            plan.warnings.append("Column(s) in other table(s) but no join path found")
 
         return min(score, 1.0)
 
@@ -569,7 +717,7 @@ class QueryPlanner:
                 # Determine which alias has the from-side column
                 from_alias = aliases.get(step.from_table, "t0")
                 from_clause += (
-                    f' JOIN {join_ref} {alias}'
+                    f" JOIN {join_ref} {alias}"
                     f' ON {from_alias}."{step.from_column}" = {alias}."{step.to_column}"'
                 )
         else:
@@ -598,14 +746,15 @@ class QueryPlanner:
             for m in plan.measures:
                 col_ref = self._col_ref(m, aliases, use_aliases)
                 agg = self._agg_for_intent(plan.intent)
-                select_parts.append(
-                    f'ROUND({agg}({col_ref}), 2) AS {agg.lower()}_{m.column_name}'
-                )
+                select_parts.append(f"ROUND({agg}({col_ref}), 2) AS {agg.lower()}_{m.column_name}")
                 has_explicit_agg = True
 
         # Implicit COUNT(*) for count/top/breakdown intents without explicit metrics
         if not plan.measures and plan.intent in (
-            INTENT_COUNT, INTENT_TOP, INTENT_BREAKDOWN, INTENT_LIST,
+            INTENT_COUNT,
+            INTENT_TOP,
+            INTENT_BREAKDOWN,
+            INTENT_LIST,
         ):
             select_parts.append("COUNT(*) AS total")
             has_explicit_agg = True
@@ -638,11 +787,7 @@ class QueryPlanner:
             return resolve_table_ref(table_name, self.con, self.models)
         # No connection -- prefer executed mart, else staging
         for m in self.models:
-            if (
-                m.model_type == "mart"
-                and table_name in m.source_tables
-                and m.status == "executed"
-            ):
+            if m.model_type == "mart" and table_name in m.source_tables and m.status == "executed":
                 return f"marts.{m.name}"
         return f"staging.stg_{table_name}"
 
@@ -766,7 +911,7 @@ def _split_subject_predicate(tokens: list[str]) -> tuple[list[str], list[str]]:
     for i, token in enumerate(tokens):
         if token in _SPLIT_PREPOSITIONS:
             subject = tokens[:i]
-            predicate = tokens[i + 1:]
+            predicate = tokens[i + 1 :]
             # Extract content words from each side
             noise = _STOP_WORDS | _ANALYTICAL_WORDS
             subj_content = [w for w in subject if w not in noise]

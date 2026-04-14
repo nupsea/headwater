@@ -61,25 +61,29 @@ def demo(
 
     from rich.panel import Panel
 
-    console.print(Panel(
-        f"[bold]Headwater Demo[/bold]\n\nDataset: {data_path}\n\n"
-        "This demo runs the full discovery-to-quality pipeline:\n"
-        "  1. Load data into an in-memory analytical engine\n"
-        "  2. Profile columns, detect types, and discover relationships\n"
-        "  3. Generate staging + mart SQL models and quality contracts\n"
-        "  4. Execute staging models (auto-approved, no business logic)\n"
-        "  5. Run quality contract checks in observation mode",
-        title="Headwater",
-        border_style="blue",
-    ))
+    console.print(
+        Panel(
+            f"[bold]Headwater Demo[/bold]\n\nDataset: {data_path}\n\n"
+            "This demo runs the full discovery-to-quality pipeline:\n"
+            "  1. Load data into an in-memory analytical engine\n"
+            "  2. Profile columns, detect types, and discover relationships\n"
+            "  3. Generate staging + mart SQL models and quality contracts\n"
+            "  4. Execute staging models (auto-approved, no business logic)\n"
+            "  5. Run quality contract checks in observation mode",
+            title="Headwater",
+            border_style="blue",
+        )
+    )
 
     # Step 1: Load data
-    console.print(Panel(
-        "[bold]Step 1: Load Data[/bold]\n\n"
-        "Reading source files and registering them as tables in DuckDB.\n"
-        "No data leaves your machine -- everything runs locally.",
-        border_style="dim",
-    ))
+    console.print(
+        Panel(
+            "[bold]Step 1: Load Data[/bold]\n\n"
+            "Reading source files and registering them as tables in DuckDB.\n"
+            "No data leaves your machine -- everything runs locally.",
+            border_style="dim",
+        )
+    )
     source = SourceConfig(name=dataset, type="json", path=str(data_path))
     con = duckdb.connect(":memory:")
     connector = get_connector(source.type)
@@ -88,13 +92,15 @@ def demo(
     console.print(f"  Loaded {len(tables_loaded)} tables: {', '.join(tables_loaded)}")
 
     # Step 2: Discover
-    console.print(Panel(
-        "[bold]Step 2: Profile & Discover[/bold]\n\n"
-        "Computing column-level statistics (nulls, uniqueness, ranges),\n"
-        "detecting primary/foreign keys, and mapping relationships\n"
-        "across tables -- all using generic heuristics.",
-        border_style="dim",
-    ))
+    console.print(
+        Panel(
+            "[bold]Step 2: Profile & Discover[/bold]\n\n"
+            "Computing column-level statistics (nulls, uniqueness, ranges),\n"
+            "detecting primary/foreign keys, and mapping relationships\n"
+            "across tables -- all using generic heuristics.",
+            border_style="dim",
+        )
+    )
     discovery = discover(con, "raw", source)
 
     # Companion doc discovery + semantic analysis
@@ -108,16 +114,16 @@ def demo(
     show_discovery_summary(discovery)
 
     # Step 3: Generate models + contracts
-    console.print(Panel(
-        "[bold]Step 3: Generate Models & Contracts[/bold]\n\n"
-        "Creating staging models (mechanical transforms, auto-approved)\n"
-        "and mart models (analytical, require human review).\n"
-        "Quality contracts capture expectations from the profiling data.",
-        border_style="dim",
-    ))
-    staging_models = generate_staging_models(
-        discovery.tables, source_schema="raw"
+    console.print(
+        Panel(
+            "[bold]Step 3: Generate Models & Contracts[/bold]\n\n"
+            "Creating staging models (mechanical transforms, auto-approved)\n"
+            "and mart models (analytical, require human review).\n"
+            "Quality contracts capture expectations from the profiling data.",
+            border_style="dim",
+        )
     )
+    staging_models = generate_staging_models(discovery.tables, source_schema="raw")
     mart_models = generate_mart_models(discovery, target_schema="staging")
     contracts = generate_contracts(discovery.profiles)
 
@@ -126,26 +132,30 @@ def demo(
     show_contracts(contracts)
 
     # Step 4: Execute staging models (auto-approved)
-    console.print(Panel(
-        "[bold]Step 4: Execute Approved Models[/bold]\n\n"
-        "Materializing staging models in DuckDB. Staging models are\n"
-        "auto-approved because they contain no business logic (only\n"
-        "rename, cast, deduplicate). Mart models stay proposed.",
-        border_style="dim",
-    ))
+    console.print(
+        Panel(
+            "[bold]Step 4: Execute Approved Models[/bold]\n\n"
+            "Materializing staging models in DuckDB. Staging models are\n"
+            "auto-approved because they contain no business logic (only\n"
+            "rename, cast, deduplicate). Mart models stay proposed.",
+            border_style="dim",
+        )
+    )
     backend = DuckDBBackend(con)
     backend.ensure_schema("staging")
     exec_results = run_models(backend, all_models, only_approved=True)
     show_execution_results(exec_results)
 
     # Step 5: Quality checks (move contracts to observing for demo)
-    console.print(Panel(
-        "[bold]Step 5: Quality Checks[/bold]\n\n"
-        "Running quality contracts in observation mode. No contract\n"
-        "skips the observation phase -- violations are tracked silently\n"
-        "before enforcement.",
-        border_style="dim",
-    ))
+    console.print(
+        Panel(
+            "[bold]Step 5: Quality Checks[/bold]\n\n"
+            "Running quality contracts in observation mode. No contract\n"
+            "skips the observation phase -- violations are tracked silently\n"
+            "before enforcement.",
+            border_style="dim",
+        )
+    )
     for c in contracts:
         c.status = "observing"
     check_results = check_contracts(con, contracts, only_active=True)
@@ -157,43 +167,51 @@ def demo(
     total_rels = len(discovery.relationships)
     total_domains = len(discovery.domains)
 
-    console.print(Panel(
-        f"[bold green]Demo Complete[/bold green]\n\n"
-        f"[bold]What happened:[/bold]\n"
-        f"  Tables discovered:   {len(discovery.tables)}\n"
-        f"  Columns profiled:    {total_cols}\n"
-        f"  Relationships found: {total_rels}\n"
-        f"  Domains detected:    {total_domains}\n"
-        f"  Staging models:      {len(staging_models)} (executed)\n"
-        f"  Mart models:         {len(mart_models)} (proposed, awaiting review)\n"
-        f"  Quality contracts:   {len(contracts)} "
-        f"({report.passed} passed, {report.failed} failed)\n\n"
-        f"[bold]Next steps:[/bold]\n"
-        f"  1. Start the API server:   uv run uvicorn headwater.api.app:app\n"
-        f"  2. Open the UI:            cd ui && npm run dev\n"
-        f"  3. Review mart models:     Each encodes business logic assumptions\n"
-        f"  4. Discover your own data: headwater discover --source /path/to/data\n"
-        f"  5. Connect a Postgres DB:  headwater discover --source postgres://...",
-        title="Summary",
-        border_style="green",
-    ))
+    console.print(
+        Panel(
+            f"[bold green]Demo Complete[/bold green]\n\n"
+            f"[bold]What happened:[/bold]\n"
+            f"  Tables discovered:   {len(discovery.tables)}\n"
+            f"  Columns profiled:    {total_cols}\n"
+            f"  Relationships found: {total_rels}\n"
+            f"  Domains detected:    {total_domains}\n"
+            f"  Staging models:      {len(staging_models)} (executed)\n"
+            f"  Mart models:         {len(mart_models)} (proposed, awaiting review)\n"
+            f"  Quality contracts:   {len(contracts)} "
+            f"({report.passed} passed, {report.failed} failed)\n\n"
+            f"[bold]Next steps:[/bold]\n"
+            f"  1. Start the API server:   uv run uvicorn headwater.api.app:app\n"
+            f"  2. Open the UI:            cd ui && npm run dev\n"
+            f"  3. Review mart models:     Each encodes business logic assumptions\n"
+            f"  4. Discover your own data: headwater discover --source /path/to/data\n"
+            f"  5. Connect a Postgres DB:  headwater discover --source postgres://...",
+            title="Summary",
+            border_style="green",
+        )
+    )
 
 
 @app.command()
 def discover(
     source: str = typer.Option(
-        ..., "--source", help="Data source: path to directory or DSN (e.g. postgres://...).",
+        ...,
+        "--source",
+        help="Data source: path to directory or DSN (e.g. postgres://...).",
     ),
     source_type: str | None = typer.Option(
-        None, "--type",
+        None,
+        "--type",
         help="Source type: json, csv, postgres. Auto-detected if omitted.",
     ),
     name: str | None = typer.Option(
-        None, "--name",
+        None,
+        "--name",
         help="Name for this source (hostname for DB, dir name for files).",
     ),
     mode: str = typer.Option(
-        "generate", "--mode", help="Mode: generate (default) or observe.",
+        "generate",
+        "--mode",
+        help="Mode: generate (default) or observe.",
     ),
 ) -> None:
     """Discover tables, profiles, and relationships from a data source."""
@@ -249,6 +267,7 @@ def discover(
     if name is None:
         if detected_type == "postgres":
             from urllib.parse import urlparse
+
             parsed = urlparse(source)
             name = parsed.hostname or "postgres"
         else:
@@ -264,7 +283,11 @@ def discover(
             raise typer.Exit(1)
 
     config = SourceConfig(
-        name=name, type=detected_type, path=source_path, uri=source_uri, mode=mode,
+        name=name,
+        type=detected_type,
+        path=source_path,
+        uri=source_uri,
+        mode=mode,
     )
 
     con = duckdb.connect(":memory:")
@@ -325,7 +348,9 @@ def discover(
             for table in discovery.tables:
                 if table.semantic_detail:
                     store.upsert_semantic_detail(
-                        table.name, name, table.semantic_detail.model_dump(),
+                        table.name,
+                        name,
+                        table.semantic_detail.model_dump(),
                         run_id=run_id,
                     )
             for doc in discovery.companion_docs:
@@ -382,7 +407,9 @@ def unlock(
     source_name: str = typer.Option(..., "--source", help="Source name."),
     table: str = typer.Option(..., "--table", help="Table name."),
     column: str = typer.Option(
-        None, "--column", help="Column name. Omit or use --all to unlock all columns in the table.",
+        None,
+        "--column",
+        help="Column name. Omit or use --all to unlock all columns in the table.",
     ),
     all_columns: bool = typer.Option(False, "--all", help="Unlock all columns in the table."),
 ) -> None:
@@ -503,9 +530,7 @@ def status() -> None:
                         src_type = src.get("type", "unknown")
                         src_mode = src.get("mode", "generate")
                         src_path = src.get("uri") or src.get("path") or ""
-                        console.print(
-                            f"  {src['name']}: {src_type} ({src_mode}) -- {src_path}"
-                        )
+                        console.print(f"  {src['name']}: {src_type} ({src_mode}) -- {src_path}")
                 else:
                     console.print("\n  No sources configured yet.")
             finally:

@@ -41,7 +41,9 @@ class DuckDBBackend:
 
             logger.info(
                 "Materialized %s: %s rows in %.0fms",
-                model.name, row_count, elapsed_ms,
+                model.name,
+                row_count,
+                elapsed_ms,
             )
             return ExecutionResult(
                 model_name=model.name,

@@ -29,9 +29,7 @@ _EXCLUDED_SCHEMAS = {"information_schema", "pg_catalog", "pg_toast"}
 
 def _require_psycopg2() -> None:
     if not _PSYCOPG2_AVAILABLE:
-        raise ConnectorError(
-            "psycopg2-binary is not installed. Run: uv add psycopg2-binary"
-        )
+        raise ConnectorError("psycopg2-binary is not installed. Run: uv add psycopg2-binary")
 
 
 def _parse_dsn_parts(dsn: str) -> dict[str, str]:

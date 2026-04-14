@@ -84,8 +84,15 @@ def test_profile_roundtrip(meta: MetadataStore):
 def test_relationship_roundtrip(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     meta.insert_relationship(
-        "src", "sites", "zone_id", "zones", "zone_id",
-        "many_to_one", 0.95, 0.98, "inferred_name",
+        "src",
+        "sites",
+        "zone_id",
+        "zones",
+        "zone_id",
+        "many_to_one",
+        0.95,
+        0.98,
+        "inferred_name",
     )
     rels = meta.get_relationships("src")
     assert len(rels) == 1
@@ -95,8 +102,12 @@ def test_relationship_roundtrip(meta: MetadataStore):
 def test_model_roundtrip(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     meta.upsert_model(
-        "stg_sites", "src", "staging", "SELECT * FROM sites",
-        description="Staging for sites", status="approved",
+        "stg_sites",
+        "src",
+        "staging",
+        "SELECT * FROM sites",
+        description="Staging for sites",
+        status="approved",
     )
     models = meta.get_models("src")
     assert len(models) == 1
@@ -113,8 +124,12 @@ def test_model_status_update(meta: MetadataStore):
 
 def test_contract_roundtrip(meta: MetadataStore):
     meta.upsert_contract(
-        "c1", "stg_sites", "not_null", "site_id IS NOT NULL",
-        column_name="site_id", severity="error",
+        "c1",
+        "stg_sites",
+        "not_null",
+        "site_id IS NOT NULL",
+        column_name="site_id",
+        severity="error",
     )
     contracts = meta.get_contracts("stg_sites")
     assert len(contracts) == 1
@@ -137,12 +152,15 @@ def test_record_decision_basic(meta: MetadataStore):
 
 def test_record_decision_with_payload(meta: MetadataStore):
     meta.record_decision(
-        "model", "mart_x", "rejected",
+        "model",
+        "mart_x",
+        "rejected",
         payload={"previous_status": "proposed", "reason": "unclear logic"},
     )
     decisions = meta.get_decisions("model", "mart_x")
     assert len(decisions) == 1
     import json
+
     payload = json.loads(decisions[0]["payload_json"])
     assert payload["previous_status"] == "proposed"
 
@@ -168,9 +186,7 @@ def test_get_decisions_filtered_by_artifact(meta: MetadataStore):
 
 def test_payload_json_column_exists(meta: MetadataStore):
     """Verify decisions table has payload_json column (migration)."""
-    cols = meta.con.execute(
-        "PRAGMA table_info(decisions)"
-    ).fetchall()
+    cols = meta.con.execute("PRAGMA table_info(decisions)").fetchall()
     col_names = {c["name"] for c in cols}
     assert "payload_json" in col_names
 
@@ -191,10 +207,12 @@ def test_upsert_source_with_mode(meta: MetadataStore):
 
 def test_llm_audit_log_roundtrip(meta: MetadataStore):
     meta.insert_llm_audit(
-        "anthropic", "claude-sonnet-4-5",
+        "anthropic",
+        "claude-sonnet-4-5",
         prompt_text="analyze this table",
         response_text='{"description": "test"}',
-        tokens_in=100, tokens_out=50,
+        tokens_in=100,
+        tokens_out=50,
     )
     entries = meta.get_llm_audit_log()
     assert len(entries) == 1

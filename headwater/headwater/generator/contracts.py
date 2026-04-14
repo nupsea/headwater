@@ -45,9 +45,7 @@ def generate_contracts(
                     model_name=model_name,
                     column_name=p.column_name,
                     rule_type="unique",
-                    expression=(
-                        f'COUNT(*) = COUNT(DISTINCT "{p.column_name}")'
-                    ),
+                    expression=(f'COUNT(*) = COUNT(DISTINCT "{p.column_name}")'),
                     severity="error",
                     description=f"{p.column_name} must be unique (observed 100% uniqueness)",
                     confidence=0.9,
@@ -69,9 +67,7 @@ def generate_contracts(
                     model_name=model_name,
                     column_name=p.column_name,
                     rule_type="range",
-                    expression=(
-                        f'"{p.column_name}" BETWEEN {lower:.2f} AND {upper:.2f}'
-                    ),
+                    expression=(f'"{p.column_name}" BETWEEN {lower:.2f} AND {upper:.2f}'),
                     severity="warning",
                     description=(
                         f"{p.column_name} expected in range "
@@ -84,13 +80,9 @@ def generate_contracts(
             )
 
         # Low-cardinality allowed values
-        if (
-            p.top_values
-            and p.distinct_count <= 30
-            and p.dtype == "varchar"
-        ):
+        if p.top_values and p.distinct_count <= 30 and p.dtype == "varchar":
             allowed = [v for v, _ in p.top_values]
-            values_str = ", ".join(f"'{v.replace(chr(39), chr(39)+chr(39))}'" for v in allowed)
+            values_str = ", ".join(f"'{v.replace(chr(39), chr(39) + chr(39))}'" for v in allowed)
             rules.append(
                 ContractRule(
                     id=_make_id(),
@@ -100,8 +92,7 @@ def generate_contracts(
                     expression=f'"{p.column_name}" IN ({values_str})',
                     severity="warning",
                     description=(
-                        f"{p.column_name} expected to be one of "
-                        f"{len(allowed)} known values"
+                        f"{p.column_name} expected to be one of {len(allowed)} known values"
                     ),
                     confidence=0.75,
                     status="proposed",

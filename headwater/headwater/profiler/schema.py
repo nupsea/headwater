@@ -55,9 +55,7 @@ def _normalise_type(duckdb_type: str) -> str:
     return "varchar"  # fallback
 
 
-def extract_schema(
-    con: duckdb.DuckDBPyConnection, schema: str
-) -> list[TableInfo]:
+def extract_schema(con: duckdb.DuckDBPyConnection, schema: str) -> list[TableInfo]:
     """Extract table and column metadata from DuckDB information_schema.
 
     Returns a list of TableInfo with ColumnInfo populated (no descriptions yet).
@@ -72,9 +70,7 @@ def extract_schema(
     tables: list[TableInfo] = []
     for (table_name,) in table_rows:
         # Row count
-        row_count = con.execute(
-            f'SELECT COUNT(*) FROM "{schema}"."{table_name}"'
-        ).fetchone()[0]
+        row_count = con.execute(f'SELECT COUNT(*) FROM "{schema}"."{table_name}"').fetchone()[0]
 
         # Columns
         col_rows = con.execute(

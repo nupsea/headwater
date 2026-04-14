@@ -20,8 +20,13 @@ _DATA_EXTENSIONS = {".json", ".ndjson", ".parquet", ".avro", ".orc"}
 
 # Filenames that apply to all tables
 _GLOBAL_DOC_NAMES = {
-    "readme", "data_dictionary", "schema", "dictionary",
-    "metadata", "codebook", "data_guide",
+    "readme",
+    "data_dictionary",
+    "schema",
+    "dictionary",
+    "metadata",
+    "codebook",
+    "data_guide",
 }
 
 # Extension -> doc_type mapping
@@ -64,11 +69,13 @@ def discover_companion_docs(source: SourceConfig) -> list[CompanionDoc]:
                 content = parse_doc_file(fp)
                 if content.strip():
                     doc_type = _EXT_TO_TYPE.get(ext, "unknown")
-                    docs.append(CompanionDoc(
-                        filename=fp.name,
-                        content=content,
-                        doc_type=doc_type,
-                    ))
+                    docs.append(
+                        CompanionDoc(
+                            filename=fp.name,
+                            content=content,
+                            doc_type=doc_type,
+                        )
+                    )
             except Exception as e:
                 logger.warning("Failed to read companion doc %s: %s", fp, e)
 
@@ -80,19 +87,25 @@ def discover_companion_docs(source: SourceConfig) -> list[CompanionDoc]:
             try:
                 content = parse_doc_file(fp)
                 if content.strip():
-                    docs.append(CompanionDoc(
-                        filename=fp.name,
-                        content=content,
-                        doc_type="csv",
-                    ))
+                    docs.append(
+                        CompanionDoc(
+                            filename=fp.name,
+                            content=content,
+                            doc_type="csv",
+                        )
+                    )
             except Exception as e:
                 logger.warning(
-                    "Failed to read CSV dictionary %s: %s", fp, e,
+                    "Failed to read CSV dictionary %s: %s",
+                    fp,
+                    e,
                 )
 
     if docs:
         logger.info(
-            "Found %d companion doc(s) in %s", len(docs), source_dir,
+            "Found %d companion doc(s) in %s",
+            len(docs),
+            source_dir,
         )
 
     return docs
@@ -200,9 +213,18 @@ def _is_data_dictionary_csv(path: Path) -> bool:
     'table', 'field', 'definition', etc. and typically < 500 rows.
     """
     dict_headers = {
-        "column", "column_name", "field", "field_name",
-        "description", "definition", "meaning", "notes",
-        "table", "table_name", "data_type", "type",
+        "column",
+        "column_name",
+        "field",
+        "field_name",
+        "description",
+        "definition",
+        "meaning",
+        "notes",
+        "table",
+        "table_name",
+        "data_type",
+        "type",
     }
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -280,7 +302,8 @@ def _match_yaml_keys(
                 key_lower = str(key).lower()
                 if key_lower in table_set:
                     matches[key_lower] = max(
-                        matches.get(key_lower, 0), 0.85,
+                        matches.get(key_lower, 0),
+                        0.85,
                     )
     except Exception:
         pass

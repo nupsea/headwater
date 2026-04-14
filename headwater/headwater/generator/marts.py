@@ -40,6 +40,7 @@ def _get_thresholds() -> tuple[int, int, int, int]:
     """Return (min_rels, min_metric_cols, min_rows_entity, min_rows_agg) from settings."""
     try:
         from headwater.core.config import get_settings
+
         s = get_settings()
         return (
             s.mart_min_relationships,
@@ -85,14 +86,8 @@ class PatternMatcher:
         min_rels, min_metrics, min_rows_entity, min_rows_agg = _get_thresholds()
 
         # Build FK set: (from_table, to_table) pairs
-        fk_pairs = {
-            (r.from_table, r.to_table)
-            for r in discovery.relationships
-        }
-        fk_pairs_reverse = {
-            (r.to_table, r.from_table)
-            for r in discovery.relationships
-        }
+        fk_pairs = {(r.from_table, r.to_table) for r in discovery.relationships}
+        fk_pairs_reverse = {(r.to_table, r.from_table) for r in discovery.relationships}
         all_fk_pairs = fk_pairs | fk_pairs_reverse
 
         # Count relationships per table
@@ -104,9 +99,7 @@ class PatternMatcher:
         for table in discovery.tables:
             temporal_cols = self._get_temporal_cols(table.columns)
             metric_cols = self._get_metric_cols(table.columns)
-            dimension_tables = self._get_dimension_tables(
-                table.name, all_fk_pairs, discovery
-            )
+            dimension_tables = self._get_dimension_tables(table.name, all_fk_pairs, discovery)
             table_rels = rel_count.get(table.name, 0)
 
             # Archetype 1: period_comparison
@@ -115,42 +108,41 @@ class PatternMatcher:
                 candidates.append(candidate)
                 logger.debug(
                     "period_comparison candidate: %s (temporal=%s)",
-                    table.name, temporal_cols,
+                    table.name,
+                    temporal_cols,
                 )
 
             # Archetype 2: entity_summary (quality gate applies)
             if metric_cols and dimension_tables:
                 passes_gate = (
-                    table_rels >= min_rels
-                    or len(metric_cols) >= min_metrics
+                    table_rels >= min_rels or len(metric_cols) >= min_metrics
                 ) and table.row_count >= min_rows_entity
                 if passes_gate:
-                    candidate = self._build_entity_summary(
-                        table, metric_cols, dimension_tables
-                    )
+                    candidate = self._build_entity_summary(table, metric_cols, dimension_tables)
                     candidates.append(candidate)
                     logger.debug(
                         "entity_summary candidate: %s (metrics=%s, dims=%s)",
-                        table.name, metric_cols, dimension_tables,
+                        table.name,
+                        metric_cols,
+                        dimension_tables,
                     )
                 else:
                     logger.debug(
                         "Skipped entity_summary candidate for %s: "
                         "insufficient evidence (rels=%d, rows=%d)",
-                        table.name, table_rels, table.row_count,
+                        table.name,
+                        table_rels,
+                        table.row_count,
                     )
 
             # Archetype 3: aggregation (numeric columns, no FK context, enough rows)
-            if (
-                len(metric_cols) >= 2
-                and not dimension_tables
-                and table.row_count >= min_rows_agg
-            ):
+            if len(metric_cols) >= 2 and not dimension_tables and table.row_count >= min_rows_agg:
                 candidate = self._build_aggregation(table, metric_cols)
                 candidates.append(candidate)
                 logger.debug(
                     "aggregation candidate: %s (metrics=%s)",
-                    table.name, metric_cols,
+                    table.name,
+                    metric_cols,
                 )
 
         return candidates
@@ -159,8 +151,7 @@ class PatternMatcher:
         result = []
         for col in columns:
             is_temporal = col.semantic_type in _TEMPORAL_SEMANTIC_TYPES or (
-                col.semantic_type is None
-                and any(p in col.name.lower() for p in _TEMPORAL_PATTERNS)
+                col.semantic_type is None and any(p in col.name.lower() for p in _TEMPORAL_PATTERNS)
             )
             if is_temporal:
                 result.append(col.name)
@@ -262,16 +253,13 @@ def _render_period_comparison(
 ) -> GeneratedModel:
     """Render a period_comparison candidate to a GeneratedModel with SQL."""
     table_name = candidate.candidate_tables[0]
-    time_cols = [c for c in candidate.candidate_columns if any(
-        p in c.lower() for p in _TEMPORAL_PATTERNS
-    )]
+    time_cols = [
+        c for c in candidate.candidate_columns if any(p in c.lower() for p in _TEMPORAL_PATTERNS)
+    ]
     metric_cols = [c for c in candidate.candidate_columns if c not in time_cols]
     time_col = time_cols[0] if time_cols else "created_at"
 
-    metric_lines = "\n".join(
-        f'    AVG("{c}") AS avg_{c},'
-        for c in metric_cols[:5]
-    )
+    metric_lines = "\n".join(f'    AVG("{c}") AS avg_{c},' for c in metric_cols[:5])
     if not metric_lines:
         metric_lines = "    COUNT(*) AS record_count,"
 
@@ -322,16 +310,14 @@ def _render_entity_summary(
     metric_cols = candidate.candidate_columns
 
     metric_lines = "\n".join(
-        f'    AVG(f."{c}") AS avg_{c},\n    SUM(f."{c}") AS total_{c},'
-        for c in metric_cols[:3]
+        f'    AVG(f."{c}") AS avg_{c},\n    SUM(f."{c}") AS total_{c},' for c in metric_cols[:3]
     )
     if not metric_lines:
         metric_lines = "    COUNT(*) AS record_count,"
 
     dim_key = dim_table[:-1] if dim_table.endswith("s") else dim_table
     join_clause = (
-        f"JOIN staging.stg_{dim_table} d ON f.{dim_key}_id = d.{dim_key}_id"
-        if dim_table else ""
+        f"JOIN staging.stg_{dim_table} d ON f.{dim_key}_id = d.{dim_key}_id" if dim_table else ""
     )
 
     sql = f"""-- Mart: {candidate.proposed_name}

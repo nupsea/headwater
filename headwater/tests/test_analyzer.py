@@ -70,23 +70,39 @@ class TestHeuristics:
         from headwater.core.models import Relationship
 
         tables = [
-            TableInfo(name="orders", row_count=100, columns=[
-                ColumnInfo(name="order_id", dtype="varchar"),
-            ]),
-            TableInfo(name="order_items", row_count=500, columns=[
-                ColumnInfo(name="item_id", dtype="varchar"),
-                ColumnInfo(name="order_id", dtype="varchar"),
-            ]),
-            TableInfo(name="customers", row_count=50, columns=[
-                ColumnInfo(name="customer_id", dtype="varchar"),
-            ]),
+            TableInfo(
+                name="orders",
+                row_count=100,
+                columns=[
+                    ColumnInfo(name="order_id", dtype="varchar"),
+                ],
+            ),
+            TableInfo(
+                name="order_items",
+                row_count=500,
+                columns=[
+                    ColumnInfo(name="item_id", dtype="varchar"),
+                    ColumnInfo(name="order_id", dtype="varchar"),
+                ],
+            ),
+            TableInfo(
+                name="customers",
+                row_count=50,
+                columns=[
+                    ColumnInfo(name="customer_id", dtype="varchar"),
+                ],
+            ),
         ]
         rels = [
             Relationship(
-                from_table="order_items", from_column="order_id",
-                to_table="orders", to_column="order_id",
-                type="many_to_one", confidence=1.0,
-                referential_integrity=1.0, source="inferred_name",
+                from_table="order_items",
+                from_column="order_id",
+                to_table="orders",
+                to_column="order_id",
+                type="many_to_one",
+                confidence=1.0,
+                referential_integrity=1.0,
+                source="inferred_name",
             ),
         ]
         result = classify_domains(tables, rels)
@@ -98,18 +114,26 @@ class TestHeuristics:
     def test_classify_domains_vocabulary_cluster(self):
         """Unconnected tables with shared column tokens are grouped together."""
         tables = [
-            TableInfo(name="sales_east", row_count=10, columns=[
-                ColumnInfo(name="region", dtype="varchar"),
-                ColumnInfo(name="product", dtype="varchar"),
-                ColumnInfo(name="revenue", dtype="float64"),
-                ColumnInfo(name="quarter", dtype="varchar"),
-            ]),
-            TableInfo(name="sales_west", row_count=10, columns=[
-                ColumnInfo(name="region", dtype="varchar"),
-                ColumnInfo(name="product", dtype="varchar"),
-                ColumnInfo(name="revenue", dtype="float64"),
-                ColumnInfo(name="quarter", dtype="varchar"),
-            ]),
+            TableInfo(
+                name="sales_east",
+                row_count=10,
+                columns=[
+                    ColumnInfo(name="region", dtype="varchar"),
+                    ColumnInfo(name="product", dtype="varchar"),
+                    ColumnInfo(name="revenue", dtype="float64"),
+                    ColumnInfo(name="quarter", dtype="varchar"),
+                ],
+            ),
+            TableInfo(
+                name="sales_west",
+                row_count=10,
+                columns=[
+                    ColumnInfo(name="region", dtype="varchar"),
+                    ColumnInfo(name="product", dtype="varchar"),
+                    ColumnInfo(name="revenue", dtype="float64"),
+                    ColumnInfo(name="quarter", dtype="varchar"),
+                ],
+            ),
         ]
         result = classify_domains(tables, [])
         # Should be grouped together via shared vocabulary
@@ -120,19 +144,31 @@ class TestHeuristics:
         from headwater.core.models import Relationship
 
         tables = [
-            TableInfo(name="aqs_sites", row_count=10, columns=[
-                ColumnInfo(name="site_id", dtype="varchar"),
-            ]),
-            TableInfo(name="aqs_monitors", row_count=20, columns=[
-                ColumnInfo(name="monitor_id", dtype="varchar"),
-            ]),
+            TableInfo(
+                name="aqs_sites",
+                row_count=10,
+                columns=[
+                    ColumnInfo(name="site_id", dtype="varchar"),
+                ],
+            ),
+            TableInfo(
+                name="aqs_monitors",
+                row_count=20,
+                columns=[
+                    ColumnInfo(name="monitor_id", dtype="varchar"),
+                ],
+            ),
         ]
         rels = [
             Relationship(
-                from_table="aqs_monitors", from_column="site_id",
-                to_table="aqs_sites", to_column="site_id",
-                type="many_to_one", confidence=1.0,
-                referential_integrity=1.0, source="inferred_name",
+                from_table="aqs_monitors",
+                from_column="site_id",
+                to_table="aqs_sites",
+                to_column="site_id",
+                type="many_to_one",
+                confidence=1.0,
+                referential_integrity=1.0,
+                source="inferred_name",
             ),
         ]
         result = classify_domains(tables, rels)
@@ -297,8 +333,11 @@ class TestRefineSemanticType:
         """complaint_number: name-pattern says 'dimension' but 0.95 uniqueness -> 'id'."""
         col = ColumnInfo(name="complaint_number", dtype="int64", semantic_type="dimension")
         profile = ColumnProfile(
-            table_name="t", column_name="complaint_number",
-            dtype="int64", distinct_count=9500, uniqueness_ratio=0.95,
+            table_name="t",
+            column_name="complaint_number",
+            dtype="int64",
+            distinct_count=9500,
+            uniqueness_ratio=0.95,
         )
         assert _refine_semantic_type(col, profile, 10000) == "id"
 
@@ -306,8 +345,10 @@ class TestRefineSemanticType:
         """county: no name-pattern match, 60 distinct / 10K rows -> 'dimension'."""
         col = ColumnInfo(name="county", dtype="varchar", semantic_type=None)
         profile = ColumnProfile(
-            table_name="t", column_name="county",
-            dtype="varchar", distinct_count=60,
+            table_name="t",
+            column_name="county",
+            dtype="varchar",
+            distinct_count=60,
         )
         assert _refine_semantic_type(col, profile, 10000) == "dimension"
 
@@ -315,8 +356,11 @@ class TestRefineSemanticType:
         """response_days: no pattern, int64, 500 distinct, has mean -> 'metric'."""
         col = ColumnInfo(name="response_days", dtype="int64", semantic_type=None)
         profile = ColumnProfile(
-            table_name="t", column_name="response_days",
-            dtype="int64", distinct_count=500, mean=15.3,
+            table_name="t",
+            column_name="response_days",
+            dtype="int64",
+            distinct_count=500,
+            mean=15.3,
         )
         assert _refine_semantic_type(col, profile, 10000) == "metric"
 
@@ -324,8 +368,11 @@ class TestRefineSemanticType:
         """latitude: already 'geographic' from name-pattern, should not change."""
         col = ColumnInfo(name="latitude", dtype="float64", semantic_type="geographic")
         profile = ColumnProfile(
-            table_name="t", column_name="latitude",
-            dtype="float64", distinct_count=8000, uniqueness_ratio=0.8,
+            table_name="t",
+            column_name="latitude",
+            dtype="float64",
+            distinct_count=8000,
+            uniqueness_ratio=0.8,
         )
         assert _refine_semantic_type(col, profile, 10000) == "geographic"
 
@@ -333,8 +380,11 @@ class TestRefineSemanticType:
         """severity_score: already 'metric' from name-pattern, should not change."""
         col = ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric")
         profile = ColumnProfile(
-            table_name="t", column_name="severity_score",
-            dtype="float64", distinct_count=500, mean=5.2,
+            table_name="t",
+            column_name="severity_score",
+            dtype="float64",
+            distinct_count=500,
+            mean=5.2,
         )
         assert _refine_semantic_type(col, profile, 10000) == "metric"
 
@@ -342,8 +392,11 @@ class TestRefineSemanticType:
         """Unnamed numeric column with 0.95 uniqueness -> 'id'."""
         col = ColumnInfo(name="record_key", dtype="int64", semantic_type=None)
         profile = ColumnProfile(
-            table_name="t", column_name="record_key",
-            dtype="int64", distinct_count=9500, uniqueness_ratio=0.95,
+            table_name="t",
+            column_name="record_key",
+            dtype="int64",
+            distinct_count=9500,
+            uniqueness_ratio=0.95,
         )
         assert _refine_semantic_type(col, profile, 10000) == "id"
 
@@ -352,16 +405,20 @@ class TestRefineSemanticType:
         col = ColumnInfo(name="category", dtype="varchar", semantic_type=None)
         # 15 distinct values > 10 threshold for 100-row table
         profile = ColumnProfile(
-            table_name="t", column_name="category",
-            dtype="varchar", distinct_count=15,
+            table_name="t",
+            column_name="category",
+            dtype="varchar",
+            distinct_count=15,
         )
         # Should NOT be dimension (15 > 10)
         assert _refine_semantic_type(col, profile, 100) is None
 
         # 8 distinct values <= 10 threshold
         profile2 = ColumnProfile(
-            table_name="t", column_name="category",
-            dtype="varchar", distinct_count=8,
+            table_name="t",
+            column_name="category",
+            dtype="varchar",
+            distinct_count=8,
         )
         assert _refine_semantic_type(col, profile2, 100) == "dimension"
 
@@ -379,21 +436,32 @@ class TestRefineSemanticType:
         )
         profiles = [
             ColumnProfile(
-                table_name="complaints", column_name="complaint_number",
-                dtype="int64", distinct_count=9500, uniqueness_ratio=0.95,
+                table_name="complaints",
+                column_name="complaint_number",
+                dtype="int64",
+                distinct_count=9500,
+                uniqueness_ratio=0.95,
             ),
             ColumnProfile(
-                table_name="complaints", column_name="county",
-                dtype="varchar", distinct_count=60,
+                table_name="complaints",
+                column_name="county",
+                dtype="varchar",
+                distinct_count=60,
             ),
             ColumnProfile(
-                table_name="complaints", column_name="latitude",
-                dtype="float64", distinct_count=8000, uniqueness_ratio=0.8,
+                table_name="complaints",
+                column_name="latitude",
+                dtype="float64",
+                distinct_count=8000,
+                uniqueness_ratio=0.8,
                 mean=40.7,
             ),
             ColumnProfile(
-                table_name="complaints", column_name="severity_score",
-                dtype="float64", distinct_count=500, mean=5.2,
+                table_name="complaints",
+                column_name="severity_score",
+                dtype="float64",
+                distinct_count=500,
+                mean=5.2,
             ),
         ]
         enriched = enrich_tables([table], profiles, [])

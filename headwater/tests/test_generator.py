@@ -132,8 +132,11 @@ def _sample_profiles() -> list[ColumnProfile]:
             distinct_count=5,
             uniqueness_ratio=0.01,
             top_values=[
-                ("restaurant", 200), ("school", 120), ("factory", 80),
-                ("park", 60), ("hospital", 40),
+                ("restaurant", 200),
+                ("school", 120),
+                ("factory", 80),
+                ("park", 60),
+                ("hospital", 40),
             ],
         ),
         # Numeric column with range
@@ -329,7 +332,9 @@ class TestMartGenerator:
                     row_count=1000,
                     columns=[
                         ColumnInfo(name="order_id", dtype="varchar", semantic_type="id"),
-                        ColumnInfo(name="customer_id", dtype="varchar", semantic_type="foreign_key"),  # noqa: E501
+                        ColumnInfo(
+                            name="customer_id", dtype="varchar", semantic_type="foreign_key"
+                        ),  # noqa: E501
                         ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
                         ColumnInfo(name="quantity", dtype="int64", semantic_type="metric"),
                     ],
@@ -414,9 +419,7 @@ class TestContractGenerator:
         """Range contract should have headroom beyond observed values."""
         profiles = _sample_profiles()
         rules = generate_contracts(profiles)
-        score_range = next(
-            r for r in rules if r.rule_type == "range" and r.column_name == "score"
-        )
+        score_range = next(r for r in rules if r.rule_type == "range" and r.column_name == "score")
         # Observed range is 20-100, headroom = 40, so lower=0 (clamped), upper=140
         assert "BETWEEN" in score_range.expression
 
@@ -433,9 +436,7 @@ class TestContractGenerator:
         """score has 90 distinct values -- should NOT get cardinality contract."""
         profiles = _sample_profiles()
         rules = generate_contracts(profiles)
-        score_card = [
-            r for r in rules if r.rule_type == "cardinality" and r.column_name == "score"
-        ]
+        score_card = [r for r in rules if r.rule_type == "cardinality" and r.column_name == "score"]
         assert len(score_card) == 0
 
     def test_all_proposed_status(self):

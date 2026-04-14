@@ -190,13 +190,19 @@ class TestBatchChecking:
         con = _make_con()
         rules = [
             ContractRule(
-                id="a1", model_name="stg_items", column_name="item_id",
-                rule_type="not_null", expression='"item_id" IS NOT NULL',
+                id="a1",
+                model_name="stg_items",
+                column_name="item_id",
+                rule_type="not_null",
+                expression='"item_id" IS NOT NULL',
                 status="observing",
             ),
             ContractRule(
-                id="a2", model_name="stg_items", column_name="name",
-                rule_type="not_null", expression='"name" IS NOT NULL',
+                id="a2",
+                model_name="stg_items",
+                column_name="name",
+                rule_type="not_null",
+                expression='"name" IS NOT NULL',
                 status="proposed",  # Should be skipped
             ),
         ]
@@ -208,13 +214,19 @@ class TestBatchChecking:
         con = _make_con()
         rules = [
             ContractRule(
-                id="b1", model_name="stg_items", column_name="item_id",
-                rule_type="not_null", expression='"item_id" IS NOT NULL',
+                id="b1",
+                model_name="stg_items",
+                column_name="item_id",
+                rule_type="not_null",
+                expression='"item_id" IS NOT NULL',
                 status="observing",
             ),
             ContractRule(
-                id="b2", model_name="stg_items", column_name="name",
-                rule_type="not_null", expression='"name" IS NOT NULL',
+                id="b2",
+                model_name="stg_items",
+                column_name="name",
+                rule_type="not_null",
+                expression='"name" IS NOT NULL',
                 status="proposed",
             ),
         ]
@@ -224,8 +236,11 @@ class TestBatchChecking:
     def test_error_handling(self):
         con = _make_con()
         rule = ContractRule(
-            id="err1", model_name="nonexistent_table", column_name="x",
-            rule_type="not_null", expression='"x" IS NOT NULL',
+            id="err1",
+            model_name="nonexistent_table",
+            column_name="x",
+            rule_type="not_null",
+            expression='"x" IS NOT NULL',
             status="observing",
         )
         result = check_contract(con, rule)
@@ -243,13 +258,19 @@ class TestQualityReport:
         con = _make_con()
         rules = [
             ContractRule(
-                id="r1", model_name="stg_items", column_name="item_id",
-                rule_type="not_null", expression='"item_id" IS NOT NULL',
+                id="r1",
+                model_name="stg_items",
+                column_name="item_id",
+                rule_type="not_null",
+                expression='"item_id" IS NOT NULL',
                 status="observing",
             ),
             ContractRule(
-                id="r2", model_name="stg_items", column_name="name",
-                rule_type="not_null", expression='"name" IS NOT NULL',
+                id="r2",
+                model_name="stg_items",
+                column_name="name",
+                rule_type="not_null",
+                expression='"name" IS NOT NULL',
                 status="observing",
             ),
         ]
@@ -276,8 +297,11 @@ class TestRowCountCheck:
     def test_passes_gte(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc1", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) >= 5",
+            id="rc1",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) >= 5",
             status="observing",
         )
         result = check_contract(con, rule)
@@ -287,8 +311,11 @@ class TestRowCountCheck:
     def test_fails_gte(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc2", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) >= 10",
+            id="rc2",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) >= 10",
             status="observing",
         )
         result = check_contract(con, rule)
@@ -297,8 +324,11 @@ class TestRowCountCheck:
     def test_passes_lte(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc3", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) <= 10",
+            id="rc3",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) <= 10",
             status="observing",
         )
         result = check_contract(con, rule)
@@ -307,8 +337,11 @@ class TestRowCountCheck:
     def test_fails_lte(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc4", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) <= 3",
+            id="rc4",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) <= 3",
             status="observing",
         )
         result = check_contract(con, rule)
@@ -317,8 +350,11 @@ class TestRowCountCheck:
     def test_passes_gt(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc5", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) > 4",
+            id="rc5",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) > 4",
             status="observing",
         )
         result = check_contract(con, rule)
@@ -327,8 +363,11 @@ class TestRowCountCheck:
     def test_passes_lt(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc6", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) < 10",
+            id="rc6",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) < 10",
             status="observing",
         )
         result = check_contract(con, rule)
@@ -337,8 +376,11 @@ class TestRowCountCheck:
     def test_passes_eq(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc7", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) == 5",
+            id="rc7",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) == 5",
             status="observing",
         )
         result = check_contract(con, rule)
@@ -347,8 +389,11 @@ class TestRowCountCheck:
     def test_fails_eq(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc8", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) == 999",
+            id="rc8",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) == 999",
             status="observing",
         )
         result = check_contract(con, rule)
@@ -357,8 +402,11 @@ class TestRowCountCheck:
     def test_passes_between(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc9", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) BETWEEN 3 AND 10",
+            id="rc9",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) BETWEEN 3 AND 10",
             status="observing",
         )
         result = check_contract(con, rule)
@@ -367,8 +415,11 @@ class TestRowCountCheck:
     def test_fails_between(self):
         con = _make_con()
         rule = ContractRule(
-            id="rc10", model_name="stg_items", column_name=None,
-            rule_type="row_count", expression="COUNT(*) BETWEEN 10 AND 20",
+            id="rc10",
+            model_name="stg_items",
+            column_name=None,
+            rule_type="row_count",
+            expression="COUNT(*) BETWEEN 10 AND 20",
             status="observing",
         )
         result = check_contract(con, rule)
