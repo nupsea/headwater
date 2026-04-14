@@ -18,13 +18,17 @@ class HeadwaterSettings(BaseSettings):
     data_dir: Path = Path.home() / ".headwater"
 
     # LLM
-    llm_provider: Literal["none", "anthropic", "ollama"] = "none"
+    llm_provider: Literal["none", "anthropic", "ollama", "openai_compat"] = "none"
     llm_api_key: str | None = None
     llm_model: str = "claude-sonnet-4-20250514"
 
     # Ollama (local LLM)
     ollama_base_url: str = "http://localhost:11434"
     ollama_timeout: int = 120  # seconds
+
+    # OpenAI-compatible endpoint (vLLM, Together, Groq, etc.)
+    openai_compat_base_url: str | None = None
+    openai_compat_api_key: str | None = None
 
     # Profiling
     sample_size: int = 50_000
@@ -44,6 +48,14 @@ class HeadwaterSettings(BaseSettings):
     @property
     def analytical_db_path(self) -> Path:
         return self.data_dir / "analytical.duckdb"
+
+    @property
+    def vector_store_path(self) -> Path:
+        return self.data_dir / "vector_store"
+
+    @property
+    def graph_store_path(self) -> Path:
+        return self.data_dir / "graph_store"
 
     def ensure_dirs(self) -> None:
         """Create data directory if it doesn't exist."""
