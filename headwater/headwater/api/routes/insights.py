@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from headwater.api.routes.project import _compute_maturity, _compute_progress
+
 router = APIRouter()
 
 
@@ -248,6 +250,9 @@ async def get_insights(request: Request):
     # --- Model suggestions ---
     model_suggestions = _compute_model_suggestions(tables, profiles, relationships, pipeline)
 
+    # --- Catalog health (v2) ---
+    catalog_health = _compute_catalog_health(request, discovery)
+
     return {
         "data_profile": data_profile,
         "workflow": workflow,
@@ -271,6 +276,7 @@ async def get_insights(request: Request):
         "relationship_map": rel_map,
         "quality_summary": quality_summary,
         "model_suggestions": model_suggestions,
+        "catalog_health": catalog_health,
     }
 
 
@@ -797,3 +803,39 @@ def _compute_model_suggestions(tables, profiles, relationships, pipeline):
             )
 
     return suggestions
+
+
+# ---------------------------------------------------------------------------
+# Catalog health (v2)
+# ---------------------------------------------------------------------------
+
+
+def _compute_catalog_health(request: Request, discovery) -> dict:
+    """Return catalog health metrics for the insights dashboard."""
+    store = request.app.state.metadata_store
+    pipeline = request.app.state.pipeline
+    source_name = discovery.source.name
+
+    metrics = store.get_catalog_metrics(source_name)
+    dimensions = store.get_catalog_dimensions(source_name)
+    entities = store.get_catalog_entities(source_name)
+
+    # Progress and maturity
+    progress = _compute_progress(discovery, pipeline, store, source_name)
+    maturity, maturity_score = _compute_maturity(progress)
+
+    # Project info
+    project = store.get_project(source_name)
+    catalog_confidence = project.get("catalog_confidence", 0.0) if project else 0.0
+
+    return {
+        "metrics_total": len(metrics),
+        "metrics_confirmed": sum(1 for m in metrics if m.get("status") == "confirmed"),
+        "dimensions_total": len(dimensions),
+        "dimensions_confirmed": sum(1 for d in dimensions if d.get("status") == "confirmed"),
+        "entities_total": len(entities),
+        "catalog_confidence": catalog_confidence,
+        "catalog_coverage": progress["catalog_coverage"],
+        "maturity": maturity,
+        "maturity_score": maturity_score,
+    }

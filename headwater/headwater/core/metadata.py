@@ -1711,6 +1711,60 @@ class MetadataStore:
             results.append(r)
         return results
 
+    def update_catalog_metric_status(
+        self,
+        project_id: str,
+        name: str,
+        status: str,
+        confidence: float | None = None,
+        source: str | None = None,
+    ) -> bool:
+        """Update the status (and optionally confidence/source) of a catalog metric."""
+        parts = ["status = ?"]
+        params: list = [status]
+        if confidence is not None:
+            parts.append("confidence = ?")
+            params.append(confidence)
+        if source is not None:
+            parts.append("source = ?")
+            params.append(source)
+        params.extend([name, project_id])
+        cur = self.con.execute(
+            f"UPDATE catalog_metrics SET {', '.join(parts)} WHERE name = ? AND project_id = ?",
+            params,
+        )
+        self.con.commit()
+        return cur.rowcount > 0
+
+    def update_catalog_dimension_status(
+        self,
+        project_id: str,
+        name: str,
+        status: str,
+        confidence: float | None = None,
+        source: str | None = None,
+        synonyms: list[str] | None = None,
+    ) -> bool:
+        """Update the status (and optionally confidence/source/synonyms) of a catalog dimension."""
+        parts = ["status = ?"]
+        params: list = [status]
+        if confidence is not None:
+            parts.append("confidence = ?")
+            params.append(confidence)
+        if source is not None:
+            parts.append("source = ?")
+            params.append(source)
+        if synonyms is not None:
+            parts.append("synonyms_json = ?")
+            params.append(json.dumps(synonyms))
+        params.extend([name, project_id])
+        cur = self.con.execute(
+            f"UPDATE catalog_dimensions SET {', '.join(parts)} WHERE name = ? AND project_id = ?",
+            params,
+        )
+        self.con.commit()
+        return cur.rowcount > 0
+
     def clear_catalog(self, project_id: str) -> None:
         """Delete all catalog entries for a project."""
         self.con.execute("DELETE FROM catalog_metrics WHERE project_id = ?", (project_id,))

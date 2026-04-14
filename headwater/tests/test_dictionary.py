@@ -67,53 +67,86 @@ def tables():
 def profiles():
     return [
         ColumnProfile(
-            table_name="env_complaints", column_name="complaint_id",
-            dtype="int64", distinct_count=5000, uniqueness_ratio=1.0,
+            table_name="env_complaints",
+            column_name="complaint_id",
+            dtype="int64",
+            distinct_count=5000,
+            uniqueness_ratio=1.0,
         ),
         ColumnProfile(
-            table_name="env_complaints", column_name="complaint_type",
-            dtype="varchar", distinct_count=15, uniqueness_ratio=0.003,
+            table_name="env_complaints",
+            column_name="complaint_type",
+            dtype="varchar",
+            distinct_count=15,
+            uniqueness_ratio=0.003,
             top_values=[("noise", 1500), ("air quality", 1200)],
         ),
         ColumnProfile(
-            table_name="env_complaints", column_name="county",
-            dtype="varchar", distinct_count=62, uniqueness_ratio=0.012,
+            table_name="env_complaints",
+            column_name="county",
+            dtype="varchar",
+            distinct_count=62,
+            uniqueness_ratio=0.012,
             top_values=[("kings", 800), ("queens", 700)],
         ),
         ColumnProfile(
-            table_name="env_complaints", column_name="created_date",
-            dtype="timestamp", distinct_count=365, uniqueness_ratio=0.073,
+            table_name="env_complaints",
+            column_name="created_date",
+            dtype="timestamp",
+            distinct_count=365,
+            uniqueness_ratio=0.073,
         ),
         ColumnProfile(
-            table_name="env_complaints", column_name="bin",
-            dtype="int64", distinct_count=4500, uniqueness_ratio=0.9,
+            table_name="env_complaints",
+            column_name="bin",
+            dtype="int64",
+            distinct_count=4500,
+            uniqueness_ratio=0.9,
             mean=3045000.0,
         ),
         ColumnProfile(
-            table_name="env_complaints", column_name="score",
-            dtype="float64", distinct_count=100, uniqueness_ratio=0.02,
+            table_name="env_complaints",
+            column_name="score",
+            dtype="float64",
+            distinct_count=100,
+            uniqueness_ratio=0.02,
             mean=72.5,
         ),
         ColumnProfile(
-            table_name="aqs_sites", column_name="site_id",
-            dtype="int64", distinct_count=200, uniqueness_ratio=1.0,
+            table_name="aqs_sites",
+            column_name="site_id",
+            dtype="int64",
+            distinct_count=200,
+            uniqueness_ratio=1.0,
         ),
         ColumnProfile(
-            table_name="aqs_sites", column_name="state_code",
-            dtype="varchar", distinct_count=5, uniqueness_ratio=0.025,
+            table_name="aqs_sites",
+            column_name="state_code",
+            dtype="varchar",
+            distinct_count=5,
+            uniqueness_ratio=0.025,
         ),
         ColumnProfile(
-            table_name="aqs_sites", column_name="county_code",
-            dtype="varchar", distinct_count=30, uniqueness_ratio=0.15,
+            table_name="aqs_sites",
+            column_name="county_code",
+            dtype="varchar",
+            distinct_count=30,
+            uniqueness_ratio=0.15,
         ),
         ColumnProfile(
-            table_name="aqs_sites", column_name="latitude",
-            dtype="float64", distinct_count=180, uniqueness_ratio=0.9,
+            table_name="aqs_sites",
+            column_name="latitude",
+            dtype="float64",
+            distinct_count=180,
+            uniqueness_ratio=0.9,
             mean=40.7,
         ),
         ColumnProfile(
-            table_name="aqs_sites", column_name="longitude",
-            dtype="float64", distinct_count=180, uniqueness_ratio=0.9,
+            table_name="aqs_sites",
+            column_name="longitude",
+            dtype="float64",
+            distinct_count=180,
+            uniqueness_ratio=0.9,
             mean=-73.9,
         ),
     ]
@@ -123,10 +156,14 @@ def profiles():
 def relationships():
     return [
         Relationship(
-            from_table="env_complaints", from_column="county",
-            to_table="aqs_sites", to_column="county_code",
-            type="many_to_one", confidence=0.8,
-            referential_integrity=0.75, source="inferred_name",
+            from_table="env_complaints",
+            from_column="county",
+            to_table="aqs_sites",
+            to_column="county_code",
+            type="many_to_one",
+            confidence=0.8,
+            referential_integrity=0.75,
+            source="inferred_name",
         ),
     ]
 
@@ -306,10 +343,15 @@ class TestMetadataStoreReview:
         store.upsert_column("t1", "test_src", "col_a", "varchar")
         store.upsert_column("t1", "test_src", "col_b", "int64")
 
-        store.bulk_update_columns("t1", "test_src", [
-            {"name": "col_a", "role": "dimension", "description": "A dim"},
-            {"name": "col_b", "role": "metric", "confidence": 0.95},
-        ], lock=True)
+        store.bulk_update_columns(
+            "t1",
+            "test_src",
+            [
+                {"name": "col_a", "role": "dimension", "description": "A dim"},
+                {"name": "col_b", "role": "metric", "confidence": 0.95},
+            ],
+            lock=True,
+        )
 
         cols = store.get_columns("t1", "test_src")
         a = next(c for c in cols if c["name"] == "col_a")
@@ -324,8 +366,12 @@ class TestMetadataStoreReview:
     def test_upsert_column_with_role_and_confidence(self, store):
         store.upsert_table("t1", "test_src", row_count=100)
         store.upsert_column(
-            "t1", "test_src", "col_a", "varchar",
-            role="dimension", confidence=0.8,
+            "t1",
+            "test_src",
+            "col_a",
+            "varchar",
+            role="dimension",
+            confidence=0.8,
         )
         cols = store.get_columns("t1", "test_src")
         assert cols[0]["role"] == "dimension"
@@ -338,7 +384,10 @@ class TestMetadataStoreReview:
 
         # Simulate re-run upserting the same table
         store.upsert_table(
-            "t1", "test_src", row_count=150, review_status="pending",
+            "t1",
+            "test_src",
+            row_count=150,
+            review_status="pending",
         )
         rows = store.get_tables("test_src")
         # Should still be reviewed, not regressed to pending
@@ -354,7 +403,8 @@ class TestExplorerGating:
     def test_reviewed_tables_filter(self, discovery):
         # Only include aqs_sites
         graph = SchemaGraph(
-            discovery, reviewed_tables={"aqs_sites"},
+            discovery,
+            reviewed_tables={"aqs_sites"},
         )
         assert "aqs_sites" in graph.tables
         assert "env_complaints" not in graph.tables
@@ -373,7 +423,8 @@ class TestExplorerGating:
         from headwater.explorer.query_planner import QueryPlanner
 
         graph = SchemaGraph(
-            discovery, reviewed_tables={"aqs_sites"},
+            discovery,
+            reviewed_tables={"aqs_sites"},
         )
         planner = QueryPlanner(graph)
         # "complaints" should not resolve because env_complaints is excluded
@@ -397,6 +448,7 @@ class TestDictionaryAPI:
 
         # Override lifespan by directly setting state
         import duckdb
+
         app.state.duckdb_con = duckdb.connect(":memory:")
         app.state.metadata_store = MetadataStore(":memory:")
         app.state.metadata_store.init()
@@ -411,8 +463,11 @@ class TestDictionaryAPI:
 
         # Enrich so columns have confidence/role
         from headwater.analyzer.heuristics import enrich_tables
+
         discovery.tables = enrich_tables(
-            discovery.tables, discovery.profiles, discovery.relationships,
+            discovery.tables,
+            discovery.profiles,
+            discovery.relationships,
         )
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -450,12 +505,15 @@ class TestDictionaryAPI:
         assert data["reviewed"] == 0
 
     def test_review_and_confirm_table(self, client):
-        resp = client.post("/api/dictionary/env_complaints/review", json={
-            "columns": [
-                {"name": "county", "role": "dimension", "description": "County name"},
-            ],
-            "confirm": True,
-        })
+        resp = client.post(
+            "/api/dictionary/env_complaints/review",
+            json={
+                "columns": [
+                    {"name": "county", "role": "dimension", "description": "County name"},
+                ],
+                "confirm": True,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["review_status"] == "reviewed"
@@ -509,20 +567,21 @@ class TestDictionaryAPI:
                 assert col["confidence"] >= 0.85
                 assert col["role"] == "identifier"
 
-    def test_explore_suggestions_gate(self, client):
-        """Suggestions should flag review_required when no tables are reviewed."""
+    def test_explore_suggestions_no_gate(self, client):
+        """v2: Suggestions are returned even when no tables are reviewed."""
         resp = client.get("/api/explore/suggestions")
         assert resp.status_code == 200
         data = resp.json()
-        assert data.get("review_required") is True
+        # No gate -- review_pct signals progress, not a blocker
+        assert "review_pct" in data
+        assert data["review_pct"] == 0.0
 
     def test_explore_after_review(self, client):
-        """After confirming all, review_required should be absent or False."""
+        """After confirming all, review_pct should be 100%."""
         client.post("/api/dictionary/confirm-all")
         resp = client.get("/api/explore/suggestions")
         data = resp.json()
-        # review_required should be False (or absent) when all reviewed
-        assert data.get("review_required") in (False, None)
+        assert data["review_pct"] == 100.0
 
 
 # ── ReviewSummary model tests ──────────────────────────────────────────────

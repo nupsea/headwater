@@ -85,12 +85,8 @@ export default function DataPage() {
   const [queryLoading, setQueryLoading] = useState(false);
   const [queryError, setQueryError] = useState("");
 
-  // Track client mount to avoid hydration mismatches
-  const [mounted, setMounted] = useState(false);
-
   // Load catalog from DuckDB on mount
   useEffect(() => {
-    setMounted(true);
     setCatalogLoading(true);
     api
       .dataCatalog()
@@ -375,7 +371,8 @@ export default function DataPage() {
               </div>
               <button
                 onClick={loadPreview}
-                disabled={!mounted || !selectedTable || previewLoading}
+                disabled={selectedTable === "" || previewLoading}
+                suppressHydrationWarning
                 className="px-4 py-1.5 bg-foreground text-background rounded-lg text-sm font-medium disabled:opacity-50 hover:opacity-90 transition-opacity"
               >
                 {previewLoading ? "Loading..." : "Load"}
@@ -428,7 +425,8 @@ export default function DataPage() {
                 </span>
                 <button
                   onClick={runQuery}
-                  disabled={!mounted || !sql.trim() || queryLoading}
+                  disabled={sql.trim() === "" || queryLoading}
+                  suppressHydrationWarning
                   className="px-4 py-1.5 bg-foreground text-background rounded-lg text-sm font-medium disabled:opacity-50 hover:opacity-90 transition-opacity"
                 >
                   {queryLoading ? "Running..." : "Run Query"}

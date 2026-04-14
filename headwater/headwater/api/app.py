@@ -18,10 +18,13 @@ from headwater.api.routes import (
     drift,
     execute,
     explore,
+    graph,
     insights,
     models,
     pipeline,
+    project,
     quality,
+    settings,
 )
 from headwater.core.config import get_settings
 from headwater.core.metadata import MetadataStore
@@ -131,6 +134,9 @@ def create_app(*, in_memory: bool = False) -> FastAPI:
     app.include_router(pipeline.router, prefix="/api", tags=["pipeline"])
     app.include_router(drift.router, prefix="/api", tags=["drift"])
     app.include_router(confidence.router, prefix="/api", tags=["confidence"])
+    app.include_router(project.router, prefix="/api", tags=["project"])
+    app.include_router(graph.router, prefix="/api", tags=["graph"])
+    app.include_router(settings.router, prefix="/api", tags=["settings"])
 
     @app.get("/api/status")
     async def api_status():
