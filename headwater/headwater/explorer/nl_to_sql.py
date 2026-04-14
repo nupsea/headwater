@@ -85,13 +85,14 @@ def ask(
     suggestions: list[SuggestedQuestion] | None = None,
     provider: LLMProvider | None = None,
     reviewed_tables: set[str] | None = None,
+    catalog: Any | None = None,
+    vector_store: Any | None = None,
+    project_id: str | None = None,
 ) -> ExplorationResult:
     """Translate a natural language question to SQL, execute it, and return results.
 
-    When *reviewed_tables* is provided, only those tables are available for
-    query planning. This gates the explorer on the data dictionary review.
-
-    Strategy:
+    Strategy (v2 -- catalog-first):
+    0. Try catalog decomposer (ontology-driven, deterministic SQL).
     1. Check if the question matches a suggested question with a pre-built SQL hint.
     2. Try the QueryPlanner (schema-graph-based entity resolution + SQL generation).
     3. Fall back to legacy heuristic SQL generation.
@@ -100,17 +101,47 @@ def ask(
     6. Execute against DuckDB.
     7. If execution fails and LLM is available, auto-repair the query (up to 3 attempts).
     8. Return results with visualization recommendation.
+
+    The reviewed_tables gate is no longer enforced -- exploration always works.
+    Low-confidence results show warnings instead of blocking.
     """
-    # Gate: if reviewed_tables is provided but empty, block exploration
-    if reviewed_tables is not None and len(reviewed_tables) == 0:
-        return ExplorationResult(
-            question=question,
-            sql="",
-            error=(
-                "No tables have been reviewed yet. "
-                "Visit the Data Dictionary to review table metadata before exploring."
-            ),
+    logger.info("Explorer ask: %r", question)
+
+    # Strategy 0: Catalog decomposer (v2 -- ontology-driven)
+    decomposition = None
+    if catalog is not None:
+        decomposition = _catalog_decompose(
+            question,
+            catalog,
+            vector_store,
+            project_id,
         )
+        if decomposition and decomposition.status == "resolved" and decomposition.sql:
+            logger.info(
+                "Catalog resolved (confidence=%.2f): %s",
+                decomposition.confidence,
+                decomposition.explanation,
+            )
+            sql = decomposition.sql
+            # Execute the catalog-generated SQL
+            result = _execute_query(question, sql, con)
+            if not result.error:
+                result.warnings = decomposition.warnings
+                return result
+            # If execution fails, log and fall through to other strategies
+            logger.warning(
+                "Catalog SQL execution failed: %s -- falling through",
+                result.error,
+            )
+        elif decomposition and decomposition.status == "options":
+            # Return disambiguation options as ExplorationResult
+            logger.info("Catalog returned options for disambiguation")
+            return ExplorationResult(
+                question=question,
+                sql="",
+                error=decomposition.explanation,
+                warnings=decomposition.warnings,
+            )
 
     has_llm = provider is not None and not isinstance(provider, NoLLMProvider)
     context = _build_context(discovery, models or []) if has_llm else ""
@@ -121,7 +152,10 @@ def ask(
     # Try QueryPlanner (schema-graph-based, handles cross-table joins)
     if sql is None:
         sql = _planned_sql(
-            question, discovery, models or [], con=con,
+            question,
+            discovery,
+            models or [],
+            con=con,
             reviewed_tables=reviewed_tables,
         )
 
@@ -152,9 +186,7 @@ def ask(
         )
 
     # Grounding check: verify question terms exist in schema + generated SQL
-    warnings = _check_grounding(
-        question, discovery, models or [], sql, suggestions or []
-    )
+    warnings = _check_grounding(question, discovery, models or [], sql, suggestions or [])
 
     # Execute (with auto-repair if LLM is available)
     result = _execute_query(question, sql, con)
@@ -164,6 +196,41 @@ def ask(
 
     result.warnings = warnings
     return result
+
+
+# ---------------------------------------------------------------------------
+# Catalog decomposition (v2)
+# ---------------------------------------------------------------------------
+
+
+def _catalog_decompose(
+    question: str,
+    catalog: Any,
+    vector_store: Any | None,
+    project_id: str | None,
+) -> Any | None:
+    """Try to decompose the question using the semantic catalog.
+
+    Returns a DecompositionResult or None if decomposition is not possible.
+    """
+    try:
+        from headwater.explorer.decomposition import QueryDecomposer
+
+        decomposer = QueryDecomposer(catalog)
+        result = decomposer.decompose(
+            question,
+            vector_store=vector_store,
+            project_id=project_id,
+        )
+        logger.info(
+            "Catalog decomposition: status=%s, confidence=%.2f",
+            result.status,
+            result.confidence,
+        )
+        return result
+    except Exception:
+        logger.exception("Catalog decomposition failed")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +251,7 @@ def _repair_loop(
     Sends the error + original SQL + schema context to the LLM and asks it
     to fix the query. Retries up to MAX_REPAIR_ATTEMPTS times.
     """
-    repair_history: list[dict[str, str]] = [
-        {"sql": original_sql, "error": original_error}
-    ]
+    repair_history: list[dict[str, str]] = [{"sql": original_sql, "error": original_error}]
 
     current_sql = original_sql
     current_error = original_error
@@ -295,13 +360,69 @@ def _match_suggestion(
 
 
 _STOP_WORDS = {
-    "what", "is", "the", "a", "an", "are", "how", "do", "does", "which",
-    "where", "when", "who", "in", "on", "by", "for", "to", "of", "and",
-    "or", "from", "with", "that", "this", "there", "have", "has", "was",
-    "were", "be", "been", "being", "my", "your", "their", "its",
-    "we", "our", "us", "i", "me", "more", "less", "than", "not", "no",
-    "one", "ones", "other", "each", "every", "any", "some", "all",
-    "give", "tell", "can", "could", "would", "should", "please", "just",
+    "what",
+    "is",
+    "the",
+    "a",
+    "an",
+    "are",
+    "how",
+    "do",
+    "does",
+    "which",
+    "where",
+    "when",
+    "who",
+    "in",
+    "on",
+    "by",
+    "for",
+    "to",
+    "of",
+    "and",
+    "or",
+    "from",
+    "with",
+    "that",
+    "this",
+    "there",
+    "have",
+    "has",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "my",
+    "your",
+    "their",
+    "its",
+    "we",
+    "our",
+    "us",
+    "i",
+    "me",
+    "more",
+    "less",
+    "than",
+    "not",
+    "no",
+    "one",
+    "ones",
+    "other",
+    "each",
+    "every",
+    "any",
+    "some",
+    "all",
+    "give",
+    "tell",
+    "can",
+    "could",
+    "would",
+    "should",
+    "please",
+    "just",
 }
 
 
@@ -350,13 +471,22 @@ def _planned_sql(
 
 # Question patterns that indicate what kind of query to build
 _TREND_WORDS = {
-    "trend", "trends", "trending", "trended",
-    "increasing", "decreasing", "growing", "growth",
-    "over", "time", "changing",
+    "trend",
+    "trends",
+    "trending",
+    "trended",
+    "increasing",
+    "decreasing",
+    "growing",
+    "growth",
+    "over",
+    "time",
+    "changing",
 }
 _COUNT_WORDS = {"how", "many", "count", "total", "number"}
 _BREAKDOWN_WORDS = {"by", "across", "per", "breakdown", "break", "distribution", "distributed"}
 _TOP_WORDS = {"top", "most", "highest", "worst", "best", "largest", "lowest", "least", "smallest"}
+
 
 def _resolve_table_ref(
     table_name: str,
@@ -410,22 +540,21 @@ def _heuristic_sql(
     # Prefer actual date/timestamp columns for trends (higher granularity) over
     # name-only matches like "year" or "month" which produce few groups.
     _temporal_raw = [
-        c for c in table.columns
+        c
+        for c in table.columns
         if c.dtype in ("timestamp", "date")
         or c.semantic_type == "temporal"
         or re.search(r"(date|time|month|year|day|week|quarter|_at$)", c.name, re.IGNORECASE)
     ]
     temporal_cols = sorted(
         _temporal_raw,
-        key=lambda c: (0 if c.dtype in ("timestamp", "date") else 1),
+        key=lambda c: 0 if c.dtype in ("timestamp", "date") else 1,
     )
     metric_cols = [
-        c for c in table.columns
-        if _shared_is_metric(c, profile_index.get((table.name, c.name)))
+        c for c in table.columns if _shared_is_metric(c, profile_index.get((table.name, c.name)))
     ]
     dimension_cols = [
-        c for c in table.columns
-        if _shared_is_dimension(c, profile_index.get((table.name, c.name)))
+        c for c in table.columns if _shared_is_dimension(c, profile_index.get((table.name, c.name)))
     ]
 
     if con is not None:
@@ -447,14 +576,26 @@ def _heuristic_sql(
     # Step 2b: If we have a FK relationship, build a JOIN query
     if join_rel is not None and secondary is not None:
         return _build_join_sql(
-            table, secondary, join_rel, q_words, con, models,
+            table,
+            secondary,
+            join_rel,
+            q_words,
+            con,
+            models,
         )
 
     # Step 2c: Indirect join through a shared intermediate table
     if indirect_join is not None and secondary is not None:
         mid_table, rel_a, rel_b = indirect_join
         return _build_indirect_join_sql(
-            table, secondary, mid_table, rel_a, rel_b, q_words, con, models,
+            table,
+            secondary,
+            mid_table,
+            rel_a,
+            rel_b,
+            q_words,
+            con,
+            models,
         )
 
     # If secondary was found but no join path exists, fall through to
@@ -474,8 +615,7 @@ def _heuristic_sql(
     for tw in table_name_words:
         table_name_stems.update(_stem(tw))
     col_match_words = {
-        w for w in content_words
-        if w not in table_name_words and not (_stem(w) & table_name_stems)
+        w for w in content_words if w not in table_name_words and not (_stem(w) & table_name_stems)
     }
 
     # Try to find a specific dimension/metric mentioned in the question
@@ -504,8 +644,7 @@ def _heuristic_sql(
         for sw in sec_name_words:
             sec_stems.update(_stem(sw))
         unmatched_words = {
-            w for w in unmatched_words
-            if w not in sec_name_words and not (_stem(w) & sec_stems)
+            w for w in unmatched_words if w not in sec_name_words and not (_stem(w) & sec_stems)
         }
     if bool(unmatched_words) and not first_pass_matched:
         return None
@@ -646,12 +785,14 @@ def _build_join_sql(
 
     # Pick a good dimension from the secondary table for GROUP BY
     sec_dim = next(
-        (c for c in secondary.columns if _shared_is_dimension(c)), None,
+        (c for c in secondary.columns if _shared_is_dimension(c)),
+        None,
     )
 
     # Pick a metric from primary for aggregation
     pri_metric = next(
-        (c for c in primary.columns if _shared_is_metric(c)), None,
+        (c for c in primary.columns if _shared_is_metric(c)),
+        None,
     )
 
     # Build the SELECT
@@ -660,15 +801,13 @@ def _build_join_sql(
 
     select_parts = [f'{group_col} AS "{group_label}"', "COUNT(*) AS total"]
     if pri_metric:
-        select_parts.append(
-            f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}'
-        )
+        select_parts.append(f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}')
 
     return (
         f"SELECT {', '.join(select_parts)} "
         f"FROM {p_ref} p "
         f'JOIN {s_ref} s ON p."{p_join_col}" = s."{s_join_col}" '
-        f'GROUP BY {group_col} '
+        f"GROUP BY {group_col} "
         f"ORDER BY total DESC LIMIT 20"
     )
 
@@ -697,8 +836,7 @@ def _find_referenced_table(
         for col in other_table.columns:
             col_parts = set(col.name.lower().replace("_", " ").split())
             other_words.update(
-                w for w in col_parts
-                if w not in ("id", "name", "type", "status", "date")
+                w for w in col_parts if w not in ("id", "name", "type", "status", "date")
             )
         unique_other = other_words - primary_vocab
         for qw in content_words:
@@ -716,9 +854,8 @@ def _find_join_relationship(
 ) -> Relationship | None:
     """Find a FK relationship between two tables (either direction)."""
     for rel in discovery.relationships:
-        if (
-            (rel.from_table == table_a.name and rel.to_table == table_b.name)
-            or (rel.from_table == table_b.name and rel.to_table == table_a.name)
+        if (rel.from_table == table_a.name and rel.to_table == table_b.name) or (
+            rel.from_table == table_b.name and rel.to_table == table_a.name
         ):
             return rel
     return None
@@ -794,12 +931,14 @@ def _build_indirect_join_sql(
 
     # Pick a dimension from the secondary table
     sec_dim = next(
-        (c for c in secondary.columns if _shared_is_dimension(c)), None,
+        (c for c in secondary.columns if _shared_is_dimension(c)),
+        None,
     )
 
     # Pick a metric from primary
     pri_metric = next(
-        (c for c in primary.columns if _shared_is_metric(c)), None,
+        (c for c in primary.columns if _shared_is_metric(c)),
+        None,
     )
 
     group_col = f's."{sec_dim.name}"' if sec_dim else f's."{s_join_col}"'
@@ -807,9 +946,7 @@ def _build_indirect_join_sql(
 
     select_parts = [f'{group_col} AS "{group_label}"', "COUNT(*) AS total"]
     if pri_metric:
-        select_parts.append(
-            f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}'
-        )
+        select_parts.append(f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}')
 
     return (
         f"SELECT {', '.join(select_parts)} "
@@ -893,7 +1030,7 @@ def _match_column(
                 if cw == qw:
                     score += 10  # exact match
                 elif _stem(cw) & _stem(qw):
-                    score += 3   # stem match
+                    score += 3  # stem match
         if score > best_score:
             best_score = score
             best_col = col
@@ -932,15 +1069,15 @@ def _build_context(
 
         tnode = graph.tables.get(table.name)
         for col in table.columns:
-            desc = f' -- {col.description}' if col.description else ''
-            sem = f' [{col.semantic_type}]' if col.semantic_type else ''
+            desc = f" -- {col.description}" if col.description else ""
+            sem = f" [{col.semantic_type}]" if col.semantic_type else ""
             # Add column role from schema graph for richer LLM context
-            role_hint = ''
+            role_hint = ""
             if tnode and col.name in tnode.columns:
                 cnode = tnode.columns[col.name]
-                role_hint = f' (role: {cnode.role})'
+                role_hint = f" (role: {cnode.role})"
                 if cnode.profile and cnode.profile.distinct_count:
-                    role_hint += f' cardinality={cnode.profile.distinct_count}'
+                    role_hint += f" cardinality={cnode.profile.distinct_count}"
             lines.append(f"  - {col.name} ({col.dtype}){sem}{role_hint}{desc}")
 
     # Mart tables (only executed ones)
@@ -977,48 +1114,163 @@ def _build_context(
 # Words that describe analytical operations, not data entities
 _ANALYTICAL_WORDS = {
     # Aggregation / metrics
-    "average", "avg", "mean", "sum", "total", "count", "max", "min",
-    "median", "rate", "rates", "ratio", "percent", "percentage", "pct",
+    "average",
+    "avg",
+    "mean",
+    "sum",
+    "total",
+    "count",
+    "max",
+    "min",
+    "median",
+    "rate",
+    "rates",
+    "ratio",
+    "percent",
+    "percentage",
+    "pct",
     # Trends / comparison
-    "trend", "trends", "trending", "trended",
-    "compare", "comparison", "comparing", "compared",
-    "increase", "increasing", "decrease", "decreasing",
-    "change", "changes", "changed",
+    "trend",
+    "trends",
+    "trending",
+    "trended",
+    "compare",
+    "comparison",
+    "comparing",
+    "compared",
+    "increase",
+    "increasing",
+    "decrease",
+    "decreasing",
+    "change",
+    "changes",
+    "changed",
     # Distribution / analysis
-    "distribution", "distributed", "breakdown", "break", "down",
-    "across", "between", "relative", "among",
+    "distribution",
+    "distributed",
+    "breakdown",
+    "break",
+    "down",
+    "across",
+    "between",
+    "relative",
+    "among",
     # Time
-    "over", "time", "daily", "weekly", "monthly", "yearly", "per",
-    "during", "since", "before", "after", "recent", "recently",
+    "over",
+    "time",
+    "daily",
+    "weekly",
+    "monthly",
+    "yearly",
+    "per",
+    "during",
+    "since",
+    "before",
+    "after",
+    "recent",
+    "recently",
     # Ranking / filtering
-    "top", "bottom", "highest", "lowest", "most", "least", "many",
-    "much", "often", "common", "commonly", "frequent", "frequently",
-    "consistently", "likely", "unlikely",
+    "top",
+    "bottom",
+    "highest",
+    "lowest",
+    "most",
+    "least",
+    "many",
+    "much",
+    "often",
+    "common",
+    "commonly",
+    "frequent",
+    "frequently",
+    "consistently",
+    "likely",
+    "unlikely",
     # Actions
-    "show", "list", "get", "find", "display", "report",
+    "show",
+    "list",
+    "get",
+    "find",
+    "display",
+    "report",
     # Quantities
-    "number", "numbers", "levels", "level",
+    "number",
+    "numbers",
+    "levels",
+    "level",
     # Analysis types
-    "correlation", "correlate", "correlated", "impact", "impacts",
-    "pattern", "patterns", "associated", "association",
+    "correlation",
+    "correlate",
+    "correlated",
+    "impact",
+    "impacts",
+    "pattern",
+    "patterns",
+    "associated",
+    "association",
     # BI verbs / adjectives
-    "meeting", "meet", "face", "facing", "experience", "experiencing",
-    "wait", "waiting", "unresolved", "resolved",
-    "fail", "failing", "failed", "pass", "passing", "passed",
+    "meeting",
+    "meet",
+    "face",
+    "facing",
+    "experience",
+    "experiencing",
+    "wait",
+    "waiting",
+    "unresolved",
+    "resolved",
+    "fail",
+    "failing",
+    "failed",
+    "pass",
+    "passing",
+    "passed",
     # Superlatives / qualifiers
-    "worst", "best", "longest", "shortest", "largest", "smallest",
-    "lower", "higher", "greater", "fewer", "worse", "better",
-    "active", "inactive", "routine",
+    "worst",
+    "best",
+    "longest",
+    "shortest",
+    "largest",
+    "smallest",
+    "lower",
+    "higher",
+    "greater",
+    "fewer",
+    "worse",
+    "better",
+    "active",
+    "inactive",
+    "routine",
     # Domain-agnostic BI terms
-    "allocated", "allocation", "driven", "operational",
-    "exceed", "exceeds", "exceeding", "threshold", "thresholds",
-    "capita", "per-capita",
-    "discovery", "discovered", "finding", "findings",
-    "sla", "slas", "kpi", "kpis",
-    "unhealthy", "healthy",
-    "reports", "reported", "reporting",
+    "allocated",
+    "allocation",
+    "driven",
+    "operational",
+    "exceed",
+    "exceeds",
+    "exceeding",
+    "threshold",
+    "thresholds",
+    "capita",
+    "per-capita",
+    "discovery",
+    "discovered",
+    "finding",
+    "findings",
+    "sla",
+    "slas",
+    "kpi",
+    "kpis",
+    "unhealthy",
+    "healthy",
+    "reports",
+    "reported",
+    "reporting",
     # Geographic scale terms (not entity names -- those are data terms)
-    "region", "regions", "area", "areas",
+    "region",
+    "regions",
+    "area",
+    "areas",
 }
 
 

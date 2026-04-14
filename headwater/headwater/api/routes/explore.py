@@ -20,10 +20,7 @@ class AskRequest(BaseModel):
 
 def _get_reviewed_tables(discovery) -> set[str] | None:
     """Get set of reviewed table names. Returns None if all are reviewed."""
-    reviewed = {
-        t.name for t in discovery.tables
-        if t.review_status in ("reviewed", "skipped")
-    }
+    reviewed = {t.name for t in discovery.tables if t.review_status in ("reviewed", "skipped")}
     # If all tables are reviewed, don't filter (no gate needed)
     if len(reviewed) == len(discovery.tables):
         return None
@@ -57,6 +54,7 @@ async def get_suggestions(request: Request):
     quality_report = pipeline["quality_report"]
     quality_results = quality_report.results if quality_report else []
 
+    catalog = pipeline.get("catalog")
     con = request.app.state.duckdb_con
     suggestions = generate_suggestions(
         discovery=discovery,
@@ -64,12 +62,14 @@ async def get_suggestions(request: Request):
         contracts=contracts,
         quality_results=quality_results,
         con=con,
+        catalog=catalog,
     )
 
     # Filter suggestions to only reference reviewed tables
     if reviewed is not None:
         suggestions = [
-            s for s in suggestions
+            s
+            for s in suggestions
             if not s.relevant_tables or any(t in reviewed for t in s.relevant_tables)
         ]
 
@@ -116,6 +116,9 @@ async def ask_question(request: Request, body: AskRequest):
     except Exception:
         provider = NoLLMProvider()
 
+    catalog = pipeline.get("catalog")
+    vector_store = pipeline.get("vector_store")
+
     result = ask(
         question=body.question,
         con=con,
@@ -124,6 +127,8 @@ async def ask_question(request: Request, body: AskRequest):
         suggestions=suggestions,
         provider=provider,
         reviewed_tables=reviewed,
+        catalog=catalog,
+        vector_store=vector_store,
     )
 
     return result.model_dump()

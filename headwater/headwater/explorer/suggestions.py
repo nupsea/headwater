@@ -65,16 +65,20 @@ def generate_suggestions(
     contracts: list[ContractRule] | None = None,
     quality_results: list[ContractCheckResult] | None = None,
     con: duckdb.DuckDBPyConnection | None = None,
+    catalog=None,
 ) -> list[SuggestedQuestion]:
     """Generate suggested questions from all available metadata.
 
     All questions are derived from actual schema -- no hardcoded names.
+    When a SemanticCatalog is provided, catalog-based suggestions are
+    generated first (highest priority after mart).
     Returns at most MAX_TOTAL_SUGGESTIONS questions in priority order.
     """
     all_models = models or []
     profile_index = {(p.table_name, p.column_name): p for p in discovery.profiles}
 
     buckets: dict[str, list[SuggestedQuestion]] = {
+        "catalog": _from_catalog(catalog) if catalog else [],
         "mart": _from_mart_models(all_models, con),
         "relationship": _from_relationships(
             discovery.tables, discovery.relationships, all_models, con
@@ -91,7 +95,7 @@ def generate_suggestions(
     result: list[SuggestedQuestion] = []
     seen: set[str] = set()
 
-    for source in ("mart", "relationship", "semantic", "quality"):
+    for source in ("catalog", "mart", "relationship", "semantic", "quality"):
         for q in buckets[source]:
             key = " ".join(q.question.lower().split())
             if key not in seen:
@@ -99,6 +103,46 @@ def generate_suggestions(
                 result.append(q)
 
     return result[:MAX_TOTAL_SUGGESTIONS]
+
+
+def _from_catalog(catalog) -> list[SuggestedQuestion]:
+    """Generate suggestions from semantic catalog metric x dimension cross-products."""
+    suggestions: list[SuggestedQuestion] = []
+
+    for entity in catalog.entities:
+        # Get entity's metrics and dimensions from catalog
+        entity_metrics = [m for m in catalog.metrics if m.name in entity.metrics]
+        entity_dims = [d for d in catalog.dimensions if d.name in entity.dimensions]
+
+        # High-confidence metrics x high-confidence dimensions
+        for m in entity_metrics[:3]:
+            if m.confidence < 0.5:
+                continue
+            # Count metric alone
+            if m.agg_type == "count":
+                suggestions.append(
+                    SuggestedQuestion(
+                        question=f"How many {entity.display_name.lower()}?",
+                        category="catalog",
+                        relevant_tables=[entity.table],
+                        sql_hint=f'SELECT {m.expression} AS "{m.display_name}" FROM "{m.table}"',
+                    )
+                )
+
+            for d in entity_dims[:4]:
+                if d.confidence < 0.5:
+                    continue
+                suggestions.append(
+                    SuggestedQuestion(
+                        question=f"{m.display_name} by {d.display_name}",
+                        category="catalog",
+                        relevant_tables=[m.table, d.table] if m.table != d.table else [m.table],
+                    )
+                )
+                if len(suggestions) >= 10:
+                    return suggestions
+
+    return suggestions
 
 
 # ---------------------------------------------------------------------------
@@ -175,15 +219,9 @@ def _from_relationships(
         to_label = _humanize(rel.to_table)
 
         from_ref = (
-            resolve_table_ref(rel.from_table, con, models)
-            if con is not None
-            else rel.from_table
+            resolve_table_ref(rel.from_table, con, models) if con is not None else rel.from_table
         )
-        to_ref = (
-            resolve_table_ref(rel.to_table, con, models)
-            if con is not None
-            else rel.to_table
-        )
+        to_ref = resolve_table_ref(rel.to_table, con, models) if con is not None else rel.to_table
 
         # Find a useful metric from the from_table to aggregate
         from_table_info = table_map[rel.from_table]
@@ -242,11 +280,7 @@ def _from_table_structure(
     questions: list[SuggestedQuestion] = []
 
     for table in tables:
-        ref = (
-            resolve_table_ref(table.name, con, models)
-            if con is not None
-            else table.name
-        )
+        ref = resolve_table_ref(table.name, con, models) if con is not None else table.name
         label = _humanize(table.name)
 
         temporal_cols = _get_temporal_cols(table)
@@ -264,7 +298,7 @@ def _from_table_structure(
                     relevant_tables=[table.name],
                     sql_hint=(
                         f'SELECT "{t_col}", AVG("{m_col}") AS avg_{m_col}, '
-                        f'COUNT(*) AS records '
+                        f"COUNT(*) AS records "
                         f"FROM {ref} "
                         f'GROUP BY "{t_col}" ORDER BY "{t_col}" LIMIT 100'
                     ),
@@ -288,7 +322,7 @@ def _from_table_structure(
                         relevant_tables=[table.name],
                         sql_hint=(
                             f'SELECT "{d_col}", '
-                            f'COUNT(*) AS records, '
+                            f"COUNT(*) AS records, "
                             f'ROUND(AVG("{m_col}"), 2) AS avg_{m_col}, '
                             f'MAX("{m_col}") AS max_{m_col} '
                             f"FROM {ref} "
@@ -360,27 +394,18 @@ def _from_quality_findings(
                 continue
             questions.append(
                 SuggestedQuestion(
-                    question=(
-                        f"Why are there missing values in "
-                        f"{base_table} {col}?"
-                    ),
+                    question=(f"Why are there missing values in {base_table} {col}?"),
                     source="quality",
                     category="Data Quality",
                     relevant_tables=[rule.model_name],
-                    sql_hint=(
-                        f"SELECT * FROM {rule.model_name} "
-                        f'WHERE "{col}" IS NULL LIMIT 20'
-                    ),
+                    sql_hint=(f'SELECT * FROM {rule.model_name} WHERE "{col}" IS NULL LIMIT 20'),
                 )
             )
 
         elif rule.rule_type == "cardinality" and col:
             questions.append(
                 SuggestedQuestion(
-                    question=(
-                        f"What unexpected {col} values appeared in "
-                        f"{base_table}?"
-                    ),
+                    question=(f"What unexpected {col} values appeared in {base_table}?"),
                     source="quality",
                     category="Data Quality",
                     relevant_tables=[rule.model_name],
@@ -395,9 +420,7 @@ def _from_quality_findings(
         elif rule.rule_type == "unique" and col:
             questions.append(
                 SuggestedQuestion(
-                    question=(
-                        f"Which {col} values have duplicates in {base_table}?"
-                    ),
+                    question=(f"Which {col} values have duplicates in {base_table}?"),
                     source="quality",
                     category="Data Quality",
                     relevant_tables=[rule.model_name],
@@ -479,7 +502,8 @@ def _is_metric_col(
     table = table_map.get(table_name)
     if table:
         col_info = next(
-            (c for c in table.columns if c.name == column_name), None,
+            (c for c in table.columns if c.name == column_name),
+            None,
         )
         if col_info:
             profile = profile_index.get((table_name, column_name))
@@ -534,7 +558,7 @@ def _humanize(name: str) -> str:
     name = name.split(".")[-1]  # drop schema prefix
     for prefix in ("mart_", "stg_"):
         if name.startswith(prefix):
-            name = name[len(prefix):]
+            name = name[len(prefix) :]
     # Strip trailing numeric suffixes that look like source identifiers
     name = re.sub(r"_\d+$", "", name)
     return name.replace("_", " ")
