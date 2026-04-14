@@ -150,9 +150,17 @@ class VectorStore:
             List of dicts with keys: id, entry_type, name, display_name, text,
             _distance (lower = more similar).
         """
+        logger.debug(
+            "Searching catalog: query=%r, project=%s, type=%s, limit=%d",
+            query[:80],
+            project_id,
+            entry_type,
+            limit,
+        )
         try:
             table = self.db.open_table(_CATALOG_TABLE)
         except Exception:
+            logger.debug("Search: catalog table not found, returning empty")
             return []
 
         query_vector = encode_text(query)
@@ -170,7 +178,7 @@ class VectorStore:
 
         results = search_builder.to_list()
 
-        return [
+        matched = [
             {
                 "id": r["id"],
                 "entry_type": r["entry_type"],
@@ -181,12 +189,23 @@ class VectorStore:
             }
             for r in results
         ]
+        if matched:
+            logger.debug(
+                "Search returned %d results, top match: %s (distance=%.3f)",
+                len(matched),
+                matched[0]["name"],
+                matched[0]["_distance"],
+            )
+        else:
+            logger.debug("Search returned 0 results for query=%r", query[:80])
+        return matched
 
     def clear_project(self, project_id: str) -> None:
         """Remove all entries for a project."""
         try:
             table = self.db.open_table(_CATALOG_TABLE)
             table.delete(f"project_id = '{project_id}'")
+            logger.debug("Cleared catalog entries for project %s", project_id)
         except Exception:
             pass  # Table doesn't exist yet
 

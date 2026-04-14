@@ -168,6 +168,11 @@ class GraphStore:
                     "connected_tables": row[1],
                 }
             )
+        logger.info(
+            "Conformed dimensions: %d tables with >= %d connections",
+            len(rows),
+            min_connections,
+        )
         return rows
 
     def find_star_schemas(self) -> list[dict[str, Any]]:
@@ -192,6 +197,7 @@ class GraphStore:
                     "spoke_count": row[2],
                 }
             )
+        logger.info("Star schemas: %d hub tables found", len(rows))
         return rows
 
     def find_chains(self, max_hops: int = 4) -> list[dict[str, Any]]:
@@ -219,6 +225,7 @@ class GraphStore:
                         "hop_count": row[1],
                     }
                 )
+        logger.info("FK chains: %d unique paths of 2+ hops", len(rows))
         return rows
 
     def find_nullable_fk_warnings(self, threshold: float = 0.5) -> list[dict[str, Any]]:
@@ -247,6 +254,12 @@ class GraphStore:
                     "ref_integrity": row[4],
                     "nullable": row[5],
                 }
+            )
+        if rows:
+            logger.warning(
+                "Nullable FK warnings: %d relationships with integrity < %.0f%%",
+                len(rows),
+                threshold * 100,
             )
         return rows
 
@@ -338,10 +351,12 @@ class GraphStore:
                 }
             )
 
+        logger.debug("Graph data: %d nodes, %d edges", len(nodes), len(edges))
         return {"nodes": nodes, "edges": edges}
 
     def clear(self) -> None:
         """Drop all data and recreate schema."""
+        logger.info("Clearing graph store at %s", self._path)
         self.close()
         if self._path.exists():
             if self._path.is_dir():

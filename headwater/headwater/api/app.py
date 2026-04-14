@@ -49,7 +49,8 @@ async def lifespan(app: FastAPI):
         settings.ensure_dirs()
         logger.info(
             "Using file-backed stores: metadata=%s, analytical=%s",
-            settings.metadata_db_path, settings.analytical_db_path,
+            settings.metadata_db_path,
+            settings.analytical_db_path,
         )
         app.state.duckdb_con = duckdb.connect(str(settings.analytical_db_path))
         app.state.metadata_store = MetadataStore(settings.metadata_db_path)
@@ -75,12 +76,12 @@ async def lifespan(app: FastAPI):
                         len(restored_discovery.relationships),
                     )
                     reviewed = sum(
-                        1 for t in restored_discovery.tables
-                        if t.review_status == "reviewed"
+                        1 for t in restored_discovery.tables if t.review_status == "reviewed"
                     )
                     logger.info(
                         "Review status: %d/%d tables reviewed",
-                        reviewed, len(restored_discovery.tables),
+                        reviewed,
+                        len(restored_discovery.tables),
                     )
                 else:
                     logger.warning("rebuild_discovery returned None for source '%s'", source_name)
@@ -89,6 +90,7 @@ async def lifespan(app: FastAPI):
 
     app.state.pipeline: dict[str, Any] = {
         "discovery": restored_discovery,
+        "catalog": None,
         "staging_models": [],
         "mart_models": [],
         "contracts": [],
