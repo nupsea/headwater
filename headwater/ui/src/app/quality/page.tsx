@@ -29,8 +29,22 @@ export default function QualityPage() {
   if (error) {
     return (
       <div>
-        <h1 className="text-2xl font-bold mb-4">Data Quality</h1>
-        <p className="text-muted">{error}</p>
+        <h1 className="text-2xl font-bold mb-4">Data Quality & Metrics</h1>
+        <div className="bg-card border border-border rounded-lg p-8 max-w-xl mx-auto text-center">
+          <h2 className="text-lg font-semibold mb-2">No Quality Data Yet</h2>
+          <p className="text-sm text-muted mb-4">
+            Headwater automatically generates quality contracts from your data profiles:
+            not-null checks, uniqueness constraints, range validations, and more. Contracts
+            start in observation mode -- violations are tracked before enforcement.
+          </p>
+          <p className="text-sm text-muted mb-4">
+            Run the full pipeline from the Dashboard to see quality metrics, or use the CLI:
+          </p>
+          <div className="bg-background border border-border rounded p-4 text-left text-sm font-mono text-muted">
+            <p className="mb-1">headwater demo</p>
+            <p>headwater discover --source /path/to/data</p>
+          </div>
+        </div>
       </div>
     );
   }

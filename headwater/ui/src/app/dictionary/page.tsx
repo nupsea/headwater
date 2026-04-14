@@ -1,0 +1,495 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import {
+  api,
+  type DictTable,
+  type DictColumn,
+  type DictReviewSummary,
+  type ColumnReviewPayload,
+} from "@/lib/api";
+
+const ROLE_OPTIONS = [
+  "metric",
+  "dimension",
+  "temporal",
+  "identifier",
+  "geographic",
+  "text",
+];
+
+const STATUS_BADGE: Record<string, string> = {
+  reviewed: "bg-green-100 text-green-800 border-green-200",
+  pending: "bg-yellow-100 text-yellow-800 border-yellow-200",
+  in_review: "bg-blue-100 text-blue-800 border-blue-200",
+  skipped: "bg-gray-100 text-gray-600 border-gray-200",
+};
+
+const CONFIDENCE_BG: Record<string, string> = {
+  high: "",
+  medium: "bg-yellow-50",
+  low: "bg-orange-50",
+};
+
+function confidenceLevel(c: number): "high" | "medium" | "low" {
+  if (c >= 0.7) return "high";
+  if (c >= 0.5) return "medium";
+  return "low";
+}
+
+export default function DictionaryPage() {
+  const [tables, setTables] = useState<DictTable[]>([]);
+  const [summary, setSummary] = useState<DictReviewSummary | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [editedCols, setEditedCols] = useState<Record<string, Partial<DictColumn>>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    Promise.all([api.dictionary(), api.dictionarySummary()])
+      .then(([dict, sum]) => {
+        setTables(dict.tables);
+        setSummary(sum);
+        if (dict.tables.length > 0 && !selected) {
+          setSelected(dict.tables[0].name);
+        }
+      })
+      .catch(() => setError("Run the pipeline from the Dashboard first."))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const selectedTable = tables.find((t) => t.name === selected);
+
+  const handleColEdit = (colName: string, field: string, value: unknown) => {
+    setEditedCols((prev) => ({
+      ...prev,
+      [colName]: { ...prev[colName], [field]: value },
+    }));
+  };
+
+  const getColValue = (col: DictColumn, field: keyof DictColumn) => {
+    const edit = editedCols[col.name];
+    if (edit && field in edit) return edit[field as keyof typeof edit];
+    return col[field];
+  };
+
+  const handleConfirm = async (tableName: string) => {
+    setSaving(true);
+    setMessage("");
+    try {
+      const columns: ColumnReviewPayload[] = Object.entries(editedCols).map(
+        ([name, edits]) => ({ name, ...edits })
+      );
+      await api.reviewTable(tableName, { columns, confirm: true });
+      // Refresh
+      const [dict, sum] = await Promise.all([
+        api.dictionary(),
+        api.dictionarySummary(),
+      ]);
+      setTables(dict.tables);
+      setSummary(sum);
+      setEditedCols({});
+      setMessage(`Table "${tableName}" reviewed and locked.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    setSaving(false);
+  };
+
+  const handleSkip = async (tableName: string) => {
+    setSaving(true);
+    try {
+      await api.skipTable(tableName);
+      const [dict, sum] = await Promise.all([
+        api.dictionary(),
+        api.dictionarySummary(),
+      ]);
+      setTables(dict.tables);
+      setSummary(sum);
+      setMessage(`Table "${tableName}" skipped.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    setSaving(false);
+  };
+
+  const handleConfirmAll = async () => {
+    setSaving(true);
+    try {
+      const res = await api.confirmAllTables();
+      const [dict, sum] = await Promise.all([
+        api.dictionary(),
+        api.dictionarySummary(),
+      ]);
+      setTables(dict.tables);
+      setSummary(sum);
+      setEditedCols({});
+      setMessage(`${res.confirmed} table(s) confirmed.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    setSaving(false);
+  };
+
+  if (loading) {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">Data Dictionary</h1>
+        <p className="text-muted text-sm">Loading...</p>
+      </div>
+    );
+  }
+
+  if (error && !tables.length) {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">Data Dictionary</h1>
+        <div className="bg-card border border-border rounded-lg p-8 max-w-xl mx-auto text-center">
+          <h2 className="text-lg font-semibold mb-2">No Data Discovered Yet</h2>
+          <p className="text-sm text-muted mb-4">
+            The data dictionary requires a completed discovery run. Run the
+            pipeline from the Dashboard first.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-2xl font-bold">Data Dictionary</h1>
+        {summary && summary.reviewed === summary.total && summary.total > 0 && (
+          <Link
+            href="/explore"
+            className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition-colors"
+          >
+            All reviewed -- Go to Explore
+          </Link>
+        )}
+      </div>
+      <p className="text-muted text-sm mb-4">
+        Review and confirm column classifications before exploring. The explorer
+        only queries reviewed tables.
+      </p>
+
+      {/* Progress bar */}
+      {summary && (
+        <div className="mb-6">
+          <div className="flex items-center justify-between text-xs text-muted mb-1">
+            <span>
+              {summary.reviewed} of {summary.total} tables reviewed
+              ({summary.pct_complete}%)
+            </span>
+            <button
+              onClick={handleConfirmAll}
+              disabled={saving || summary.pending === 0}
+              className="text-xs underline hover:text-foreground disabled:opacity-50"
+            >
+              Confirm all as correct
+            </button>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2">
+            <div
+              className="bg-green-500 h-2 rounded-full transition-all"
+              style={{
+                width: `${summary.pct_complete}%`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {message && (
+        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded text-sm text-green-800">
+          {message}
+        </div>
+      )}
+
+      <div className="flex gap-6">
+        {/* Table list sidebar */}
+        <div className="w-64 shrink-0">
+          <div className="border border-border rounded-lg bg-card overflow-hidden">
+            {tables.map((t) => (
+              <button
+                key={t.name}
+                onClick={() => {
+                  setSelected(t.name);
+                  setEditedCols({});
+                  setMessage("");
+                }}
+                className={`w-full text-left px-3 py-2 text-sm border-b border-border last:border-0 transition-colors ${
+                  selected === t.name
+                    ? "bg-blue-50 font-medium"
+                    : "hover:bg-background"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="truncate">{t.name}</span>
+                  <span
+                    className={`ml-2 px-1.5 py-0.5 rounded text-[10px] border shrink-0 ${
+                      STATUS_BADGE[t.review_status]
+                    }`}
+                  >
+                    {t.review_status}
+                  </span>
+                </div>
+                <div className="text-[10px] text-muted mt-0.5">
+                  {t.row_count.toLocaleString()} rows
+                  {t.domain ? ` -- ${t.domain}` : ""}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Main panel */}
+        {selectedTable && (
+          <div className="flex-1 min-w-0">
+            {/* Table header */}
+            <div className="border border-border rounded-lg bg-card p-4 mb-4">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-lg font-semibold">{selectedTable.name}</h2>
+                <span
+                  className={`px-2 py-1 rounded text-xs border ${
+                    STATUS_BADGE[selectedTable.review_status]
+                  }`}
+                >
+                  {selectedTable.review_status}
+                </span>
+              </div>
+              <div className="text-sm text-muted mb-2">
+                {selectedTable.description}
+              </div>
+              <div className="flex gap-4 text-xs text-muted">
+                <span>{selectedTable.row_count.toLocaleString()} rows</span>
+                <span>{selectedTable.columns.length} columns</span>
+                {selectedTable.domain && (
+                  <span>Domain: {selectedTable.domain}</span>
+                )}
+                {selectedTable.relationships.length > 0 && (
+                  <span>
+                    {selectedTable.relationships.length} relationship(s)
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Clarifying questions */}
+            {selectedTable.questions.length > 0 && (
+              <div className="border border-amber-200 rounded-lg bg-amber-50 p-4 mb-4">
+                <h3 className="text-xs font-semibold text-amber-800 uppercase tracking-wider mb-2">
+                  Needs Clarification
+                </h3>
+                <ul className="space-y-1">
+                  {selectedTable.questions.map((q, i) => (
+                    <li key={i} className="text-sm text-amber-900">
+                      {q}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Column grid */}
+            <div className="border border-border rounded-lg bg-card overflow-auto mb-4">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-background text-left">
+                    <th className="px-3 py-2 font-medium text-muted">Column</th>
+                    <th className="px-3 py-2 font-medium text-muted">Type</th>
+                    <th className="px-3 py-2 font-medium text-muted">Role</th>
+                    <th className="px-3 py-2 font-medium text-muted">
+                      Semantic Type
+                    </th>
+                    <th className="px-3 py-2 font-medium text-muted">
+                      Description
+                    </th>
+                    <th className="px-3 py-2 font-medium text-muted w-12">PK</th>
+                    <th className="px-3 py-2 font-medium text-muted w-12">FK</th>
+                    <th className="px-3 py-2 font-medium text-muted w-16">
+                      Conf.
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedTable.columns.map((col) => {
+                    const conf = confidenceLevel(
+                      (getColValue(col, "confidence") as number) ?? col.confidence
+                    );
+                    const isLocked = col.locked;
+                    return (
+                      <tr
+                        key={col.name}
+                        className={`border-b border-border last:border-0 ${
+                          CONFIDENCE_BG[conf]
+                        } ${col.needs_review ? "border-l-2 border-l-amber-400" : ""}`}
+                      >
+                        <td className="px-3 py-2 font-mono text-xs">
+                          {col.name}
+                        </td>
+                        <td className="px-3 py-2 text-xs text-muted">
+                          {col.dtype}
+                        </td>
+                        <td className="px-3 py-2">
+                          {isLocked ? (
+                            <span className="text-xs">{col.role || "-"}</span>
+                          ) : (
+                            <select
+                              value={
+                                (getColValue(col, "role") as string) ??
+                                col.role ??
+                                ""
+                              }
+                              onChange={(e) =>
+                                handleColEdit(col.name, "role", e.target.value || null)
+                              }
+                              className="text-xs border border-border rounded px-1 py-0.5 bg-background"
+                            >
+                              <option value="">--</option>
+                              {ROLE_OPTIONS.map((r) => (
+                                <option key={r} value={r}>
+                                  {r}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-xs text-muted">
+                          {col.semantic_type || "-"}
+                        </td>
+                        <td className="px-3 py-2">
+                          {isLocked ? (
+                            <span className="text-xs">
+                              {col.description || "-"}
+                            </span>
+                          ) : (
+                            <input
+                              type="text"
+                              value={
+                                (getColValue(col, "description") as string) ??
+                                col.description ??
+                                ""
+                              }
+                              onChange={(e) =>
+                                handleColEdit(
+                                  col.name,
+                                  "description",
+                                  e.target.value || null
+                                )
+                              }
+                              className="text-xs border border-border rounded px-1 py-0.5 bg-background w-full"
+                            />
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-center">
+                          {isLocked ? (
+                            col.is_primary_key ? (
+                              <span className="text-green-600 font-bold">PK</span>
+                            ) : null
+                          ) : (
+                            <input
+                              type="checkbox"
+                              checked={
+                                (getColValue(col, "is_primary_key") as boolean) ??
+                                col.is_primary_key
+                              }
+                              onChange={(e) =>
+                                handleColEdit(
+                                  col.name,
+                                  "is_primary_key",
+                                  e.target.checked
+                                )
+                              }
+                            />
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-center text-xs">
+                          {col.is_foreign_key && (
+                            <span
+                              className="text-purple-600 cursor-help"
+                              title={col.fk_references || ""}
+                            >
+                              FK
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-center">
+                          <span
+                            className={`inline-block w-2 h-2 rounded-full ${
+                              conf === "high"
+                                ? "bg-green-500"
+                                : conf === "medium"
+                                ? "bg-yellow-500"
+                                : "bg-orange-500"
+                            }`}
+                            title={`${(col.confidence * 100).toFixed(0)}% confidence`}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Relationships */}
+            {selectedTable.relationships.length > 0 && (
+              <div className="border border-border rounded-lg bg-card p-4 mb-4">
+                <h3 className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">
+                  Relationships
+                </h3>
+                <div className="space-y-1">
+                  {selectedTable.relationships.map((r, i) => (
+                    <div key={i} className="text-xs text-muted">
+                      {r.from_table}.{r.from_column} → {r.to_table}.
+                      {r.to_column}{" "}
+                      <span className="text-[10px]">
+                        ({r.type}, {(r.confidence * 100).toFixed(0)}% conf,{" "}
+                        {(r.integrity * 100).toFixed(0)}% integrity)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Action buttons */}
+            {selectedTable.review_status !== "reviewed" && (
+              <div className="flex gap-3">
+                <button
+                  onClick={() => handleConfirm(selectedTable.name)}
+                  disabled={saving}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+                >
+                  {saving
+                    ? "Saving..."
+                    : Object.keys(editedCols).length > 0
+                    ? "Save & Confirm"
+                    : "Confirm as Correct"}
+                </button>
+                <button
+                  onClick={() => handleSkip(selectedTable.name)}
+                  disabled={saving}
+                  className="px-4 py-2 border border-border rounded-lg text-sm text-muted hover:text-foreground disabled:opacity-50 transition-colors"
+                >
+                  Skip
+                </button>
+              </div>
+            )}
+
+            {selectedTable.review_status === "reviewed" && (
+              <div className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg p-3">
+                This table has been reviewed and locked. Column classifications
+                are confirmed and will persist across re-runs.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

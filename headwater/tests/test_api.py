@@ -16,7 +16,7 @@ SAMPLE_DATA = str(
 
 @pytest.fixture
 def client():
-    app = create_app()
+    app = create_app(in_memory=True)
     with TestClient(app) as c:
         yield c
 
@@ -231,6 +231,143 @@ class TestSemanticLockEndpoint:
             json={"description": "test"},
         )
         assert resp.status_code == 404
+
+
+class TestFalsePositive:
+    """US-304: POST /api/contracts/{rule_id}/mark-false-positive."""
+
+    def _setup(self, client):
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        client.post("/api/generate")
+
+    def test_mark_false_positive(self, client):
+        self._setup(client)
+        contracts = client.get("/api/contracts").json()
+        assert len(contracts) > 0
+        rule_id = contracts[0]["id"]
+        resp = client.post(f"/api/contracts/{rule_id}/mark-false-positive")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["rule_id"] == rule_id
+        assert data["marked"] == "false_positive"
+
+        # Verify decisions row was written
+        store = client.app.state.metadata_store
+        decisions = store.get_decisions("contract", rule_id)
+        assert len(decisions) >= 1
+        assert any(d["action"] == "false_positive" for d in decisions)
+
+    def test_mark_false_positive_not_found(self, client):
+        self._setup(client)
+        resp = client.post("/api/contracts/nonexistent/mark-false-positive")
+        assert resp.status_code == 404
+
+
+class TestUnlockEndpoint:
+    """US-202: PATCH /api/columns/.../  with locked=false."""
+
+    def _setup(self, client):
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+
+    def test_unlock_writes_decision(self, client):
+        self._setup(client)
+        # Lock first
+        client.patch(
+            "/api/columns/source/zones/zone_id",
+            json={"description": "Locked desc"},
+        )
+        # Unlock
+        resp = client.patch(
+            "/api/columns/source/zones/zone_id",
+            json={"locked": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["locked"] is False
+        # Verify decisions row with action='unlocked'
+        store = client.app.state.metadata_store
+        decisions = store.get_decisions("column", "source.zones.zone_id")
+        assert any(d["action"] == "unlocked" for d in decisions)
+
+
+class TestDriftAPI:
+    """US-402/403: Drift detection API endpoints."""
+
+    def test_drift_no_reports(self, client):
+        """GET /api/drift returns empty when no reports."""
+        resp = client.get("/api/drift")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reports"] == [] or data.get("message")
+
+    def test_drift_latest_no_reports(self, client):
+        """GET /api/drift?latest=true returns null report when none exist."""
+        resp = client.get("/api/drift?latest=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["report"] is None
+
+    def test_drift_report_creation_and_retrieval(self, client):
+        """Create a drift report and retrieve it via API."""
+        store = client.app.state.metadata_store
+        store.upsert_source("src", "json", "/data", None)
+        run1 = store.start_run("src")
+        store.finish_run(run1, table_count=1)
+        run2 = store.start_run("src")
+        store.finish_run(run2, table_count=1)
+
+        diff_data = {
+            "source_name": "src",
+            "run_id_from": run1,
+            "run_id_to": run2,
+            "no_changes": False,
+            "tables_added": ["new_table"],
+            "tables_removed": [],
+            "tables_changed": [],
+            "detected_at": "2026-01-01T00:00:00Z",
+        }
+        store.save_drift_report("src", run1, run2, diff_data)
+
+        resp = client.get("/api/drift?latest=true&source=src")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source_name"] == "src"
+        assert data["run_id_to"] == run2
+
+    def test_acknowledge_drift_report(self, client):
+        """PATCH /api/drift/{id}/acknowledge marks report as acknowledged."""
+        store = client.app.state.metadata_store
+        store.upsert_source("src", "json", "/data", None)
+        run1 = store.start_run("src")
+        store.finish_run(run1, table_count=1)
+
+        report_id = store.save_drift_report("src", None, run1, {"no_changes": True})
+
+        resp = client.patch(f"/api/drift/{report_id}/acknowledge")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["acknowledged"] is True
+
+    def test_acknowledge_nonexistent_drift_report(self, client):
+        """PATCH /api/drift/999/acknowledge returns 404."""
+        resp = client.patch("/api/drift/999/acknowledge")
+        assert resp.status_code == 404
+
+    def test_drift_reports_list(self, client):
+        """GET /api/drift returns list of reports."""
+        store = client.app.state.metadata_store
+        store.upsert_source("src", "json", "/data", None)
+        run1 = store.start_run("src")
+        store.finish_run(run1, table_count=1)
+        run2 = store.start_run("src")
+        store.finish_run(run2, table_count=1)
+
+        store.save_drift_report("src", None, run1, {"no_changes": True})
+        store.save_drift_report("src", run1, run2, {"no_changes": False})
+
+        resp = client.get("/api/drift")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["reports"]) == 2
 
 
 class TestDecisionRecording:

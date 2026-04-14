@@ -22,11 +22,20 @@ class HeadwaterSettings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "claude-sonnet-4-20250514"
 
+    # Ollama (local LLM)
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_timeout: int = 120  # seconds
+
     # Profiling
     sample_size: int = 50_000
 
     # Logging
     log_level: str = "INFO"
+
+    # Mart quality gate thresholds (US-503)
+    mart_min_relationships: int = 2
+    mart_min_metric_columns: int = 1
+    mart_min_rows: int = 100
 
     @property
     def metadata_db_path(self) -> Path:

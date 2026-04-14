@@ -86,10 +86,23 @@ export default function ModelsPage() {
   if (models.length === 0 && !message) {
     return (
       <div>
-        <h1 className="text-2xl font-bold mb-4">Models</h1>
-        <p className="text-muted">
-          Run the pipeline from the Dashboard first.
-        </p>
+        <h1 className="text-2xl font-bold mb-4">Models & Lineage</h1>
+        <div className="bg-card border border-border rounded-lg p-8 max-w-xl mx-auto text-center">
+          <h2 className="text-lg font-semibold mb-2">No Models Generated Yet</h2>
+          <p className="text-sm text-muted mb-4">
+            Headwater generates SQL models from your data: staging models
+            (mechanical transforms, auto-approved) and mart models (analytical,
+            require your review). Each mart comes with assumptions and clarifying
+            questions so you stay in control.
+          </p>
+          <p className="text-sm text-muted mb-4">
+            Run the full pipeline from the Dashboard to generate models, or use the CLI:
+          </p>
+          <div className="bg-background border border-border rounded p-4 text-left text-sm font-mono text-muted">
+            <p className="mb-1">headwater demo</p>
+            <p>headwater discover --source /path/to/data</p>
+          </div>
+        </div>
       </div>
     );
   }

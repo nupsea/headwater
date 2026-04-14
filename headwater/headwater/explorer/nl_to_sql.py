@@ -19,14 +19,24 @@ from typing import Any
 import duckdb
 
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider
+from headwater.core.classification import (
+    is_dimension_column as _shared_is_dimension,
+)
+from headwater.core.classification import (
+    is_metric_column as _shared_is_metric,
+)
 from headwater.core.models import (
     ColumnInfo,
+    ColumnProfile,
     DiscoveryResult,
     ExplorationResult,
     GeneratedModel,
+    Relationship,
     SuggestedQuestion,
     TableInfo,
 )
+from headwater.explorer.query_planner import QueryPlanner
+from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.utils import resolve_table_ref, table_exists
 from headwater.explorer.visualization import recommend_visualization
 
@@ -74,24 +84,48 @@ def ask(
     models: list[GeneratedModel] | None = None,
     suggestions: list[SuggestedQuestion] | None = None,
     provider: LLMProvider | None = None,
+    reviewed_tables: set[str] | None = None,
 ) -> ExplorationResult:
     """Translate a natural language question to SQL, execute it, and return results.
 
+    When *reviewed_tables* is provided, only those tables are available for
+    query planning. This gates the explorer on the data dictionary review.
+
     Strategy:
     1. Check if the question matches a suggested question with a pre-built SQL hint.
-    2. If LLM is available, generate SQL from metadata context.
-    3. Validate the SQL is read-only.
-    4. Execute against DuckDB.
-    5. If execution fails and LLM is available, auto-repair the query (up to 3 attempts).
-    6. Return results with visualization recommendation.
+    2. Try the QueryPlanner (schema-graph-based entity resolution + SQL generation).
+    3. Fall back to legacy heuristic SQL generation.
+    4. If LLM is available, generate SQL from metadata context.
+    5. Validate the SQL is read-only.
+    6. Execute against DuckDB.
+    7. If execution fails and LLM is available, auto-repair the query (up to 3 attempts).
+    8. Return results with visualization recommendation.
     """
+    # Gate: if reviewed_tables is provided but empty, block exploration
+    if reviewed_tables is not None and len(reviewed_tables) == 0:
+        return ExplorationResult(
+            question=question,
+            sql="",
+            error=(
+                "No tables have been reviewed yet. "
+                "Visit the Data Dictionary to review table metadata before exploring."
+            ),
+        )
+
     has_llm = provider is not None and not isinstance(provider, NoLLMProvider)
     context = _build_context(discovery, models or []) if has_llm else ""
 
     # Try matching a suggested question first
     sql = _match_suggestion(question, suggestions or [])
 
-    # If no match, try heuristic SQL generation from metadata
+    # Try QueryPlanner (schema-graph-based, handles cross-table joins)
+    if sql is None:
+        sql = _planned_sql(
+            question, discovery, models or [], con=con,
+            reviewed_tables=reviewed_tables,
+        )
+
+    # Fall back to legacy heuristic SQL generation
     if sql is None:
         sql = _heuristic_sql(question, discovery, models or [], con=con)
 
@@ -267,6 +301,7 @@ _STOP_WORDS = {
     "were", "be", "been", "being", "my", "your", "their", "its",
     "we", "our", "us", "i", "me", "more", "less", "than", "not", "no",
     "one", "ones", "other", "each", "every", "any", "some", "all",
+    "give", "tell", "can", "could", "would", "should", "please", "just",
 }
 
 
@@ -284,7 +319,33 @@ def _questions_similar(a: str, b: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Heuristic SQL builder -- constructs queries from metadata, no LLM needed
+# Schema-graph-based query planner (primary heuristic path)
+# ---------------------------------------------------------------------------
+
+
+def _planned_sql(
+    question: str,
+    discovery: DiscoveryResult,
+    models: list[GeneratedModel],
+    con: duckdb.DuckDBPyConnection | None = None,
+    reviewed_tables: set[str] | None = None,
+) -> str | None:
+    """Use the QueryPlanner to generate SQL from a natural language question.
+
+    Builds a SchemaGraph from the discovery metadata, then uses the planner
+    to resolve entities, plan joins, and generate SQL.  Returns None if the
+    planner's confidence is too low.
+
+    When *reviewed_tables* is provided, only those tables are indexed in the
+    schema graph -- the planner physically cannot reference unreviewed tables.
+    """
+    graph = SchemaGraph(discovery, models, reviewed_tables=reviewed_tables)
+    planner = QueryPlanner(graph, con=con, models=models)
+    return planner.plan_sql(question)
+
+
+# ---------------------------------------------------------------------------
+# Legacy heuristic SQL builder -- fallback when planner declines
 # ---------------------------------------------------------------------------
 
 # Question patterns that indicate what kind of query to build
@@ -296,7 +357,6 @@ _TREND_WORDS = {
 _COUNT_WORDS = {"how", "many", "count", "total", "number"}
 _BREAKDOWN_WORDS = {"by", "across", "per", "breakdown", "break", "distribution", "distributed"}
 _TOP_WORDS = {"top", "most", "highest", "worst", "best", "largest", "lowest", "least", "smallest"}
-
 
 def _resolve_table_ref(
     table_name: str,
@@ -331,32 +391,41 @@ def _heuristic_sql(
     if table is None:
         return None
 
-    # Step 2: Bail out if the question references other tables
-    # (implies a JOIN we can't reliably construct)
-    if _references_other_tables(content_words, table, discovery):
-        return None
+    # Step 2: Check if the question references another table.
+    # Try direct FK, then indirect (shared FK target), then fall back to single-table.
+    secondary = _find_referenced_table(content_words, table, discovery)
+    join_rel = None
+    indirect_join = None
+    if secondary is not None:
+        join_rel = _find_join_relationship(table, secondary, discovery)
+        if join_rel is None:
+            indirect_join = _find_indirect_join(table, secondary, discovery)
 
-    # Classify columns by role
-    temporal_cols = [
+    # Build profile index for column classification
+    profile_index: dict[tuple[str, str], ColumnProfile] = {
+        (p.table_name, p.column_name): p for p in discovery.profiles
+    }
+
+    # Classify columns by role.
+    # Prefer actual date/timestamp columns for trends (higher granularity) over
+    # name-only matches like "year" or "month" which produce few groups.
+    _temporal_raw = [
         c for c in table.columns
         if c.dtype in ("timestamp", "date")
         or c.semantic_type == "temporal"
         or re.search(r"(date|time|month|year|day|week|quarter|_at$)", c.name, re.IGNORECASE)
     ]
+    temporal_cols = sorted(
+        _temporal_raw,
+        key=lambda c: (0 if c.dtype in ("timestamp", "date") else 1),
+    )
     metric_cols = [
         c for c in table.columns
-        if c.dtype in ("int64", "float64")
-        and c.semantic_type not in ("id", "foreign_key", "dimension", "temporal")
-        and not c.name.endswith("_id")
-        and not c.is_primary_key
-        and not re.search(r"(code$|flag$|indicator$|_key$|_fk$|_pk$)", c.name, re.IGNORECASE)
+        if _shared_is_metric(c, profile_index.get((table.name, c.name)))
     ]
     dimension_cols = [
         c for c in table.columns
-        if c.dtype == "varchar"
-        and c.semantic_type not in ("id", "foreign_key")
-        and not c.name.endswith("_id")
-        and not c.is_primary_key
+        if _shared_is_dimension(c, profile_index.get((table.name, c.name)))
     ]
 
     if con is not None:
@@ -375,15 +444,71 @@ def _heuristic_sql(
         )
         table_ref = mart_ref if mart_ref is not None else f"staging.stg_{table.name}"
 
-    # Step 3: Detect the question intent and build SQL
+    # Step 2b: If we have a FK relationship, build a JOIN query
+    if join_rel is not None and secondary is not None:
+        return _build_join_sql(
+            table, secondary, join_rel, q_words, con, models,
+        )
+
+    # Step 2c: Indirect join through a shared intermediate table
+    if indirect_join is not None and secondary is not None:
+        mid_table, rel_a, rel_b = indirect_join
+        return _build_indirect_join_sql(
+            table, secondary, mid_table, rel_a, rel_b, q_words, con, models,
+        )
+
+    # If secondary was found but no join path exists, fall through to
+    # single-table analysis on the primary table (better than giving up).
+
+    # Step 3: Detect the question intent and build SQL (single-table)
     is_trend = bool(q_words & _TREND_WORDS) and temporal_cols
     is_count = bool(q_words & _COUNT_WORDS)
     is_top = bool(q_words & _TOP_WORDS)
     has_breakdown_word = bool(q_words & _BREAKDOWN_WORDS)
 
-    # Try to find a specific dimension mentioned in the question
-    target_dim = _match_column(q_words, dimension_cols)
-    target_metric = _match_column(q_words, metric_cols)
+    # For column matching, remove table-name words (and their stems) so
+    # "complaints" / "reading" from the table name doesn't shadow the user's
+    # actual column reference like "county".
+    table_name_words = set(table.name.lower().replace("_", " ").split())
+    table_name_stems: set[str] = set()
+    for tw in table_name_words:
+        table_name_stems.update(_stem(tw))
+    col_match_words = {
+        w for w in content_words
+        if w not in table_name_words and not (_stem(w) & table_name_stems)
+    }
+
+    # Try to find a specific dimension/metric mentioned in the question
+    target_dim = _match_column(col_match_words, dimension_cols)
+    target_metric = _match_column(col_match_words, metric_cols)
+
+    # Track whether the user's specific words (minus table name) matched anything.
+    # Used later to decide if a blind fallback is appropriate.
+    first_pass_matched = target_dim is not None or target_metric is not None
+
+    # If col_match_words yielded nothing, fall back to full content_words
+    if target_dim is None and target_metric is None:
+        target_dim = _match_column(content_words, dimension_cols)
+        target_metric = _match_column(content_words, metric_cols)
+
+    # Guard: if the user referenced specific columns (e.g. "county") but the
+    # first pass found nothing, the second-pass match is likely a false positive
+    # from table-name word overlap (e.g. "complaints" -> "complaint_type_311").
+    # Return None rather than building a query with the wrong column.
+    # Exclude words that matched a secondary table (those are table references,
+    # not orphaned column references).
+    unmatched_words = set(col_match_words)
+    if secondary is not None:
+        sec_name_words = set(secondary.name.lower().replace("_", " ").split())
+        sec_stems: set[str] = set()
+        for sw in sec_name_words:
+            sec_stems.update(_stem(sw))
+        unmatched_words = {
+            w for w in unmatched_words
+            if w not in sec_name_words and not (_stem(w) & sec_stems)
+        }
+    if bool(unmatched_words) and not first_pass_matched:
+        return None
 
     # -- Trend query: metric over time, optionally grouped by a dimension
     if is_trend and temporal_cols:
@@ -391,9 +516,17 @@ def _heuristic_sql(
         metric = target_metric or (metric_cols[0] if metric_cols else None)
         dim = target_dim
 
-        time_expr = f'CAST("{time_col.name}" AS DATE)'
+        # Build time expression based on dtype:
+        # - timestamp -> truncate to month for meaningful grouping
+        # - date -> use as-is
+        # - varchar/int (e.g. "year", "month") -> use the raw column
         if time_col.dtype == "timestamp":
             time_expr = f"DATE_TRUNC('month', \"{time_col.name}\")"
+        elif time_col.dtype == "date":
+            time_expr = f'CAST("{time_col.name}" AS DATE)'
+        else:
+            # Name-pattern temporal (year, month, etc.) -- use raw value
+            time_expr = f'"{time_col.name}"'
 
         parts = [f"SELECT {time_expr} AS period"]
         if dim:
@@ -482,19 +615,71 @@ def _heuristic_sql(
     return None
 
 
-def _references_other_tables(
+def _build_join_sql(
+    primary: TableInfo,
+    secondary: TableInfo,
+    rel: Relationship,
+    q_words: set[str],
+    con: duckdb.DuckDBPyConnection | None,
+    models: list[GeneratedModel],
+) -> str:
+    """Build a JOIN query between two FK-related tables.
+
+    Joins the primary table to the secondary and produces a GROUP BY
+    aggregation using the best available dimension from the secondary table
+    and a metric or COUNT from the primary table.
+    """
+    # Resolve schema-qualified references
+    if con is not None:
+        p_ref = resolve_table_ref(primary.name, con, models)
+        s_ref = resolve_table_ref(secondary.name, con, models)
+    else:
+        p_ref = primary.name
+        s_ref = secondary.name
+
+    # Determine join columns and alias direction
+    # The FK goes from_table.from_column -> to_table.to_column
+    if rel.from_table == primary.name:
+        p_join_col, s_join_col = rel.from_column, rel.to_column
+    else:
+        p_join_col, s_join_col = rel.to_column, rel.from_column
+
+    # Pick a good dimension from the secondary table for GROUP BY
+    sec_dim = next(
+        (c for c in secondary.columns if _shared_is_dimension(c)), None,
+    )
+
+    # Pick a metric from primary for aggregation
+    pri_metric = next(
+        (c for c in primary.columns if _shared_is_metric(c)), None,
+    )
+
+    # Build the SELECT
+    group_col = f's."{sec_dim.name}"' if sec_dim else f's."{s_join_col}"'
+    group_label = sec_dim.name if sec_dim else s_join_col
+
+    select_parts = [f'{group_col} AS "{group_label}"', "COUNT(*) AS total"]
+    if pri_metric:
+        select_parts.append(
+            f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}'
+        )
+
+    return (
+        f"SELECT {', '.join(select_parts)} "
+        f"FROM {p_ref} p "
+        f'JOIN {s_ref} s ON p."{p_join_col}" = s."{s_join_col}" '
+        f'GROUP BY {group_col} '
+        f"ORDER BY total DESC LIMIT 20"
+    )
+
+
+def _find_referenced_table(
     content_words: set[str],
     primary_table: TableInfo,
     discovery: DiscoveryResult,
-) -> bool:
-    """Check if the question references entities from tables other than the primary.
-
-    If someone asks about "inspections by neighborhood", "neighborhood" maps to
-    the zones table -- that requires a JOIN we can't reliably build. Return True
-    to signal the heuristic should bail out.
-    """
+) -> TableInfo | None:
+    """If the question mentions another table, return it. Otherwise None."""
     primary_vocab: set[str] = set()
-    # Build vocabulary for the primary table (name + columns + domain + description)
     primary_vocab.update(primary_table.name.lower().replace("_", " ").split())
     if primary_table.domain:
         primary_vocab.update(primary_table.domain.lower().split())
@@ -506,29 +691,134 @@ def _references_other_tables(
     for other_table in discovery.tables:
         if other_table.name == primary_table.name:
             continue
-
         other_words = set(other_table.name.lower().replace("_", " ").split())
         if other_table.domain:
             other_words.update(other_table.domain.lower().split())
         for col in other_table.columns:
             col_parts = set(col.name.lower().replace("_", " ").split())
-            # Only include meaningful column name parts (skip "id", "name", etc.)
             other_words.update(
                 w for w in col_parts
                 if w not in ("id", "name", "type", "status", "date")
             )
-
-        # Remove words that overlap with the primary table's vocabulary
         unique_other = other_words - primary_vocab
-
-        # Check if any content word from the question stems to a unique other-table word
         for qw in content_words:
             qw_stems = _stem(qw)
             for ow in unique_other:
                 if _stem(ow) & qw_stems:
-                    return True
+                    return other_table
+    return None
 
-    return False
+
+def _find_join_relationship(
+    table_a: TableInfo,
+    table_b: TableInfo,
+    discovery: DiscoveryResult,
+) -> Relationship | None:
+    """Find a FK relationship between two tables (either direction)."""
+    for rel in discovery.relationships:
+        if (
+            (rel.from_table == table_a.name and rel.to_table == table_b.name)
+            or (rel.from_table == table_b.name and rel.to_table == table_a.name)
+        ):
+            return rel
+    return None
+
+
+def _find_indirect_join(
+    table_a: TableInfo,
+    table_b: TableInfo,
+    discovery: DiscoveryResult,
+) -> tuple[TableInfo, Relationship, Relationship] | None:
+    """Find an indirect FK path: table_a -> mid -> table_b (one hop).
+
+    Returns (mid_table, rel_a_to_mid, rel_b_to_mid) or None.
+    """
+    table_lookup = {t.name: t for t in discovery.tables}
+
+    # Build adjacency: for each table, which relationships does it participate in?
+    rels_by_table: dict[str, list[Relationship]] = {}
+    for rel in discovery.relationships:
+        rels_by_table.setdefault(rel.from_table, []).append(rel)
+        rels_by_table.setdefault(rel.to_table, []).append(rel)
+
+    # Find tables that both table_a and table_b relate to
+    a_neighbours: dict[str, Relationship] = {}
+    for rel in rels_by_table.get(table_a.name, []):
+        other = rel.to_table if rel.from_table == table_a.name else rel.from_table
+        a_neighbours[other] = rel
+
+    for rel in rels_by_table.get(table_b.name, []):
+        other = rel.to_table if rel.from_table == table_b.name else rel.from_table
+        if other in a_neighbours and other != table_a.name and other != table_b.name:
+            mid = table_lookup.get(other)
+            if mid is not None:
+                return (mid, a_neighbours[other], rel)
+
+    return None
+
+
+def _build_indirect_join_sql(
+    primary: TableInfo,
+    secondary: TableInfo,
+    mid_table: TableInfo,
+    rel_a: Relationship,
+    rel_b: Relationship,
+    q_words: set[str],
+    con: duckdb.DuckDBPyConnection | None,
+    models: list[GeneratedModel],
+) -> str:
+    """Build a two-hop JOIN: primary -> mid_table -> secondary.
+
+    Produces a GROUP BY aggregation using a dimension from the secondary table.
+    """
+    if con is not None:
+        p_ref = resolve_table_ref(primary.name, con, models)
+        m_ref = resolve_table_ref(mid_table.name, con, models)
+        s_ref = resolve_table_ref(secondary.name, con, models)
+    else:
+        p_ref = primary.name
+        m_ref = mid_table.name
+        s_ref = secondary.name
+
+    # Determine join columns for primary -> mid
+    if rel_a.from_table == primary.name:
+        p_join_col, m_join_col_a = rel_a.from_column, rel_a.to_column
+    else:
+        p_join_col, m_join_col_a = rel_a.to_column, rel_a.from_column
+
+    # Determine join columns for secondary -> mid
+    if rel_b.from_table == secondary.name:
+        s_join_col, m_join_col_b = rel_b.from_column, rel_b.to_column
+    else:
+        s_join_col, m_join_col_b = rel_b.to_column, rel_b.from_column
+
+    # Pick a dimension from the secondary table
+    sec_dim = next(
+        (c for c in secondary.columns if _shared_is_dimension(c)), None,
+    )
+
+    # Pick a metric from primary
+    pri_metric = next(
+        (c for c in primary.columns if _shared_is_metric(c)), None,
+    )
+
+    group_col = f's."{sec_dim.name}"' if sec_dim else f's."{s_join_col}"'
+    group_label = sec_dim.name if sec_dim else s_join_col
+
+    select_parts = [f'{group_col} AS "{group_label}"', "COUNT(*) AS total"]
+    if pri_metric:
+        select_parts.append(
+            f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}'
+        )
+
+    return (
+        f"SELECT {', '.join(select_parts)} "
+        f"FROM {p_ref} p "
+        f'JOIN {m_ref} m ON p."{p_join_col}" = m."{m_join_col_a}" '
+        f'JOIN {s_ref} s ON m."{m_join_col_b}" = s."{s_join_col}" '
+        f"GROUP BY {group_col} "
+        f"ORDER BY total DESC LIMIT 20"
+    )
 
 
 def _match_table(
@@ -586,15 +876,29 @@ def _match_column(
     q_words: set[str],
     columns: list[ColumnInfo],
 ) -> ColumnInfo | None:
-    """Find the column whose name best matches the question words."""
+    """Find the column whose name best matches the question words.
+
+    Scores each column and returns the best match. Exact word matches score
+    higher than stem matches to avoid false positives like "complaint_number"
+    matching "complaints" when the user asked for "county".
+    """
+    best_col: ColumnInfo | None = None
+    best_score = 0
+
     for col in columns:
         col_words = set(col.name.lower().replace("_", " ").split())
+        score = 0
         for cw in col_words:
-            cw_stems = _stem(cw)
             for qw in q_words:
-                if _stem(qw) & cw_stems:
-                    return col
-    return None
+                if cw == qw:
+                    score += 10  # exact match
+                elif _stem(cw) & _stem(qw):
+                    score += 3   # stem match
+        if score > best_score:
+            best_score = score
+            best_col = col
+
+    return best_col if best_score > 0 else None
 
 
 # ---------------------------------------------------------------------------
@@ -609,9 +913,11 @@ def _build_context(
 ) -> str:
     """Build a metadata context prompt for the LLM. Never includes raw data.
 
+    Uses SchemaGraph to enrich context with column roles and cardinality.
     Uses _resolve_table_ref so the LLM is told about tables that actually exist,
     not tables that were planned but may not have been materialized.
     """
+    graph = SchemaGraph(discovery, models)
     lines: list[str] = []
     lines.append("=== Available Tables ===\n")
 
@@ -623,10 +929,19 @@ def _build_context(
         lines.append(f"\nTable: {ref} ({table.row_count} rows)")
         if table.description:
             lines.append(f"  Description: {table.description}")
+
+        tnode = graph.tables.get(table.name)
         for col in table.columns:
             desc = f' -- {col.description}' if col.description else ''
             sem = f' [{col.semantic_type}]' if col.semantic_type else ''
-            lines.append(f"  - {col.name} ({col.dtype}){sem}{desc}")
+            # Add column role from schema graph for richer LLM context
+            role_hint = ''
+            if tnode and col.name in tnode.columns:
+                cnode = tnode.columns[col.name]
+                role_hint = f' (role: {cnode.role})'
+                if cnode.profile and cnode.profile.distinct_count:
+                    role_hint += f' cardinality={cnode.profile.distinct_count}'
+            lines.append(f"  - {col.name} ({col.dtype}){sem}{role_hint}{desc}")
 
     # Mart tables (only executed ones)
     executed_marts = [m for m in models if m.model_type == "mart" and m.status == "executed"]

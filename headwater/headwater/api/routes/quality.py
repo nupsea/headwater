@@ -76,6 +76,31 @@ async def get_quality_report(request: Request):
     }
 
 
+@router.post("/contracts/{rule_id}/mark-false-positive")
+async def mark_false_positive(request: Request, rule_id: str):
+    """Mark a quality contract alert as a false positive.
+
+    Writes a decisions row but does not change the contract status itself.
+    """
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="Metadata store not available.")
+
+    # Verify contract exists
+    contracts = request.app.state.pipeline.get("contracts", [])
+    contract = next((c for c in contracts if c.id == rule_id), None)
+    if contract is None:
+        raise HTTPException(status_code=404, detail=f"Contract '{rule_id}' not found.")
+
+    store.record_decision(
+        "contract",
+        rule_id,
+        "false_positive",
+        payload={"model_name": contract.model_name, "rule_type": contract.rule_type},
+    )
+    return {"rule_id": rule_id, "marked": "false_positive"}
+
+
 @router.get("/audit")
 async def get_audit_log(request: Request, limit: int = 100):
     """Return the last N LLM audit log entries (default 100)."""

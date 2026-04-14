@@ -23,6 +23,7 @@ import re
 
 import duckdb
 
+from headwater.core.classification import is_dimension_column, is_metric_column
 from headwater.core.models import (
     ColumnProfile,
     ContractCheckResult,
@@ -250,7 +251,7 @@ def _from_table_structure(
 
         temporal_cols = _get_temporal_cols(table)
         metric_cols = _get_metric_cols(table, profile_index)
-        dim_cols = _get_dimension_cols(table, profile_index)
+        dim_cols = _prefer_display_dim(_get_dimension_cols(table, profile_index), table.name)
 
         if temporal_cols and metric_cols:
             t_col = temporal_cols[0]
@@ -271,28 +272,31 @@ def _from_table_structure(
             )
 
         if dim_cols and metric_cols:
-            d_col = dim_cols[0]
-            m_col = metric_cols[0]
-            questions.append(
-                SuggestedQuestion(
-                    question=(
-                        f"Which {_humanize(d_col)} has the highest {_humanize(m_col)} "
-                        f"in {label}?"
-                    ),
-                    source="semantic",
-                    category=label.title(),
-                    relevant_tables=[table.name],
-                    sql_hint=(
-                        f'SELECT "{d_col}", '
-                        f'COUNT(*) AS records, '
-                        f'ROUND(AVG("{m_col}"), 2) AS avg_{m_col}, '
-                        f'MAX("{m_col}") AS max_{m_col} '
-                        f"FROM {ref} "
-                        f'GROUP BY "{d_col}" '
-                        f"ORDER BY avg_{m_col} DESC LIMIT 20"
-                    ),
+            # Generate questions for up to 2 distinct dimensions (e.g. county
+            # and state) so both geographic levels get coverage.
+            dim_limit = min(len(dim_cols), 2)
+            for d_col in dim_cols[:dim_limit]:
+                m_col = metric_cols[0]
+                questions.append(
+                    SuggestedQuestion(
+                        question=(
+                            f"Which {_humanize(d_col)} has the highest {_humanize(m_col)} "
+                            f"in {label}?"
+                        ),
+                        source="semantic",
+                        category=label.title(),
+                        relevant_tables=[table.name],
+                        sql_hint=(
+                            f'SELECT "{d_col}", '
+                            f'COUNT(*) AS records, '
+                            f'ROUND(AVG("{m_col}"), 2) AS avg_{m_col}, '
+                            f'MAX("{m_col}") AS max_{m_col} '
+                            f"FROM {ref} "
+                            f'GROUP BY "{d_col}" '
+                            f"ORDER BY avg_{m_col} DESC LIMIT 20"
+                        ),
+                    )
                 )
-            )
 
         if metric_cols and not temporal_cols and not dim_cols:
             m_col = metric_cols[0]
@@ -415,8 +419,9 @@ def _from_quality_findings(
 
 
 def _get_temporal_cols(table: TableInfo) -> list[str]:
-    return [
-        c.name
+    """Return temporal column names, preferring date/timestamp dtypes first."""
+    raw = [
+        c
         for c in table.columns
         if not c.is_primary_key
         and not _ID_NAME_RE.search(c.name)
@@ -426,6 +431,9 @@ def _get_temporal_cols(table: TableInfo) -> list[str]:
             or bool(_TEMPORAL_NAME_RE.search(c.name))
         )
     ]
+    # Prefer actual date/timestamp dtypes over name-pattern matches (year, month)
+    raw.sort(key=lambda c: 0 if any(c.dtype.lower().startswith(t) for t in _TEMPORAL_DTYPES) else 1)
+    return [c.name for c in raw]
 
 
 def _get_metric_cols(
@@ -434,16 +442,8 @@ def _get_metric_cols(
 ) -> list[str]:
     cols = []
     for c in table.columns:
-        if c.is_primary_key or _ID_NAME_RE.search(c.name):
-            continue
-        if c.semantic_type in ("id", "foreign_key", "primary_key", "dimension", "temporal"):
-            continue
-        if c.semantic_type in ("metric", "measure", "kpi"):
-            cols.append(c.name)
-            continue
         profile = profile_index.get((table.name, c.name))
-        dtype = (profile.dtype if profile else c.dtype).lower()
-        if any(t in dtype for t in _NUMERIC_DTYPES):
+        if is_metric_column(c, profile):
             cols.append(c.name)
     return cols
 
@@ -452,44 +452,19 @@ def _get_dimension_cols(
     table: TableInfo,
     profile_index: dict[tuple[str, str], ColumnProfile],
 ) -> list[str]:
-    """Return low-cardinality columns suitable for GROUP BY.
-
-    Includes varchar/text columns and numeric "code" columns with low
-    cardinality (e.g. state_code, huc codes) that act as categorical dimensions.
-    """
+    """Return low-cardinality columns suitable for GROUP BY."""
     cols = []
     for c in table.columns:
-        if c.is_primary_key or _ID_NAME_RE.search(c.name):
-            continue
-        if c.semantic_type in ("id", "foreign_key", "primary_key"):
-            continue
         profile = profile_index.get((table.name, c.name))
-        dtype = (profile.dtype if profile else c.dtype).lower()
-
-        is_text = "varchar" in dtype or "char" in dtype or "text" in dtype
-        is_numeric_code = (
-            any(t in dtype for t in _NUMERIC_DTYPES)
-            and c.semantic_type == "dimension"
-        )
-
-        if not is_text and not is_numeric_code:
-            continue
-        # Only good grouping columns if distinct count is reasonably low
-        if profile is not None and profile.distinct_count > 200:
-            continue
-        cols.append(c.name)
+        if is_dimension_column(c, profile):
+            cols.append(c.name)
     return cols
 
 
 def _pick_metric_col(table: TableInfo) -> str | None:
     """Pick the first non-ID, non-code numeric column from a table."""
     for c in table.columns:
-        if c.is_primary_key or _ID_NAME_RE.search(c.name):
-            continue
-        if c.semantic_type in ("id", "foreign_key", "primary_key", "dimension", "temporal"):
-            continue
-        dtype = c.dtype.lower()
-        if any(t in dtype for t in _NUMERIC_DTYPES):
+        if is_metric_column(c):
             return c.name
     return None
 
@@ -500,32 +475,58 @@ def _is_metric_col(
     profile_index: dict[tuple[str, str], ColumnProfile],
     table_map: dict[str, TableInfo],
 ) -> bool:
-    """Return True if the column is a numeric metric with actual nulls."""
-    col_lower = column_name.lower()
-    if _ID_NAME_RE.search(col_lower):
-        return False
-    if bool(_TEMPORAL_NAME_RE.search(col_lower)):
-        return False
-    if col_lower in ("year", "month", "day", "date"):
-        return False
-
-    # Check semantic type
+    """Return True if the column is a numeric metric."""
     table = table_map.get(table_name)
     if table:
-        col_info = next((c for c in table.columns if c.name == column_name), None)
-        if col_info and col_info.semantic_type in (
-            "id", "foreign_key", "primary_key", "temporal", "dimension",
-        ):
-            return False
-
-    # Use profile dtype to confirm it's numeric -- string/varchar columns are not metrics
+        col_info = next(
+            (c for c in table.columns if c.name == column_name), None,
+        )
+        if col_info:
+            profile = profile_index.get((table_name, column_name))
+            return is_metric_column(col_info, profile)
+    # Fallback when table metadata is unavailable
+    if _ID_NAME_RE.search(column_name) or _TEMPORAL_NAME_RE.search(column_name):
+        return False
     profile = profile_index.get((table_name, column_name))
-    return profile is None or any(t in profile.dtype.lower() for t in _NUMERIC_DTYPES)
+    if profile is None:
+        return False
+    return any(t in profile.dtype.lower() for t in _NUMERIC_DTYPES)
 
 
 # ---------------------------------------------------------------------------
 # String helpers
 # ---------------------------------------------------------------------------
+
+
+def _prefer_display_dim(dim_cols: list[str], table_name: str = "") -> list[str]:
+    """Sort dimension columns: table-name match > names > plain > codes.
+
+    Suggestions read better with human-readable columns (state_name)
+    than with code columns (state_code) or identifiers (state_id).
+
+    Columns whose name appears in the table name rank highest -- if the table
+    is ``aqi_by_county``, the ``county`` column is the most natural dimension.
+    """
+    table_words = set(table_name.lower().replace("_", " ").split()) if table_name else set()
+
+    def _rank(col: str) -> tuple[int, int]:
+        lower = col.lower()
+        col_words = set(lower.replace("_", " ").split())
+
+        # Primary: boost columns whose name overlaps with the table name
+        table_affinity = 0 if (col_words & table_words) else 1
+
+        # Secondary: human-readable names > plain > codes
+        if any(s in lower for s in ("_name", "name_", "label", "description")):
+            display = 0  # Best: human-readable names
+        elif any(s in lower for s in ("_code", "code_", "_num", "_id", "_key")):
+            display = 2  # Worst: codes/IDs
+        else:
+            display = 1  # Middle: plain column names
+
+        return (table_affinity, display)
+
+    return sorted(dim_cols, key=_rank)
 
 
 def _humanize(name: str) -> str:
@@ -534,6 +535,8 @@ def _humanize(name: str) -> str:
     for prefix in ("mart_", "stg_"):
         if name.startswith(prefix):
             name = name[len(prefix):]
+    # Strip trailing numeric suffixes that look like source identifiers
+    name = re.sub(r"_\d+$", "", name)
     return name.replace("_", " ")
 
 

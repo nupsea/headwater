@@ -39,12 +39,19 @@ export default function ExplorePage() {
     "questions"
   );
 
+  const [reviewRequired, setReviewRequired] = useState(false);
+
   useEffect(() => {
     api
       .exploreSuggestions()
-      .then((res) => {
-        setSuggestions(res.suggestions);
-        setInsights(res.insights);
+      .then((res: Record<string, unknown>) => {
+        setSuggestions(
+          (res.suggestions as typeof suggestions) || []
+        );
+        setInsights(
+          (res.insights as typeof insights) || []
+        );
+        if (res.review_required) setReviewRequired(true);
       })
       .catch(() => setError("Run the pipeline from the Dashboard first."));
   }, []);
@@ -79,7 +86,21 @@ export default function ExplorePage() {
     return (
       <div>
         <h1 className="text-2xl font-bold mb-4">Explore Data</h1>
-        <p className="text-muted">{error}</p>
+        <div className="bg-card border border-border rounded-lg p-8 max-w-xl mx-auto text-center">
+          <h2 className="text-lg font-semibold mb-2">No Data to Explore Yet</h2>
+          <p className="text-sm text-muted mb-4">
+            Ask natural language questions about your data and get instant answers
+            with visualizations. The explorer works on top of your materialized
+            staging and mart models.
+          </p>
+          <p className="text-sm text-muted mb-4">
+            Run the full pipeline from the Dashboard first, or use the CLI:
+          </p>
+          <div className="bg-background border border-border rounded p-4 text-left text-sm font-mono text-muted">
+            <p className="mb-1">headwater demo</p>
+            <p>headwater discover --source /path/to/data</p>
+          </div>
+        </div>
       </div>
     );
   }
@@ -92,6 +113,26 @@ export default function ExplorePage() {
         from your curated metadata and executes it against the analytical
         database.
       </p>
+
+      {/* Dictionary review gate */}
+      {reviewRequired && (
+        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+          <h3 className="text-sm font-semibold text-amber-800 mb-1">
+            Review Required
+          </h3>
+          <p className="text-sm text-amber-900 mb-2">
+            Some tables have not been reviewed yet. The explorer only generates
+            queries for reviewed tables. Review table metadata in the Data
+            Dictionary to enable full exploration.
+          </p>
+          <a
+            href="/dictionary"
+            className="inline-block px-3 py-1.5 bg-amber-600 text-white rounded text-sm font-medium hover:bg-amber-700 transition-colors"
+          >
+            Go to Data Dictionary
+          </a>
+        </div>
+      )}
 
       {/* Question input */}
       <div className="mb-6">

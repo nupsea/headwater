@@ -11,10 +11,10 @@ US-503: Quality gate -- only yield a candidate if it meets minimum evidence thre
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Literal
 
+from headwater.core.classification import is_metric_column
 from headwater.core.models import ColumnInfo, DiscoveryResult, GeneratedModel
 
 logger = logging.getLogger(__name__)
@@ -28,11 +28,32 @@ _TEMPORAL_SEMANTIC_TYPES = {"temporal"}
 # Column name patterns that suggest temporal values (fallback if semantic_type not set)
 _TEMPORAL_PATTERNS = ("date", "time", "at", "period", "month", "year", "week", "day")
 
-# Minimum evidence thresholds (US-503)
+# Minimum evidence thresholds (US-503) -- defaults used when settings are not provided.
+# These can be overridden via HeadwaterSettings (env: HEADWATER_MART_MIN_*).
 _MIN_RELATIONSHIPS_FOR_ENTITY_SUMMARY = 2
 _MIN_METRIC_COLUMNS_FOR_ENTITY_SUMMARY = 1
 _MIN_ROWS_FOR_ENTITY_SUMMARY = 100
 _MIN_ROWS_FOR_AGGREGATION = 100
+
+
+def _get_thresholds() -> tuple[int, int, int, int]:
+    """Return (min_rels, min_metric_cols, min_rows_entity, min_rows_agg) from settings."""
+    try:
+        from headwater.core.config import get_settings
+        s = get_settings()
+        return (
+            s.mart_min_relationships,
+            s.mart_min_metric_columns,
+            s.mart_min_rows,
+            s.mart_min_rows,
+        )
+    except Exception:
+        return (
+            _MIN_RELATIONSHIPS_FOR_ENTITY_SUMMARY,
+            _MIN_METRIC_COLUMNS_FOR_ENTITY_SUMMARY,
+            _MIN_ROWS_FOR_ENTITY_SUMMARY,
+            _MIN_ROWS_FOR_AGGREGATION,
+        )
 
 
 @dataclass
@@ -61,6 +82,7 @@ class PatternMatcher:
     def match(self, discovery: DiscoveryResult) -> list[MartCandidate]:
         """Return all matched MartCandidates for the discovery result."""
         candidates: list[MartCandidate] = []
+        min_rels, min_metrics, min_rows_entity, min_rows_agg = _get_thresholds()
 
         # Build FK set: (from_table, to_table) pairs
         fk_pairs = {
@@ -96,12 +118,12 @@ class PatternMatcher:
                     table.name, temporal_cols,
                 )
 
-            # Archetype 2: entity_summary (quality gate: relationships >= 2 OR metric >= 1)
+            # Archetype 2: entity_summary (quality gate applies)
             if metric_cols and dimension_tables:
                 passes_gate = (
-                    table_rels >= _MIN_RELATIONSHIPS_FOR_ENTITY_SUMMARY
-                    or len(metric_cols) >= _MIN_METRIC_COLUMNS_FOR_ENTITY_SUMMARY
-                ) and table.row_count >= _MIN_ROWS_FOR_ENTITY_SUMMARY
+                    table_rels >= min_rels
+                    or len(metric_cols) >= min_metrics
+                ) and table.row_count >= min_rows_entity
                 if passes_gate:
                     candidate = self._build_entity_summary(
                         table, metric_cols, dimension_tables
@@ -122,7 +144,7 @@ class PatternMatcher:
             if (
                 len(metric_cols) >= 2
                 and not dimension_tables
-                and table.row_count >= _MIN_ROWS_FOR_AGGREGATION
+                and table.row_count >= min_rows_agg
             ):
                 candidate = self._build_aggregation(table, metric_cols)
                 candidates.append(candidate)
@@ -144,30 +166,8 @@ class PatternMatcher:
                 result.append(col.name)
         return result
 
-    _NON_METRIC_TYPES = {"id", "foreign_key", "geographic", "temporal", "dimension", "text"}
-    _NUMERIC_DTYPES = {"float64", "int64", "float32", "int32"}
-    _ID_NAME_RE = re.compile(
-        r"(_id|_key|_fk|_pk|^id$|^key$|^uuid$|code$|flag$|indicator$)",
-        re.IGNORECASE,
-    )
-
     def _get_metric_cols(self, columns: list[ColumnInfo]) -> list[str]:
-        result = []
-        for col in columns:
-            # Explicit metric semantic type -- trust it
-            if col.semantic_type in _METRIC_SEMANTIC_TYPES:
-                result.append(col.name)
-                continue
-            # Numeric dtype but skip if semantic type excludes it
-            if col.dtype not in self._NUMERIC_DTYPES:
-                continue
-            if col.semantic_type in self._NON_METRIC_TYPES:
-                continue
-            # Name-based heuristic: codes, keys, flags are not metrics
-            if self._ID_NAME_RE.search(col.name):
-                continue
-            result.append(col.name)
-        return result
+        return [col.name for col in columns if is_metric_column(col)]
 
     def _get_dimension_tables(
         self,
