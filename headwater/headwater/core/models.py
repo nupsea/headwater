@@ -147,6 +147,7 @@ class ColumnProfile(BaseModel):
 class Relationship(BaseModel):
     """A detected relationship between two columns."""
 
+    id: int | None = None  # SQLite row id; populated on persist/rebuild
     from_table: str
     from_column: str
     to_table: str

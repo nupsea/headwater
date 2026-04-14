@@ -21,7 +21,7 @@ def client():
     """Create a test client with a DuckDB table loaded."""
     from headwater.api.app import create_app
 
-    app = create_app()
+    app = create_app(in_memory=True)
 
     con = duckdb.connect(":memory:")
     # Create a staging table with sample data

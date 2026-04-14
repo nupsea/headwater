@@ -6,10 +6,13 @@ Metadata is always SQLite (POC) or Postgres (Phase 1+). Never DuckDB.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
 from headwater.core.exceptions import MetadataError
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -770,8 +773,9 @@ class MetadataStore:
         ref_integrity: float,
         detection_source: str,
         run_id: int | None = None,
-    ) -> None:
-        self.con.execute(
+    ) -> int:
+        """Insert a relationship and return its id."""
+        cur = self.con.execute(
             "INSERT INTO relationships "
             "(source_name, from_table, from_column, to_table, to_column, "
             "rel_type, confidence, ref_integrity, detection_source, run_id) "
@@ -780,6 +784,7 @@ class MetadataStore:
              rel_type, confidence, ref_integrity, detection_source, run_id),
         )
         self.con.commit()
+        return cur.lastrowid or 0
 
     def get_relationships(self, source_name: str) -> list[dict]:
         return [
@@ -788,6 +793,197 @@ class MetadataStore:
                 "SELECT * FROM relationships WHERE source_name = ?", (source_name,)
             ).fetchall()
         ]
+
+    def clear_relationships(self, source_name: str) -> int:
+        """Delete all relationships for a source. Returns count deleted."""
+        cur = self.con.execute(
+            "DELETE FROM relationships WHERE source_name = ?", (source_name,)
+        )
+        self.con.commit()
+        return cur.rowcount
+
+    def get_relationship(self, relationship_id: int) -> dict | None:
+        row = self.con.execute(
+            "SELECT * FROM relationships WHERE id = ?", (relationship_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def delete_relationship(self, relationship_id: int) -> bool:
+        cur = self.con.execute(
+            "DELETE FROM relationships WHERE id = ?", (relationship_id,)
+        )
+        self.con.commit()
+        return cur.rowcount > 0
+
+    # -- Profiles (read-back) ------------------------------------------------
+
+    def get_profiles(self, source_name: str) -> list[dict]:
+        """Return all profiles for a source with parsed stats."""
+        rows = self.con.execute(
+            "SELECT * FROM profiles WHERE source_name = ?", (source_name,)
+        ).fetchall()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r["stats"] = json.loads(r["stats_json"])
+            del r["stats_json"]
+            results.append(r)
+        return results
+
+    # -- Rebuild discovery from persisted state --------------------------------
+
+    def rebuild_discovery(self, source_name: str):
+        """Reconstruct a DiscoveryResult from persisted metadata.
+
+        Returns None if no source or tables are found.
+        """
+        from headwater.core.models import (
+            ColumnInfo,
+            ColumnProfile,
+            CompanionDoc,
+            DiscoveryResult,
+            Relationship,
+            SourceConfig,
+            TableInfo,
+            TableSemanticDetail,
+        )
+
+        logger.info("rebuild_discovery: looking up source '%s'", source_name)
+        source_row = self.get_source(source_name)
+        if source_row is None:
+            logger.warning(
+                "rebuild_discovery: source '%s' not found in metadata store",
+                source_name,
+            )
+            return None
+
+        logger.info("rebuild_discovery: source found -- type=%s, path=%s, uri=%s",
+                     source_row.get("type"), source_row.get("path"), source_row.get("uri"))
+        source = SourceConfig(
+            name=source_row["name"],
+            type=source_row["type"],
+            path=source_row.get("path"),
+            uri=source_row.get("uri"),
+            mode=source_row.get("mode", "generate"),
+        )
+
+        table_rows = self.get_active_tables(source_name)
+        if not table_rows:
+            logger.warning("rebuild_discovery: no active tables for source '%s'", source_name)
+            return None
+        logger.info("rebuild_discovery: found %d active tables", len(table_rows))
+
+        tables: list[TableInfo] = []
+        for trow in table_rows:
+            col_rows = self.get_columns(trow["name"], source_name)
+            columns = [
+                ColumnInfo(
+                    name=c["name"],
+                    dtype=c["dtype"],
+                    nullable=bool(c["nullable"]),
+                    is_primary_key=bool(c["is_primary_key"]),
+                    description=c.get("description"),
+                    semantic_type=c.get("semantic_type"),
+                    role=c.get("role"),
+                    confidence=c.get("confidence", 0.0),
+                    locked=bool(c.get("locked", 0)),
+                )
+                for c in col_rows
+            ]
+
+            semantic_detail = None
+            sd_row = self.get_semantic_detail(trow["name"], source_name)
+            if sd_row:
+                semantic_detail = TableSemanticDetail(**sd_row)
+
+            tables.append(
+                TableInfo(
+                    name=trow["name"],
+                    schema_name=trow.get("schema_name"),
+                    row_count=trow.get("row_count", 0),
+                    columns=columns,
+                    description=trow.get("description"),
+                    domain=trow.get("domain"),
+                    tags=json.loads(trow.get("tags", "[]")),
+                    locked=bool(trow.get("locked", 0)),
+                    review_status=trow.get("review_status", "pending"),
+                    reviewed_at=trow.get("reviewed_at"),
+                    semantic_detail=semantic_detail,
+                )
+            )
+
+        # Rebuild profiles
+        profile_rows = self.get_profiles(source_name)
+        logger.info("rebuild_discovery: found %d profile rows", len(profile_rows))
+        profiles: list[ColumnProfile] = []
+        for prow in profile_rows:
+            stats = prow["stats"]
+            profiles.append(
+                ColumnProfile(
+                    table_name=prow["table_name"],
+                    column_name=prow["column_name"],
+                    dtype=prow["dtype"],
+                    **stats,
+                )
+            )
+
+        # Rebuild relationships
+        rel_rows = self.get_relationships(source_name)
+        logger.info("rebuild_discovery: found %d relationship rows", len(rel_rows))
+        relationships: list[Relationship] = []
+        for rrow in rel_rows:
+            relationships.append(
+                Relationship(
+                    id=rrow["id"],
+                    from_table=rrow["from_table"],
+                    from_column=rrow["from_column"],
+                    to_table=rrow["to_table"],
+                    to_column=rrow["to_column"],
+                    type=rrow["rel_type"],
+                    confidence=rrow["confidence"],
+                    referential_integrity=rrow["ref_integrity"],
+                    source=rrow["detection_source"],
+                )
+            )
+
+        # Rebuild companion docs
+        doc_rows = self.get_companion_docs(source_name)
+        logger.info("rebuild_discovery: found %d companion docs", len(doc_rows))
+        companion_docs: list[CompanionDoc] = []
+        for drow in doc_rows:
+            matched = drow.get("matched_tables")
+            if isinstance(matched, str):
+                matched = json.loads(matched)
+            companion_docs.append(
+                CompanionDoc(
+                    filename=drow["filename"],
+                    content=drow["content"],
+                    doc_type=drow.get("doc_type", "unknown"),
+                    matched_tables=matched or [],
+                    confidence=drow.get("confidence", 0.5),
+                )
+            )
+
+        # Log per-table detail
+        for t in tables:
+            reviewed_cols = sum(1 for c in t.columns if c.locked)
+            logger.info(
+                "rebuild_discovery: table=%s, review_status=%s, cols=%d, locked_cols=%d",
+                t.name, t.review_status, len(t.columns), reviewed_cols,
+            )
+
+        logger.info(
+            "rebuild_discovery: complete -- %d tables, %d profiles, %d relationships, %d docs",
+            len(tables), len(profiles), len(relationships), len(companion_docs),
+        )
+
+        return DiscoveryResult(
+            source=source,
+            tables=tables,
+            profiles=profiles,
+            relationships=relationships,
+            companion_docs=companion_docs,
+        )
 
     # -- Models ------------------------------------------------------------
 

@@ -190,7 +190,7 @@ class TestConfidenceAPI:
         from fastapi.testclient import TestClient
 
         from headwater.api.app import create_app
-        app = create_app()
+        app = create_app(in_memory=True)
         with TestClient(app) as c:
             yield c
 

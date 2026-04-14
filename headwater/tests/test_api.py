@@ -16,7 +16,7 @@ SAMPLE_DATA = str(
 
 @pytest.fixture
 def client():
-    app = create_app()
+    app = create_app(in_memory=True)
     with TestClient(app) as c:
         yield c
 

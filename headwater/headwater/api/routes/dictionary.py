@@ -17,6 +17,7 @@ from headwater.analyzer.heuristics import generate_clarifying_questions
 from headwater.core.models import (
     DataDictionaryColumn,
     DataDictionaryTable,
+    Relationship,
     ReviewSummary,
     TableReviewRequest,
 )
@@ -297,3 +298,220 @@ async def confirm_all_tables(request: Request):
         confirmed += 1
 
     return {"confirmed": confirmed, "total": len(discovery.tables)}
+
+
+# ---------------------------------------------------------------------------
+# Post-review editing endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/dictionary/{table_name}/unlock")
+async def unlock_table(table_name: str, request: Request):
+    """Unlock a reviewed table so it can be re-reviewed with updated metadata."""
+    pipeline = request.app.state.pipeline
+    discovery = pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    source_name = discovery.source.name
+    table = next((t for t in discovery.tables if t.name == table_name), None)
+    if table is None:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
+
+    store = request.app.state.metadata_store
+
+    # Unlock in-memory
+    table.review_status = "pending"
+    table.locked = False
+    table.reviewed_at = None
+    for col in table.columns:
+        col.locked = False
+
+    # Persist unlock
+    store.update_table_review_status(table_name, source_name, "pending")
+    for col in table.columns:
+        store.lock_column(table_name, source_name, col.name, locked=False)
+
+    store.record_decision(
+        artifact_type="table",
+        artifact_id=f"{source_name}.{table_name}",
+        action="unlocked",
+    )
+
+    return {"table": table_name, "review_status": "pending", "locked": False}
+
+
+class ColumnEditRequest(BaseModel):
+    """Payload for editing a single column post-review."""
+
+    semantic_type: str | None = None
+    role: str | None = None
+    description: str | None = None
+    is_primary_key: bool | None = None
+
+
+@router.patch("/dictionary/{table_name}/columns/{column_name}")
+async def edit_column(
+    table_name: str, column_name: str, body: ColumnEditRequest, request: Request,
+):
+    """Edit a single column's metadata. Updates both in-memory and metadata store."""
+    pipeline = request.app.state.pipeline
+    discovery = pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    source_name = discovery.source.name
+    table = next((t for t in discovery.tables if t.name == table_name), None)
+    if table is None:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
+
+    col = next((c for c in table.columns if c.name == column_name), None)
+    if col is None:
+        raise HTTPException(
+            status_code=404, detail=f"Column '{column_name}' not found in '{table_name}'.",
+        )
+
+    # Apply changes to in-memory model
+    if body.semantic_type is not None:
+        col.semantic_type = body.semantic_type
+    if body.role is not None:
+        col.role = body.role
+    if body.description is not None:
+        col.description = body.description
+    if body.is_primary_key is not None:
+        col.is_primary_key = body.is_primary_key
+
+    # Persist to metadata store
+    store = request.app.state.metadata_store
+    update = {"name": column_name}
+    for field in ("semantic_type", "role", "description", "is_primary_key"):
+        val = getattr(body, field)
+        if val is not None:
+            update[field] = val
+    store.bulk_update_columns(table_name, source_name, [update], lock=False)
+
+    store.record_decision(
+        artifact_type="column",
+        artifact_id=f"{source_name}.{table_name}.{column_name}",
+        action="edited",
+        payload=update,
+    )
+
+    return {
+        "table": table_name,
+        "column": column_name,
+        "semantic_type": col.semantic_type,
+        "role": col.role,
+        "description": col.description,
+        "is_primary_key": col.is_primary_key,
+    }
+
+
+class RelationshipCreateRequest(BaseModel):
+    """Payload for adding a foreign key relationship."""
+
+    from_table: str
+    from_column: str
+    to_table: str
+    to_column: str
+    rel_type: str = "many_to_one"
+
+
+@router.post("/dictionary/relationships")
+async def add_relationship(body: RelationshipCreateRequest, request: Request):
+    """Add a new FK relationship between two columns."""
+    pipeline = request.app.state.pipeline
+    discovery = pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    source_name = discovery.source.name
+    table_names = {t.name for t in discovery.tables}
+
+    # Validate tables exist
+    for tname in (body.from_table, body.to_table):
+        if tname not in table_names:
+            raise HTTPException(status_code=404, detail=f"Table '{tname}' not found.")
+
+    # Validate columns exist
+    from_table = next(t for t in discovery.tables if t.name == body.from_table)
+    to_table = next(t for t in discovery.tables if t.name == body.to_table)
+    if not any(c.name == body.from_column for c in from_table.columns):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Column '{body.from_column}' not found in '{body.from_table}'.",
+        )
+    if not any(c.name == body.to_column for c in to_table.columns):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Column '{body.to_column}' not found in '{body.to_table}'.",
+        )
+
+    store = request.app.state.metadata_store
+    rel_id = store.insert_relationship(
+        source_name,
+        body.from_table,
+        body.from_column,
+        body.to_table,
+        body.to_column,
+        body.rel_type,
+        confidence=1.0,
+        ref_integrity=1.0,
+        detection_source="declared",
+    )
+
+    rel = Relationship(
+        id=rel_id,
+        from_table=body.from_table,
+        from_column=body.from_column,
+        to_table=body.to_table,
+        to_column=body.to_column,
+        type=body.rel_type,
+        confidence=1.0,
+        referential_integrity=1.0,
+        source="declared",
+    )
+    discovery.relationships.append(rel)
+
+    store.record_decision(
+        artifact_type="relationship",
+        artifact_id=f"{source_name}.{body.from_table}.{body.from_column}->{body.to_table}.{body.to_column}",
+        action="added",
+    )
+
+    return rel.model_dump()
+
+
+@router.delete("/dictionary/relationships/{relationship_id}")
+async def remove_relationship(relationship_id: int, request: Request):
+    """Remove a foreign key relationship."""
+    pipeline = request.app.state.pipeline
+    discovery = pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    store = request.app.state.metadata_store
+
+    # Verify it exists in the store
+    existing = store.get_relationship(relationship_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Relationship {relationship_id} not found.")
+
+    # Remove from in-memory
+    discovery.relationships = [
+        r for r in discovery.relationships if r.id != relationship_id
+    ]
+
+    # Remove from store
+    store.delete_relationship(relationship_id)
+    store.record_decision(
+        artifact_type="relationship",
+        artifact_id=str(relationship_id),
+        action="deleted",
+        payload={
+            "from": f"{existing['from_table']}.{existing['from_column']}",
+            "to": f"{existing['to_table']}.{existing['to_column']}",
+        },
+    )
+
+    return {"deleted": relationship_id}

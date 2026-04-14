@@ -393,7 +393,7 @@ class TestDictionaryAPI:
     def client(self, discovery):
         from headwater.api.app import create_app
 
-        app = create_app()
+        app = create_app(in_memory=True)
 
         # Override lifespan by directly setting state
         import duckdb
