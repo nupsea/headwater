@@ -6,11 +6,14 @@ import {
   type ModelSummary,
   type ModelDetail,
   type InsightsResponse,
+  type GraphData,
+  type GraphPatterns,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/status-badge";
 import { SqlViewer } from "@/components/sql-viewer";
 import { StatCard } from "@/components/stat-card";
 import { SuggestionsList } from "@/components/suggestions-list";
+import { RelationshipGraph } from "@/components/relationship-graph";
 
 export default function ModelsPage() {
   const [models, setModels] = useState<ModelSummary[]>([]);
@@ -22,6 +25,9 @@ export default function ModelsPage() {
   // Map of model name -> ModelDetail for the Review Queue tab
   const [reviewDetails, setReviewDetails] = useState<Record<string, ModelDetail>>({});
   const [reviewDetailErrors, setReviewDetailErrors] = useState<Record<string, string>>({});
+  // Graph data for Relationships tab
+  const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [graphPatterns, setGraphPatterns] = useState<GraphPatterns | null>(null);
 
   const refresh = () =>
     api
@@ -41,6 +47,15 @@ export default function ModelsPage() {
     if (!selected) return;
     api.model(selected).then(setDetail);
   }, [selected]);
+
+  // Load graph data when Relationships tab is shown
+  useEffect(() => {
+    if (showSection !== "graph") return;
+    if (graphData) return;
+    api.graphData().then(setGraphData).catch(() => {});
+    api.graphPatterns().then(setGraphPatterns).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showSection]);
 
   // Fetch full model detail (including SQL) for each proposed model when Review Queue opens
   useEffect(() => {
@@ -132,6 +147,7 @@ export default function ModelsPage() {
   const sections = [
     { id: "overview", label: "Overview" },
     { id: "lineage", label: "Lineage & Coverage" },
+    { id: "graph", label: "Relationships" },
     { id: "review", label: `Review Queue (${proposed.length})` },
     { id: "browse", label: "Browse All" },
     { id: "suggestions", label: "Suggestions" },
@@ -483,6 +499,156 @@ export default function ModelsPage() {
         </div>
       )}
 
+      {/* Relationships (Graph) */}
+      {showSection === "graph" && (
+        <div className="space-y-6">
+          {!graphData ? (
+            <div className="bg-card border border-border rounded-lg p-8 text-center">
+              <p className="text-sm text-muted">
+                Loading relationship graph data... If no data appears, run the
+                pipeline to discover tables and relationships first.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Summary stats */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <div className="bg-card border border-border rounded-lg p-3 text-center">
+                  <div className="text-lg font-bold">{graphData.nodes.length}</div>
+                  <div className="text-xs text-muted">Tables</div>
+                </div>
+                <div className="bg-card border border-border rounded-lg p-3 text-center">
+                  <div className="text-lg font-bold">{graphData.edges.length}</div>
+                  <div className="text-xs text-muted">Relationships</div>
+                </div>
+                {graphPatterns && (
+                  <>
+                    <div className="bg-card border border-border rounded-lg p-3 text-center">
+                      <div className="text-lg font-bold">{graphPatterns.conformed_dimensions.length}</div>
+                      <div className="text-xs text-muted">Conformed Dims</div>
+                    </div>
+                    <div className="bg-card border border-border rounded-lg p-3 text-center">
+                      <div className="text-lg font-bold">{graphPatterns.nullable_warnings.length}</div>
+                      <div className="text-xs text-muted">Nullable Warnings</div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Interactive force-directed graph */}
+              <div className="bg-card border border-border rounded-lg overflow-hidden" style={{ height: 500 }}>
+                <RelationshipGraph graphData={graphData} />
+              </div>
+
+              {/* Patterns */}
+              {graphPatterns && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Conformed Dimensions */}
+                  <div className="bg-card border border-border rounded-lg p-5">
+                    <h3 className="text-sm font-semibold mb-1">Conformed Dimensions</h3>
+                    <p className="text-xs text-muted mb-3">
+                      Tables referenced by multiple fact tables -- shared lookup dimensions.
+                    </p>
+                    {graphPatterns.conformed_dimensions.length === 0 ? (
+                      <p className="text-xs text-muted">None detected.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {graphPatterns.conformed_dimensions.map((cd) => (
+                          <div
+                            key={cd.name}
+                            className="flex items-center justify-between p-2 border border-border rounded"
+                          >
+                            <span className="font-mono text-sm">{cd.name}</span>
+                            <span className="text-xs text-muted">
+                              referenced by {cd.connection_count} table{cd.connection_count > 1 ? "s" : ""}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Nullable FK Warnings */}
+                  <div className="bg-card border border-border rounded-lg p-5">
+                    <h3 className="text-sm font-semibold mb-1">Nullable FK Warnings</h3>
+                    <p className="text-xs text-muted mb-3">
+                      Foreign keys with low referential integrity -- JOINs may lose rows.
+                    </p>
+                    {graphPatterns.nullable_warnings.length === 0 ? (
+                      <p className="text-xs text-muted">No warnings.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {graphPatterns.nullable_warnings.map((w, i) => (
+                          <div
+                            key={i}
+                            className="p-2 border border-amber-200 bg-amber-50/50 rounded text-xs"
+                          >
+                            <span className="font-mono">
+                              {w.from_table}.{w.from_column}
+                            </span>
+                            <span className="text-muted"> -&gt; </span>
+                            <span className="font-mono">
+                              {w.to_table}.{w.to_column}
+                            </span>
+                            <span className="ml-2 text-amber-700">
+                              {(w.ref_integrity * 100).toFixed(0)}% integrity
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Star schemas */}
+                  {graphPatterns.star_schemas.length > 0 && (
+                    <div className="bg-card border border-border rounded-lg p-5">
+                      <h3 className="text-sm font-semibold mb-1">Star Schema Patterns</h3>
+                      <p className="text-xs text-muted mb-3">
+                        Hub tables with multiple satellite/fact connections.
+                      </p>
+                      <div className="space-y-2">
+                        {graphPatterns.star_schemas.map((s) => (
+                          <div
+                            key={s.hub}
+                            className="flex items-center justify-between p-2 border border-border rounded"
+                          >
+                            <span className="font-mono text-sm">{s.hub}</span>
+                            <span className="text-xs text-muted">
+                              {s.spoke_count} connected table{s.spoke_count > 1 ? "s" : ""}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Chains */}
+                  {graphPatterns.chains.length > 0 && (
+                    <div className="bg-card border border-border rounded-lg p-5">
+                      <h3 className="text-sm font-semibold mb-1">Relationship Chains</h3>
+                      <p className="text-xs text-muted mb-3">
+                        Multi-hop join paths through the data model.
+                      </p>
+                      <div className="space-y-2">
+                        {graphPatterns.chains.map((c, i) => (
+                          <div
+                            key={i}
+                            className="p-2 border border-border rounded text-xs font-mono"
+                          >
+                            {c.path.join(" -> ")}
+                            <span className="text-muted ml-2">({c.hop_count} hops)</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {/* Review Queue */}
       {showSection === "review" && (
         <div className="space-y-4">
@@ -522,13 +688,13 @@ export default function ModelsPage() {
                     <div className="flex gap-2 shrink-0">
                       <button
                         onClick={() => handleApprove(m.name)}
-                        className="px-4 py-2 bg-success text-white rounded text-sm font-medium hover:opacity-90"
+                        className="px-4 py-2 bg-green-600 text-white rounded text-sm font-medium hover:bg-green-700 transition-colors"
                       >
-                        Approve
+                        Confirm
                       </button>
                       <button
                         onClick={() => handleReject(m.name)}
-                        className="px-4 py-2 bg-danger text-white rounded text-sm font-medium hover:opacity-90"
+                        className="px-4 py-2 border border-border rounded text-sm text-muted hover:text-foreground transition-colors"
                       >
                         Reject
                       </button>
@@ -702,13 +868,13 @@ export default function ModelsPage() {
                       <div className="flex gap-2 shrink-0">
                         <button
                           onClick={() => handleApprove(detail.name)}
-                          className="px-4 py-2 bg-success text-white rounded text-sm font-medium hover:opacity-90"
+                          className="px-4 py-2 bg-green-600 text-white rounded text-sm font-medium hover:bg-green-700 transition-colors"
                         >
-                          Approve
+                          Confirm
                         </button>
                         <button
                           onClick={() => handleReject(detail.name)}
-                          className="px-4 py-2 bg-danger text-white rounded text-sm font-medium hover:opacity-90"
+                          className="px-4 py-2 border border-border rounded text-sm text-muted hover:text-foreground transition-colors"
                         >
                           Reject
                         </button>

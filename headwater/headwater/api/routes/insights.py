@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 
 from headwater.api.routes.project import _compute_maturity, _compute_progress
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/insights")
@@ -16,6 +19,12 @@ async def get_insights(request: Request):
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
+    logger.info(
+        "Computing insights: %d tables, %d profiles, %d relationships",
+        len(discovery.tables),
+        len(discovery.profiles),
+        len(discovery.relationships),
+    )
 
     profiles = discovery.profiles
     tables = discovery.tables
@@ -251,7 +260,21 @@ async def get_insights(request: Request):
     model_suggestions = _compute_model_suggestions(tables, profiles, relationships, pipeline)
 
     # --- Catalog health (v2) ---
-    catalog_health = _compute_catalog_health(request, discovery)
+    try:
+        catalog_health = _compute_catalog_health(request, discovery)
+    except Exception:
+        logger.exception("Failed to compute catalog health")
+        catalog_health = {
+            "metrics_total": 0,
+            "metrics_confirmed": 0,
+            "dimensions_total": 0,
+            "dimensions_confirmed": 0,
+            "entities_total": 0,
+            "catalog_confidence": 0.0,
+            "catalog_coverage": 0.0,
+            "maturity": "raw",
+            "maturity_score": 0.0,
+        }
 
     return {
         "data_profile": data_profile,
@@ -814,7 +837,12 @@ def _compute_catalog_health(request: Request, discovery) -> dict:
     """Return catalog health metrics for the insights dashboard."""
     store = request.app.state.metadata_store
     pipeline = request.app.state.pipeline
-    source_name = discovery.source.name
+    source = getattr(discovery, "source", None)
+    if source is None:
+        logger.warning("Discovery has no source attribute -- cannot compute catalog health")
+        raise ValueError("Discovery missing source")
+    source_name = source.name
+    logger.info("Computing catalog health for source '%s'", source_name)
 
     metrics = store.get_catalog_metrics(source_name)
     dimensions = store.get_catalog_dimensions(source_name)

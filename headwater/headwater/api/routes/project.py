@@ -129,7 +129,12 @@ def _compute_maturity(progress: dict) -> tuple[str, float]:
 async def list_projects(request: Request):
     """List all projects with summary info."""
     store = request.app.state.metadata_store
-    projects = store.list_projects()
+    try:
+        projects = store.list_projects()
+    except Exception:
+        logger.exception("Failed to list projects from metadata store")
+        raise
+    logger.info("Listed %d projects", len(projects))
     return {"projects": projects}
 
 
@@ -174,8 +179,12 @@ async def get_project_progress(project_id: str, request: Request):
     pipeline = request.app.state.pipeline
     discovery = pipeline.get("discovery")
 
-    progress = _compute_progress(discovery, pipeline, store, project_id)
-    maturity, maturity_score = _compute_maturity(progress)
+    try:
+        progress = _compute_progress(discovery, pipeline, store, project_id)
+        maturity, maturity_score = _compute_maturity(progress)
+    except Exception:
+        logger.exception("Failed to compute progress for project '%s'", project_id)
+        raise
 
     return {
         "project_id": project_id,

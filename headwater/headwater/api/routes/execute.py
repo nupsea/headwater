@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 
 from headwater.executor.duckdb_backend import DuckDBBackend
 from headwater.executor.runner import run_models
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/execute")

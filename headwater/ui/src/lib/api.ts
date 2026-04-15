@@ -240,6 +240,7 @@ export interface InsightsResponse {
     pass_rate: number;
   } | null;
   model_suggestions: ModelSuggestion[];
+  catalog_health: CatalogHealth | null;
 }
 
 export interface PipelineRunResponse {
@@ -299,6 +300,14 @@ export interface RepairAttempt {
   error: string;
 }
 
+export interface DimensionOption {
+  dimension_name: string;
+  display_name: string;
+  description: string;
+  sample_values: string[];
+  confidence: number;
+}
+
 export interface ExplorationResult {
   question: string;
   sql: string;
@@ -307,6 +316,9 @@ export interface ExplorationResult {
   visualization: VisualizationSpec | null;
   error: string | null;
   warnings: string[];
+  suggestions: string[];
+  explanation: string;
+  options: DimensionOption[];
   repaired: boolean;
   repair_history: RepairAttempt[];
 }
@@ -314,6 +326,7 @@ export interface ExplorationResult {
 export interface ExploreSuggestionsResponse {
   suggestions: SuggestedQuestion[];
   insights: StatisticalInsight[];
+  review_pct: number;
 }
 
 // ---------- Drift types (US-402, US-403) ----------
@@ -460,6 +473,214 @@ export interface CatalogResponse {
   total: number;
 }
 
+// ---------- v2: Project types ----------
+
+export interface ProjectProgress {
+  tables_discovered: number;
+  tables_profiled: number;
+  tables_reviewed: number;
+  tables_modeled: number;
+  tables_mart_ready: number;
+  columns_total: number;
+  columns_described: number;
+  columns_confirmed: number;
+  relationships_detected: number;
+  relationships_confirmed: number;
+  metrics_defined: number;
+  metrics_confirmed: number;
+  dimensions_defined: number;
+  dimensions_confirmed: number;
+  quality_contracts: number;
+  contracts_enforcing: number;
+  catalog_coverage: number;
+}
+
+export interface Project {
+  id: string;
+  slug: string;
+  display_name: string;
+  description: string;
+  maturity: "raw" | "profiled" | "documented" | "modeled" | "production";
+  maturity_score: number;
+  catalog_confidence: number;
+  created_at: string;
+  updated_at: string;
+  progress?: ProjectProgress;
+}
+
+// ---------- v2: Catalog types ----------
+
+export interface CatalogMetric {
+  name: string;
+  project_id: string;
+  display_name: string;
+  description: string;
+  expression: string;
+  column_name: string | null;
+  table_name: string;
+  agg_type: string;
+  synonyms: string[];
+  confidence: number;
+  status: "proposed" | "confirmed" | "rejected";
+  source: "heuristic" | "llm" | "human";
+}
+
+export interface CatalogDimension {
+  name: string;
+  project_id: string;
+  display_name: string;
+  description: string;
+  column_name: string;
+  table_name: string;
+  dtype: string;
+  synonyms: string[];
+  sample_values: string[];
+  cardinality: number;
+  confidence: number;
+  status: "proposed" | "confirmed" | "rejected";
+  source: "heuristic" | "llm" | "human";
+  join_path: string | null;
+  join_nullable: boolean;
+}
+
+export interface CatalogEntity {
+  name: string;
+  project_id: string;
+  display_name: string;
+  description: string;
+  table_name: string;
+  row_semantics: string;
+  metrics: string[];
+  dimensions: string[];
+  temporal_grain: string | null;
+}
+
+export interface CatalogReviewResponse {
+  metrics: CatalogMetric[];
+  dimensions: CatalogDimension[];
+  entities: CatalogEntity[];
+  summary: {
+    metrics_total: number;
+    metrics_confirmed: number;
+    metrics_rejected: number;
+    dimensions_total: number;
+    dimensions_confirmed: number;
+    dimensions_rejected: number;
+  };
+}
+
+// ---------- v2: Graph types ----------
+
+export interface GraphNode {
+  id: string;
+  row_count: number;
+  domain: string;
+  description: string;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  from_column: string;
+  to_column: string;
+  rel_type: string;
+  confidence: number;
+  ref_integrity: number;
+  nullable: boolean;
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface GraphPatterns {
+  conformed_dimensions: { name: string; connection_count: number; connected_tables: string[] }[];
+  star_schemas: { hub: string; spokes: string[]; spoke_count: number }[];
+  chains: { path: string[]; hop_count: number }[];
+  nullable_warnings: { from_table: string; from_column: string; to_table: string; to_column: string; ref_integrity: number }[];
+}
+
+// ---------- v2: Settings types ----------
+
+export interface LLMSettings {
+  provider: string;
+  model: string;
+  ollama_base_url: string;
+  openai_compat_base_url: string | null;
+  has_api_key: boolean;
+  has_openai_compat_key: boolean;
+}
+
+export interface LLMSettingsUpdate {
+  provider?: "none" | "anthropic" | "ollama" | "openai_compat";
+  model?: string;
+  api_key?: string;
+  ollama_base_url?: string;
+  openai_compat_base_url?: string;
+  openai_compat_api_key?: string;
+}
+
+// ---------- v2: Catalog health (from insights) ----------
+
+export interface CatalogHealth {
+  metrics_total: number;
+  metrics_confirmed: number;
+  dimensions_total: number;
+  dimensions_confirmed: number;
+  entities_total: number;
+  catalog_confidence: number;
+  catalog_coverage: number;
+  maturity: string;
+  maturity_score: number;
+}
+
+// ---------- v2: Decomposition types ----------
+
+export interface MetricMatch {
+  metric_name: string;
+  display_name: string;
+  expression: string;
+  table: string;
+  confidence: number;
+  strategy: "keyword" | "embedding" | "llm";
+}
+
+export interface DimensionMatch {
+  dimension_name: string;
+  display_name: string;
+  column: string;
+  table: string;
+  join_path: string | null;
+  confidence: number;
+  strategy: "keyword" | "embedding" | "llm";
+  is_filter: boolean;
+  filter_value: string | null;
+}
+
+export interface DimensionOption {
+  dimension_name: string;
+  display_name: string;
+  description: string;
+  sample_values: string[];
+  confidence: number;
+}
+
+export interface DecompositionResult {
+  status: "resolved" | "options" | "outside_scope";
+  entity: string | null;
+  metrics: MetricMatch[];
+  dimensions: DimensionMatch[];
+  sql: string | null;
+  explanation: string;
+  warnings: string[];
+  suggestions: string[];
+  options: DimensionOption[];
+  outside_catalog: string[];
+  confidence: number;
+  resolution_mode: "catalog" | "exploratory" | null;
+}
+
 // ---------- API calls ----------
 
 export const api = {
@@ -572,4 +793,65 @@ export const api = {
     fetchJSON<ConfidenceMetrics>(
       `/confidence${source ? `?source=${encodeURIComponent(source)}` : ""}`
     ),
+
+  // v2: Projects
+  projects: () => fetchJSON<{ projects: Project[] }>("/projects"),
+
+  project: (id: string) => fetchJSON<Project>(`/projects/${id}`),
+
+  projectProgress: (id: string) =>
+    fetchJSON<{ project_id: string; progress: ProjectProgress; maturity: string; maturity_score: number }>(
+      `/projects/${id}/progress`
+    ),
+
+  projectCatalog: (id: string) =>
+    fetchJSON<{ project_id: string; metrics: CatalogMetric[]; dimensions: CatalogDimension[]; entities: CatalogEntity[] }>(
+      `/projects/${id}/catalog`
+    ),
+
+  deleteProject: (id: string) =>
+    fetchJSON<{ deleted: string }>(`/projects/${id}`, { method: "DELETE" }),
+
+  // v2: Catalog review
+  catalogReview: () => fetchJSON<CatalogReviewResponse>("/dictionary/catalog"),
+
+  reviewMetric: (name: string, action: "confirmed" | "rejected") =>
+    fetchJSON<{ metric: string; status: string; confidence: number }>(
+      `/dictionary/catalog/metrics/${name}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      }
+    ),
+
+  reviewDimension: (name: string, action: "confirmed" | "rejected", synonyms?: string[]) =>
+    fetchJSON<{ dimension: string; status: string; confidence: number }>(
+      `/dictionary/catalog/dimensions/${name}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, synonyms }),
+      }
+    ),
+
+  // v2: Graph
+  graphData: () => fetchJSON<GraphData>("/graph/data"),
+
+  graphPatterns: () => fetchJSON<GraphPatterns>("/graph/patterns"),
+
+  graphJoinPath: (from: string, to: string) =>
+    fetchJSON<{ from_table: string; to_table: string; path: unknown[] | null; hop_count?: number }>(
+      `/graph/join-path?from_table=${encodeURIComponent(from)}&to_table=${encodeURIComponent(to)}`
+    ),
+
+  // v2: Settings
+  llmSettings: () => fetchJSON<LLMSettings>("/settings/llm"),
+
+  updateLLMSettings: (body: LLMSettingsUpdate) =>
+    fetchJSON<LLMSettings>("/settings/llm", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };

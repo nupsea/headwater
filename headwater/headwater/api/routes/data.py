@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Request
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 from headwater.explorer.utils import resolve_table_ref, table_exists
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _MAX_ROWS = 500
 

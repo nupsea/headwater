@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 
 from headwater.generator.contracts import generate_contracts
@@ -9,6 +11,7 @@ from headwater.generator.marts import generate_mart_models
 from headwater.generator.staging import generate_staging_models
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/generate")

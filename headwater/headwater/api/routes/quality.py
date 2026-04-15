@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/contracts")

@@ -6,8 +6,10 @@ import {
   type InsightsResponse,
   type TableDetail,
   type ColumnProfile,
+  type DictColumn,
 } from "@/lib/api";
 import { ProfileTable } from "@/components/profile-table";
+import { KeyColumnsView } from "@/components/key-columns-view";
 
 export default function DiscoveryPage() {
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
@@ -15,6 +17,7 @@ export default function DiscoveryPage() {
   const [detail, setDetail] = useState<TableDetail | null>(null);
   const [profiles, setProfiles] = useState<ColumnProfile[]>([]);
   const [error, setError] = useState("");
+  const [schemaTab, setSchemaTab] = useState<"key" | "full">("key");
 
   useEffect(() => {
     api
@@ -282,65 +285,157 @@ export default function DiscoveryPage() {
                 </div>
               )}
 
-              {/* Column schema */}
+              {/* Column tabs: Key Columns / Full Schema */}
               <div className="bg-card border border-border rounded-lg p-5">
-                <h3 className="text-sm font-semibold text-muted uppercase tracking-wide mb-3">
-                  Column Schema
-                </h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-border text-left text-muted">
-                        <th className="py-2 pr-4">Name</th>
-                        <th className="py-2 pr-4">Type</th>
-                        <th className="py-2 pr-4">Key</th>
-                        <th className="py-2 pr-4">Nullable</th>
-                        <th className="py-2 pr-4">Semantic Type</th>
-                        <th className="py-2">Description</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {detail.columns.map((c) => (
-                        <tr
-                          key={c.name}
-                          className="border-b border-border/50"
-                        >
-                          <td className="py-2 pr-4 font-mono font-medium">
-                            {c.name}
-                          </td>
-                          <td className="py-2 pr-4 text-muted">{c.dtype}</td>
-                          <td className="py-2 pr-4">
-                            {c.is_primary_key && (
-                              <span className="text-xs text-warning font-semibold">
-                                PK
-                              </span>
-                            )}
-                            {selectedHealth.fk_columns.some(
-                              (fk) => fk.column === c.name
-                            ) && (
-                              <span className="text-xs text-accent font-semibold">
-                                FK
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-2 pr-4 text-muted text-xs">
-                            {c.nullable ? "yes" : "no"}
-                          </td>
-                          <td className="py-2 pr-4">
-                            {c.semantic_type && (
-                              <span className="px-1.5 py-0.5 bg-accent/10 text-accent rounded text-xs">
-                                {c.semantic_type}
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-2 text-xs text-muted">
-                            {c.description || "-"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-muted uppercase tracking-wide">
+                    Columns
+                  </h3>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setSchemaTab("key")}
+                      className={`px-3 py-1 rounded-full text-xs border transition-colors ${
+                        schemaTab === "key"
+                          ? "bg-foreground text-background border-foreground"
+                          : "bg-background text-muted border-border hover:border-foreground"
+                      }`}
+                    >
+                      Key Columns
+                    </button>
+                    <button
+                      onClick={() => setSchemaTab("full")}
+                      className={`px-3 py-1 rounded-full text-xs border transition-colors ${
+                        schemaTab === "full"
+                          ? "bg-foreground text-background border-foreground"
+                          : "bg-background text-muted border-border hover:border-foreground"
+                      }`}
+                    >
+                      Full Schema ({detail.columns.length})
+                    </button>
+                  </div>
                 </div>
+
+                {schemaTab === "key" && (
+                  <KeyColumnsView
+                    columns={detail.columns.map(
+                      (c): DictColumn => ({
+                        name: c.name,
+                        dtype: c.dtype,
+                        nullable: c.nullable,
+                        is_primary_key: c.is_primary_key,
+                        is_foreign_key: selectedHealth.fk_columns.some(
+                          (fk) => fk.column === c.name
+                        ),
+                        fk_references:
+                          selectedHealth.fk_columns.find(
+                            (fk) => fk.column === c.name
+                          )?.references || null,
+                        semantic_type: c.semantic_type,
+                        role: c.semantic_type
+                          ? c.semantic_type.includes("date") ||
+                            c.semantic_type.includes("time")
+                            ? "temporal"
+                            : null
+                          : null,
+                        description: c.description,
+                        confidence: 0.7,
+                        locked: false,
+                        needs_review: false,
+                      })
+                    )}
+                    profiles={profiles}
+                  />
+                )}
+
+                {schemaTab === "full" && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border text-left text-muted">
+                          <th className="py-2 pr-4">Name</th>
+                          <th className="py-2 pr-4">Type</th>
+                          <th className="py-2 pr-4">Key</th>
+                          <th className="py-2 pr-4">Nullable</th>
+                          <th className="py-2 pr-4">Semantic Type</th>
+                          <th className="py-2 pr-4">Profile</th>
+                          <th className="py-2">Description</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.columns.map((c) => {
+                          const prof = profiles.find(
+                            (p) => p.column_name === c.name
+                          );
+                          return (
+                            <tr
+                              key={c.name}
+                              className="border-b border-border/50"
+                            >
+                              <td className="py-2 pr-4 font-mono font-medium">
+                                {c.name}
+                              </td>
+                              <td className="py-2 pr-4 text-muted">
+                                {c.dtype}
+                              </td>
+                              <td className="py-2 pr-4">
+                                {c.is_primary_key && (
+                                  <span className="text-xs text-warning font-semibold">
+                                    PK
+                                  </span>
+                                )}
+                                {selectedHealth.fk_columns.some(
+                                  (fk) => fk.column === c.name
+                                ) && (
+                                  <span className="text-xs text-accent font-semibold ml-1">
+                                    FK
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 pr-4 text-muted text-xs">
+                                {c.nullable ? "yes" : "no"}
+                              </td>
+                              <td className="py-2 pr-4">
+                                {c.semantic_type && (
+                                  <span className="px-1.5 py-0.5 bg-accent/10 text-accent rounded text-xs">
+                                    {c.semantic_type}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 pr-4">
+                                {prof ? (
+                                  <div className="flex items-center gap-2">
+                                    <span
+                                      className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                                        prof.null_rate <= 0.01
+                                          ? "bg-green-500"
+                                          : prof.null_rate <= 0.1
+                                            ? "bg-yellow-500"
+                                            : "bg-orange-500"
+                                      }`}
+                                      title={`${(prof.null_rate * 100).toFixed(1)}% null`}
+                                    />
+                                    <span className="text-[10px] text-muted">
+                                      {prof.distinct_count} distinct
+                                      {prof.null_rate > 0.01 &&
+                                        ` | ${(prof.null_rate * 100).toFixed(0)}% null`}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <span className="text-[10px] text-muted">
+                                    --
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 text-xs text-muted">
+                                {c.description || "-"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
               {/* Statistical profiles */}

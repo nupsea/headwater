@@ -8,6 +8,7 @@ exploration.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Literal
 
@@ -24,6 +25,7 @@ from headwater.core.models import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _build_dictionary_table(
@@ -125,6 +127,134 @@ async def get_review_summary(request: Request):
         skipped=counts["skipped"],
         pct_complete=round(reviewed / total * 100, 1) if total > 0 else 0.0,
     ).model_dump()
+
+
+# -- Catalog review routes (MUST be before /{table_name} wildcard) -----------
+
+
+class CatalogItemAction(BaseModel):
+    """Payload for confirming, editing, or rejecting a catalog metric or dimension."""
+
+    action: Literal["confirmed", "rejected"]
+    synonyms: list[str] | None = None  # For dimensions: add/replace synonyms
+
+
+@router.get("/dictionary/catalog")
+async def get_catalog_for_review(request: Request):
+    """Return catalog metrics and dimensions with their review status."""
+    pipeline = request.app.state.pipeline
+    discovery = pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    store = request.app.state.metadata_store
+    source_name = discovery.source.name
+    metrics = store.get_catalog_metrics(source_name)
+    dimensions = store.get_catalog_dimensions(source_name)
+    entities = store.get_catalog_entities(source_name)
+
+    return {
+        "metrics": metrics,
+        "dimensions": dimensions,
+        "entities": entities,
+        "summary": {
+            "metrics_total": len(metrics),
+            "metrics_confirmed": sum(1 for m in metrics if m.get("status") == "confirmed"),
+            "metrics_rejected": sum(1 for m in metrics if m.get("status") == "rejected"),
+            "dimensions_total": len(dimensions),
+            "dimensions_confirmed": sum(
+                1 for d in dimensions if d.get("status") == "confirmed"
+            ),
+            "dimensions_rejected": sum(
+                1 for d in dimensions if d.get("status") == "rejected"
+            ),
+        },
+    }
+
+
+@router.patch("/dictionary/catalog/metrics/{metric_name}")
+async def review_catalog_metric(
+    metric_name: str,
+    body: CatalogItemAction,
+    request: Request,
+):
+    """Confirm or reject a catalog metric."""
+    pipeline = request.app.state.pipeline
+    discovery = pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    store = request.app.state.metadata_store
+    project_id = discovery.source.name
+
+    confidence = 0.95 if body.action == "confirmed" else 0.0
+    updated = store.update_catalog_metric_status(
+        project_id,
+        metric_name,
+        status=body.action,
+        confidence=confidence,
+        source="human",
+    )
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Metric '{metric_name}' not found in catalog.",
+        )
+
+    store.record_decision(
+        artifact_type="catalog_metric",
+        artifact_id=f"{project_id}.{metric_name}",
+        action=body.action,
+    )
+
+    return {"metric": metric_name, "status": body.action, "confidence": confidence}
+
+
+@router.patch("/dictionary/catalog/dimensions/{dimension_name}")
+async def review_catalog_dimension(
+    dimension_name: str,
+    body: CatalogItemAction,
+    request: Request,
+):
+    """Confirm or reject a catalog dimension. Optionally update synonyms."""
+    pipeline = request.app.state.pipeline
+    discovery = pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    store = request.app.state.metadata_store
+    project_id = discovery.source.name
+
+    confidence = 0.95 if body.action == "confirmed" else 0.0
+    updated = store.update_catalog_dimension_status(
+        project_id,
+        dimension_name,
+        status=body.action,
+        confidence=confidence,
+        source="human",
+        synonyms=body.synonyms,
+    )
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Dimension '{dimension_name}' not found in catalog.",
+        )
+
+    store.record_decision(
+        artifact_type="catalog_dimension",
+        artifact_id=f"{project_id}.{dimension_name}",
+        action=body.action,
+        payload={"synonyms": body.synonyms} if body.synonyms else None,
+    )
+
+    return {
+        "dimension": dimension_name,
+        "status": body.action,
+        "confidence": confidence,
+    }
+
+
+# -- Table-level routes (wildcard MUST come after specific routes) -----------
 
 
 @router.get("/dictionary/{table_name}")
@@ -423,124 +553,6 @@ async def edit_column(
         "role": col.role,
         "description": col.description,
         "is_primary_key": col.is_primary_key,
-    }
-
-
-class CatalogItemAction(BaseModel):
-    """Payload for confirming, editing, or rejecting a catalog metric or dimension."""
-
-    action: Literal["confirmed", "rejected"]
-    synonyms: list[str] | None = None  # For dimensions: add/replace synonyms
-
-
-@router.get("/dictionary/catalog")
-async def get_catalog_for_review(request: Request):
-    """Return catalog metrics and dimensions with their review status."""
-    pipeline = request.app.state.pipeline
-    discovery = pipeline["discovery"]
-    if not discovery:
-        raise HTTPException(status_code=400, detail="No discovery run yet.")
-
-    store = request.app.state.metadata_store
-    source_name = discovery.source.name
-    metrics = store.get_catalog_metrics(source_name)
-    dimensions = store.get_catalog_dimensions(source_name)
-    entities = store.get_catalog_entities(source_name)
-
-    return {
-        "metrics": metrics,
-        "dimensions": dimensions,
-        "entities": entities,
-        "summary": {
-            "metrics_total": len(metrics),
-            "metrics_confirmed": sum(1 for m in metrics if m.get("status") == "confirmed"),
-            "metrics_rejected": sum(1 for m in metrics if m.get("status") == "rejected"),
-            "dimensions_total": len(dimensions),
-            "dimensions_confirmed": sum(1 for d in dimensions if d.get("status") == "confirmed"),
-            "dimensions_rejected": sum(1 for d in dimensions if d.get("status") == "rejected"),
-        },
-    }
-
-
-@router.patch("/dictionary/catalog/metrics/{metric_name}")
-async def review_catalog_metric(
-    metric_name: str,
-    body: CatalogItemAction,
-    request: Request,
-):
-    """Confirm or reject a catalog metric."""
-    pipeline = request.app.state.pipeline
-    discovery = pipeline["discovery"]
-    if not discovery:
-        raise HTTPException(status_code=400, detail="No discovery run yet.")
-
-    store = request.app.state.metadata_store
-    project_id = discovery.source.name
-
-    confidence = 0.95 if body.action == "confirmed" else 0.0
-    updated = store.update_catalog_metric_status(
-        project_id,
-        metric_name,
-        status=body.action,
-        confidence=confidence,
-        source="human",
-    )
-    if not updated:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Metric '{metric_name}' not found in catalog.",
-        )
-
-    store.record_decision(
-        artifact_type="catalog_metric",
-        artifact_id=f"{project_id}.{metric_name}",
-        action=body.action,
-    )
-
-    return {"metric": metric_name, "status": body.action, "confidence": confidence}
-
-
-@router.patch("/dictionary/catalog/dimensions/{dimension_name}")
-async def review_catalog_dimension(
-    dimension_name: str,
-    body: CatalogItemAction,
-    request: Request,
-):
-    """Confirm or reject a catalog dimension. Optionally update synonyms."""
-    pipeline = request.app.state.pipeline
-    discovery = pipeline["discovery"]
-    if not discovery:
-        raise HTTPException(status_code=400, detail="No discovery run yet.")
-
-    store = request.app.state.metadata_store
-    project_id = discovery.source.name
-
-    confidence = 0.95 if body.action == "confirmed" else 0.0
-    updated = store.update_catalog_dimension_status(
-        project_id,
-        dimension_name,
-        status=body.action,
-        confidence=confidence,
-        source="human",
-        synonyms=body.synonyms,
-    )
-    if not updated:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Dimension '{dimension_name}' not found in catalog.",
-        )
-
-    store.record_decision(
-        artifact_type="catalog_dimension",
-        artifact_id=f"{project_id}.{dimension_name}",
-        action=body.action,
-        payload={"synonyms": body.synonyms} if body.synonyms else None,
-    )
-
-    return {
-        "dimension": dimension_name,
-        "status": body.action,
-        "confidence": confidence,
     }
 
 

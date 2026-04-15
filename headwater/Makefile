@@ -10,14 +10,14 @@ app: ## Start backend (port 8000) + frontend (port 3000)
 	@echo ""
 	@trap 'kill 0' INT TERM; \
 	cd /Users/sethurama/DEV/LM/UTE/adm/headwater && \
-	uv run uvicorn headwater.api.app:app --host 0.0.0.0 --port 8000 --reload 2>&1 | sed 's/^/[api] /' & \
+	uv run uvicorn headwater.api.app:app --host 0.0.0.0 --port 8000 --reload --log-level info 2>&1 | sed 's/^/[api] /' & \
 	cd /Users/sethurama/DEV/LM/UTE/adm/headwater/ui && npm run dev 2>&1 | sed 's/^/[ui]  /' & \
 	wait
 
 # --- Individual services ---
 
 api: ## Start backend only (port 8000)
-	uv run uvicorn headwater.api.app:app --host 0.0.0.0 --port 8000 --reload
+	uv run uvicorn headwater.api.app:app --host 0.0.0.0 --port 8000 --reload --log-level info
 
 ui: ## Start frontend only (port 3000)
 	cd ui && npm run dev

@@ -7,6 +7,8 @@ blocks execution (I-4).
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -17,6 +19,7 @@ from headwater.explorer.statistical import detect_insights
 from headwater.explorer.suggestions import generate_suggestions
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class AskRequest(BaseModel):

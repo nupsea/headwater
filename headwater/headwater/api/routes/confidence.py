@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/confidence")

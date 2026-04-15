@@ -127,6 +127,8 @@ def ask(
             result = _execute_query(question, sql, con)
             if not result.error:
                 result.warnings = decomposition.warnings
+                result.suggestions = decomposition.suggestions
+                result.explanation = decomposition.explanation
                 return result
             # If execution fails, log and fall through to other strategies
             logger.warning(
@@ -141,6 +143,9 @@ def ask(
                 sql="",
                 error=decomposition.explanation,
                 warnings=decomposition.warnings,
+                suggestions=decomposition.suggestions,
+                explanation=decomposition.explanation,
+                options=[o.model_dump() for o in decomposition.options] if decomposition.options else [],
             )
 
     has_llm = provider is not None and not isinstance(provider, NoLLMProvider)

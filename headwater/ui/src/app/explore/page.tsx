@@ -6,9 +6,12 @@ import {
   type SuggestedQuestion,
   type StatisticalInsight,
   type ExplorationResult,
+  type ExploreSuggestionsResponse,
+  type DimensionOption,
 } from "@/lib/api";
 import { ResultChart } from "@/components/result-chart";
 import { SqlViewer } from "@/components/sql-viewer";
+import { DisambiguationUI } from "@/components/disambiguation-ui";
 
 const SOURCE_COLORS: Record<string, string> = {
   mart: "bg-blue-100 text-blue-800 border-blue-200",
@@ -39,19 +42,15 @@ export default function ExplorePage() {
     "questions"
   );
 
-  const [reviewRequired, setReviewRequired] = useState(false);
+  const [reviewPct, setReviewPct] = useState(100);
 
   useEffect(() => {
     api
       .exploreSuggestions()
-      .then((res: Record<string, unknown>) => {
-        setSuggestions(
-          (res.suggestions as typeof suggestions) || []
-        );
-        setInsights(
-          (res.insights as typeof insights) || []
-        );
-        if (res.review_required) setReviewRequired(true);
+      .then((res: ExploreSuggestionsResponse) => {
+        setSuggestions(res.suggestions || []);
+        setInsights(res.insights || []);
+        if (typeof res.review_pct === "number") setReviewPct(res.review_pct);
       })
       .catch(() => setError("Run the pipeline from the Dashboard first."));
   }, []);
@@ -109,27 +108,25 @@ export default function ExplorePage() {
     <div>
       <h1 className="text-2xl font-bold mb-2">Explore Data</h1>
       <p className="text-muted text-sm mb-6">
-        Ask natural language questions about your data. The system generates SQL
-        from your curated metadata and executes it against the analytical
-        database.
+        Ask natural language questions about your data. The system decomposes
+        questions into metrics and dimensions from the semantic catalog, then
+        generates deterministic SQL.
       </p>
 
-      {/* Dictionary review gate */}
-      {reviewRequired && (
-        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
-          <h3 className="text-sm font-semibold text-amber-800 mb-1">
-            Review Required
-          </h3>
-          <p className="text-sm text-amber-900 mb-2">
-            Some tables have not been reviewed yet. The explorer only generates
-            queries for reviewed tables. Review table metadata in the Data
-            Dictionary to enable full exploration.
-          </p>
+      {/* Soft review indicator (non-blocking) */}
+      {reviewPct < 100 && (
+        <div className="mb-6 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">
+          <div>
+            <span className="text-sm text-blue-800">
+              {Math.round(reviewPct)}% of tables reviewed in the dictionary.
+              Reviewing more tables improves accuracy.
+            </span>
+          </div>
           <a
             href="/dictionary"
-            className="inline-block px-3 py-1.5 bg-amber-600 text-white rounded text-sm font-medium hover:bg-amber-700 transition-colors"
+            className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 transition-colors shrink-0 ml-4"
           >
-            Go to Data Dictionary
+            Review Dictionary
           </a>
         </div>
       )}
@@ -191,19 +188,88 @@ export default function ExplorePage() {
                 )}
               </div>
             </div>
+
+            {/* Decomposition explanation */}
+            {result.explanation && (
+              <p className="text-sm text-muted mt-2">{result.explanation}</p>
+            )}
+
+            {/* Resolution metadata */}
+            {!result.error && result.data.length > 0 && (
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                {result.repaired && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800 border border-green-200">
+                    Auto-repaired
+                  </span>
+                )}
+                {result.options.length === 0 && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800 border border-green-200">
+                    Catalog-resolved
+                  </span>
+                )}
+              </div>
+            )}
+
             {result.error && (
               <p className="text-sm text-red-600 mt-2">{result.error}</p>
             )}
           </div>
 
+          {/* Disambiguation options */}
+          {result.options && result.options.length > 0 && (
+            <DisambiguationUI
+              options={result.options}
+              loading={loading}
+              question={result.question}
+              onSelect={(opt: DimensionOption) => {
+                const q = result.question.replace(
+                  /by\s+\S+/i,
+                  `by ${opt.display_name}`
+                );
+                askQuestion(
+                  q !== result.question
+                    ? q
+                    : `${result.question} (${opt.display_name})`
+                );
+              }}
+            />
+          )}
+
+          {/* Warnings */}
           {result.warnings && result.warnings.length > 0 && (
-            <div className="px-4 py-3 border-b border-border bg-amber-50 border-l-4 border-l-amber-400">
-              <div className="text-xs font-semibold text-amber-800 uppercase tracking-wider mb-1">
-                Grounding Warning
+            <div className="px-4 py-3 border-b border-border">
+              <div className="space-y-2">
+                {result.warnings.map((w, i) => (
+                  <div
+                    key={i}
+                    className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200"
+                  >
+                    <span className="text-amber-600 shrink-0 mt-0.5 text-sm">!</span>
+                    <p className="text-sm text-amber-900">{w}</p>
+                  </div>
+                ))}
               </div>
-              {result.warnings.map((w, i) => (
-                <p key={i} className="text-sm text-amber-900">{w}</p>
-              ))}
+            </div>
+          )}
+
+          {/* Follow-up suggestions from decomposition */}
+          {result.suggestions && result.suggestions.length > 0 && (
+            <div className="px-4 py-3 border-b border-border bg-background">
+              <div className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">
+                Related questions
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {result.suggestions.map((s, i) => (
+                  <button
+                    key={i}
+                    onClick={() => askQuestion(s)}
+                    disabled={loading}
+                    className="px-3 py-1 text-xs border border-border rounded-full bg-card hover:border-foreground transition-colors disabled:opacity-50"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 

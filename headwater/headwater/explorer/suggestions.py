@@ -106,7 +106,10 @@ def generate_suggestions(
 
 
 def _from_catalog(catalog) -> list[SuggestedQuestion]:
-    """Generate suggestions from semantic catalog metric x dimension cross-products."""
+    """Generate suggestions from semantic catalog metric x dimension cross-products.
+
+    Every suggestion includes a valid sql_hint so clicking it works immediately.
+    """
     suggestions: list[SuggestedQuestion] = []
 
     for entity in catalog.entities:
@@ -123,6 +126,7 @@ def _from_catalog(catalog) -> list[SuggestedQuestion]:
                 suggestions.append(
                     SuggestedQuestion(
                         question=f"How many {entity.display_name.lower()}?",
+                        source="catalog",
                         category="catalog",
                         relevant_tables=[entity.table],
                         sql_hint=f'SELECT {m.expression} AS "{m.display_name}" FROM "{m.table}"',
@@ -132,17 +136,43 @@ def _from_catalog(catalog) -> list[SuggestedQuestion]:
             for d in entity_dims[:4]:
                 if d.confidence < 0.5:
                     continue
+                sql = _build_catalog_sql(m, d)
                 suggestions.append(
                     SuggestedQuestion(
                         question=f"{m.display_name} by {d.display_name}",
+                        source="catalog",
                         category="catalog",
                         relevant_tables=[m.table, d.table] if m.table != d.table else [m.table],
+                        sql_hint=sql,
                     )
                 )
                 if len(suggestions) >= 10:
                     return suggestions
 
     return suggestions
+
+
+def _build_catalog_sql(metric, dimension) -> str:
+    """Build SQL for a metric x dimension suggestion."""
+    m_alias = metric.display_name.lower().replace(" ", "_")
+    d_alias = dimension.display_name.lower().replace(" ", "_")
+    d_col = f'"{dimension.table}"."{dimension.column}"'
+
+    select = f'{d_col} AS "{d_alias}", {metric.expression} AS "{m_alias}"'
+    from_clause = f'"{metric.table}"'
+
+    join = ""
+    if dimension.table != metric.table and dimension.join_path:
+        import re as _re
+
+        match = _re.match(r"(\w+)\.(\w+)\s*->\s*(\w+)\.(\w+)", dimension.join_path)
+        if match:
+            from_t, from_c, to_t, to_c = match.groups()
+            join_type = "LEFT JOIN" if dimension.join_nullable else "JOIN"
+            join = f'\n{join_type} "{to_t}" ON "{from_t}"."{from_c}" = "{to_t}"."{to_c}"'
+
+    order = f"{metric.expression} DESC"
+    return f"SELECT {select}\nFROM {from_clause}{join}\nGROUP BY {d_col}\nORDER BY {order}"
 
 
 # ---------------------------------------------------------------------------

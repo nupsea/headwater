@@ -217,11 +217,11 @@ class QueryDecomposer:
     def _build_index(self) -> None:
         """Build a stem-to-catalog-entry index for fast keyword lookup."""
         for m in self.catalog.metrics:
-            for token in _name_tokens(m.name, m.display_name, m.synonyms):
+            for token in _name_tokens(m.name, m.display_name, m.synonyms, m.table):
                 self._name_index.setdefault(token, []).append(("metric", m.name, m.table))
 
         for d in self.catalog.dimensions:
-            for token in _name_tokens(d.name, d.display_name, d.synonyms):
+            for token in _name_tokens(d.name, d.display_name, d.synonyms, d.table):
                 self._name_index.setdefault(token, []).append(("dimension", d.name, d.table))
 
         for e in self.catalog.entities:
@@ -258,7 +258,13 @@ class QueryDecomposer:
         # Strategy A: keyword resolution
         entity_matches = self._keyword_resolve_entities(stems)
         metric_matches = self._keyword_resolve_metrics(stems, tokens, intent)
-        dim_matches = self._keyword_resolve_dimensions(stems, tokens)
+
+        # Parse "by X" / "per X" patterns to identify dimension-intent tokens
+        group_by_tokens = _extract_group_by_tokens(question)
+        # Only resolve dimensions from group-by tokens if present, else use all
+        dim_stems = [_stem(t) for t in group_by_tokens] if group_by_tokens else stems
+        dim_tokens = group_by_tokens if group_by_tokens else tokens
+        dim_matches = self._keyword_resolve_dimensions(dim_stems, dim_tokens)
 
         # Strategy B: embedding resolution (fills gaps)
         if vector_store and (not metric_matches or not dim_matches):
@@ -272,6 +278,12 @@ class QueryDecomposer:
                 dim_matches,
                 entity_matches,
             )
+
+        # If intent is clear and multiple metrics matched, prefer the one matching the intent
+        if intent and len(metric_matches) > 1:
+            intent_matches = [m for m in metric_matches if self._metric_matches_intent(m.metric_name, intent)]
+            if intent_matches:
+                metric_matches = intent_matches
 
         # Resolve entity from matches
         entity = self._pick_entity(entity_matches, metric_matches, dim_matches)
@@ -297,8 +309,12 @@ class QueryDecomposer:
                         )
                     )
 
-        # Check for ambiguous dimensions
-        ambiguous = _find_ambiguous_dimensions(dim_matches, self.catalog.dimensions)
+        # Scope dimensions to the resolved entity's table context
+        if entity and (metric_matches or dim_matches):
+            dim_matches = self._scope_dimensions(entity, metric_matches, dim_matches)
+
+        # Check for ambiguous dimensions only when genuinely confusable
+        ambiguous = _find_ambiguous_dimensions(dim_matches)
         if ambiguous:
             logger.info("Ambiguous dimensions detected, returning options")
             return DecompositionResult(
@@ -727,6 +743,65 @@ class QueryDecomposer:
 
         return suggestions[:5]
 
+    def _metric_matches_intent(self, metric_name: str, intent: str) -> bool:
+        """Check if a metric's aggregation type matches the detected intent."""
+        m = self._get_metric(metric_name)
+        return m is not None and m.agg_type == intent
+
+    # -------------------------------------------------------------------
+    # Dimension scoping -- remove irrelevant cross-table matches
+    # -------------------------------------------------------------------
+
+    def _scope_dimensions(
+        self,
+        entity: str,
+        metrics: list[MetricMatch],
+        dims: list[DimensionMatch],
+    ) -> list[DimensionMatch]:
+        """Keep only dimensions relevant to the resolved entity context.
+
+        When a query like "count of aqi by county" matches dimensions from
+        multiple unrelated tables, we keep only:
+        1. Dimensions on the entity's own table
+        2. Dimensions reachable via join_path from the entity's table
+        3. If nothing survives, fall back to the original list
+        """
+        if not dims or len(dims) <= 1:
+            return dims
+
+        entity_def = self._get_entity(entity)
+        if not entity_def:
+            return dims
+
+        entity_table = entity_def.table
+        metric_tables = {m.table for m in metrics}
+        relevant_tables = {entity_table} | metric_tables
+
+        # Dimensions declared on the entity are always relevant
+        entity_dim_names = set(entity_def.dimensions) if entity_def.dimensions else set()
+
+        scoped: list[DimensionMatch] = []
+        for d in dims:
+            # On the entity's table or metric tables
+            if d.table in relevant_tables:
+                scoped.append(d)
+            # Declared as a dimension of this entity (cross-table via join)
+            elif d.dimension_name in entity_dim_names:
+                scoped.append(d)
+            # Has a join_path from the entity table
+            elif d.join_path and d.join_path.startswith(f"{entity_table}."):
+                scoped.append(d)
+
+        if scoped:
+            logger.debug(
+                "Scoped dimensions from %d to %d for entity=%s",
+                len(dims), len(scoped), entity,
+            )
+            return scoped
+
+        # Nothing survived scoping -- keep original to avoid empty results
+        return dims
+
     # -------------------------------------------------------------------
     # Catalog lookups
     # -------------------------------------------------------------------
@@ -749,22 +824,54 @@ class QueryDecomposer:
 # ---------------------------------------------------------------------------
 
 
-def _name_tokens(name: str, display_name: str, synonyms: list[str]) -> set[str]:
-    """Extract stemmed tokens from a catalog entry for indexing."""
+def _name_tokens(
+    name: str, display_name: str, synonyms: list[str], table: str = ""
+) -> set[str]:
+    """Extract stemmed tokens from a catalog entry for indexing.
+
+    Skips table-name prefix tokens from the internal name to avoid
+    false matches (e.g. "aqi" in "aqi_by_county_state" shouldn't match
+    the aqi_state dimension when the user says "aqi").
+    """
     tokens: set[str] = set()
+
+    # Internal name -- skip tokens that are part of the table name
+    table_stems = {_stem(p) for p in re.split(r"[_\s]+", table.lower()) if len(p) > 1} if table else set()
     for part in re.split(r"[_\s]+", name.lower()):
-        if part and len(part) > 1:
+        if part and len(part) > 1 and _stem(part) not in table_stems:
             tokens.add(_stem(part))
             tokens.add(part)
+
+    # Display name -- always index (user-facing, no table prefix)
     for part in re.split(r"[_\s]+", display_name.lower()):
         if part and len(part) > 1:
             tokens.add(_stem(part))
             tokens.add(part)
+
+    # Synonyms -- always index
     for syn in synonyms:
         for part in re.split(r"[_\s]+", syn.lower()):
             if part and len(part) > 1:
                 tokens.add(_stem(part))
                 tokens.add(part)
+    return tokens
+
+
+def _extract_group_by_tokens(question: str) -> list[str]:
+    """Extract tokens after 'by', 'per', 'grouped by', 'broken down by'.
+
+    Returns empty list if no group-by pattern found, which means all tokens
+    should be used for dimension resolution (backward compatible).
+    """
+    match = _GROUP_BY_PATTERNS.search(question)
+    if not match:
+        return []
+    group_text = match.group(1).strip()
+    # Split on 'and', ',', '&'
+    parts = re.split(r"\s*(?:and|,|&)\s*", group_text, flags=re.IGNORECASE)
+    tokens = []
+    for part in parts:
+        tokens.extend(_tokenize(part))
     return tokens
 
 
@@ -779,33 +886,40 @@ def _detect_intent(question: str) -> str | None:
 
 def _find_ambiguous_dimensions(
     matches: list[DimensionMatch],
-    all_dims: list[DimensionDefinition],
 ) -> list[DimensionOption]:
-    """Check if matched dimensions are ambiguous (multiple dims for same concept)."""
+    """Check if matched dimensions are genuinely ambiguous.
+
+    Ambiguity means multiple dimensions on the SAME table serve the same
+    analytical role (e.g., zone_name and zone_type both match "zone").
+    Cross-table matches are NOT ambiguous -- they're already scoped by entity.
+    """
     if len(matches) <= 1:
         return []
 
-    # Check if multiple dims share the same stem (e.g. zone_geography and zone_type)
-    stem_groups: dict[str, list[DimensionMatch]] = {}
+    # Group by display_name stem -- only same-table collisions are ambiguous
+    from collections import defaultdict
+
+    stem_groups: dict[str, list[DimensionMatch]] = defaultdict(list)
     for m in matches:
-        stem = _stem(m.column)
-        stem_groups.setdefault(stem, []).append(m)
+        # Use display_name stem as the grouping key
+        key = _stem(m.display_name.split()[0].lower()) if m.display_name else _stem(m.column)
+        stem_groups[key].append(m)
 
     options: list[DimensionOption] = []
-    for _stem_key, group in stem_groups.items():
-        if len(group) > 1:
+    for _key, group in stem_groups.items():
+        # Only ambiguous if multiple dims on the same table share a stem
+        tables_in_group = {dm.table for dm in group}
+        if len(group) > 1 and len(tables_in_group) == 1:
             for dm in group:
-                d = next((d for d in all_dims if d.name == dm.dimension_name), None)
-                if d:
-                    options.append(
-                        DimensionOption(
-                            dimension_name=d.name,
-                            display_name=d.display_name,
-                            description=d.description,
-                            sample_values=d.sample_values[:5],
-                            confidence=dm.confidence,
-                        )
+                options.append(
+                    DimensionOption(
+                        dimension_name=dm.dimension_name,
+                        display_name=dm.display_name,
+                        description="",
+                        sample_values=[],
+                        confidence=dm.confidence,
                     )
+                )
 
     return options
 

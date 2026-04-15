@@ -290,7 +290,7 @@ class SuggestedQuestion(BaseModel):
     """A natural language question the system can answer from materialized models."""
 
     question: str
-    source: Literal["mart", "relationship", "quality", "semantic", "statistical"]
+    source: Literal["mart", "relationship", "quality", "semantic", "statistical", "catalog"]
     category: str  # e.g. "Air Quality", "Inspections", "Trends"
     relevant_tables: list[str] = Field(default_factory=list)
     sql_hint: str | None = None  # Optional pre-generated SQL
@@ -401,6 +401,9 @@ class ExplorationResult(BaseModel):
     visualization: VisualizationSpec | None = None
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)  # Grounding / confidence warnings
+    suggestions: list[str] = Field(default_factory=list)  # Follow-up questions from catalog
+    explanation: str = ""  # How the query was interpreted (from decomposer)
+    options: list[dict[str, Any]] = Field(default_factory=list)  # Disambiguation options
     repaired: bool = False  # True if LLM auto-repaired a failed query
     repair_history: list[dict[str, str]] = Field(default_factory=list)  # [{sql, error}]
 
