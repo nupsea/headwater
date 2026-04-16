@@ -7,10 +7,12 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from headwater.analyzer.catalog import build_catalog, index_catalog
 from headwater.analyzer.companion import (
     discover_companion_docs,
     match_docs_to_tables,
 )
+from headwater.analyzer.eval import evaluate_catalog
 from headwater.analyzer.semantic import analyze
 from headwater.connectors.registry import get_connector
 from headwater.core.models import SourceConfig
@@ -39,8 +41,13 @@ async def run_discovery(
     con = request.app.state.duckdb_con
     source = SourceConfig(name=source_name, type=source_type, path=str(data_path))
 
-    logger.info("Discovery starting: path=%s, type=%s, name=%s, schema=%s",
-                data_path, source_type, source_name, source_schema)
+    logger.info(
+        "Discovery starting: path=%s, type=%s, name=%s, schema=%s",
+        data_path,
+        source_type,
+        source_name,
+        source_schema,
+    )
 
     connector = get_connector(source.type)
     connector.connect(source)
@@ -49,9 +56,12 @@ async def run_discovery(
     logger.info("Data loaded to DuckDB")
 
     discovery = discover(con, source_schema, source)
-    logger.info("Discovery complete: %d tables, %d profiles, %d relationships",
-                len(discovery.tables), len(discovery.profiles),
-                len(discovery.relationships))
+    logger.info(
+        "Discovery complete: %d tables, %d profiles, %d relationships",
+        len(discovery.tables),
+        len(discovery.profiles),
+        len(discovery.relationships),
+    )
 
     # Companion doc discovery
     companion_docs = discover_companion_docs(source)
@@ -65,15 +75,42 @@ async def run_discovery(
     analyze(discovery)
     logger.info("Semantic analysis complete")
 
+    # Build semantic catalog (heuristic tier 0)
+    catalog = build_catalog(discovery)
+    logger.info(
+        "Catalog built: %d metrics, %d dimensions, %d entities (confidence=%.2f)",
+        len(catalog.metrics),
+        len(catalog.dimensions),
+        len(catalog.entities),
+        catalog.confidence,
+    )
+
+    # Evaluate catalog quality
+    evaluation = evaluate_catalog(catalog, discovery.tables, discovery.profiles)
+    logger.info("Catalog evaluation: overall=%.2f", evaluation.confidence)
+
+    # Build graph store (Kuzu) with table nodes and FK edges
+    catalog_data = _build_graph_and_index(
+        request,
+        discovery,
+        catalog,
+        source_name,
+        evaluation,
+    )
+
     # Persist all discovery data to metadata store
     logger.info("Persisting discovery data to metadata store...")
     _persist_discovery_data(request, discovery, source_name)
 
     # Persist semantic details and companion docs
     _persist_semantic_data(request, discovery, source_name)
+
+    # Persist catalog to metadata store
+    _persist_catalog_data(request, catalog, evaluation, source_name)
     logger.info("Persistence complete")
 
     request.app.state.pipeline["discovery"] = discovery
+    request.app.state.pipeline["catalog"] = catalog
 
     return {
         "tables": len(discovery.tables),
@@ -81,6 +118,14 @@ async def run_discovery(
         "relationships": len(discovery.relationships),
         "domains": discovery.domains,
         "companion_docs": len(discovery.companion_docs),
+        "catalog": {
+            "metrics": len(catalog.metrics),
+            "dimensions": len(catalog.dimensions),
+            "entities": len(catalog.entities),
+            "confidence": catalog.confidence,
+            "evaluation": evaluation.confidence,
+        },
+        **catalog_data,
     }
 
 
@@ -197,17 +242,24 @@ async def patch_column(
         if body.description is not None:
             col.description = body.description
         store.lock_column(
-            table_name, source_name, column_name,
-            locked=True, description=body.description,
+            table_name,
+            source_name,
+            column_name,
+            locked=True,
+            description=body.description,
         )
         store.record_decision(
-            "column", f"{source_name}.{table_name}.{column_name}", "locked",
+            "column",
+            f"{source_name}.{table_name}.{column_name}",
+            "locked",
             payload={"description": body.description},
         )
     elif body.locked is False:
         store.lock_column(table_name, source_name, column_name, locked=False)
         store.record_decision(
-            "column", f"{source_name}.{table_name}.{column_name}", "unlocked",
+            "column",
+            f"{source_name}.{table_name}.{column_name}",
+            "unlocked",
         )
     elif body.description is not None:
         col.description = body.description
@@ -229,8 +281,14 @@ def _persist_discovery_data(request: Request, discovery, source_name: str) -> No
         return
 
     source = discovery.source
-    logger.info("Persisting source: name=%s, type=%s, path=%s, uri=%s, mode=%s",
-                source_name, source.type, source.path, source.uri, source.mode)
+    logger.info(
+        "Persisting source: name=%s, type=%s, path=%s, uri=%s, mode=%s",
+        source_name,
+        source.type,
+        source.path,
+        source.uri,
+        source.mode,
+    )
     store.upsert_source(source_name, source.type, source.path, source.uri, mode=source.mode)
     run_id = store.start_run(source_name)
     logger.info("Started discovery run_id=%d", run_id)
@@ -269,8 +327,12 @@ def _persist_discovery_data(request: Request, discovery, source_name: str) -> No
             exclude={"table_name", "column_name", "dtype"},
         )
         store.upsert_profile(
-            profile.table_name, profile.column_name, source_name,
-            profile.dtype, stats, run_id=run_id,
+            profile.table_name,
+            profile.column_name,
+            source_name,
+            profile.dtype,
+            stats,
+            run_id=run_id,
         )
     logger.info("Persisted %d profiles", len(discovery.profiles))
 
@@ -294,7 +356,9 @@ def _persist_discovery_data(request: Request, discovery, source_name: str) -> No
     logger.info("Persisted %d relationships", len(discovery.relationships))
 
     removed = store.mark_removed_tables(
-        source_name, [t.name for t in discovery.tables], run_id,
+        source_name,
+        [t.name for t in discovery.tables],
+        run_id,
     )
     if removed:
         logger.info("Marked %d tables as removed: %s", len(removed), removed)
@@ -325,3 +389,166 @@ def _persist_semantic_data(request: Request, discovery, source_name: str) -> Non
             matched_tables=doc.matched_tables,
             confidence=doc.confidence,
         )
+
+
+def _build_graph_and_index(
+    request: Request,
+    discovery,
+    catalog,
+    source_name: str,
+    evaluation,
+) -> dict:
+    """Build Kuzu graph store and LanceDB index. Returns summary dict."""
+    result: dict = {"graph": {}, "vector_index": 0}
+
+    # Graph store: load tables + relationships
+    try:
+        from headwater.core.config import get_settings
+        from headwater.core.graph_store import GraphStore
+
+        settings = get_settings()
+        graph = GraphStore(settings.graph_store_path)
+        graph.clear()  # Fresh graph for each discovery run
+
+        table_dicts = [
+            {
+                "name": t.name,
+                "row_count": t.row_count,
+                "domain": t.domain or "",
+                "description": t.description or "",
+            }
+            for t in discovery.tables
+        ]
+        node_count = graph.load_tables(table_dicts)
+
+        rel_dicts = [
+            {
+                "from_table": r.from_table,
+                "from_column": r.from_column,
+                "to_table": r.to_table,
+                "to_column": r.to_column,
+                "rel_type": r.type,
+                "confidence": r.confidence,
+                "ref_integrity": r.referential_integrity,
+            }
+            for r in discovery.relationships
+        ]
+        edge_count = graph.load_relationships(rel_dicts)
+
+        # Run pattern discovery
+        conformed = graph.find_conformed_dimensions()
+        stars = graph.find_star_schemas()
+        chains = graph.find_chains()
+        nullable_warnings = graph.find_nullable_fk_warnings()
+
+        result["graph"] = {
+            "nodes": node_count,
+            "edges": edge_count,
+            "conformed_dimensions": len(conformed),
+            "star_schemas": len(stars),
+            "chains": len(chains),
+            "nullable_fk_warnings": len(nullable_warnings),
+        }
+
+        request.app.state.pipeline["graph_store"] = graph
+        logger.info(
+            "Graph built: %d nodes, %d edges, %d conformed dims, %d stars",
+            node_count,
+            edge_count,
+            len(conformed),
+            len(stars),
+        )
+    except Exception:
+        logger.exception("Failed to build graph store")
+
+    # LanceDB vector index
+    try:
+        from headwater.core.vector_store import VectorStore
+
+        settings = get_settings()
+        vs = VectorStore(settings.vector_store_path)
+        indexed = index_catalog(catalog, source_name, vs)
+        result["vector_index"] = indexed
+        request.app.state.pipeline["vector_store"] = vs
+        logger.info("Indexed %d catalog entries in LanceDB", indexed)
+    except Exception:
+        logger.exception("Failed to build vector index")
+
+    return result
+
+
+def _persist_catalog_data(request: Request, catalog, evaluation, source_name: str) -> None:
+    """Persist catalog metrics, dimensions, and entities to metadata store."""
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        return
+
+    # Use source_name as project_id for now (project entity comes in Phase 4)
+    project_id = source_name
+
+    # Ensure project record exists (FK constraint)
+    store.upsert_project(
+        id_=project_id,
+        slug=project_id,
+        display_name=project_id,
+        maturity="profiled",
+        catalog_confidence=evaluation.confidence,
+    )
+
+    # Clear previous catalog for this project before re-inserting
+    store.clear_catalog(project_id)
+
+    for m in catalog.metrics:
+        store.upsert_catalog_metric(
+            project_id=project_id,
+            name=m.name,
+            display_name=m.display_name,
+            description=m.description,
+            expression=m.expression,
+            table_name=m.table,
+            agg_type=m.agg_type,
+            column_name=m.column,
+            synonyms=m.synonyms,
+            confidence=m.confidence,
+            status=m.status,
+            source=m.source,
+        )
+
+    for d in catalog.dimensions:
+        store.upsert_catalog_dimension(
+            project_id=project_id,
+            name=d.name,
+            display_name=d.display_name,
+            description=d.description,
+            column_name=d.column,
+            table_name=d.table,
+            dtype=d.dtype,
+            synonyms=d.synonyms,
+            sample_values=d.sample_values,
+            cardinality=d.cardinality,
+            confidence=d.confidence,
+            status=d.status,
+            source=d.source,
+            join_path=d.join_path,
+            join_nullable=d.join_nullable,
+        )
+
+    for e in catalog.entities:
+        store.upsert_catalog_entity(
+            project_id=project_id,
+            name=e.name,
+            display_name=e.display_name,
+            description=e.description,
+            table_name=e.table,
+            row_semantics=e.row_semantics,
+            metrics=e.metrics,
+            dimensions=e.dimensions,
+            temporal_grain=e.temporal_grain,
+        )
+
+    logger.info(
+        "Persisted catalog: %d metrics, %d dimensions, %d entities",
+        len(catalog.metrics),
+        len(catalog.dimensions),
+        len(catalog.entities),
+    )

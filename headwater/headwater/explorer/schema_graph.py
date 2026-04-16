@@ -50,21 +50,22 @@ _TEMPORAL_DTYPES = ("timestamp", "date", "time", "datetime")
 # Uses word boundaries and specific suffix patterns to avoid false positives.
 _TEMPORAL_NAME_RE = re.compile(
     r"("
-    r"date|_date|date_"    # date as standalone/prefix/suffix
+    r"date|_date|date_"  # date as standalone/prefix/suffix
     r"|timestamp|datetime"  # explicit temporal types
-    r"|_time$|^time_"       # time as suffix/prefix (not "time" embedded)
+    r"|_time$|^time_"  # time as suffix/prefix (not "time" embedded)
     r"|^month$|_month$|^month_"  # month standalone/suffix/prefix
-    r"|^year$|_year$|^year_"     # year standalone/suffix/prefix
-    r"|^day$|_day$|^day_"        # day standalone/suffix/prefix (not "days_with_aqi")
-    r"|^week$|_week$|^week_"     # week
-    r"|^quarter$|_quarter$"      # quarter
-    r"|^period$|_period$"        # period
-    r"|_at$|_ts$"                # common timestamp suffixes
+    r"|^year$|_year$|^year_"  # year standalone/suffix/prefix
+    r"|^day$|_day$|^day_"  # day standalone/suffix/prefix (not "days_with_aqi")
+    r"|^week$|_week$|^week_"  # week
+    r"|^quarter$|_quarter$"  # quarter
+    r"|^period$|_period$"  # period
+    r"|_at$|_ts$"  # common timestamp suffixes
     r")",
     re.IGNORECASE,
 )
 _ID_NAME_RE = re.compile(
-    r"(_id$|_key$|_fk$|_pk$|^id$|^key$|^uuid$)", re.IGNORECASE,
+    r"(_id$|_key$|_fk$|_pk$|^id$|^key$|^uuid$)",
+    re.IGNORECASE,
 )
 
 
@@ -300,9 +301,7 @@ class SchemaGraph:
                     match_type = "semantic_type"
 
                 if score > 0:
-                    matches.append(
-                        EntityMatch(tname, cname, score, match_type, role=cnode.role)
-                    )
+                    matches.append(EntityMatch(tname, cname, score, match_type, role=cnode.role))
 
         # Value-index matches (user might reference a data value, e.g. "Brooklyn")
         if term_lower in self._value_index:
@@ -312,7 +311,11 @@ class SchemaGraph:
                     table_boost = 5.0 if tname == preferred_table else 0.0
                     matches.append(
                         EntityMatch(
-                            tname, cname, 2 + table_boost, "value", role=cnode.role,
+                            tname,
+                            cname,
+                            2 + table_boost,
+                            "value",
+                            role=cnode.role,
                         )
                     )
 
@@ -370,14 +373,18 @@ class SchemaGraph:
                 # Build join step with correct column direction
                 if rel.from_table == current:
                     step = JoinStep(
-                        current, rel.from_column,
-                        neighbor, rel.to_column,
+                        current,
+                        rel.from_column,
+                        neighbor,
+                        rel.to_column,
                         rel.type,
                     )
                 else:
                     step = JoinStep(
-                        current, rel.to_column,
-                        neighbor, rel.from_column,
+                        current,
+                        rel.to_column,
+                        neighbor,
+                        rel.from_column,
                         rel.type,
                     )
 
@@ -431,6 +438,7 @@ class SchemaGraph:
     def get_temporals(self, table_name: str) -> list[ColumnNode]:
         """Return temporal columns, preferring real date/timestamp dtypes."""
         cols = self.get_columns_by_role(table_name, ROLE_TEMPORAL)
+
         # Sort: actual date/timestamp dtypes first, name-pattern matches second
         def _temporal_rank(c: ColumnNode) -> int:
             return 0 if any(c.info.dtype.lower().startswith(t) for t in _TEMPORAL_DTYPES) else 1

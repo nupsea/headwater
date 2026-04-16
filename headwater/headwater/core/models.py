@@ -290,7 +290,7 @@ class SuggestedQuestion(BaseModel):
     """A natural language question the system can answer from materialized models."""
 
     question: str
-    source: Literal["mart", "relationship", "quality", "semantic", "statistical"]
+    source: Literal["mart", "relationship", "quality", "semantic", "statistical", "catalog"]
     category: str  # e.g. "Air Quality", "Inspections", "Trends"
     relevant_tables: list[str] = Field(default_factory=list)
     sql_hint: str | None = None  # Optional pre-generated SQL
@@ -401,5 +401,181 @@ class ExplorationResult(BaseModel):
     visualization: VisualizationSpec | None = None
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)  # Grounding / confidence warnings
+    suggestions: list[str] = Field(default_factory=list)  # Follow-up questions from catalog
+    explanation: str = ""  # How the query was interpreted (from decomposer)
+    options: list[dict[str, Any]] = Field(default_factory=list)  # Disambiguation options
     repaired: bool = False  # True if LLM auto-repaired a failed query
     repair_history: list[dict[str, str]] = Field(default_factory=list)  # [{sql, error}]
+
+
+# ---------------------------------------------------------------------------
+# Project (v2 -- top-level data group container)
+# ---------------------------------------------------------------------------
+
+
+class ProjectProgress(BaseModel):
+    """Dynamic progress counters for a project."""
+
+    tables_discovered: int = 0
+    tables_profiled: int = 0
+    tables_reviewed: int = 0
+    tables_modeled: int = 0
+    tables_mart_ready: int = 0
+    columns_total: int = 0
+    columns_described: int = 0
+    columns_confirmed: int = 0
+    relationships_detected: int = 0
+    relationships_confirmed: int = 0
+    metrics_defined: int = 0
+    dimensions_defined: int = 0
+    quality_contracts: int = 0
+    contracts_enforcing: int = 0
+    catalog_coverage: float = 0.0
+    last_activity: datetime | None = None
+
+
+class Project(BaseModel):
+    """Top-level container for a dataset or data group."""
+
+    id: str  # UUID
+    slug: str  # URL-safe name: "riverton-env-health"
+    display_name: str
+    description: str = ""
+    sources: list[SourceConfig] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+    # Maturity tracking
+    maturity: Literal["raw", "profiled", "documented", "modeled", "production"] = "raw"
+    maturity_score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    # Progress tracking
+    progress: ProjectProgress = Field(default_factory=ProjectProgress)
+
+    # Catalog reference
+    catalog_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Semantic Catalog (v2 -- ontology for metrics, dimensions, entities)
+# ---------------------------------------------------------------------------
+
+
+class MetricDefinition(BaseModel):
+    """A defined metric in the semantic catalog."""
+
+    name: str  # "complaint_count"
+    display_name: str  # "Total Complaints"
+    description: str  # "Count of all complaint records"
+    expression: str  # "COUNT(*)"
+    column: str | None = None
+    table: str
+    agg_type: Literal["count", "sum", "avg", "min", "max", "count_distinct"]
+    filters: list[str] = Field(default_factory=list)
+    synonyms: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    status: Literal["proposed", "confirmed", "rejected"] = "proposed"
+    source: Literal["heuristic", "llm", "human"] = "heuristic"
+
+
+class DimensionDefinition(BaseModel):
+    """A defined dimension in the semantic catalog."""
+
+    name: str  # "zone_geography"
+    display_name: str  # "Zone / Geographic Area"
+    description: str
+    column: str  # "name"
+    table: str  # "zones"
+    dtype: str
+    expression: str | None = None  # For CASE WHEN derived dimensions
+    synonyms: list[str] = Field(default_factory=list)
+    hierarchy: list[str] = Field(default_factory=list)  # coarse -> fine
+    sample_values: list[str] = Field(default_factory=list)
+    cardinality: int = 0
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    status: Literal["proposed", "confirmed", "rejected"] = "proposed"
+    source: Literal["heuristic", "llm", "human"] = "heuristic"
+    join_path: str | None = None  # "complaints.zone_id -> zones.zone_id"
+    join_nullable: bool = False  # True if FK can be NULL
+
+
+class EntityDefinition(BaseModel):
+    """A defined entity (fact table) in the semantic catalog."""
+
+    name: str
+    display_name: str
+    description: str
+    table: str
+    row_semantics: str  # "Each row represents a daily reading..."
+    metrics: list[str] = Field(default_factory=list)  # metric names
+    dimensions: list[str] = Field(default_factory=list)  # dimension names
+    temporal_grain: str | None = None  # daily|monthly|event-based|snapshot|none
+    synonyms: list[str] = Field(default_factory=list)
+
+
+class SemanticCatalog(BaseModel):
+    """Complete ontology of metrics, dimensions, and entities for a project."""
+
+    metrics: list[MetricDefinition] = Field(default_factory=list)
+    dimensions: list[DimensionDefinition] = Field(default_factory=list)
+    entities: list[EntityDefinition] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=datetime.now)
+    generation_source: Literal["heuristic", "llm", "hybrid"] = "heuristic"
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Query Decomposition (v2 -- catalog-driven query resolution)
+# ---------------------------------------------------------------------------
+
+
+class MetricMatch(BaseModel):
+    """A metric matched during query decomposition."""
+
+    metric_name: str
+    display_name: str
+    expression: str
+    table: str
+    confidence: float = 0.0
+    strategy: Literal["keyword", "embedding", "llm"] = "keyword"
+
+
+class DimensionMatch(BaseModel):
+    """A dimension matched during query decomposition."""
+
+    dimension_name: str
+    display_name: str
+    column: str
+    table: str
+    join_path: str | None = None
+    confidence: float = 0.0
+    strategy: Literal["keyword", "embedding", "llm"] = "keyword"
+    is_filter: bool = False  # True if used as WHERE, not GROUP BY
+    filter_value: str | None = None
+
+
+class DimensionOption(BaseModel):
+    """An option presented when disambiguation is needed."""
+
+    dimension_name: str
+    display_name: str
+    description: str
+    sample_values: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class DecompositionResult(BaseModel):
+    """Result of decomposing a natural language query against the semantic catalog."""
+
+    status: Literal["resolved", "options", "outside_scope"]
+    entity: str | None = None
+    metrics: list[MetricMatch] = Field(default_factory=list)
+    dimensions: list[DimensionMatch] = Field(default_factory=list)
+    sql: str | None = None
+    explanation: str = ""  # How the query was interpreted
+    warnings: list[str] = Field(default_factory=list)  # NULL caveats, join notes
+    suggestions: list[str] = Field(default_factory=list)  # Follow-up questions
+    options: list[DimensionOption] = Field(default_factory=list)  # Disambiguation
+    outside_catalog: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    resolution_mode: Literal["catalog", "exploratory"] | None = None

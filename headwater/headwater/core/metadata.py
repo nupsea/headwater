@@ -178,6 +178,71 @@ CREATE TABLE IF NOT EXISTS companion_docs (
     run_id          INTEGER REFERENCES discovery_runs(id),
     UNIQUE(source_name, filename)
 );
+
+CREATE TABLE IF NOT EXISTS projects (
+    id              TEXT PRIMARY KEY,
+    slug            TEXT NOT NULL UNIQUE,
+    display_name    TEXT NOT NULL,
+    description     TEXT DEFAULT '',
+    sources_json    TEXT DEFAULT '[]',
+    maturity        TEXT NOT NULL DEFAULT 'raw',
+    maturity_score  REAL DEFAULT 0.0,
+    catalog_confidence REAL DEFAULT 0.0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS catalog_metrics (
+    name            TEXT NOT NULL,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    display_name    TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    expression      TEXT NOT NULL,
+    column_name     TEXT,
+    table_name      TEXT NOT NULL,
+    agg_type        TEXT NOT NULL,
+    filters_json    TEXT DEFAULT '[]',
+    synonyms_json   TEXT DEFAULT '[]',
+    confidence      REAL DEFAULT 0.5,
+    status          TEXT NOT NULL DEFAULT 'proposed',
+    source          TEXT NOT NULL DEFAULT 'heuristic',
+    PRIMARY KEY (name, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS catalog_dimensions (
+    name            TEXT NOT NULL,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    display_name    TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    column_name     TEXT NOT NULL,
+    table_name      TEXT NOT NULL,
+    dtype           TEXT NOT NULL,
+    expression      TEXT,
+    synonyms_json   TEXT DEFAULT '[]',
+    hierarchy_json  TEXT DEFAULT '[]',
+    sample_values_json TEXT DEFAULT '[]',
+    cardinality     INTEGER DEFAULT 0,
+    confidence      REAL DEFAULT 0.5,
+    status          TEXT NOT NULL DEFAULT 'proposed',
+    source          TEXT NOT NULL DEFAULT 'heuristic',
+    join_path       TEXT,
+    join_nullable   INTEGER DEFAULT 0,
+    PRIMARY KEY (name, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS catalog_entities (
+    name            TEXT NOT NULL,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    display_name    TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    table_name      TEXT NOT NULL,
+    row_semantics   TEXT NOT NULL,
+    metrics_json    TEXT DEFAULT '[]',
+    dimensions_json TEXT DEFAULT '[]',
+    temporal_grain  TEXT,
+    synonyms_json   TEXT DEFAULT '[]',
+    PRIMARY KEY (name, project_id)
+);
 """
 
 
@@ -252,8 +317,7 @@ class MetadataStore:
         mode: str = "generate",
     ) -> None:
         self.con.execute(
-            "INSERT OR REPLACE INTO sources (name, type, path, uri, mode) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO sources (name, type, path, uri, mode) VALUES (?, ?, ?, ?, ?)",
             (name, type_, path, uri, mode),
         )
         self.con.commit()
@@ -304,8 +368,16 @@ class MetadataStore:
             "INSERT OR IGNORE INTO tables "
             "(name, source_name, schema_name, row_count, description, domain, tags, run_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (name, source_name, schema_name, row_count, description, domain,
-             json.dumps(tags or []), run_id),
+            (
+                name,
+                source_name,
+                schema_name,
+                row_count,
+                description,
+                domain,
+                json.dumps(tags or []),
+                run_id,
+            ),
         )
         # Update non-locked fields; if locked=1 skip description/domain update.
         # Also clear removed_in_run_id since the table is present again.
@@ -326,8 +398,9 @@ class MetadataStore:
             "description = CASE WHEN locked = 1 THEN description ELSE ? END, "
             f"domain = CASE WHEN locked = 1 THEN domain ELSE ? END{review_clause} "
             "WHERE name = ? AND source_name = ?",
-            [schema_name, row_count, json.dumps(tags or []), run_id,
-             description, domain] + review_params + [name, source_name],
+            [schema_name, row_count, json.dumps(tags or []), run_id, description, domain]
+            + review_params
+            + [name, source_name],
         )
         self.con.commit()
 
@@ -353,8 +426,19 @@ class MetadataStore:
             "(table_name, source_name, name, dtype, nullable, is_primary_key, "
             "description, semantic_type, role, confidence, ordinal) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (table_name, source_name, name, dtype, int(nullable), int(is_primary_key),
-             description, semantic_type, role, confidence, ordinal),
+            (
+                table_name,
+                source_name,
+                name,
+                dtype,
+                int(nullable),
+                int(is_primary_key),
+                description,
+                semantic_type,
+                role,
+                confidence,
+                ordinal,
+            ),
         )
         # Update non-locked columns; if locked=1 skip description/semantic_type/role update
         self.con.execute(
@@ -365,9 +449,19 @@ class MetadataStore:
             "role = CASE WHEN locked = 1 THEN role ELSE ? END, "
             "confidence = CASE WHEN locked = 1 THEN confidence ELSE ? END "
             "WHERE table_name = ? AND source_name = ? AND name = ?",
-            (dtype, int(nullable), int(is_primary_key), ordinal,
-             description, semantic_type, role, confidence,
-             table_name, source_name, name),
+            (
+                dtype,
+                int(nullable),
+                int(is_primary_key),
+                ordinal,
+                description,
+                semantic_type,
+                role,
+                confidence,
+                table_name,
+                source_name,
+                name,
+            ),
         )
         self.con.commit()
 
@@ -415,7 +509,10 @@ class MetadataStore:
         ]
 
     def mark_removed_tables(
-        self, source_name: str, current_table_names: list[str], run_id: int,
+        self,
+        source_name: str,
+        current_table_names: list[str],
+        run_id: int,
     ) -> list[str]:
         """Mark tables not in current_table_names as removed.
 
@@ -427,8 +524,7 @@ class MetadataStore:
         for t in existing:
             if t["name"] not in current_set and t.get("removed_in_run_id") is None:
                 self.con.execute(
-                    "UPDATE tables SET removed_in_run_id = ? "
-                    "WHERE name = ? AND source_name = ?",
+                    "UPDATE tables SET removed_in_run_id = ? WHERE name = ? AND source_name = ?",
                     (run_id, t["name"], source_name),
                 )
                 removed.append(t["name"])
@@ -463,8 +559,7 @@ class MetadataStore:
             )
         else:
             self.con.execute(
-                "UPDATE tables SET review_status = ? "
-                "WHERE name = ? AND source_name = ?",
+                "UPDATE tables SET review_status = ? WHERE name = ? AND source_name = ?",
                 (status, name, source_name),
             )
         self.con.commit()
@@ -583,7 +678,9 @@ class MetadataStore:
     # -- Confidence metrics (US-302, US-303) --------------------------------
 
     def get_description_acceptance_rate(
-        self, source_name: str | None = None, min_decisions: int = 5,
+        self,
+        source_name: str | None = None,
+        min_decisions: int = 5,
     ) -> dict:
         """Compute description acceptance rate from decisions.
 
@@ -724,13 +821,14 @@ class MetadataStore:
     # -- Drift reports (list all) -------------------------------------------
 
     def get_drift_reports(
-        self, source_name: str | None = None, limit: int = 50,
+        self,
+        source_name: str | None = None,
+        limit: int = 50,
     ) -> list[dict]:
         """Return drift reports, optionally filtered by source."""
         if source_name:
             rows = self.con.execute(
-                "SELECT * FROM drift_reports WHERE source_name = ? "
-                "ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM drift_reports WHERE source_name = ? ORDER BY id DESC LIMIT ?",
                 (source_name, limit),
             ).fetchall()
         else:
@@ -748,8 +846,13 @@ class MetadataStore:
     # -- Profiles ----------------------------------------------------------
 
     def upsert_profile(
-        self, table_name: str, column_name: str, source_name: str, dtype: str,
-        stats: dict, run_id: int | None = None,
+        self,
+        table_name: str,
+        column_name: str,
+        source_name: str,
+        dtype: str,
+        stats: dict,
+        run_id: int | None = None,
     ) -> None:
         self.con.execute(
             "INSERT OR REPLACE INTO profiles "
@@ -780,8 +883,18 @@ class MetadataStore:
             "(source_name, from_table, from_column, to_table, to_column, "
             "rel_type, confidence, ref_integrity, detection_source, run_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (source_name, from_table, from_column, to_table, to_column,
-             rel_type, confidence, ref_integrity, detection_source, run_id),
+            (
+                source_name,
+                from_table,
+                from_column,
+                to_table,
+                to_column,
+                rel_type,
+                confidence,
+                ref_integrity,
+                detection_source,
+                run_id,
+            ),
         )
         self.con.commit()
         return cur.lastrowid or 0
@@ -796,9 +909,7 @@ class MetadataStore:
 
     def clear_relationships(self, source_name: str) -> int:
         """Delete all relationships for a source. Returns count deleted."""
-        cur = self.con.execute(
-            "DELETE FROM relationships WHERE source_name = ?", (source_name,)
-        )
+        cur = self.con.execute("DELETE FROM relationships WHERE source_name = ?", (source_name,))
         self.con.commit()
         return cur.rowcount
 
@@ -809,9 +920,7 @@ class MetadataStore:
         return dict(row) if row else None
 
     def delete_relationship(self, relationship_id: int) -> bool:
-        cur = self.con.execute(
-            "DELETE FROM relationships WHERE id = ?", (relationship_id,)
-        )
+        cur = self.con.execute("DELETE FROM relationships WHERE id = ?", (relationship_id,))
         self.con.commit()
         return cur.rowcount > 0
 
@@ -857,8 +966,12 @@ class MetadataStore:
             )
             return None
 
-        logger.info("rebuild_discovery: source found -- type=%s, path=%s, uri=%s",
-                     source_row.get("type"), source_row.get("path"), source_row.get("uri"))
+        logger.info(
+            "rebuild_discovery: source found -- type=%s, path=%s, uri=%s",
+            source_row.get("type"),
+            source_row.get("path"),
+            source_row.get("uri"),
+        )
         source = SourceConfig(
             name=source_row["name"],
             type=source_row["type"],
@@ -969,12 +1082,18 @@ class MetadataStore:
             reviewed_cols = sum(1 for c in t.columns if c.locked)
             logger.info(
                 "rebuild_discovery: table=%s, review_status=%s, cols=%d, locked_cols=%d",
-                t.name, t.review_status, len(t.columns), reviewed_cols,
+                t.name,
+                t.review_status,
+                len(t.columns),
+                reviewed_cols,
             )
 
         logger.info(
             "rebuild_discovery: complete -- %d tables, %d profiles, %d relationships, %d docs",
-            len(tables), len(profiles), len(relationships), len(companion_docs),
+            len(tables),
+            len(profiles),
+            len(relationships),
+            len(companion_docs),
         )
 
         return DiscoveryResult(
@@ -1006,7 +1125,11 @@ class MetadataStore:
             "depends_on, status, assumptions, questions, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
             (
-                name, source_name, model_type, sql_text, description,
+                name,
+                source_name,
+                model_type,
+                sql_text,
+                description,
                 json.dumps(source_tables or []),
                 json.dumps(depends_on or []),
                 status,
@@ -1052,8 +1175,17 @@ class MetadataStore:
             "(id, model_name, column_name, rule_type, expression, severity, "
             "description, confidence, status) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (id_, model_name, column_name, rule_type, expression, severity,
-             description, confidence, status),
+            (
+                id_,
+                model_name,
+                column_name,
+                rule_type,
+                expression,
+                severity,
+                description,
+                confidence,
+                status,
+            ),
         )
         self.con.commit()
 
@@ -1113,9 +1245,7 @@ class MetadataStore:
                 (artifact_type,),
             ).fetchall()
         else:
-            rows = self.con.execute(
-                "SELECT * FROM decisions ORDER BY created_at DESC"
-            ).fetchall()
+            rows = self.con.execute("SELECT * FROM decisions ORDER BY created_at DESC").fetchall()
         return [dict(r) for r in rows]
 
     # -- LLM audit log -----------------------------------------------------
@@ -1138,8 +1268,16 @@ class MetadataStore:
             "(provider, model, prompt_hash, prompt_text, response_text, "
             "tokens_in, tokens_out, cached) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (provider, model, prompt_hash, prompt_text, response_text,
-             tokens_in, tokens_out, cached),
+            (
+                provider,
+                model,
+                prompt_hash,
+                prompt_text,
+                response_text,
+                tokens_in,
+                tokens_out,
+                cached,
+            ),
         )
         self.con.commit()
 
@@ -1202,8 +1340,7 @@ class MetadataStore:
         """Return the most recent drift report, optionally filtered by source."""
         if source_name:
             row = self.con.execute(
-                "SELECT * FROM drift_reports WHERE source_name = ? "
-                "ORDER BY id DESC LIMIT 1",
+                "SELECT * FROM drift_reports WHERE source_name = ? ORDER BY id DESC LIMIT 1",
                 (source_name,),
             ).fetchone()
         else:
@@ -1277,8 +1414,15 @@ class MetadataStore:
             "content = excluded.content, doc_type = excluded.doc_type, "
             "matched_tables = excluded.matched_tables, confidence = excluded.confidence, "
             "run_id = excluded.run_id",
-            (source_name, filename, content, doc_type,
-             json.dumps(matched_tables or []), confidence, run_id),
+            (
+                source_name,
+                filename,
+                content,
+                doc_type,
+                json.dumps(matched_tables or []),
+                confidence,
+                run_id,
+            ),
         )
         self.con.commit()
 
@@ -1294,3 +1438,336 @@ class MetadataStore:
             r["matched_tables"] = json.loads(r["matched_tables"])
             results.append(r)
         return results
+
+    # -- Projects (v2) -----------------------------------------------------
+
+    def upsert_project(
+        self,
+        id_: str,
+        slug: str,
+        display_name: str,
+        *,
+        description: str = "",
+        sources_json: str = "[]",
+        maturity: str = "raw",
+        maturity_score: float = 0.0,
+        catalog_confidence: float = 0.0,
+    ) -> None:
+        self.con.execute(
+            "INSERT INTO projects "
+            "(id, slug, display_name, description, sources_json, maturity, "
+            "maturity_score, catalog_confidence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "slug = excluded.slug, display_name = excluded.display_name, "
+            "description = excluded.description, sources_json = excluded.sources_json, "
+            "maturity = excluded.maturity, maturity_score = excluded.maturity_score, "
+            "catalog_confidence = excluded.catalog_confidence, "
+            "updated_at = datetime('now')",
+            (
+                id_,
+                slug,
+                display_name,
+                description,
+                sources_json,
+                maturity,
+                maturity_score,
+                catalog_confidence,
+            ),
+        )
+        self.con.commit()
+
+    def get_project(self, project_id: str) -> dict | None:
+        row = self.con.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            return None
+        r = dict(row)
+        r["sources"] = json.loads(r.pop("sources_json", "[]"))
+        return r
+
+    def get_project_by_slug(self, slug: str) -> dict | None:
+        row = self.con.execute("SELECT * FROM projects WHERE slug = ?", (slug,)).fetchone()
+        if row is None:
+            return None
+        r = dict(row)
+        r["sources"] = json.loads(r.pop("sources_json", "[]"))
+        return r
+
+    def list_projects(self) -> list[dict]:
+        rows = self.con.execute("SELECT * FROM projects ORDER BY updated_at DESC").fetchall()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r["sources"] = json.loads(r.pop("sources_json", "[]"))
+            results.append(r)
+        return results
+
+    def update_project_maturity(
+        self,
+        project_id: str,
+        maturity: str,
+        maturity_score: float,
+    ) -> None:
+        self.con.execute(
+            "UPDATE projects SET maturity = ?, maturity_score = ?, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (maturity, maturity_score, project_id),
+        )
+        self.con.commit()
+
+    def delete_project(self, project_id: str) -> bool:
+        cur = self.con.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        self.con.commit()
+        return cur.rowcount > 0
+
+    # -- Catalog metrics (v2) ----------------------------------------------
+
+    def upsert_catalog_metric(
+        self,
+        project_id: str,
+        name: str,
+        display_name: str,
+        description: str,
+        expression: str,
+        table_name: str,
+        agg_type: str,
+        *,
+        column_name: str | None = None,
+        filters: list[str] | None = None,
+        synonyms: list[str] | None = None,
+        confidence: float = 0.5,
+        status: str = "proposed",
+        source: str = "heuristic",
+    ) -> None:
+        self.con.execute(
+            "INSERT INTO catalog_metrics "
+            "(name, project_id, display_name, description, expression, "
+            "column_name, table_name, agg_type, filters_json, synonyms_json, "
+            "confidence, status, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(name, project_id) DO UPDATE SET "
+            "display_name = excluded.display_name, description = excluded.description, "
+            "expression = excluded.expression, column_name = excluded.column_name, "
+            "table_name = excluded.table_name, agg_type = excluded.agg_type, "
+            "filters_json = excluded.filters_json, synonyms_json = excluded.synonyms_json, "
+            "confidence = excluded.confidence, status = excluded.status, "
+            "source = excluded.source",
+            (
+                name,
+                project_id,
+                display_name,
+                description,
+                expression,
+                column_name,
+                table_name,
+                agg_type,
+                json.dumps(filters or []),
+                json.dumps(synonyms or []),
+                confidence,
+                status,
+                source,
+            ),
+        )
+        self.con.commit()
+
+    def get_catalog_metrics(self, project_id: str) -> list[dict]:
+        rows = self.con.execute(
+            "SELECT * FROM catalog_metrics WHERE project_id = ?", (project_id,)
+        ).fetchall()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r["filters"] = json.loads(r.pop("filters_json", "[]"))
+            r["synonyms"] = json.loads(r.pop("synonyms_json", "[]"))
+            results.append(r)
+        return results
+
+    # -- Catalog dimensions (v2) -------------------------------------------
+
+    def upsert_catalog_dimension(
+        self,
+        project_id: str,
+        name: str,
+        display_name: str,
+        description: str,
+        column_name: str,
+        table_name: str,
+        dtype: str,
+        *,
+        expression: str | None = None,
+        synonyms: list[str] | None = None,
+        hierarchy: list[str] | None = None,
+        sample_values: list[str] | None = None,
+        cardinality: int = 0,
+        confidence: float = 0.5,
+        status: str = "proposed",
+        source: str = "heuristic",
+        join_path: str | None = None,
+        join_nullable: bool = False,
+    ) -> None:
+        self.con.execute(
+            "INSERT INTO catalog_dimensions "
+            "(name, project_id, display_name, description, column_name, "
+            "table_name, dtype, expression, synonyms_json, hierarchy_json, "
+            "sample_values_json, cardinality, confidence, status, source, "
+            "join_path, join_nullable) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(name, project_id) DO UPDATE SET "
+            "display_name = excluded.display_name, description = excluded.description, "
+            "column_name = excluded.column_name, table_name = excluded.table_name, "
+            "dtype = excluded.dtype, expression = excluded.expression, "
+            "synonyms_json = excluded.synonyms_json, hierarchy_json = excluded.hierarchy_json, "
+            "sample_values_json = excluded.sample_values_json, "
+            "cardinality = excluded.cardinality, confidence = excluded.confidence, "
+            "status = excluded.status, source = excluded.source, "
+            "join_path = excluded.join_path, join_nullable = excluded.join_nullable",
+            (
+                name,
+                project_id,
+                display_name,
+                description,
+                column_name,
+                table_name,
+                dtype,
+                expression,
+                json.dumps(synonyms or []),
+                json.dumps(hierarchy or []),
+                json.dumps(sample_values or []),
+                cardinality,
+                confidence,
+                status,
+                source,
+                join_path,
+                int(join_nullable),
+            ),
+        )
+        self.con.commit()
+
+    def get_catalog_dimensions(self, project_id: str) -> list[dict]:
+        rows = self.con.execute(
+            "SELECT * FROM catalog_dimensions WHERE project_id = ?", (project_id,)
+        ).fetchall()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r["synonyms"] = json.loads(r.pop("synonyms_json", "[]"))
+            r["hierarchy"] = json.loads(r.pop("hierarchy_json", "[]"))
+            r["sample_values"] = json.loads(r.pop("sample_values_json", "[]"))
+            r["join_nullable"] = bool(r.get("join_nullable", 0))
+            results.append(r)
+        return results
+
+    # -- Catalog entities (v2) ---------------------------------------------
+
+    def upsert_catalog_entity(
+        self,
+        project_id: str,
+        name: str,
+        display_name: str,
+        description: str,
+        table_name: str,
+        row_semantics: str,
+        *,
+        metrics: list[str] | None = None,
+        dimensions: list[str] | None = None,
+        temporal_grain: str | None = None,
+        synonyms: list[str] | None = None,
+    ) -> None:
+        self.con.execute(
+            "INSERT INTO catalog_entities "
+            "(name, project_id, display_name, description, table_name, "
+            "row_semantics, metrics_json, dimensions_json, temporal_grain, synonyms_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(name, project_id) DO UPDATE SET "
+            "display_name = excluded.display_name, description = excluded.description, "
+            "table_name = excluded.table_name, row_semantics = excluded.row_semantics, "
+            "metrics_json = excluded.metrics_json, dimensions_json = excluded.dimensions_json, "
+            "temporal_grain = excluded.temporal_grain, synonyms_json = excluded.synonyms_json",
+            (
+                name,
+                project_id,
+                display_name,
+                description,
+                table_name,
+                row_semantics,
+                json.dumps(metrics or []),
+                json.dumps(dimensions or []),
+                temporal_grain,
+                json.dumps(synonyms or []),
+            ),
+        )
+        self.con.commit()
+
+    def get_catalog_entities(self, project_id: str) -> list[dict]:
+        rows = self.con.execute(
+            "SELECT * FROM catalog_entities WHERE project_id = ?", (project_id,)
+        ).fetchall()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r["metrics"] = json.loads(r.pop("metrics_json", "[]"))
+            r["dimensions"] = json.loads(r.pop("dimensions_json", "[]"))
+            r["synonyms"] = json.loads(r.pop("synonyms_json", "[]"))
+            results.append(r)
+        return results
+
+    def update_catalog_metric_status(
+        self,
+        project_id: str,
+        name: str,
+        status: str,
+        confidence: float | None = None,
+        source: str | None = None,
+    ) -> bool:
+        """Update the status (and optionally confidence/source) of a catalog metric."""
+        parts = ["status = ?"]
+        params: list = [status]
+        if confidence is not None:
+            parts.append("confidence = ?")
+            params.append(confidence)
+        if source is not None:
+            parts.append("source = ?")
+            params.append(source)
+        params.extend([name, project_id])
+        cur = self.con.execute(
+            f"UPDATE catalog_metrics SET {', '.join(parts)} WHERE name = ? AND project_id = ?",
+            params,
+        )
+        self.con.commit()
+        return cur.rowcount > 0
+
+    def update_catalog_dimension_status(
+        self,
+        project_id: str,
+        name: str,
+        status: str,
+        confidence: float | None = None,
+        source: str | None = None,
+        synonyms: list[str] | None = None,
+    ) -> bool:
+        """Update the status (and optionally confidence/source/synonyms) of a catalog dimension."""
+        parts = ["status = ?"]
+        params: list = [status]
+        if confidence is not None:
+            parts.append("confidence = ?")
+            params.append(confidence)
+        if source is not None:
+            parts.append("source = ?")
+            params.append(source)
+        if synonyms is not None:
+            parts.append("synonyms_json = ?")
+            params.append(json.dumps(synonyms))
+        params.extend([name, project_id])
+        cur = self.con.execute(
+            f"UPDATE catalog_dimensions SET {', '.join(parts)} WHERE name = ? AND project_id = ?",
+            params,
+        )
+        self.con.commit()
+        return cur.rowcount > 0
+
+    def clear_catalog(self, project_id: str) -> None:
+        """Delete all catalog entries for a project."""
+        self.con.execute("DELETE FROM catalog_metrics WHERE project_id = ?", (project_id,))
+        self.con.execute("DELETE FROM catalog_dimensions WHERE project_id = ?", (project_id,))
+        self.con.execute("DELETE FROM catalog_entities WHERE project_id = ?", (project_id,))
+        self.con.commit()

@@ -68,7 +68,7 @@ export default function DataPage() {
   const [schemas, setSchemas] = useState<string[]>([]);
   const [catalog, setCatalog] = useState<CatalogTable[]>([]);
   const [expandedTable, setExpandedTable] = useState<string | null>(null);
-  const [collapsedSchemas, setCollapsedSchemas] = useState<Set<string>>(new Set());
+  const [collapsedSchemas, setCollapsedSchemas] = useState<Set<string>>(() => new Set());
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState("");
 
@@ -371,7 +371,8 @@ export default function DataPage() {
               </div>
               <button
                 onClick={loadPreview}
-                disabled={!selectedTable || previewLoading}
+                disabled={selectedTable === "" || previewLoading}
+                suppressHydrationWarning
                 className="px-4 py-1.5 bg-foreground text-background rounded-lg text-sm font-medium disabled:opacity-50 hover:opacity-90 transition-opacity"
               >
                 {previewLoading ? "Loading..." : "Load"}
@@ -424,7 +425,8 @@ export default function DataPage() {
                 </span>
                 <button
                   onClick={runQuery}
-                  disabled={!sql.trim() || queryLoading}
+                  disabled={sql.trim() === "" || queryLoading}
+                  suppressHydrationWarning
                   className="px-4 py-1.5 bg-foreground text-background rounded-lg text-sm font-medium disabled:opacity-50 hover:opacity-90 transition-opacity"
                 >
                   {queryLoading ? "Running..." : "Run Query"}

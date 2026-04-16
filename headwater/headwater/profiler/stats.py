@@ -80,9 +80,7 @@ def profile_table(
     return profiles
 
 
-def _profile_column(
-    table_name: str, col_name: str, dtype: str, series: pl.Series
-) -> ColumnProfile:
+def _profile_column(table_name: str, col_name: str, dtype: str, series: pl.Series) -> ColumnProfile:
     """Compute stats for a single column."""
     total = len(series)
     null_count = series.null_count()
@@ -146,9 +144,7 @@ def _add_string_stats(profile: ColumnProfile, series: pl.Series) -> None:
     # Top values for low-cardinality columns
     if profile.distinct_count <= 100:
         vc = cast.value_counts().sort("count", descending=True).head(20)
-        profile.top_values = [
-            (str(row[0]), int(row[1])) for row in vc.iter_rows()
-        ]
+        profile.top_values = [(str(row[0]), int(row[1])) for row in vc.iter_rows()]
 
     # Pattern detection on a sample
     sample = cast.head(200).to_list()

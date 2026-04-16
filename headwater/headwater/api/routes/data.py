@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Request
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 from headwater.explorer.utils import resolve_table_ref, table_exists
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _MAX_ROWS = 500
 
@@ -45,9 +47,7 @@ def _empty_query_result(sql: str, error: str) -> dict:
 
 def _get_schemas(con) -> list[str]:
     """Return all user-created schemas in DuckDB (excludes internal ones)."""
-    rows = con.execute(
-        "SELECT schema_name FROM information_schema.schemata"
-    ).fetchall()
+    rows = con.execute("SELECT schema_name FROM information_schema.schemata").fetchall()
     return [r[0] for r in rows if r[0] not in _INTERNAL_SCHEMAS]
 
 
@@ -129,16 +129,16 @@ def get_catalog(request: Request):
         except Exception:
             count = None
 
-        tables.append({
-            "schema": schema,
-            "table_name": tname,
-            "qualified_name": f"{schema}.{tname}",
-            "row_count": count,
-            "column_count": len(col_rows),
-            "columns": [
-                {"name": c[0], "dtype": c[1]} for c in col_rows
-            ],
-        })
+        tables.append(
+            {
+                "schema": schema,
+                "table_name": tname,
+                "qualified_name": f"{schema}.{tname}",
+                "row_count": count,
+                "column_count": len(col_rows),
+                "columns": [{"name": c[0], "dtype": c[1]} for c in col_rows],
+            }
+        )
 
     schemas = sorted({t["schema"] for t in tables})
     return {"schemas": schemas, "tables": tables, "total": len(tables)}

@@ -9,9 +9,7 @@ from fastapi.testclient import TestClient
 
 from headwater.api.app import create_app
 
-SAMPLE_DATA = str(
-    Path(__file__).resolve().parent.parent.parent / "data" / "sample"
-)
+SAMPLE_DATA = str(Path(__file__).resolve().parent.parent.parent / "data" / "sample")
 
 
 @pytest.fixture
@@ -124,8 +122,7 @@ class TestModels:
         # Find any proposed mart to approve
         models_resp = client.get("/api/models")
         mart = next(
-            m for m in models_resp.json()
-            if m["model_type"] == "mart" and m["status"] == "proposed"
+            m for m in models_resp.json() if m["model_type"] == "mart" and m["status"] == "proposed"
         )
         resp = client.post(f"/api/models/{mart['name']}/approve")
         assert resp.status_code == 200
@@ -135,8 +132,7 @@ class TestModels:
         self._setup(client)
         models_resp = client.get("/api/models")
         mart = next(
-            m for m in models_resp.json()
-            if m["model_type"] == "mart" and m["status"] == "proposed"
+            m for m in models_resp.json() if m["model_type"] == "mart" and m["status"] == "proposed"
         )
         resp = client.post(f"/api/models/{mart['name']}/reject")
         assert resp.status_code == 200
@@ -380,8 +376,7 @@ class TestDecisionRecording:
     def _first_proposed_mart_name(self, client) -> str:
         models_resp = client.get("/api/models")
         mart = next(
-            m for m in models_resp.json()
-            if m["model_type"] == "mart" and m["status"] == "proposed"
+            m for m in models_resp.json() if m["model_type"] == "mart" and m["status"] == "proposed"
         )
         return mart["name"]
 

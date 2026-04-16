@@ -51,12 +51,8 @@ def detect_insights(
             if temporal_cols and metric_cols:
                 for t_col in temporal_cols:
                     for m_col in metric_cols:
-                        insights.extend(
-                            _detect_temporal_anomalies(df, table_name, t_col, m_col)
-                        )
-                        insights.extend(
-                            _detect_period_shifts(df, table_name, t_col, m_col)
-                        )
+                        insights.extend(_detect_temporal_anomalies(df, table_name, t_col, m_col))
+                        insights.extend(_detect_period_shifts(df, table_name, t_col, m_col))
 
             if len(metric_cols) >= 2:
                 insights.extend(_detect_correlations(df, table_name, metric_cols))
@@ -79,9 +75,7 @@ def _list_tables(con: duckdb.DuckDBPyConnection, schema: str) -> list[str]:
         return []
 
 
-def _load_table(
-    con: duckdb.DuckDBPyConnection, schema: str, table: str
-) -> pl.DataFrame | None:
+def _load_table(con: duckdb.DuckDBPyConnection, schema: str, table: str) -> pl.DataFrame | None:
     """Load a table into a Polars DataFrame via Arrow."""
     try:
         arrow = con.execute(f"SELECT * FROM {schema}.{table}").arrow()
@@ -151,12 +145,12 @@ def _detect_temporal_anomalies(
         window = max(5, agg.height // 3)
 
         # Compute rolling statistics
-        rolling_mean = agg.select(
-            pl.col("value").rolling_mean(window_size=window).alias("rmean")
-        )["rmean"].to_list()
-        rolling_std = agg.select(
-            pl.col("value").rolling_std(window_size=window).alias("rstd")
-        )["rstd"].to_list()
+        rolling_mean = agg.select(pl.col("value").rolling_mean(window_size=window).alias("rmean"))[
+            "rmean"
+        ].to_list()
+        rolling_std = agg.select(pl.col("value").rolling_std(window_size=window).alias("rstd"))[
+            "rstd"
+        ].to_list()
 
         # Find anomalies (skip the warm-up window)
         for i in range(window, len(values)):
@@ -245,11 +239,7 @@ def _detect_period_shifts(
     insights: list[StatisticalInsight] = []
 
     try:
-        agg = (
-            df.select([pl.col(temporal_col), pl.col(metric_col)])
-            .drop_nulls()
-            .sort(temporal_col)
-        )
+        agg = df.select([pl.col(temporal_col), pl.col(metric_col)]).drop_nulls().sort(temporal_col)
 
         if agg.height < _MIN_ROWS * 2:
             return insights
@@ -281,11 +271,7 @@ def _detect_period_shifts(
             mid_date = _format_date(dates[mid])
 
             confidence = _p_to_confidence(p_value)
-            severity = (
-                "critical" if p_value < 0.001
-                else "warning" if p_value < 0.01
-                else "info"
-            )
+            severity = "critical" if p_value < 0.001 else "warning" if p_value < 0.01 else "info"
 
             insights.append(
                 StatisticalInsight(
@@ -344,10 +330,7 @@ def _detect_correlations(
 
                 # Only report strong, significant correlations
                 if abs(r) >= 0.6 and p_value < _P_VALUE_THRESHOLD:
-                    strength = (
-                        "strong" if abs(r) >= 0.8
-                        else "moderate"
-                    )
+                    strength = "strong" if abs(r) >= 0.8 else "moderate"
                     direction = "positive" if r > 0 else "negative"
 
                     insights.append(

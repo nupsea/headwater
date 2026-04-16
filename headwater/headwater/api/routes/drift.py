@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/drift")
@@ -39,9 +42,7 @@ def acknowledge_drift(request: Request, report_id: int):
         raise HTTPException(status_code=503, detail="Metadata store not available.")
 
     # Verify report exists
-    row = store.con.execute(
-        "SELECT id FROM drift_reports WHERE id = ?", (report_id,)
-    ).fetchone()
+    row = store.con.execute("SELECT id FROM drift_reports WHERE id = ?", (report_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Drift report {report_id} not found.")
 

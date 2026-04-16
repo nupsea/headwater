@@ -22,7 +22,9 @@ class TestDescriptionAcceptanceRate:
         # Only 3 decisions (below default threshold of 5)
         for i in range(3):
             meta.record_decision(
-                "column", f"src.t.col{i}", "description_accepted",
+                "column",
+                f"src.t.col{i}",
+                "description_accepted",
             )
         result = meta.get_description_acceptance_rate()
         assert result["acceptance_rate"] is None
@@ -33,7 +35,9 @@ class TestDescriptionAcceptanceRate:
         """100% acceptance rate when all descriptions accepted."""
         for i in range(6):
             meta.record_decision(
-                "column", f"src.t.col{i}", "description_accepted",
+                "column",
+                f"src.t.col{i}",
+                "description_accepted",
             )
         result = meta.get_description_acceptance_rate()
         assert result["acceptance_rate"] == 1.0
@@ -44,11 +48,15 @@ class TestDescriptionAcceptanceRate:
         """Correct rate with mix of accepted and edited."""
         for i in range(4):
             meta.record_decision(
-                "column", f"src.t.col{i}", "description_accepted",
+                "column",
+                f"src.t.col{i}",
+                "description_accepted",
             )
         for i in range(6):
             meta.record_decision(
-                "column", f"src.t.edit{i}", "description_edited",
+                "column",
+                f"src.t.edit{i}",
+                "description_edited",
             )
         result = meta.get_description_acceptance_rate()
         assert result["acceptance_rate"] == 0.4  # 4/10
@@ -59,12 +67,16 @@ class TestDescriptionAcceptanceRate:
         # 5 accepted for src1
         for i in range(5):
             meta.record_decision(
-                "column", f"src1.t.col{i}", "description_accepted",
+                "column",
+                f"src1.t.col{i}",
+                "description_accepted",
             )
         # 5 edited for src2
         for i in range(5):
             meta.record_decision(
-                "column", f"src2.t.col{i}", "description_edited",
+                "column",
+                f"src2.t.col{i}",
+                "description_edited",
             )
         result_src1 = meta.get_description_acceptance_rate(source_name="src1")
         assert result_src1["acceptance_rate"] == 1.0
@@ -78,7 +90,9 @@ class TestDescriptionAcceptanceRate:
         """Custom min_decisions threshold."""
         for i in range(3):
             meta.record_decision(
-                "column", f"src.t.col{i}", "description_accepted",
+                "column",
+                f"src.t.col{i}",
+                "description_accepted",
             )
         result = meta.get_description_acceptance_rate(min_decisions=3)
         assert result["acceptance_rate"] == 1.0
@@ -87,11 +101,15 @@ class TestDescriptionAcceptanceRate:
         """'locked' action counts towards total but not as accepted."""
         for i in range(3):
             meta.record_decision(
-                "column", f"src.t.col{i}", "description_accepted",
+                "column",
+                f"src.t.col{i}",
+                "description_accepted",
             )
         for i in range(3):
             meta.record_decision(
-                "column", f"src.t.lock{i}", "locked",
+                "column",
+                f"src.t.lock{i}",
+                "locked",
             )
         result = meta.get_description_acceptance_rate()
         assert result["acceptance_rate"] == 0.5  # 3 accepted / 6 total
@@ -110,7 +128,9 @@ class TestModelEditDistance:
     def test_single_edit(self, meta: MetadataStore):
         """Single edit returns exact distance."""
         meta.record_decision(
-            "model", "mart_x", "edited",
+            "model",
+            "mart_x",
+            "edited",
             payload={"edit_distance": 0.25, "original_sql": "...", "new_sql": "..."},
         )
         result = meta.get_model_edit_distance_avg()
@@ -120,11 +140,15 @@ class TestModelEditDistance:
     def test_multiple_edits_averaged(self, meta: MetadataStore):
         """Multiple edits are averaged."""
         meta.record_decision(
-            "model", "mart_a", "edited",
+            "model",
+            "mart_a",
+            "edited",
             payload={"edit_distance": 0.1},
         )
         meta.record_decision(
-            "model", "mart_b", "edited",
+            "model",
+            "mart_b",
+            "edited",
             payload={"edit_distance": 0.3},
         )
         result = meta.get_model_edit_distance_avg()
@@ -134,11 +158,15 @@ class TestModelEditDistance:
     def test_ignores_edits_without_distance(self, meta: MetadataStore):
         """Edit decisions without edit_distance in payload are ignored."""
         meta.record_decision(
-            "model", "mart_a", "edited",
+            "model",
+            "mart_a",
+            "edited",
             payload={"edit_distance": 0.5},
         )
         meta.record_decision(
-            "model", "mart_b", "edited",
+            "model",
+            "mart_b",
+            "edited",
             payload={"note": "no distance"},
         )
         result = meta.get_model_edit_distance_avg()
@@ -190,6 +218,7 @@ class TestConfidenceAPI:
         from fastapi.testclient import TestClient
 
         from headwater.api.app import create_app
+
         app = create_app(in_memory=True)
         with TestClient(app) as c:
             yield c

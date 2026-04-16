@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
+import { ProjectSidebar } from "@/components/project-sidebar";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -26,6 +27,7 @@ const navItems = [
   { href: "/quality", label: "Quality" },
   { href: "/data", label: "Data" },
   { href: "/explore", label: "Explore" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export default function RootLayout({
@@ -55,9 +57,14 @@ export default function RootLayout({
             ))}
           </div>
         </nav>
-        <main className="flex-1 px-6 py-6 max-w-7xl mx-auto w-full">
-          {children}
-        </main>
+        <div className="flex flex-1 overflow-hidden">
+          <ProjectSidebar />
+          <main className="flex-1 px-6 py-6 overflow-y-auto">
+            <div className="max-w-7xl mx-auto w-full">
+              {children}
+            </div>
+          </main>
+        </div>
       </body>
     </html>
   );

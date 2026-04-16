@@ -61,9 +61,16 @@ class CsvLoader:
                 "distinct_count": series.n_unique(),
             }
             if series.dtype in (
-                pl.Int8, pl.Int16, pl.Int32, pl.Int64,
-                pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
-                pl.Float32, pl.Float64,
+                pl.Int8,
+                pl.Int16,
+                pl.Int32,
+                pl.Int64,
+                pl.UInt8,
+                pl.UInt16,
+                pl.UInt32,
+                pl.UInt64,
+                pl.Float32,
+                pl.Float64,
             ):
                 non_null = series.drop_nulls()
                 if len(non_null) > 0:
@@ -92,8 +99,7 @@ class CsvLoader:
             self._frames[table_name] = df
             con.register(f"_tmp_{table_name}", df)
             con.execute(
-                f"CREATE OR REPLACE TABLE {schema}.{table_name} AS "
-                f"SELECT * FROM _tmp_{table_name}"
+                f"CREATE OR REPLACE TABLE {schema}.{table_name} AS SELECT * FROM _tmp_{table_name}"
             )
             con.unregister(f"_tmp_{table_name}")
             loaded.append(table_name)

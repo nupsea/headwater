@@ -9,9 +9,7 @@ from headwater.cli.main import app
 runner = CliRunner()
 
 SAMPLE_DATA = str(
-    __import__("pathlib").Path(__file__).resolve().parent.parent.parent
-    / "data"
-    / "sample"
+    __import__("pathlib").Path(__file__).resolve().parent.parent.parent / "data" / "sample"
 )
 
 

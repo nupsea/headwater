@@ -84,10 +84,7 @@ def recommend_visualization(
     if len(metric_cols) >= 2 and not temporal_cols:
         return VisualizationSpec(
             chart_type="scatter",
-            title=(
-                _title_from_question(question)
-                or f"{metric_cols[0]} vs {metric_cols[1]}"
-            ),
+            title=(_title_from_question(question) or f"{metric_cols[0]} vs {metric_cols[1]}"),
             x_axis=metric_cols[0],
             y_axis=metric_cols[1],
             group_by=dimension_cols[0] if dimension_cols else None,

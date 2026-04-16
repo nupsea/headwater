@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
+from headwater.analyzer.catalog import build_catalog
 from headwater.analyzer.companion import discover_companion_docs, match_docs_to_tables
+from headwater.analyzer.eval import evaluate_catalog
 from headwater.analyzer.semantic import analyze
 from headwater.connectors.registry import get_connector
 from headwater.core.models import SourceConfig
@@ -18,6 +21,8 @@ from headwater.generator.staging import generate_staging_models
 from headwater.profiler.engine import discover
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -113,6 +118,37 @@ async def run_full_pipeline(
     analyze(discovery_result)
     pipeline["discovery"] = discovery_result
 
+    # Step 1b: Build semantic catalog (v2)
+    catalog = build_catalog(discovery_result)
+    pipeline["catalog"] = catalog
+    logger.info(
+        "Catalog built: %d metrics, %d dimensions, %d entities (confidence=%.2f)",
+        len(catalog.metrics),
+        len(catalog.dimensions),
+        len(catalog.entities),
+        catalog.confidence,
+    )
+
+    # Evaluate catalog quality
+    evaluation = evaluate_catalog(catalog, discovery_result.tables, discovery_result.profiles)
+    logger.info("Catalog evaluation: overall=%.2f", evaluation.confidence)
+
+    # Build graph store (Kuzu) + vector index (LanceDB)
+    from headwater.api.routes.discovery import (
+        _build_graph_and_index,
+        _persist_catalog_data,
+        _persist_discovery_data,
+        _persist_semantic_data,
+    )
+
+    _build_graph_and_index(request, discovery_result, catalog, source_name, evaluation)
+
+    # Persist all data to metadata store
+    _persist_discovery_data(request, discovery_result, source_name)
+    _persist_semantic_data(request, discovery_result, source_name)
+    _persist_catalog_data(request, catalog, evaluation, source_name)
+    logger.info("Metadata persistence complete")
+
     # Step 2: Generate
     staging = generate_staging_models(
         discovery_result.tables, source_schema=_duckdb_schema, target_schema=target_schema
@@ -156,4 +192,8 @@ async def run_full_pipeline(
         "quality_total": report.total_contracts,
         "quality_passed": report.passed,
         "quality_failed": report.failed,
+        "catalog_metrics": len(catalog.metrics),
+        "catalog_dimensions": len(catalog.dimensions),
+        "catalog_entities": len(catalog.entities),
+        "catalog_confidence": catalog.confidence,
     }

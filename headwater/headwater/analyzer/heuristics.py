@@ -16,11 +16,29 @@ from headwater.core.models import (
 )
 
 # Common column-name suffixes that carry no domain signal
-_NOISE_TOKENS = frozenset({
-    "id", "date", "name", "type", "code", "at", "status", "flag",
-    "count", "rate", "value", "number", "description", "notes",
-    "created", "updated", "is", "has", "pct",
-})
+_NOISE_TOKENS = frozenset(
+    {
+        "id",
+        "date",
+        "name",
+        "type",
+        "code",
+        "at",
+        "status",
+        "flag",
+        "count",
+        "rate",
+        "value",
+        "number",
+        "description",
+        "notes",
+        "created",
+        "updated",
+        "is",
+        "has",
+        "pct",
+    }
+)
 
 # Column name patterns -> semantic type
 _SEMANTIC_TYPE_PATTERNS: list[tuple[str, str]] = [
@@ -66,10 +84,10 @@ _SEMANTIC_TYPE_PATTERNS: list[tuple[str, str]] = [
     (r".*flag$", "dimension"),
     (r".*indicator$", "dimension"),
     (r".*number$", "dimension"),
-    (r".*_num$", "dimension"),      # site_num
-    (r".*_no$", "dimension"),       # complaint_no
-    (r".*_tract$|^tract$", "dimension"),   # census_tract
-    (r".*_board$|^board$", "dimension"),   # community_board
+    (r".*_num$", "dimension"),  # site_num
+    (r".*_no$", "dimension"),  # complaint_no
+    (r".*_tract$|^tract$", "dimension"),  # census_tract
+    (r".*_board$|^board$", "dimension"),  # community_board
     # Temporal singletons
     (r"^year$", "temporal"),
     (r"^month$", "temporal"),
@@ -185,7 +203,7 @@ def classify_domains(
             if t1 not in remaining:
                 continue
             group: set[str] = {t1}
-            for t2 in unconnected_list[i + 1:]:
+            for t2 in unconnected_list[i + 1 :]:
                 if t2 not in remaining:
                     continue
                 shared = token_map[t1] & token_map[t2]
@@ -281,27 +299,54 @@ def classify_semantic_type(col_name: str) -> str | None:
 
 
 # Confidence levels for different classification sources
-_CONF_EXACT_ID_PATTERN = 0.9       # _id$, ^id$
+_CONF_EXACT_ID_PATTERN = 0.9  # _id$, ^id$
 _CONF_SPECIFIC_NAME_PATTERN = 0.85  # .*email.*, .*_count$
-_CONF_BROAD_NAME_PATTERN = 0.7     # .*type$, .*name$
-_CONF_STANDALONE_DIM = 0.8         # ^county$, ^state$ etc
-_CONF_PROFILE_OVERRIDE = 0.75      # Profile-based refinement overrides name
-_CONF_PROFILE_INFER = 0.5          # Profile-based inference with no name match
-_CONF_NO_SIGNAL = 0.0              # Nothing matched
+_CONF_BROAD_NAME_PATTERN = 0.7  # .*type$, .*name$
+_CONF_STANDALONE_DIM = 0.8  # ^county$, ^state$ etc
+_CONF_PROFILE_OVERRIDE = 0.75  # Profile-based refinement overrides name
+_CONF_PROFILE_INFER = 0.5  # Profile-based inference with no name match
+_CONF_NO_SIGNAL = 0.0  # Nothing matched
 
 # Patterns grouped by confidence level
 _HIGH_CONF_PATTERNS = {
-    r".*_id$", r"^id$", r".*email.*", r".*phone.*", r".*ssn.*",
-    r".*_count$|^count$", r".*score.*", r".*_rate$|^rate$",
-    r".*amount.*", r".*budget.*", r".*latitude.*", r".*longitude.*",
+    r".*_id$",
+    r"^id$",
+    r".*email.*",
+    r".*phone.*",
+    r".*ssn.*",
+    r".*_count$|^count$",
+    r".*score.*",
+    r".*_rate$|^rate$",
+    r".*amount.*",
+    r".*budget.*",
+    r".*latitude.*",
+    r".*longitude.*",
 }
 _STANDALONE_DIM_PATTERNS = {
-    r"^county$", r"^borough$", r"^city$", r"^state$", r"^country$",
-    r"^region$", r"^district$", r"^ward$", r"^province$",
-    r"^department$", r"^zone$", r"^sector$", r"^priority$",
-    r"^severity$", r"^channel$", r"^source$", r"^platform$",
-    r"^tier$", r"^level$", r"^class$", r"^group$",
-    r"^gender$", r"^race$", r"^ethnicity$",
+    r"^county$",
+    r"^borough$",
+    r"^city$",
+    r"^state$",
+    r"^country$",
+    r"^region$",
+    r"^district$",
+    r"^ward$",
+    r"^province$",
+    r"^department$",
+    r"^zone$",
+    r"^sector$",
+    r"^priority$",
+    r"^severity$",
+    r"^channel$",
+    r"^source$",
+    r"^platform$",
+    r"^tier$",
+    r"^level$",
+    r"^class$",
+    r"^group$",
+    r"^gender$",
+    r"^race$",
+    r"^ethnicity$",
 }
 
 
@@ -467,7 +512,7 @@ def _compute_confidence(
             and profile.max_value is not None
             and profile.max_value > profile.min_value
         ):
-                signals += 0.05
+            signals += 0.05
         return 0.55 + signals
 
     return 0.3  # Genuinely unclear
@@ -507,7 +552,8 @@ def enrich_tables(
         if locked_col_count:
             _log.info(
                 "Skipped enrichment for %d locked column(s) in table %s",
-                locked_col_count, table.name,
+                locked_col_count,
+                table.name,
             )
 
         if not table.locked:
@@ -526,10 +572,15 @@ def enrich_tables(
             profile = profile_index.get((table.name, col.name))
             if profile is not None and table.row_count > 0:
                 col.semantic_type = _refine_semantic_type(
-                    col, profile, table.row_count,
+                    col,
+                    profile,
+                    table.row_count,
                 )
                 col.confidence = _compute_confidence(
-                    col, profile, name_conf, table.row_count,
+                    col,
+                    profile,
+                    name_conf,
+                    table.row_count,
                 )
 
             col.role = _classify_role(col, profile)
@@ -594,9 +645,7 @@ def _apply_sibling_consistency(
         for col in group:
             if col.role != majority_role and col.confidence < 0.75:
                 dtype = col.dtype.lower()
-                is_numeric = any(
-                    t in dtype for t in ("int", "float", "double", "decimal")
-                )
+                is_numeric = any(t in dtype for t in ("int", "float", "double", "decimal"))
 
                 # Only align if dtype is compatible with the majority role
                 if majority_role == "metric" and is_numeric:
@@ -829,7 +878,12 @@ def generate_deep_table_description(
 
     # --- Narrative ---
     narrative = _build_heuristic_narrative(
-        table, dims, metrics, temporals, geos, relationships,
+        table,
+        dims,
+        metrics,
+        temporals,
+        geos,
+        relationships,
     )
 
     # --- Business process ---
@@ -840,9 +894,7 @@ def generate_deep_table_description(
             related = {r.to_table for r in relationships if r.from_table == table.name}
             related |= {r.from_table for r in relationships if r.to_table == table.name}
             if related:
-                business_process += (
-                    f", connected to {', '.join(sorted(related)[:3])}"
-                )
+                business_process += f", connected to {', '.join(sorted(related)[:3])}"
 
     return TableSemanticDetail(
         narrative=narrative,
@@ -982,9 +1034,7 @@ def _build_column_semantic_detail(
     # Example interpretation for metrics
     example_interpretation = None
     if col.role == "metric" and profile is not None and profile.mean is not None:
-        example_interpretation = (
-            f"Typical value around {profile.mean:.1f}"
-        )
+        example_interpretation = f"Typical value around {profile.mean:.1f}"
         if profile.min_value is not None and profile.max_value is not None:
             example_interpretation += (
                 f", ranging from {profile.min_value:.1f} to {profile.max_value:.1f}"

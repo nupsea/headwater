@@ -61,10 +61,7 @@ def _check_not_null(
     rule: ContractRule,
 ) -> ContractCheckResult:
     """Check that a column has no null values."""
-    sql = (
-        f"SELECT COUNT(*) FROM {rule.model_name} "
-        f'WHERE "{rule.column_name}" IS NULL'
-    )
+    sql = f'SELECT COUNT(*) FROM {rule.model_name} WHERE "{rule.column_name}" IS NULL'
     null_count = con.execute(sql).fetchone()[0]
     return ContractCheckResult(
         rule_id=rule.id or "",
@@ -80,10 +77,7 @@ def _check_unique(
     rule: ContractRule,
 ) -> ContractCheckResult:
     """Check that a column has all unique values."""
-    sql = (
-        f"SELECT COUNT(*) - COUNT(DISTINCT \"{rule.column_name}\") "
-        f"FROM {rule.model_name}"
-    )
+    sql = f'SELECT COUNT(*) - COUNT(DISTINCT "{rule.column_name}") FROM {rule.model_name}'
     duplicate_count = con.execute(sql).fetchone()[0]
     return ContractCheckResult(
         rule_id=rule.id or "",
@@ -91,8 +85,7 @@ def _check_unique(
         passed=duplicate_count == 0,
         observed_value=duplicate_count,
         message=(
-            f"{duplicate_count} duplicate values" if duplicate_count > 0
-            else "All values unique"
+            f"{duplicate_count} duplicate values" if duplicate_count > 0 else "All values unique"
         ),
     )
 
@@ -102,10 +95,7 @@ def _check_range(
     rule: ContractRule,
 ) -> ContractCheckResult:
     """Check that all values fall within the expected range."""
-    sql = (
-        f"SELECT COUNT(*) FROM {rule.model_name} "
-        f"WHERE NOT ({rule.expression})"
-    )
+    sql = f"SELECT COUNT(*) FROM {rule.model_name} WHERE NOT ({rule.expression})"
     out_of_range = con.execute(sql).fetchone()[0]
     return ContractCheckResult(
         rule_id=rule.id or "",
@@ -113,8 +103,7 @@ def _check_range(
         passed=out_of_range == 0,
         observed_value=out_of_range,
         message=(
-            f"{out_of_range} values out of range" if out_of_range > 0
-            else "All values in range"
+            f"{out_of_range} values out of range" if out_of_range > 0 else "All values in range"
         ),
     )
 
@@ -135,8 +124,7 @@ def _check_cardinality(
         passed=unexpected == 0,
         observed_value=unexpected,
         message=(
-            f"{unexpected} unexpected values" if unexpected > 0
-            else "All values in allowed set"
+            f"{unexpected} unexpected values" if unexpected > 0 else "All values in allowed set"
         ),
     )
 
@@ -211,10 +199,7 @@ def _check_generic(
     rule: ContractRule,
 ) -> ContractCheckResult:
     """Fallback: evaluate the expression as a WHERE clause."""
-    sql = (
-        f"SELECT COUNT(*) FROM {rule.model_name} "
-        f"WHERE NOT ({rule.expression})"
-    )
+    sql = f"SELECT COUNT(*) FROM {rule.model_name} WHERE NOT ({rule.expression})"
     violations = con.execute(sql).fetchone()[0]
     return ContractCheckResult(
         rule_id=rule.id or "",
