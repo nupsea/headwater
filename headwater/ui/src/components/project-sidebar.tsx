@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { api, type Project, type ProjectProgress } from "@/lib/api";
+import { CreateProjectDialog } from "@/components/create-project-dialog";
 
 const MATURITY_COLORS: Record<string, string> = {
   raw: "bg-gray-200 text-gray-700",
@@ -26,6 +27,7 @@ export function ProjectSidebar() {
     Record<string, ProjectProgress>
   >({});
   const [collapsed, setCollapsed] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
   const pathname = usePathname();
 
   useEffect(() => {
@@ -76,20 +78,38 @@ export function ProjectSidebar() {
         <span className="text-xs font-semibold text-muted uppercase tracking-wider">
           Projects
         </span>
-        <button
-          onClick={() => setCollapsed(true)}
-          className="text-muted hover:text-foreground text-xs"
-          title="Collapse sidebar"
-        >
-          &laquo;
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setShowCreate(true)}
+            className="text-accent hover:text-accent/80 text-xs font-medium"
+            title="New project"
+          >
+            [+ New]
+          </button>
+          <button
+            onClick={() => setCollapsed(true)}
+            className="text-muted hover:text-foreground text-xs"
+            title="Collapse sidebar"
+          >
+            &laquo;
+          </button>
+        </div>
       </div>
+
+      <CreateProjectDialog
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        onCreated={(proj) => {
+          setProjects((prev) => [proj, ...prev]);
+          setShowCreate(false);
+        }}
+      />
 
       {projects.length === 0 && (
         <div className="px-3 py-6 text-center">
           <p className="text-xs text-muted">No projects yet.</p>
           <p className="text-xs text-muted mt-1">
-            Run a pipeline from the Dashboard to create one.
+            Click [+ New] or run a pipeline to create one.
           </p>
         </div>
       )}

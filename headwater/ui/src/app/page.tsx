@@ -10,8 +10,11 @@ import {
   type DriftReport,
   type Project,
   type ProjectProgress,
+  type ActivityEntry,
 } from "@/lib/api";
-import { WorkflowProgress } from "@/components/workflow-progress";
+import { PipelineStepper } from "@/components/pipeline-stepper";
+import { ReviewQueue } from "@/components/review-queue";
+import { ActivityFeed } from "@/components/activity-feed";
 import { ProjectSummary } from "@/components/project-summary";
 import { AdvisoryActions } from "@/components/advisory-actions";
 import { DomainMap } from "@/components/domain-map";
@@ -25,6 +28,7 @@ export default function DashboardPage() {
   const [driftReport, setDriftReport] = useState<DriftReport | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [progress, setProgress] = useState<ProjectProgress | null>(null);
+  const [activities, setActivities] = useState<ActivityEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [phase, setPhase] = useState("");
   const [sourcePath, setSourcePath] = useState(
@@ -54,6 +58,13 @@ export default function DashboardPage() {
           }
         } catch {
           /* projects endpoint may not be available */
+        }
+        // Fetch activity feed
+        try {
+          const actRes = await api.activity(10);
+          setActivities(actRes.activities || []);
+        } catch {
+          /* activity endpoint may not be available */
         }
         // Fetch latest drift report
         try {
@@ -278,8 +289,23 @@ export default function DashboardPage() {
             <ProjectSummary project={project} progress={progress ?? undefined} />
           )}
 
-          {/* 2. Workflow progress bar */}
-          <WorkflowProgress workflow={insights.workflow} />
+          {/* 2. Pipeline stepper (v3) */}
+          <PipelineStepper phases={insights.workflow.phases} />
+
+          {/* 2b. Review queue (v3) */}
+          <ReviewQueue
+            dictPending={
+              insights.table_health?.filter((t) => !t.pk_columns?.length).length ?? 0
+            }
+            modelsPending={
+              insights.model_suggestions?.length ?? 0
+            }
+            contractsObserving={
+              insights.quality_summary
+                ? insights.quality_summary.total - insights.quality_summary.passed
+                : 0
+            }
+          />
 
           {/* 3. Attention Needed */}
           {attentionItems.length > 0 && (
@@ -456,6 +482,9 @@ export default function DashboardPage() {
 
           {/* 6. Advisory Actions */}
           <AdvisoryActions actions={insights.advisory_actions} />
+
+          {/* 7. Activity Feed (v3) */}
+          <ActivityFeed activities={activities} />
         </div>
       )}
     </div>

@@ -162,12 +162,8 @@ async def get_catalog_for_review(request: Request):
             "metrics_confirmed": sum(1 for m in metrics if m.get("status") == "confirmed"),
             "metrics_rejected": sum(1 for m in metrics if m.get("status") == "rejected"),
             "dimensions_total": len(dimensions),
-            "dimensions_confirmed": sum(
-                1 for d in dimensions if d.get("status") == "confirmed"
-            ),
-            "dimensions_rejected": sum(
-                1 for d in dimensions if d.get("status") == "rejected"
-            ),
+            "dimensions_confirmed": sum(1 for d in dimensions if d.get("status") == "confirmed"),
+            "dimensions_rejected": sum(1 for d in dimensions if d.get("status") == "rejected"),
         },
     }
 
@@ -662,3 +658,50 @@ async def remove_relationship(relationship_id: int, request: Request):
     )
 
     return {"deleted": relationship_id}
+
+
+# -- v3: Dictionary question answers ------------------------------------------
+
+
+class DictAnswerItem(BaseModel):
+    question_index: int
+    answer: str
+
+
+class DictAnswersPayload(BaseModel):
+    answers: list[DictAnswerItem]
+
+
+@router.post("/dictionary/{table_name}/answers")
+async def save_dictionary_answers(table_name: str, body: DictAnswersPayload, request: Request):
+    """Save answers to a table's clarifying questions."""
+    pipeline = request.app.state.pipeline
+    discovery = pipeline.get("discovery")
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    table = next((t for t in discovery.tables if t.name == table_name), None)
+    if table is None:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
+
+    store = request.app.state.metadata_store
+    # Store with dict: prefix to distinguish from model answers
+    key = f"dict:{table_name}"
+    answers_dicts = [a.model_dump() for a in body.answers]
+    saved = store.save_model_answers(key, answers_dicts)
+    store.log_activity(
+        "dict_question_answered",
+        f"Answered {len(body.answers)} question(s) for table {table_name}",
+        artifact_type="table",
+        artifact_id=table_name,
+    )
+    return {"table_name": table_name, "answers_saved": saved}
+
+
+@router.get("/dictionary/{table_name}/answers")
+async def get_dictionary_answers(table_name: str, request: Request):
+    """Retrieve saved answers for a table's clarifying questions."""
+    store = request.app.state.metadata_store
+    key = f"dict:{table_name}"
+    answers = store.get_model_answers(key)
+    return {"table_name": table_name, "answers": answers}

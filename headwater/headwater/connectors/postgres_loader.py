@@ -92,7 +92,11 @@ class PostgresConnector:
             raise ConnectorError("PostgresConnector requires a URI (config.uri)")
         self._dsn = config.uri
         try:
-            self._conn = psycopg2.connect(self._dsn)
+            self._conn = psycopg2.connect(
+                self._dsn,
+                connect_timeout=15,
+                options="-c statement_timeout=120000",  # 2 min per statement
+            )
         except psycopg2.OperationalError as exc:
             raise _wrap_operational_error(exc, self._dsn) from exc
 

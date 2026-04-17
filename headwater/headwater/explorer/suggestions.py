@@ -8,7 +8,7 @@ No hardcoded table names, column names, or domain knowledge -- everything is
 inferred from what the data actually contains.
 
 Priority order (highest to lowest):
-  mart > relationship > semantic > quality
+  mart > cross_table (schema-graph) > relationship > semantic > quality
 
 Quality questions are intentionally de-prioritized and capped:
   - Only for numeric metric columns with actual nulls present
@@ -19,6 +19,7 @@ Total output is capped at MAX_TOTAL_SUGGESTIONS, deduplicated.
 
 from __future__ import annotations
 
+import logging
 import re
 
 import duckdb
@@ -34,7 +35,10 @@ from headwater.core.models import (
     SuggestedQuestion,
     TableInfo,
 )
+from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.utils import resolve_table_ref, table_exists
+
+logger = logging.getLogger(__name__)
 
 MAX_TOTAL_SUGGESTIONS = 15
 MAX_QUALITY_SUGGESTIONS = 3
@@ -66,22 +70,55 @@ def generate_suggestions(
     quality_results: list[ContractCheckResult] | None = None,
     con: duckdb.DuckDBPyConnection | None = None,
     catalog=None,
+    extra_relationships: list[Relationship] | None = None,
 ) -> list[SuggestedQuestion]:
     """Generate suggested questions from all available metadata.
 
     All questions are derived from actual schema -- no hardcoded names.
     When a SemanticCatalog is provided, catalog-based suggestions are
     generated first (highest priority after mart).
+
+    extra_relationships: supplemental FK relationships from confirmed PK/FK
+    detection, merged with discovery.relationships for richer cross-table
+    suggestions.
+
     Returns at most MAX_TOTAL_SUGGESTIONS questions in priority order.
     """
     all_models = models or []
     profile_index = {(p.table_name, p.column_name): p for p in discovery.profiles}
 
+    # Merge confirmed PK/FK relationships with discovered ones
+    all_relationships = list(discovery.relationships)
+    if extra_relationships:
+        existing_pairs = {
+            (r.from_table, r.from_column, r.to_table, r.to_column) for r in all_relationships
+        }
+        for rel in extra_relationships:
+            key = (rel.from_table, rel.from_column, rel.to_table, rel.to_column)
+            if key not in existing_pairs:
+                all_relationships.append(rel)
+                existing_pairs.add(key)
+
+    # Log catalog status for observability
+    if catalog is not None:
+        entity_count = len(getattr(catalog, "entities", []))
+        metric_count = len(getattr(catalog, "metrics", []))
+        if entity_count == 0 and metric_count == 0:
+            logger.warning(
+                "Catalog is empty (0 entities, 0 metrics). "
+                "Catalog-based suggestions will be skipped. "
+                "Check enrichment pipeline and column classifications."
+            )
+
+    # Build schema graph for cross-table question generation
+    graph = SchemaGraph(discovery, all_models)
+
     buckets: dict[str, list[SuggestedQuestion]] = {
         "catalog": _from_catalog(catalog) if catalog else [],
         "mart": _from_mart_models(all_models, con),
+        "cross_table": _from_schema_graph(graph, all_relationships, all_models, con),
         "relationship": _from_relationships(
-            discovery.tables, discovery.relationships, all_models, con
+            discovery.tables, all_relationships, all_models, con
         ),
         "semantic": _from_table_structure(discovery.tables, profile_index, all_models, con),
         "quality": _from_quality_findings(
@@ -95,13 +132,24 @@ def generate_suggestions(
     result: list[SuggestedQuestion] = []
     seen: set[str] = set()
 
-    for source in ("catalog", "mart", "relationship", "semantic", "quality"):
+    for source in ("catalog", "mart", "cross_table", "relationship", "semantic", "quality"):
         for q in buckets[source]:
             key = " ".join(q.question.lower().split())
             if key not in seen:
                 seen.add(key)
                 result.append(q)
 
+    logger.info(
+        "Generated %d suggestions: catalog=%d, mart=%d, cross_table=%d, "
+        "relationship=%d, semantic=%d, quality=%d",
+        len(result),
+        len(buckets["catalog"]),
+        len(buckets["mart"]),
+        len(buckets["cross_table"]),
+        len(buckets["relationship"]),
+        len(buckets["semantic"]),
+        len(buckets["quality"]),
+    )
     return result[:MAX_TOTAL_SUGGESTIONS]
 
 
@@ -148,6 +196,106 @@ def _from_catalog(catalog) -> list[SuggestedQuestion]:
                 )
                 if len(suggestions) >= 10:
                     return suggestions
+
+    return suggestions
+
+
+def _from_schema_graph(
+    graph: SchemaGraph,
+    relationships: list[Relationship],
+    models: list[GeneratedModel],
+    con: duckdb.DuckDBPyConnection | None,
+) -> list[SuggestedQuestion]:
+    """Generate cross-table analytical questions using SchemaGraph join paths.
+
+    Finds pairs of tables that can be joined (even indirectly) and generates
+    questions combining metrics from one table with dimensions from another.
+    This produces multi-table questions that _from_relationships misses when
+    the join is indirect (2+ hops) or when relationships are sparse.
+    """
+    suggestions: list[SuggestedQuestion] = []
+    if len(graph.tables) < 2:
+        return suggestions
+
+    seen_combos: set[tuple[str, str, str]] = set()
+
+    for fact_name, fact_node in graph.tables.items():
+        if not fact_node.metrics:
+            continue
+
+        metric_col = fact_node.metrics[0]
+        metric_label = _humanize(metric_col)
+
+        for dim_name, dim_node in graph.tables.items():
+            if dim_name == fact_name:
+                continue
+            if not dim_node.dimensions:
+                continue
+
+            # Find join path between fact and dim tables
+            path = graph.find_join_path(fact_name, dim_name)
+            if path is None:
+                continue
+
+            dim_col_name = dim_node.dimensions[0]
+            dim_label = _humanize(dim_col_name)
+            fact_label = _humanize(fact_name)
+            dim_table_label = _humanize(dim_name)
+
+            combo_key = (fact_name, dim_name, dim_col_name)
+            if combo_key in seen_combos:
+                continue
+            seen_combos.add(combo_key)
+
+            # Build the SQL with proper joins
+            fact_ref = (
+                resolve_table_ref(fact_name, con, models) if con is not None else fact_name
+            )
+            join_clauses = []
+            aliases = {fact_name: "t0"}
+
+            for i, step in enumerate(path, 1):
+                alias = f"t{i}"
+                aliases[step.to_table] = alias
+                step_ref = (
+                    resolve_table_ref(step.to_table, con, models)
+                    if con is not None
+                    else step.to_table
+                )
+                from_alias = aliases.get(step.from_table, "t0")
+                join_clauses.append(
+                    f'JOIN {step_ref} {alias} ON {from_alias}."{step.from_column}" '
+                    f'= {alias}."{step.to_column}"'
+                )
+
+            dim_alias = aliases.get(dim_name, "t0")
+            fact_alias = aliases.get(fact_name, "t0")
+
+            sql = (
+                f'SELECT {dim_alias}."{dim_col_name}", '
+                f'COUNT(*) AS {_humanize(fact_name).replace(" ", "_")}_count, '
+                f'ROUND(AVG({fact_alias}."{metric_col}"), 2) AS avg_{metric_col} '
+                f"FROM {fact_ref} t0 "
+                + " ".join(join_clauses)
+                + f' GROUP BY {dim_alias}."{dim_col_name}" '
+                f"ORDER BY avg_{metric_col} DESC LIMIT 20"
+            )
+
+            suggestions.append(
+                SuggestedQuestion(
+                    question=(
+                        f"What is the average {metric_label} in {fact_label} "
+                        f"by {dim_label} ({dim_table_label})?"
+                    ),
+                    source="cross_table",
+                    category="Cross-Table Analysis",
+                    relevant_tables=[fact_name, dim_name],
+                    sql_hint=sql,
+                )
+            )
+
+            if len(suggestions) >= 6:
+                return suggestions
 
     return suggestions
 

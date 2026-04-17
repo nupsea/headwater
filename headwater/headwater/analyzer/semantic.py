@@ -16,6 +16,7 @@ from headwater.analyzer.heuristics import (
 )
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider, make_cache_key
 from headwater.core.models import (
+    ColumnInfo,
     ColumnProfile,
     ColumnSemanticDetail,
     DiscoveryResult,
@@ -30,17 +31,26 @@ logger = logging.getLogger(__name__)
 def analyze(
     discovery: DiscoveryResult,
     provider: LLMProvider | None = None,
+    *,
+    store: object | None = None,
+    source_name: str = "source",
 ) -> DiscoveryResult:
     """Enrich a DiscoveryResult with semantic descriptions and domain classification.
 
     If provider is None or NoLLMProvider, uses heuristic-only mode.
     If provider is an LLM provider, enriches with LLM + heuristic fallback.
+
+    When ``store`` (a MetadataStore) is provided, each table's enrichment is
+    checkpointed to SQLite immediately after LLM processing so partial work
+    survives timeouts and restarts.
     """
     if provider is None or isinstance(provider, NoLLMProvider):
         return _analyze_heuristic(discovery)
 
     # LLM mode: run async enrichment
-    return asyncio.run(_analyze_with_llm(discovery, provider))
+    return asyncio.run(
+        _analyze_with_llm(discovery, provider, store=store, source_name=source_name)
+    )
 
 
 def _analyze_heuristic(discovery: DiscoveryResult) -> DiscoveryResult:
@@ -57,8 +67,15 @@ def _analyze_heuristic(discovery: DiscoveryResult) -> DiscoveryResult:
 async def _analyze_with_llm(
     discovery: DiscoveryResult,
     provider: LLMProvider,
+    *,
+    store: object | None = None,
+    source_name: str = "source",
 ) -> DiscoveryResult:
-    """Enrich using LLM with heuristic fallback per table."""
+    """Enrich using LLM with heuristic fallback per table.
+
+    When *store* is provided, each table is checkpointed to SQLite immediately
+    after successful LLM enrichment so partial work survives failures.
+    """
     # First apply heuristics as baseline
     enrich_tables(discovery.tables, discovery.profiles, discovery.relationships)
 
@@ -73,21 +90,70 @@ async def _analyze_with_llm(
     # Check if this is a local (Ollama) provider for prompt simplification
     compact = _is_compact_provider(provider)
 
-    # Enrich each table with LLM
+    # Enrich each table with LLM -- checkpoint after each success
+    enriched_count = 0
+    failed_tables: list[str] = []
     for table in discovery.tables:
         table_profiles = profile_map.get(table.name, [])
         companion_ctx = companion_context_map.get(table.name)
-        await _enrich_table_with_llm(
-            table,
-            table_profiles,
-            discovery.relationships,
-            provider,
-            companion_ctx,
-            compact=compact,
+        try:
+            await _enrich_table_with_llm(
+                table,
+                table_profiles,
+                discovery.relationships,
+                provider,
+                companion_ctx,
+                compact=compact,
+            )
+            enriched_count += 1
+
+            # Checkpoint this table to SQLite immediately
+            if store is not None:
+                _checkpoint_table(store, table, source_name)
+
+        except Exception:
+            logger.exception("LLM enrichment failed for table %s -- continuing", table.name)
+            failed_tables.append(table.name)
+
+    if failed_tables:
+        logger.warning(
+            "Enrichment completed with %d failures: %s",
+            len(failed_tables),
+            ", ".join(failed_tables),
         )
+    logger.info("LLM enrichment: %d succeeded, %d failed", enriched_count, len(failed_tables))
+
+    # Derive new FK relationships from LLM-identified foreign_key columns
+    new_rels = derive_relationships_from_llm(discovery)
+    if new_rels:
+        discovery.relationships.extend(new_rels)
+        logger.info("Added %d LLM-inferred relationships", len(new_rels))
 
     discovery.domains = build_domain_map(discovery.tables)
     return discovery
+
+
+def _checkpoint_table(store: object, table: TableInfo, source_name: str) -> None:
+    """Persist a single table's enrichment results to the metadata store."""
+    try:
+        for col in table.columns:
+            store.upsert_column(  # type: ignore[union-attr]
+                table.name,
+                source_name,
+                col.name,
+                col.dtype,
+                description=col.description,
+                semantic_type=col.semantic_type,
+            )
+        if table.semantic_detail:
+            store.upsert_semantic_detail(  # type: ignore[union-attr]
+                table.name,
+                source_name,
+                table.semantic_detail.model_dump(),
+            )
+        logger.info("Checkpointed enrichment for table %s", table.name)
+    except Exception:
+        logger.exception("Failed to checkpoint table %s", table.name)
 
 
 def _apply_deep_descriptions(discovery: DiscoveryResult) -> None:
@@ -366,7 +432,7 @@ def _apply_llm_result(
     if "domain" in result:
         table.domain = result["domain"]
 
-    # Column-level descriptions and semantic types
+    # Column-level descriptions, semantic types, and role inference
     if "columns" in result and isinstance(result["columns"], dict):
         for col in table.columns:
             if col.locked:
@@ -377,6 +443,8 @@ def _apply_llm_result(
                     col.description = col_data["description"]
                 if "semantic_type" in col_data:
                     col.semantic_type = col_data["semantic_type"]
+                    # Derive role and PK/FK flags from LLM semantic_type
+                    _apply_semantic_role(col, col_data["semantic_type"])
 
     # Build semantic detail from LLM response
     semantic_columns: dict[str, ColumnSemanticDetail] = {}
@@ -389,6 +457,13 @@ def _apply_llm_result(
                 semantic_group=col_data.get("semantic_group"),
                 example_interpretation=col_data.get("example_interpretation"),
             )
+
+    # Upgrade confidence on columns that got LLM descriptions
+    for col in table.columns:
+        if col.locked:
+            continue
+        if col.name in (result.get("columns") or {}):
+            col.confidence = max(col.confidence, 0.6 if compact else 0.8)
 
     confidence = 0.6 if compact else 0.8
 
@@ -404,3 +479,125 @@ def _apply_llm_result(
         companion_context=companion_context,
         inference_confidence=confidence,
     )
+
+
+# -- Semantic type -> role/PK/FK mapping ------------------------------------
+
+_SEMANTIC_TO_ROLE = {
+    "id": "identifier",
+    "identifier": "identifier",
+    "foreign_key": "identifier",
+    "metric": "metric",
+    "dimension": "dimension",
+    "temporal": "temporal",
+    "geographic": "geographic",
+    "text": "text",
+    "pii": "text",
+}
+
+
+def _apply_semantic_role(col: ColumnInfo, semantic_type: str) -> None:
+    """Derive column role and PK/FK flags from LLM-assigned semantic_type."""
+    st = semantic_type.lower().strip()
+    role = _SEMANTIC_TO_ROLE.get(st)
+    if role:
+        col.role = role
+
+    # If LLM says "id" and column looks like a primary key, mark it
+    if st == "id" and not col.is_primary_key:
+        # Only promote to PK if name suggests it (defensive)
+        name_lower = col.name.lower()
+        if name_lower == "id" or name_lower.endswith("_id"):
+            col.is_primary_key = True
+            logger.info("LLM identified PK: %s", col.name)
+
+
+def derive_relationships_from_llm(
+    discovery: DiscoveryResult,
+) -> list[Relationship]:
+    """Discover new FK relationships from LLM semantic_type=foreign_key.
+
+    For columns the LLM tagged as 'foreign_key', try to match them to
+    PK columns in other tables using name patterns (e.g. zone_id -> zones.id).
+    Returns only NEW relationships not already in discovery.relationships.
+    """
+    existing = {
+        (r.from_table, r.from_column, r.to_table, r.to_column)
+        for r in discovery.relationships
+    }
+
+    # Build PK lookup: table_name -> list of PK column names
+    pk_map: dict[str, list[str]] = {}
+    for t in discovery.tables:
+        pks = [c.name for c in t.columns if c.is_primary_key]
+        if pks:
+            pk_map[t.name] = pks
+
+    table_names = {t.name for t in discovery.tables}
+    new_rels: list[Relationship] = []
+
+    for table in discovery.tables:
+        for col in table.columns:
+            if col.semantic_type != "foreign_key":
+                continue
+            # Try to find target table from column name
+            target = _infer_fk_target(col.name, table_names, pk_map)
+            if target is None:
+                continue
+            target_table, target_col = target
+            key = (table.name, col.name, target_table, target_col)
+            if key in existing:
+                continue
+            new_rels.append(
+                Relationship(
+                    from_table=table.name,
+                    from_column=col.name,
+                    to_table=target_table,
+                    to_column=target_col,
+                    type="many_to_one",
+                    source="llm_inferred",
+                    confidence=0.7,
+                    referential_integrity=0.0,
+                )
+            )
+            logger.info(
+                "LLM-inferred FK: %s.%s -> %s.%s",
+                table.name,
+                col.name,
+                target_table,
+                target_col,
+            )
+    return new_rels
+
+
+def _infer_fk_target(
+    col_name: str,
+    table_names: set[str],
+    pk_map: dict[str, list[str]],
+) -> tuple[str, str] | None:
+    """Infer FK target from column name pattern.
+
+    zone_id -> zones.zone_id or zones.id
+    site_id -> sites.site_id or sites.id
+    """
+    name = col_name.lower()
+    if not name.endswith("_id"):
+        return None
+    stem = name[: -len("_id")]  # "zone"
+
+    # Try plural forms
+    for candidate in [stem + "s", stem + "es", stem]:
+        if candidate not in table_names:
+            continue
+        # Check if target table has matching PK
+        pks = pk_map.get(candidate, [])
+        if col_name in pks:
+            return candidate, col_name
+        if "id" in pks:
+            return candidate, "id"
+        if f"{stem}_id" in pks:
+            return candidate, f"{stem}_id"
+        # No matching PK found but table exists -- use first PK
+        if pks:
+            return candidate, pks[0]
+    return None

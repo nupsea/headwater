@@ -13,6 +13,8 @@ import {
 } from "@/lib/api";
 import { KeyColumnsView } from "@/components/key-columns-view";
 import { ConfidenceDot } from "@/components/confidence-dot";
+import { QuestionResolver } from "@/components/question-resolver";
+import { PKFKManager } from "@/components/pk-fk-manager";
 
 const ROLE_OPTIONS = [
   "metric",
@@ -343,19 +345,15 @@ export default function DictionaryPage() {
                   </div>
                 </div>
 
-                {/* Clarifying questions */}
+                {/* Clarifying questions -- QuestionResolver (v3) */}
                 {selectedTable.questions.length > 0 && (
-                  <div className="border border-amber-200 rounded-lg bg-amber-50 p-4 mb-4">
-                    <h3 className="text-xs font-semibold text-amber-800 uppercase tracking-wider mb-2">
-                      Needs Clarification
-                    </h3>
-                    <ul className="space-y-1">
-                      {selectedTable.questions.map((q, i) => (
-                        <li key={i} className="text-sm text-amber-900">
-                          {q}
-                        </li>
-                      ))}
-                    </ul>
+                  <div className="mb-4">
+                    <QuestionResolver
+                      questions={selectedTable.questions}
+                      onAnswer={async (answers) => {
+                        await api.submitDictAnswers(selectedTable.name, answers);
+                      }}
+                    />
                   </div>
                 )}
 
@@ -547,6 +545,11 @@ export default function DictionaryPage() {
                     </div>
                   </div>
                 )}
+
+                {/* PK/FK suggestions (v3) */}
+                <div className="mb-4">
+                  <PKFKManager tableName={selectedTable.name} />
+                </div>
 
                 {/* Action buttons */}
                 {selectedTable.review_status !== "reviewed" && (

@@ -145,7 +145,9 @@ def ask(
                 warnings=decomposition.warnings,
                 suggestions=decomposition.suggestions,
                 explanation=decomposition.explanation,
-                options=[o.model_dump() for o in decomposition.options] if decomposition.options else [],
+                options=[
+                    o.model_dump() for o in decomposition.options
+                ] if decomposition.options else [],
             )
 
     has_llm = provider is not None and not isinstance(provider, NoLLMProvider)
@@ -1491,6 +1493,22 @@ def _is_read_only(sql: str) -> bool:
     return not bool(_FORBIDDEN_PATTERNS.search(sql))
 
 
+_INTERNAL_SCHEMAS = {"information_schema", "pg_catalog"}
+
+
+def _ensure_search_path(con: duckdb.DuckDBPyConnection) -> None:
+    """Set DuckDB search_path to include all user schemas.
+
+    Without this, unqualified table names (e.g. 'complaints') fail when
+    tables live under a named schema (e.g. 'env_health.complaints').
+    """
+    rows = con.execute("SELECT schema_name FROM information_schema.schemata").fetchall()
+    schemas = [r[0] for r in rows if r[0] not in _INTERNAL_SCHEMAS]
+    if schemas:
+        path = ",".join(schemas)
+        con.execute(f"SET search_path = '{path}'")
+
+
 def _execute_query(
     question: str,
     sql: str,
@@ -1498,6 +1516,7 @@ def _execute_query(
 ) -> ExplorationResult:
     """Execute a validated SQL query and return structured results."""
     try:
+        _ensure_search_path(con)
         result = con.execute(sql)
         columns = [desc[0] for desc in result.description]
         rows = result.fetchall()

@@ -3,11 +3,34 @@
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+class CreateProjectRequest(BaseModel):
+    display_name: str
+    source_path: str | None = None
+    description: str | None = None
+
+
+class RenameProjectRequest(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+
+
+def _slugify(name: str) -> str:
+    """Convert display name to a URL-friendly slug."""
+    slug = name.lower().strip()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"[\s]+", "-", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug
 
 
 def _compute_progress(
@@ -125,6 +148,24 @@ def _compute_maturity(progress: dict) -> tuple[str, float]:
     return level, round(score, 3)
 
 
+@router.post("/projects", status_code=201)
+async def create_project(body: CreateProjectRequest, request: Request):
+    """Create a new project."""
+    store = request.app.state.metadata_store
+    id_ = str(uuid.uuid4())
+    slug = _slugify(body.display_name)
+    store.upsert_project(id_, slug, body.display_name, description=body.description)
+    store.log_activity(
+        "project_created",
+        f"Created project '{body.display_name}'",
+        artifact_type="project",
+        artifact_id=id_,
+    )
+    project = store.get_project(id_)
+    logger.info("Created project %s (%s)", id_, body.display_name)
+    return project
+
+
 @router.get("/projects")
 async def list_projects(request: Request):
     """List all projects with summary info."""
@@ -230,3 +271,43 @@ async def delete_project(project_id: str, request: Request):
 
     logger.info("Deleted project %s (%s)", project_id, project.get("display_name"))
     return {"deleted": project_id}
+
+
+@router.patch("/projects/{project_id}/rename")
+async def rename_project(project_id: str, body: RenameProjectRequest, request: Request):
+    """Rename or update description of a project."""
+    store = request.app.state.metadata_store
+    project = store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+
+    display_name = body.display_name or project["display_name"]
+    description = body.description if body.description is not None else project.get("description")
+    slug = _slugify(display_name)
+
+    store.upsert_project(
+        project_id,
+        slug,
+        display_name,
+        description=description,
+    )
+    store.log_activity(
+        "project_renamed",
+        f"Renamed project to '{display_name}'",
+        artifact_type="project",
+        artifact_id=project_id,
+    )
+    updated = store.get_project(project_id)
+    logger.info("Renamed project %s to '%s'", project_id, display_name)
+    return updated
+
+
+@router.get("/activity")
+async def get_activity(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """Return recent activity feed."""
+    store = request.app.state.metadata_store
+    activities = store.get_activity(limit=limit)
+    return {"activities": activities}

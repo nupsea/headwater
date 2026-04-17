@@ -4,7 +4,11 @@
 
 V2 built the semantic catalog backend (LanceDB, Kuzu, 3-strategy decomposer) and a first-pass frontend. But the app still feels like a collection of pages showing metadata, not a **guided advisory tool**. Independent reviewer feedback confirms: there's no navigable guided flow, no resolution paths for recommendations, duplicated info without added value, and the press release promise of "20 minutes to a complete map" isn't realized.
 
-**Core problem**: The app recommends things but gives no way to act on them. It shows data but doesn't guide the user through a journey. V3 fixes this by making every screen answer: "What should I do next, and how do I do it here?"
+**Core problems**:
+1. The app recommends things but gives no way to act on them. It shows data but doesn't guide the user through a journey.
+2. State management is broken -- LLM enrichment results are lost on failure, re-runs start from zero instead of building on partial work, and pipeline state (models, contracts, quality) vanishes on restart.
+
+V3 fixes this by (a) making every screen answer "What should I do next, and how do I do it here?" and (b) ensuring every piece of work is persisted incrementally so progress is never lost.
 
 ### Reviewer feedback (verbatim, addressed below)
 
@@ -349,7 +353,83 @@ V2 built the semantic catalog backend (LanceDB, Kuzu, 3-strategy decomposer) and
 
 ---
 
-### Phase 11: Explorer Verification -- Complex Query & Visualization Accuracy
+### Phase 11: State Management & Incremental Persistence
+
+**Problem**: State management is fundamentally broken. LLM enrichment for N tables is lost if the process fails at table N+1. Re-runs start from zero instead of building on partial work. Pipeline state (models, contracts, execution results) lives only in an in-memory dict and vanishes on restart. The app feels like a POC that forgets everything.
+
+**Root cause analysis**:
+1. `_analyze_with_llm()` processes tables sequentially but checkpoints nothing -- if enrichment fails at table 5 of 8, tables 1-4 are lost
+2. `app.state.pipeline` is a plain dict; only `discovery` and `catalog` are restored from SQLite on startup; staging_models, mart_models, contracts, execution_results are always empty
+3. `re_enrich()` mutates the in-memory discovery but only persists columns at the END -- a timeout means zero columns persisted
+4. `build_catalog()` is pure-functional with no persistence hooks; catalog rows are written only after the full pipeline completes
+5. No mechanism to detect "already enriched" tables and skip them on re-run
+
+**Files**: `analyzer/semantic.py`, `api/routes/pipeline.py`, `api/app.py`, `core/metadata.py`, `analyzer/catalog.py`
+
+#### 11A: Per-Table Enrichment Checkpointing
+
+1. **Pass metadata store into `analyze()`**: Add optional `store` and `source_name` parameters to `analyze()` and `_analyze_with_llm()`.
+
+2. **Checkpoint after each table**: After `_enrich_table_with_llm()` succeeds for a table, immediately persist:
+   - Column descriptions and semantic types via `store.upsert_column()` for each column
+   - Table semantic detail via `store.upsert_semantic_detail()`
+   - Log activity: "Enriched table {name} ({n} columns)"
+   ```python
+   for table in discovery.tables:
+       await _enrich_table_with_llm(table, ...)
+       if store and table.semantic_detail:
+           for col in table.columns:
+               store.upsert_column(table.name, source_name, col.name, col.dtype,
+                   description=col.description, semantic_type=col.semantic_type)
+           store.upsert_semantic_detail(table.name, source_name,
+               table.semantic_detail.model_dump())
+           logger.info("Checkpointed enrichment for table %s", table.name)
+   ```
+
+3. **Wrap per-table enrichment in try/except**: If one table fails, log the error but continue to the next table. Return partial results with a count of succeeded/failed tables.
+
+4. **Remove bulk persist at end of `re_enrich()`**: The per-table checkpoint replaces the current end-of-pipeline bulk write in the re-enrich endpoint.
+
+#### 11B: Skip Already-Enriched Tables on Re-Run
+
+5. **Detect enrichment state**: Before calling LLM for a table, check if `table.semantic_detail` already exists with `inference_confidence > 0`. If so, skip unless the user explicitly requests full re-enrichment.
+
+6. **Add `force` parameter to `/pipeline/re-enrich`**: Default `false`. When `false`, only enrich tables that have no semantic_detail or have `inference_confidence == 0` (heuristic-only). When `true`, re-enrich all unlocked tables.
+
+7. **Frontend re-enrich UX**: Show two options:
+   - "Enrich remaining" (default) -- only processes un-enriched tables
+   - "Full re-enrich" -- re-processes all unlocked tables
+   - Show count: "3 of 8 tables already enriched. Enrich remaining 5?"
+
+#### 11C: Pipeline State Persistence
+
+8. **Persist generated models to SQLite**: After `generate_staging_models()` and `generate_mart_models()`, store each model's SQL, status, source tables, and target schema in a `generated_models` table.
+
+9. **Persist contracts to SQLite**: After `generate_contracts()`, store contract definitions. Already partially supported by existing metadata schema -- wire it up.
+
+10. **Persist execution results**: After `run_models()`, store success/failure status per model with timestamp and error message (if any) in an `execution_log` table.
+
+11. **Persist quality report**: After `build_report()`, store summary metrics (total, passed, failed) and per-contract results.
+
+12. **Restore full pipeline state on startup**: In `lifespan()`, restore models, contracts, and latest execution results from SQLite alongside the existing discovery/catalog restoration.
+
+#### 11D: Catalog Incremental Update
+
+13. **Checkpoint catalog per-table**: After extracting metrics/dimensions/entities for each table in `build_catalog()`, persist immediately rather than waiting for the full catalog to complete.
+
+14. **Incremental catalog rebuild**: When re-enrichment updates a single table's semantic detail, rebuild only that table's catalog entries (metrics, dimensions, entity) rather than rebuilding the entire catalog from scratch.
+
+#### 11E: Holistic Project State View
+
+15. **Unified project status API**: New endpoint `GET /api/project/status` returns:
+    - Per-stage completion: discovery (N tables), profiling (N profiled), enrichment (N/M enriched), models (N generated, M approved), quality (N contracts, M passing)
+    - Last activity timestamp per stage
+    - Overall maturity level with evidence
+    - List of "stale" items (enriched before last schema change)
+
+16. **Frontend project dashboard**: Replace scattered stage indicators with a single holistic view showing all stages, their completion state, and what needs attention next. Each stage links to its detail page.
+
+### Phase 12: Explorer Verification -- Complex Query & Visualization Accuracy
 
 **Problem**: Auto-generated queries handle only simple single-table GROUP BY and basic 1-2 hop JOINs. Medium-to-high complexity insights fail both SQL-wise (incorrect queries, missing patterns) and visually (wrong chart type, misclassified columns). The press release promises "clarifying questions" and accurate exploration, but the current explorer can't correctly represent multi-metric trends, temporal aggregations with custom granularity, comparative analyses, or correlated breakdowns.
 
@@ -362,7 +442,7 @@ V2 built the semantic catalog backend (LanceDB, Kuzu, 3-strategy decomposer) and
 
 **Files**: `explorer/decomposition.py`, `explorer/nl_to_sql.py`, `explorer/visualization.py`, `explorer/query_patterns.py` (NEW), `components/result-chart.tsx`, `app/explore/page.tsx`
 
-#### 11A: Extended SQL Generation Patterns
+#### 12A: Extended SQL Generation Patterns
 
 1. **`explorer/query_patterns.py`** (NEW module): Pattern library for complex queries
    - `TemporalAggregation`: DATE_TRUNC at configurable granularity (day/week/month/quarter/year), period-over-period comparison
@@ -385,7 +465,7 @@ V2 built the semantic catalog backend (LanceDB, Kuzu, 3-strategy decomposer) and
    - Temporal + dimension: `GROUP BY DATE_TRUNC('month', date_col), category` for "monthly trend by category"
    - Improve JOIN logic: support 3-hop JOINs through intermediate tables when catalog graph shows a path
 
-#### 11B: Catalog-Aware Visualization
+#### 12B: Catalog-Aware Visualization
 
 4. **Enhance `visualization.py`**:
    - Replace name-pattern regex with catalog-first classification:
@@ -405,7 +485,7 @@ V2 built the semantic catalog backend (LanceDB, Kuzu, 3-strategy decomposer) and
    - Add `HistogramChart` variant (bucket distribution of single metric)
    - Improve axis labeling: use catalog display names, format numbers (k/M/B suffixes), date formatting by granularity
 
-#### 11C: Query Hint Validation
+#### 12C: Query Hint Validation
 
 6. **Suggestion SQL refresh**: When catalog is re-enriched (Phase 4A), regenerate SQL hints for all suggested questions. Old hints are invalidated, new ones generated against current schema.
 
@@ -414,7 +494,7 @@ V2 built the semantic catalog backend (LanceDB, Kuzu, 3-strategy decomposer) and
    - Verify all referenced tables/columns exist in current schema
    - If validation fails, attempt auto-repair (fix column names, table aliases) before falling back to error
 
-#### 11D: Verification Suite
+#### 12D: Verification Suite
 
 8. **Test queries against sample dataset** (8 tables, 59.9K records, environmental health domain):
    - Simple: "How many inspections?" -- single COUNT, KPI chart
@@ -457,7 +537,9 @@ V2 built the semantic catalog backend (LanceDB, Kuzu, 3-strategy decomposer) and
 | `api/routes/dictionary.py` | MODIFY | Editable descriptions, PK persistence |
 | `core/metadata.py` | MODIFY | `save_model_answers`, `log_activity`, `persist_pk_fk` |
 | `core/config.py` | MODIFY | Load settings from `settings.json` file |
-| `analyzer/semantic.py` | MODIFY | Ensure LLM enrichment runs when provider configured |
+| `analyzer/semantic.py` | MODIFY | Per-table checkpointing, skip already-enriched, store passthrough |
+| `analyzer/catalog.py` | MODIFY | Per-table catalog persistence, incremental rebuild |
+| `api/app.py` | MODIFY | Restore full pipeline state (models, contracts, exec results) on startup |
 | `explorer/query_patterns.py` | CREATE | Pattern library for complex SQL (window, HAVING, subquery, temporal) |
 | `explorer/decomposition.py` | MODIFY | Route through pattern library, computed columns, HAVING support |
 | `explorer/nl_to_sql.py` | MODIFY | New heuristic patterns (comparison, correlation, distribution, cumulative), 3-hop JOINs |
@@ -490,18 +572,23 @@ V2 built the semantic catalog backend (LanceDB, Kuzu, 3-strategy decomposer) and
 
 | Order | Phase | Dependencies | Effort |
 |-------|-------|-------------|--------|
-| 1 | Phase 1: Project Identity | None | S |
-| 2 | Phase 6: Settings Persistence | None | S |
-| 3 | Phase 4A: LLM Descriptions | Phase 6 (settings) | M |
-| 4 | Phase 4B: PK/FK Detection | None | M |
-| 5 | Phase 2: Pipeline Stepper | None | S |
-| 6 | Phase 3: Review Queue | Phase 1 (projects) | M |
-| 7 | Phase 5: Question Resolution | None | M |
-| 8 | Phase 10: Editable Dictionary | Phase 4B (PK/FK) | S |
-| 9 | Phase 7: Deduplicate Metadata | None | S |
-| 10 | Phase 8: Quality Visual | None | M |
-| 11 | Phase 9: Dashboard Advisory | Phases 1-8 | M |
-| 12 | Phase 11: Explorer Verification | Phase 4A (catalog semantics) | L |
+| 1 | Phase 11A: Per-Table Enrichment Checkpointing | None | M |
+| 2 | Phase 11B: Skip Already-Enriched on Re-Run | Phase 11A | S |
+| 3 | Phase 11C: Pipeline State Persistence | None | M |
+| 4 | Phase 6: Settings Persistence | None | S |
+| 5 | Phase 1: Project Identity | None | S |
+| 6 | Phase 4A: LLM Descriptions | Phase 6 + 11A | M |
+| 7 | Phase 4B: PK/FK Detection | None | M |
+| 8 | Phase 2: Pipeline Stepper | Phase 11C (state) | S |
+| 9 | Phase 3: Review Queue | Phase 1 (projects) | M |
+| 10 | Phase 5: Question Resolution | None | M |
+| 11 | Phase 10: Editable Dictionary | Phase 4B (PK/FK) | S |
+| 12 | Phase 7: Deduplicate Metadata | None | S |
+| 13 | Phase 11D: Catalog Incremental Update | Phase 11A | S |
+| 14 | Phase 11E: Holistic Project State View | Phase 11C | M |
+| 15 | Phase 8: Quality Visual | None | M |
+| 16 | Phase 9: Dashboard Advisory | Phases 1-8, 11E | M |
+| 17 | Phase 12: Explorer Verification | Phase 4A (catalog semantics) | L |
 
 S = Small (1-2 files), M = Medium (3-5 files), L = Large (6+ files)
 
@@ -509,15 +596,19 @@ S = Small (1-2 files), M = Medium (3-5 files), L = Large (6+ files)
 
 ## Verification
 
-1. **Project creation**: Sidebar shows "[+ New]", creating a project shows it immediately with display name. Multiple projects visible.
-2. **Pipeline stepper**: Dashboard shows connected boxes (Discover -> Profile -> Review -> Model -> Quality) with status icons and pending counts. Each box links to its page.
-3. **Review queue**: Dashboard groups all review items by stage. Each item has a resolution link that navigates to the exact context.
-4. **LLM descriptions**: After configuring Ollama/Anthropic in settings and re-enriching, column descriptions are business-friendly (not just column names).
-5. **PK/FK suggestions**: Dictionary shows "Suggested PK: zone_id (100% unique)" with Confirm/Reject. FK suggestions show match %.
-6. **Question resolution**: Model page questions have answer inputs. Answering stores response and optionally regenerates SQL.
-7. **Settings persistence**: Restart server -> settings preserved. Changing LLM provider shows "Re-enrich?" prompt.
-8. **No duplicate metadata**: Discovery shows profile data only. Dictionary shows editable descriptions. Models show SQL + lineage only. Quality shows issues only.
-9. **Quality visual**: Scorecard cards, grouped issues by severity with resolution links, contracts by status.
-10. **Activity feed**: Dashboard shows recent actions with timestamps.
-11. **Explorer verification**: "Monthly inspection trend by zone" produces correct DATE_TRUNC + GROUP BY SQL and renders as grouped line chart. "Top 5 zones by complaint count" renders as horizontal bar. Complex queries (year-over-year comparison, above-average filter, running totals) execute without error and select appropriate chart types.
-12. **Build**: `cd headwater/ui && npm run build` -- zero errors. `cd headwater && uv run ruff check .` -- zero lint.
+1. **Incremental enrichment**: Run re-enrich with Ollama. Kill the server mid-enrichment (after 3 of 8 tables). Restart. The 3 enriched tables retain their LLM descriptions in SQLite. Re-enrich again -- only the remaining 5 tables are processed.
+2. **Pipeline state survives restart**: Run full pipeline. Restart server. Dashboard still shows models, contracts, execution results, quality report -- not empty.
+3. **Re-run improves, doesn't reset**: After partial enrichment, re-running enrichment picks up where it left off. Already-enriched tables are skipped. Total enriched count increases monotonically.
+4. **Holistic project status**: Single API endpoint returns completion state for every stage. Frontend shows unified view.
+5. **Project creation**: Sidebar shows "[+ New]", creating a project shows it immediately with display name. Multiple projects visible.
+6. **Pipeline stepper**: Dashboard shows connected boxes (Discover -> Profile -> Review -> Model -> Quality) with status icons and pending counts. Each box links to its page.
+7. **Review queue**: Dashboard groups all review items by stage. Each item has a resolution link that navigates to the exact context.
+8. **LLM descriptions**: After configuring Ollama/Anthropic in settings and re-enriching, column descriptions are business-friendly (not just column names).
+9. **PK/FK suggestions**: Dictionary shows "Suggested PK: zone_id (100% unique)" with Confirm/Reject. FK suggestions show match %.
+10. **Question resolution**: Model page questions have answer inputs. Answering stores response and optionally regenerates SQL.
+11. **Settings persistence**: Restart server -> settings preserved. Changing LLM provider shows "Re-enrich?" prompt.
+12. **No duplicate metadata**: Discovery shows profile data only. Dictionary shows editable descriptions. Models show SQL + lineage only. Quality shows issues only.
+13. **Quality visual**: Scorecard cards, grouped issues by severity with resolution links, contracts by status.
+14. **Activity feed**: Dashboard shows recent actions with timestamps.
+15. **Explorer verification**: "Monthly inspection trend by zone" produces correct DATE_TRUNC + GROUP BY SQL and renders as grouped line chart. "Top 5 zones by complaint count" renders as horizontal bar. Complex queries (year-over-year comparison, above-average filter, running totals) execute without error and select appropriate chart types.
+16. **Build**: `cd headwater/ui && npm run build` -- zero errors. `cd headwater && uv run ruff check .` -- zero lint.

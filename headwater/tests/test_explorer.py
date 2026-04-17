@@ -399,6 +399,170 @@ class TestSuggestions:
             )
 
 
+class TestCrossTableSuggestions:
+    """Tests for SchemaGraph-based cross-table suggestion generation."""
+
+    def test_cross_table_suggestions_generated(self):
+        """Cross-table suggestions should be generated when tables are joinable."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(
+                            name="order_id", dtype="int64",
+                            semantic_type="id", is_primary_key=True,
+                        ),
+                        ColumnInfo(name="customer_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="customers",
+                    row_count=200,
+                    columns=[
+                        ColumnInfo(
+                            name="customer_id", dtype="int64",
+                            semantic_type="id", is_primary_key=True,
+                        ),
+                        ColumnInfo(name="region", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=3000,
+                    min_value=1.0,
+                    max_value=1000.0,
+                    mean=150.0,
+                ),
+                ColumnProfile(
+                    table_name="customers",
+                    column_name="region",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=10,
+                    top_values=[("East", 80), ("West", 60), ("North", 40)],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="orders",
+                    from_column="customer_id",
+                    to_table="customers",
+                    to_column="customer_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+            ],
+        )
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+        assert len(cross_qs) > 0, "Should generate cross-table suggestions when join paths exist"
+        assert all(q.sql_hint is not None for q in cross_qs)
+        assert all(len(q.relevant_tables) == 2 for q in cross_qs)
+
+    def test_cross_table_no_join_path_no_suggestions(self):
+        """Cross-table suggestions should not be generated without join paths."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(name="order_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="products",
+                    row_count=100,
+                    columns=[
+                        ColumnInfo(name="product_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="category", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[],
+            relationships=[],
+        )
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+        assert len(cross_qs) == 0, "Should not generate cross-table suggestions without join paths"
+
+    def test_extra_relationships_enrich_suggestions(self):
+        """Confirmed PK/FK relationships should produce additional suggestions."""
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="invoices",
+                    row_count=3000,
+                    columns=[
+                        ColumnInfo(name="invoice_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="vendor_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="total", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="vendors",
+                    row_count=50,
+                    columns=[
+                        ColumnInfo(
+                            name="vendor_id", dtype="int64",
+                            semantic_type="id", is_primary_key=True,
+                        ),
+                        ColumnInfo(name="industry", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="vendors",
+                    column_name="industry",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=8,
+                    top_values=[("Tech", 20), ("Finance", 15)],
+                ),
+            ],
+            relationships=[],  # No auto-detected relationships
+        )
+
+        # Without extra_relationships: no cross-table or relationship suggestions
+        qs_without = generate_suggestions(discovery=discovery)
+        cross_without = [q for q in qs_without if q.source in ("cross_table", "relationship")]
+
+        # With confirmed FK relationship
+        extra = [
+            Relationship(
+                from_table="invoices",
+                from_column="vendor_id",
+                to_table="vendors",
+                to_column="vendor_id",
+                type="many_to_one",
+                confidence=1.0,
+                referential_integrity=1.0,
+                source="declared",
+            ),
+        ]
+        qs_with = generate_suggestions(discovery=discovery, extra_relationships=extra)
+        cross_with = [q for q in qs_with if q.source in ("cross_table", "relationship")]
+
+        assert len(cross_with) > len(cross_without), (
+            "Confirmed relationships should produce additional cross-table suggestions"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Statistical tests
 # ---------------------------------------------------------------------------
