@@ -42,8 +42,11 @@ logger = logging.getLogger(__name__)
 # ── Intent constants ─────────────────────────────────────────────────────────
 
 INTENT_COUNT = "count"
+INTENT_COUNT_DISTINCT = "count_distinct"
 INTENT_AVERAGE = "average"
 INTENT_SUM = "sum"
+INTENT_MAX = "max"
+INTENT_MIN = "min"
 INTENT_TREND = "trend"
 INTENT_TOP = "top"
 INTENT_DISTRIBUTION = "distribution"
@@ -94,6 +97,8 @@ _INTENT_SIGNALS: list[tuple[str, set[str]]] = [
         },
     ),
     (INTENT_AVERAGE, {"average", "avg", "mean"}),
+    (INTENT_MAX, {"maximum", "max"}),
+    (INTENT_MIN, {"minimum", "min"}),
     (INTENT_SUM, {"sum", "total", "cumulative"}),
     (INTENT_DISTRIBUTION, {"distribution", "spread", "histogram", "range", "percentile"}),
     (INTENT_LIST, {"show", "list", "display", "browse"}),
@@ -179,7 +184,9 @@ _ANALYTICAL_WORDS: frozenset[str] = frozenset(
         "total",
         "count",
         "max",
+        "maximum",
         "min",
+        "minimum",
         "median",
         "rate",
         "ratio",
@@ -229,6 +236,9 @@ _ANALYTICAL_WORDS: frozenset[str] = frozenset(
         "best",
         "largest",
         "smallest",
+        "distinct",
+        "unique",
+        "different",
     }
 )
 
@@ -258,6 +268,7 @@ class QueryPlan:
     limit: int | None = 20
     confidence: float = 0.0
     warnings: list[str] = field(default_factory=list)
+    has_predicate: bool = False  # True when question had "by X" / "per X"
 
 
 # ── Query planner ────────────────────────────────────────────────────────────
@@ -370,6 +381,7 @@ class QueryPlanner:
             dimensions=dimensions,
             time_axis=temporal,
             joins=joins,
+            has_predicate=bool(predicate_words),
         )
 
         # Apply defaults when the question didn't mention specific columns
@@ -607,7 +619,9 @@ class QueryPlanner:
         # If we have dimensions but no metrics, and intent needs a metric
         # (AVERAGE, SUM), add the best metric from the primary table.
         # For COUNT/TOP/BREAKDOWN, implicit COUNT(*) is added in SQL generation.
-        if plan.dimensions and not plan.measures and plan.intent in (INTENT_AVERAGE, INTENT_SUM):
+        if plan.dimensions and not plan.measures and plan.intent in (
+            INTENT_AVERAGE, INTENT_SUM, INTENT_MAX, INTENT_MIN,
+        ):
             metric = self.graph.get_best_metric(plan.primary_table)
             if metric:
                 plan.measures.append(
@@ -618,13 +632,39 @@ class QueryPlanner:
                     )
                 )
 
-        # If we have metrics but no dimensions, add the best dimension
-        if plan.measures and not plan.dimensions and plan.intent != INTENT_TREND:
+        # If we have metrics but no dimensions, add the best dimension.
+        # EXCEPT: for AVERAGE/SUM intents without a predicate ("by X"),
+        # the question is asking for a scalar value -- don't add a dimension.
+        # "What is the average value?" → scalar.
+        # "Average value by zone" → has_predicate, so dimension is added.
+        skip_default_dim = (
+            plan.intent in (INTENT_AVERAGE, INTENT_SUM, INTENT_MAX, INTENT_MIN)
+            and not plan.has_predicate
+        )
+        if (
+            plan.measures
+            and not plan.dimensions
+            and plan.intent != INTENT_TREND
+            and not skip_default_dim
+        ):
             dim = self.graph.get_best_dimension(plan.primary_table)
             if dim:
                 plan.dimensions.append(
                     ResolvedColumn(dim.table_name, dim.info.name, ROLE_DIMENSION)
                 )
+
+        # AVERAGE/SUM/MAX/MIN with a predicate ("by month") but nothing resolved yet:
+        # add the best temporal axis so the query groups over time.
+        if (
+            plan.intent in (INTENT_AVERAGE, INTENT_SUM, INTENT_MAX, INTENT_MIN)
+            and plan.has_predicate
+            and not plan.dimensions
+            and plan.time_axis is None
+        ):
+            temps = self.graph.get_temporals(plan.primary_table)
+            if temps:
+                t = temps[0]
+                plan.time_axis = ResolvedColumn(t.table_name, t.info.name, ROLE_TEMPORAL)
 
         # If we have nothing resolved, fall back to table's best columns
         if not plan.dimensions and not plan.measures and plan.time_axis is None:
@@ -702,6 +742,37 @@ class QueryPlanner:
     def _plan_to_sql(self, plan: QueryPlan) -> str:
         """Generate SQL from a QueryPlan."""
         primary_ref = self._resolve_ref(plan.primary_table)
+
+        # ── COUNT DISTINCT shortcut ─────────────────────────────────
+        # "How many distinct X?" → scalar COUNT(DISTINCT col)
+        if plan.intent == INTENT_COUNT_DISTINCT and plan.dimensions:
+            dim = plan.dimensions[0]
+            # Build FROM clause with JOINs if needed
+            if plan.joins:
+                aliases: dict[str, str] = {plan.primary_table: "t0"}
+                from_clause = f"{primary_ref} t0"
+                for i, step in enumerate(plan.joins, 1):
+                    alias = f"t{i}"
+                    aliases[step.to_table] = alias
+                    join_ref = self._resolve_ref(step.to_table)
+                    from_alias = aliases.get(step.from_table, "t0")
+                    from_clause += (
+                        f" JOIN {join_ref} {alias}"
+                        f' ON {from_alias}."{step.from_column}"'
+                        f' = {alias}."{step.to_column}"'
+                    )
+                dim_alias = aliases.get(dim.table_name, "t0")
+                col_ref = f'{dim_alias}."{dim.column_name}"'
+            else:
+                from_clause = self._resolve_ref(dim.table_name)
+                col_ref = f'"{dim.column_name}"'
+            return (
+                f"SELECT COUNT(DISTINCT {col_ref}) AS "
+                f"distinct_{dim.column_name} FROM {from_clause}"
+            )
+        # COUNT DISTINCT with no resolved dimension → COUNT(*) on primary
+        if plan.intent == INTENT_COUNT_DISTINCT:
+            return f"SELECT COUNT(*) AS total FROM {primary_ref}"
 
         # ── Build FROM clause with JOINs ─────────────────────────────
         aliases: dict[str, str] = {}
@@ -821,6 +892,10 @@ class QueryPlanner:
         """Return the aggregation function for an intent."""
         if intent == INTENT_SUM:
             return "SUM"
+        if intent == INTENT_MAX:
+            return "MAX"
+        if intent == INTENT_MIN:
+            return "MIN"
         if intent == INTENT_COUNT:
             return "AVG"  # COUNT goes via COUNT(*); metric aggregation defaults to AVG
         return "AVG"
@@ -844,10 +919,11 @@ class QueryPlanner:
             if "COUNT(*) AS total" in " ".join(select_parts):
                 return " ORDER BY total DESC"
 
-        # Average queries order by the aggregate
-        if plan.intent == INTENT_AVERAGE and plan.measures:
+        # Average/max/min queries order by the aggregate
+        if plan.intent in (INTENT_AVERAGE, INTENT_MAX, INTENT_MIN) and plan.measures:
             m = plan.measures[0]
-            return f" ORDER BY avg_{m.column_name} DESC"
+            agg = self._agg_for_intent(plan.intent).lower()
+            return f" ORDER BY {agg}_{m.column_name} DESC"
 
         return ""
 
@@ -887,6 +963,11 @@ def _detect_intent(tokens: list[str]) -> str:
     # Special case: "over time" strongly indicates trend
     if "over" in token_set and "time" in token_set:
         best_intent = INTENT_TREND
+
+    # Special case: "how many distinct/unique X" is COUNT DISTINCT
+    distinct_words = {"distinct", "unique", "different"}
+    if best_intent == INTENT_COUNT and token_set & distinct_words:
+        best_intent = INTENT_COUNT_DISTINCT
 
     return best_intent
 

@@ -681,7 +681,13 @@ class TestNlToSql:
         assert _questions_similar("what is the average", "what is the average") is True
 
     def test_questions_similar_contains(self):
-        assert _questions_similar("average pm25", "what is the average pm25 by zone") is True
+        # "average pm25" (scalar) should NOT match "average pm25 by zone" (grouped)
+        # because adding "by zone" changes the query structure entirely.
+        assert _questions_similar("average pm25", "what is the average pm25 by zone") is False
+
+    def test_questions_similar_contains_same_structure(self):
+        # Both scalar -- substring match should work
+        assert _questions_similar("average pm25", "what is the average pm25") is True
 
     def test_questions_dissimilar(self):
         assert _questions_similar("hello world", "goodbye moon") is False

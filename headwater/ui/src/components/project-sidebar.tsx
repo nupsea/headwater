@@ -6,11 +6,11 @@ import { api, type Project, type ProjectProgress } from "@/lib/api";
 import { CreateProjectDialog } from "@/components/create-project-dialog";
 
 const MATURITY_COLORS: Record<string, string> = {
-  raw: "bg-gray-200 text-gray-700",
-  profiled: "bg-blue-100 text-blue-800",
-  documented: "bg-green-100 text-green-800",
-  modeled: "bg-purple-100 text-purple-800",
-  production: "bg-emerald-100 text-emerald-800",
+  raw: "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
+  profiled: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
+  documented: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
+  modeled: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300",
+  production: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300",
 };
 
 const MATURITY_WIDTHS: Record<string, string> = {

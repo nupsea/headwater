@@ -7,6 +7,7 @@ import {
   type LLMSettingsUpdate,
   type LLMVerifyResponse,
 } from "@/lib/api";
+import { useToast } from "@/components/toast";
 
 const PROVIDERS = [
   {
@@ -32,6 +33,7 @@ const PROVIDERS = [
 ];
 
 export default function SettingsPage() {
+  const { toast } = useToast();
   const [settings, setSettings] = useState<LLMSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -127,6 +129,7 @@ export default function SettingsPage() {
       setApiKey("");
       setOpenaiKey("");
       setMessage("Settings saved.");
+      toast("Settings saved.", "success");
 
       // Auto-verify after save (for non-none providers)
       if (updated.provider !== "none") {
@@ -155,7 +158,9 @@ export default function SettingsPage() {
         setShowReEnrich(true);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      toast(`Save failed: ${msg}`, "error");
     }
     setSaving(false);
   };
@@ -179,12 +184,12 @@ export default function SettingsPage() {
       </p>
 
       {error && (
-        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700">
+        <div className="mb-4 p-3 bg-[var(--danger)]/10 border border-[var(--danger)]/20 rounded text-sm text-[var(--danger)]">
           {error}
         </div>
       )}
       {message && (
-        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded text-sm text-green-800">
+        <div className="mb-4 p-3 bg-[var(--success)]/10 border border-[var(--success)]/20 rounded text-sm text-[var(--success)]">
           {message}
         </div>
       )}
@@ -243,25 +248,25 @@ export default function SettingsPage() {
                 </div>
               ) : ollamaError ? (
                 <div>
-                  <div className="px-3 py-2 border border-red-300 rounded bg-red-50 text-sm text-red-700 mb-2">
+                  <div className="px-3 py-2 border border-[var(--danger)]/20 rounded bg-[var(--danger)]/10 text-sm text-[var(--danger)] mb-2">
                     {ollamaError}
                   </div>
                   <button
                     onClick={fetchOllamaModels}
-                    className="text-xs text-blue-600 underline hover:text-blue-800"
+                    className="text-xs text-accent underline hover:opacity-80"
                   >
                     Retry
                   </button>
                 </div>
               ) : ollamaModels.length === 0 ? (
                 <div>
-                  <div className="px-3 py-2 border border-amber-300 rounded bg-amber-50 text-sm text-amber-800 mb-2">
+                  <div className="px-3 py-2 border border-[var(--warning)]/20 rounded bg-[var(--warning)]/10 text-sm text-[var(--warning)] mb-2">
                     No models found. Pull a model first:{" "}
                     <code className="font-mono">ollama pull mistral</code>
                   </div>
                   <button
                     onClick={fetchOllamaModels}
-                    className="text-xs text-blue-600 underline hover:text-blue-800"
+                    className="text-xs text-accent underline hover:opacity-80"
                   >
                     Refresh
                   </button>
@@ -325,7 +330,7 @@ export default function SettingsPage() {
               <label className="block text-xs text-muted mb-1">
                 API Key{" "}
                 {settings?.has_api_key && (
-                  <span className="text-green-600">(set)</span>
+                  <span className="text-[var(--success)]">(set)</span>
                 )}
               </label>
               <input
@@ -375,7 +380,7 @@ export default function SettingsPage() {
               <label className="block text-xs text-muted mb-1">
                 API Key{" "}
                 {settings?.has_openai_compat_key && (
-                  <span className="text-green-600">(set)</span>
+                  <span className="text-[var(--success)]">(set)</span>
                 )}
               </label>
               <input
@@ -452,8 +457,8 @@ export default function SettingsPage() {
         <div
           className={`mb-6 p-3 border rounded text-sm ${
             verifyResult.status === "ok"
-              ? "bg-green-50 border-green-200 text-green-800"
-              : "bg-red-50 border-red-200 text-red-700"
+              ? "bg-[var(--success)]/10 border-[var(--success)]/20 text-[var(--success)]"
+              : "bg-[var(--danger)]/10 border-[var(--danger)]/20 text-[var(--danger)]"
           }`}
         >
           {verifyResult.status === "ok" ? (

@@ -26,10 +26,10 @@ const ROLE_OPTIONS = [
 ];
 
 const STATUS_BADGE: Record<string, string> = {
-  reviewed: "bg-green-100 text-green-800 border-green-200",
-  pending: "bg-yellow-100 text-yellow-800 border-yellow-200",
-  in_review: "bg-blue-100 text-blue-800 border-blue-200",
-  skipped: "bg-gray-100 text-gray-600 border-gray-200",
+  reviewed: "bg-green-100 text-green-800 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700",
+  pending: "bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-700",
+  in_review: "bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700",
+  skipped: "bg-gray-100 text-gray-600 border-gray-200 dark:bg-gray-800/30 dark:text-gray-400 dark:border-gray-600",
 };
 
 const CONFIDENCE_BG: Record<string, string> = {
@@ -271,7 +271,7 @@ export default function DictionaryPage() {
           )}
 
           {message && (
-            <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded text-sm text-green-800">
+            <div className="mb-4 p-3 bg-[var(--success)]/10 border border-[var(--success)]/20 rounded text-sm text-[var(--success)]">
               {message}
             </div>
           )}
@@ -467,7 +467,7 @@ export default function DictionaryPage() {
                               <td className="px-3 py-2 text-center">
                                 {isLocked ? (
                                   col.is_primary_key ? (
-                                    <span className="text-green-600 font-bold">PK</span>
+                                    <span className="text-[var(--success)] font-bold">PK</span>
                                   ) : null
                                 ) : (
                                   <input
@@ -515,7 +515,7 @@ export default function DictionaryPage() {
                           key={i}
                           className={`text-xs p-2 rounded ${
                             r.integrity < 0.5
-                              ? "bg-amber-50 border border-amber-200"
+                              ? "bg-[var(--warning)]/10 border border-[var(--warning)]/20"
                               : ""
                           }`}
                         >
@@ -534,7 +534,7 @@ export default function DictionaryPage() {
                             <ConfidenceDot value={r.integrity} />
                           </div>
                           {r.integrity < 0.5 && (
-                            <div className="text-[10px] text-amber-700 mt-1">
+                            <div className="text-[10px] text-[var(--warning)] mt-1">
                               {(r.integrity * 100).toFixed(0)}% of rows have
                               matching records -- JOINs will lose{" "}
                               {((1 - r.integrity) * 100).toFixed(0)}% of data

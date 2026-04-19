@@ -249,15 +249,15 @@ export default function QualityPage() {
               <Link
                 key={`issue-${i}`}
                 href="/dictionary"
-                className="block border-l-4 border-l-red-500 bg-red-50 rounded-r-lg p-3 hover:opacity-80 transition-opacity"
+                className="block border-l-4 border-l-[var(--danger)] bg-[color-mix(in_srgb,var(--danger)_10%,var(--card))] rounded-r-lg p-3 hover:opacity-80 transition-opacity"
               >
                 <div className="flex items-center justify-between">
-                  <div className="text-sm font-medium">
+                  <div className="text-sm font-medium text-foreground">
                     {ci.table}.{ci.column}
                   </div>
                   <span className="text-xs text-muted">Review &rarr;</span>
                 </div>
-                <div className="text-xs text-red-700 mt-0.5">
+                <div className="text-xs text-[var(--danger)] mt-0.5">
                   {ci.issues
                     .filter((i) => i.severity === "error")
                     .map((i) => i.message)
@@ -268,11 +268,11 @@ export default function QualityPage() {
             {highNulls.map((n) => (
               <div
                 key={`null-${n.table}-${n.column}`}
-                className="border-l-4 border-l-amber-500 bg-amber-50 rounded-r-lg p-3"
+                className="border-l-4 border-l-[var(--warning)] bg-[color-mix(in_srgb,var(--warning)_10%,var(--card))] rounded-r-lg p-3"
               >
                 <div className="flex items-center justify-between">
                   <div className="text-sm">
-                    <span className="font-mono font-medium">
+                    <span className="font-mono font-medium text-foreground">
                       {n.table}.{n.column}
                     </span>
                     <span className="text-muted ml-2">
@@ -288,16 +288,16 @@ export default function QualityPage() {
               <Link
                 key={`rel-${i}`}
                 href="/models"
-                className="block border-l-4 border-l-amber-500 bg-amber-50 rounded-r-lg p-3 hover:opacity-80 transition-opacity"
+                className="block border-l-4 border-l-[var(--warning)] bg-[color-mix(in_srgb,var(--warning)_10%,var(--card))] rounded-r-lg p-3 hover:opacity-80 transition-opacity"
               >
                 <div className="flex items-center justify-between">
-                  <div className="text-sm font-mono">
+                  <div className="text-sm font-mono text-foreground">
                     {r.from_table}.{r.from_column} &rarr; {r.to_table}.
                     {r.to_column}
                   </div>
                   <span className="text-xs text-muted">Investigate &rarr;</span>
                 </div>
-                <div className="text-xs text-amber-700 mt-0.5">
+                <div className="text-xs text-[var(--warning)] mt-0.5">
                   {(r.integrity * 100).toFixed(0)}% integrity -- JOINs will
                   lose {((1 - r.integrity) * 100).toFixed(0)}% of data
                 </div>

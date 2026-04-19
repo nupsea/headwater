@@ -12,6 +12,7 @@ import {
   type ProjectProgress,
   type ActivityEntry,
 } from "@/lib/api";
+import { useToast } from "@/components/toast";
 import { PipelineStepper } from "@/components/pipeline-stepper";
 import { ReviewQueue } from "@/components/review-queue";
 import { ActivityFeed } from "@/components/activity-feed";
@@ -23,6 +24,7 @@ import { DriftBanner } from "@/components/drift-banner";
 import { ConfidenceDot } from "@/components/confidence-dot";
 
 export default function DashboardPage() {
+  const { toast } = useToast();
   const [, setStatus] = useState<StatusResponse | null>(null);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [driftReport, setDriftReport] = useState<DriftReport | null>(null);
@@ -93,14 +95,17 @@ export default function DashboardPage() {
     setPhase("Discovering, profiling, modeling, and validating...");
     try {
       const result: PipelineRunResponse = await api.pipelineRun(sourcePath);
-      setPhase(
+      const summary =
         `Done: ${result.tables_discovered} tables, ` +
-          `${result.profiles} profiles, ${result.relationships} relationships, ` +
-          `${result.quality_passed}/${result.quality_total} quality checks passed.`
-      );
+        `${result.profiles} profiles, ${result.relationships} relationships, ` +
+        `${result.quality_passed}/${result.quality_total} quality checks passed.`;
+      setPhase(summary);
+      toast("Pipeline complete", "success");
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      toast(`Pipeline failed: ${msg}`, "error");
       setPhase("");
     }
     setLoading(false);
@@ -196,10 +201,10 @@ export default function DashboardPage() {
 
   const SEVERITY_STYLES = {
     critical:
-      "border-l-red-500 bg-red-50",
+      "border-l-[var(--danger)] bg-[color-mix(in_srgb,var(--danger)_10%,var(--card))]",
     warning:
-      "border-l-amber-500 bg-amber-50",
-    info: "border-l-blue-500 bg-blue-50",
+      "border-l-[var(--warning)] bg-[color-mix(in_srgb,var(--warning)_10%,var(--card))]",
+    info: "border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_10%,var(--card))]",
   };
 
   return (
@@ -323,12 +328,12 @@ export default function DashboardPage() {
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <div className="text-sm font-medium">{item.label}</div>
+                      <div className="text-sm font-medium text-foreground">{item.label}</div>
                       <span className="text-xs text-muted shrink-0 ml-2">
                         Review &rarr;
                       </span>
                     </div>
-                    <div className="text-xs text-muted mt-0.5">
+                    <div className="text-xs text-muted mt-0.5 truncate">
                       {item.detail}
                     </div>
                   </Link>

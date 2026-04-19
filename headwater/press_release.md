@@ -109,6 +109,31 @@ A managed cloud version with built-in Postgres, LLM integration, SSO, and team c
 
 ---
 
+## Current Availability (v0.3)
+
+Available today:
+- JSON, CSV, Parquet file connectors
+- Postgres database connector
+- Full discovery-to-quality pipeline (discover, profile, analyze, generate, execute, validate)
+- LLM-optional with three modes: air-gapped heuristic, local Ollama, cloud Anthropic
+- React review UI with dashboard, dictionary, models, quality, data, explore, and settings pages
+- Health check endpoint with component-level status
+- Schema drift detection and alerting
+- Semantic locking (approved classifications persist across runs)
+- Quality contracts with observation mode
+- Confidence tracking per table and column
+
+On the roadmap:
+- Snowflake, BigQuery, MySQL, Redshift connectors
+- AWS Glue, Databricks Unity Catalog, Iceberg REST catalog connectors
+- dbt project export
+- Plugin architecture for connectors, exporters, LLM providers
+- Explore deep insights with statistical rigor and correctness validation
+- Observe mode for cloud warehouses (read-only, no materialization)
+- Managed cloud version with SSO and team collaboration
+
+---
+
 ## Get Started
 
 10 minutes from zero to your first discovery report:

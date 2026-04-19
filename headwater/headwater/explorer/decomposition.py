@@ -26,6 +26,7 @@ from headwater.core.models import (
     DimensionMatch,
     DimensionOption,
     EntityDefinition,
+    GeneratedModel,
     MetricDefinition,
     MetricMatch,
     SemanticCatalog,
@@ -209,8 +210,15 @@ class QueryDecomposer:
         result = decomposer.decompose("complaints by county", vector_store=vs)
     """
 
-    def __init__(self, catalog: SemanticCatalog) -> None:
+    def __init__(
+        self,
+        catalog: SemanticCatalog,
+        con: Any | None = None,
+        models: list[GeneratedModel] | None = None,
+    ) -> None:
         self.catalog = catalog
+        self._con = con
+        self._models = models or []
         self._name_index: dict[str, list[tuple[str, str, str]]] = {}
         self._build_index()
 
@@ -281,9 +289,31 @@ class QueryDecomposer:
 
         # If intent is clear and multiple metrics matched, prefer the one matching the intent
         if intent and len(metric_matches) > 1:
-            intent_matches = [m for m in metric_matches if self._metric_matches_intent(m.metric_name, intent)]
+            intent_matches = [
+                m for m in metric_matches
+                if self._metric_matches_intent(m.metric_name, intent)
+            ]
             if intent_matches:
                 metric_matches = intent_matches
+
+        # If intent is a specific aggregate (max, min) but NO metric has that
+        # agg_type, the catalog can't answer this question correctly -- decline
+        # so downstream strategies (heuristic) can handle it with raw SQL.
+        if intent in ("max", "min") and metric_matches:
+            has_matching = any(
+                self._metric_matches_intent(m.metric_name, intent)
+                for m in metric_matches
+            )
+            if not has_matching:
+                logger.info(
+                    "Catalog has no %s metric -- declining to let heuristic handle",
+                    intent,
+                )
+                return DecompositionResult(
+                    status="outside_scope",
+                    explanation=f"No {intent.upper()} metric defined in catalog.",
+                    confidence=0.0,
+                )
 
         # Resolve entity from matches
         entity = self._pick_entity(entity_matches, metric_matches, dim_matches)
@@ -590,6 +620,26 @@ class QueryDecomposer:
         return None
 
     # -------------------------------------------------------------------
+    # Table reference resolution
+    # -------------------------------------------------------------------
+
+    def _resolve_tables(self, table_names: set[str]) -> dict[str, str]:
+        """Map raw table names to schema-qualified DuckDB references.
+
+        Uses resolve_table_ref when a connection is available, otherwise
+        falls back to staging.stg_{name} convention.
+        """
+        refs: dict[str, str] = {}
+        for name in table_names:
+            if self._con is not None:
+                from headwater.explorer.utils import resolve_table_ref
+
+                refs[name] = resolve_table_ref(name, self._con, self._models)
+            else:
+                refs[name] = f"staging.stg_{name}"
+        return refs
+
+    # -------------------------------------------------------------------
     # SQL generation (deterministic from catalog)
     # -------------------------------------------------------------------
 
@@ -609,11 +659,24 @@ class QueryDecomposer:
         warnings: list[str] = []
         primary_table = metrics[0].table
 
+        # Collect all tables: primary, dimension, and join-path tables
+        all_tables = {primary_table} | {d.table for d in dimensions}
+        for d in dimensions:
+            if d.join_path:
+                join_info = _parse_join_path(d.join_path)
+                if join_info:
+                    all_tables.add(join_info[0])  # from_table
+                    all_tables.add(join_info[2])  # to_table
+
+        # Resolve raw table names to schema-qualified references
+        # (e.g. "complaints" -> "staging.stg_complaints")
+        table_refs = self._resolve_tables(all_tables)
+
         # Collect all tables involved
-        tables_needed: dict[str, str] = {primary_table: primary_table}
+        tables_needed: dict[str, str] = {primary_table: table_refs[primary_table]}
         for d in dimensions:
             if d.table != primary_table:
-                tables_needed[d.table] = d.table
+                tables_needed[d.table] = table_refs[d.table]
 
         # Build SELECT
         select_parts: list[str] = []
@@ -623,7 +686,8 @@ class QueryDecomposer:
         for d in dimensions:
             if d.is_filter:
                 continue
-            col_ref = f'"{d.table}"."{d.column}"'
+            tref = table_refs[d.table]
+            col_ref = f'{tref}."{d.column}"'
             alias = d.display_name.lower().replace(" ", "_")
             select_parts.append(f'{col_ref} AS "{alias}"')
             group_by_parts.append(col_ref)
@@ -631,7 +695,6 @@ class QueryDecomposer:
         # Add metric expressions
         for m in metrics:
             alias = m.display_name.lower().replace(" ", "_")
-            # Prefix expression columns with table if needed
             expr = m.expression
             select_parts.append(f'{expr} AS "{alias}"')
 
@@ -639,7 +702,7 @@ class QueryDecomposer:
             return None, warnings
 
         # Build FROM + JOINs
-        from_clause = f'"{primary_table}"'
+        from_clause = table_refs[primary_table]
         join_clauses: list[str] = []
 
         for d in dimensions:
@@ -649,11 +712,12 @@ class QueryDecomposer:
                 join_info = _parse_join_path(d.join_path)
                 if join_info:
                     from_t, from_c, to_t, to_c = join_info
-                    # Check nullable join
+                    from_ref = table_refs.get(from_t, f'"{from_t}"')
+                    to_ref = table_refs.get(to_t, f'"{to_t}"')
                     dim_def = self._get_dimension(d.dimension_name)
                     join_type = "LEFT JOIN" if (dim_def and dim_def.join_nullable) else "JOIN"
                     join_clause = (
-                        f'{join_type} "{to_t}" ON "{from_t}"."{from_c}" = "{to_t}"."{to_c}"'
+                        f'{join_type} {to_ref} ON {from_ref}."{from_c}" = {to_ref}."{to_c}"'
                     )
                     if join_clause not in join_clauses:
                         join_clauses.append(join_clause)
@@ -667,7 +731,8 @@ class QueryDecomposer:
         where_parts: list[str] = []
         for d in dimensions:
             if d.is_filter and d.filter_value:
-                col_ref = f'"{d.table}"."{d.column}"'
+                tref = table_refs[d.table]
+                col_ref = f'{tref}."{d.column}"'
                 where_parts.append(f"{col_ref} = '{d.filter_value}'")
 
         # Check metric columns for NULL warnings
@@ -677,7 +742,6 @@ class QueryDecomposer:
                 for dim in self.catalog.dimensions:
                     if dim.table == m.table:
                         break
-                # Check if description mentions NULL
                 if metric_def.description and "NULL" in metric_def.description:
                     warnings.append(
                         f"{metric_def.display_name}: some values are NULL "
@@ -782,14 +846,11 @@ class QueryDecomposer:
 
         scoped: list[DimensionMatch] = []
         for d in dims:
-            # On the entity's table or metric tables
-            if d.table in relevant_tables:
-                scoped.append(d)
-            # Declared as a dimension of this entity (cross-table via join)
-            elif d.dimension_name in entity_dim_names:
-                scoped.append(d)
-            # Has a join_path from the entity table
-            elif d.join_path and d.join_path.startswith(f"{entity_table}."):
+            if (
+                d.table in relevant_tables
+                or d.dimension_name in entity_dim_names
+                or (d.join_path and d.join_path.startswith(f"{entity_table}."))
+            ):
                 scoped.append(d)
 
         if scoped:
@@ -836,7 +897,11 @@ def _name_tokens(
     tokens: set[str] = set()
 
     # Internal name -- skip tokens that are part of the table name
-    table_stems = {_stem(p) for p in re.split(r"[_\s]+", table.lower()) if len(p) > 1} if table else set()
+    table_stems = (
+        {_stem(p) for p in re.split(r"[_\s]+", table.lower()) if len(p) > 1}
+        if table
+        else set()
+    )
     for part in re.split(r"[_\s]+", name.lower()):
         if part and len(part) > 1 and _stem(part) not in table_stems:
             tokens.add(_stem(part))

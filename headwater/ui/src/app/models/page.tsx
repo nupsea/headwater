@@ -9,6 +9,7 @@ import {
   type GraphData,
   type GraphPatterns,
 } from "@/lib/api";
+import { useToast } from "@/components/toast";
 import { StatusBadge } from "@/components/status-badge";
 import { SqlViewer } from "@/components/sql-viewer";
 import { StatCard } from "@/components/stat-card";
@@ -17,6 +18,7 @@ import { RelationshipGraph } from "@/components/relationship-graph";
 import { QuestionResolver } from "@/components/question-resolver";
 
 export default function ModelsPage() {
+  const { toast } = useToast();
   const [models, setModels] = useState<ModelSummary[]>([]);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -81,10 +83,13 @@ export default function ModelsPage() {
     try {
       await api.approveModel(name);
       setMessage(`Approved: ${name}`);
+      toast(`Approved: ${name}`, "success");
       refresh();
       if (selected === name) api.model(name).then(setDetail);
     } catch (e) {
-      setMessage(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessage(`Error: ${msg}`);
+      toast(`Approve failed: ${msg}`, "error");
     }
   };
 
@@ -92,10 +97,13 @@ export default function ModelsPage() {
     try {
       await api.rejectModel(name);
       setMessage(`Rejected: ${name}`);
+      toast(`Rejected: ${name}`, "info");
       refresh();
       if (selected === name) api.model(name).then(setDetail);
     } catch (e) {
-      setMessage(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessage(`Error: ${msg}`);
+      toast(`Reject failed: ${msg}`, "error");
     }
   };
 

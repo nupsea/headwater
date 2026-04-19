@@ -114,7 +114,7 @@ def generate_suggestions(
     graph = SchemaGraph(discovery, all_models)
 
     buckets: dict[str, list[SuggestedQuestion]] = {
-        "catalog": _from_catalog(catalog) if catalog else [],
+        "catalog": _from_catalog(catalog, con, all_models) if catalog else [],
         "mart": _from_mart_models(all_models, con),
         "cross_table": _from_schema_graph(graph, all_relationships, all_models, con),
         "relationship": _from_relationships(
@@ -153,23 +153,32 @@ def generate_suggestions(
     return result[:MAX_TOTAL_SUGGESTIONS]
 
 
-def _from_catalog(catalog) -> list[SuggestedQuestion]:
+def _from_catalog(
+    catalog,
+    con: duckdb.DuckDBPyConnection | None = None,
+    models: list[GeneratedModel] | None = None,
+) -> list[SuggestedQuestion]:
     """Generate suggestions from semantic catalog metric x dimension cross-products.
 
     Every suggestion includes a valid sql_hint so clicking it works immediately.
+    Table references are resolved to schema-qualified names (staging/marts).
     """
     suggestions: list[SuggestedQuestion] = []
+    all_models = models or []
+
+    def _ref(table_name: str) -> str:
+        if con is not None:
+            return resolve_table_ref(table_name, con, all_models)
+        return f"staging.stg_{table_name}"
 
     for entity in catalog.entities:
-        # Get entity's metrics and dimensions from catalog
         entity_metrics = [m for m in catalog.metrics if m.name in entity.metrics]
         entity_dims = [d for d in catalog.dimensions if d.name in entity.dimensions]
 
-        # High-confidence metrics x high-confidence dimensions
         for m in entity_metrics[:3]:
             if m.confidence < 0.5:
                 continue
-            # Count metric alone
+            t_ref = _ref(m.table)
             if m.agg_type == "count":
                 suggestions.append(
                     SuggestedQuestion(
@@ -177,14 +186,14 @@ def _from_catalog(catalog) -> list[SuggestedQuestion]:
                         source="catalog",
                         category="catalog",
                         relevant_tables=[entity.table],
-                        sql_hint=f'SELECT {m.expression} AS "{m.display_name}" FROM "{m.table}"',
+                        sql_hint=f'SELECT {m.expression} AS "{m.display_name}" FROM {t_ref}',
                     )
                 )
 
             for d in entity_dims[:4]:
                 if d.confidence < 0.5:
                     continue
-                sql = _build_catalog_sql(m, d)
+                sql = _build_catalog_sql(m, d, _ref)
                 suggestions.append(
                     SuggestedQuestion(
                         question=f"{m.display_name} by {d.display_name}",
@@ -300,14 +309,24 @@ def _from_schema_graph(
     return suggestions
 
 
-def _build_catalog_sql(metric, dimension) -> str:
-    """Build SQL for a metric x dimension suggestion."""
+def _build_catalog_sql(metric, dimension, ref_fn=None) -> str:
+    """Build SQL for a metric x dimension suggestion.
+
+    ref_fn: callable that maps raw table name to schema-qualified reference.
+    """
     m_alias = metric.display_name.lower().replace(" ", "_")
     d_alias = dimension.display_name.lower().replace(" ", "_")
-    d_col = f'"{dimension.table}"."{dimension.column}"'
+
+    def _ref(name: str) -> str:
+        if ref_fn:
+            return ref_fn(name)
+        return f'"{name}"'
+
+    d_ref = _ref(dimension.table)
+    d_col = f'{d_ref}."{dimension.column}"'
 
     select = f'{d_col} AS "{d_alias}", {metric.expression} AS "{m_alias}"'
-    from_clause = f'"{metric.table}"'
+    from_clause = _ref(metric.table)
 
     join = ""
     if dimension.table != metric.table and dimension.join_path:
@@ -316,8 +335,10 @@ def _build_catalog_sql(metric, dimension) -> str:
         match = _re.match(r"(\w+)\.(\w+)\s*->\s*(\w+)\.(\w+)", dimension.join_path)
         if match:
             from_t, from_c, to_t, to_c = match.groups()
+            from_r = _ref(from_t)
+            to_r = _ref(to_t)
             join_type = "LEFT JOIN" if dimension.join_nullable else "JOIN"
-            join = f'\n{join_type} "{to_t}" ON "{from_t}"."{from_c}" = "{to_t}"."{to_c}"'
+            join = f'\n{join_type} {to_r} ON {from_r}."{from_c}" = {to_r}."{to_c}"'
 
     order = f"{metric.expression} DESC"
     return f"SELECT {select}\nFROM {from_clause}{join}\nGROUP BY {d_col}\nORDER BY {order}"

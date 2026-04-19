@@ -107,14 +107,22 @@ def ask(
     """
     logger.info("Explorer ask: %r", question)
 
-    # Strategy 0: Catalog decomposer (v2 -- ontology-driven)
+    has_llm = provider is not None and not isinstance(provider, NoLLMProvider)
+    context = _build_context(discovery, models or []) if has_llm else ""
+
+    # Strategy 0: Suggestion matcher (pre-built, validated SQL -- highest priority)
+    sql = _match_suggestion(question, suggestions or [])
+
+    # Strategy 1: Catalog decomposer (ontology-driven, deterministic SQL)
     decomposition = None
-    if catalog is not None:
+    if sql is None and catalog is not None:
         decomposition = _catalog_decompose(
             question,
             catalog,
             vector_store,
             project_id,
+            con=con,
+            models=models,
         )
         if decomposition and decomposition.status == "resolved" and decomposition.sql:
             logger.info(
@@ -135,6 +143,7 @@ def ask(
                 "Catalog SQL execution failed: %s -- falling through",
                 result.error,
             )
+            sql = None  # Reset so downstream strategies can try
         elif decomposition and decomposition.status == "options":
             # Return disambiguation options as ExplorationResult
             logger.info("Catalog returned options for disambiguation")
@@ -149,12 +158,6 @@ def ask(
                     o.model_dump() for o in decomposition.options
                 ] if decomposition.options else [],
             )
-
-    has_llm = provider is not None and not isinstance(provider, NoLLMProvider)
-    context = _build_context(discovery, models or []) if has_llm else ""
-
-    # Try matching a suggested question first
-    sql = _match_suggestion(question, suggestions or [])
 
     # Try QueryPlanner (schema-graph-based, handles cross-table joins)
     if sql is None:
@@ -215,6 +218,8 @@ def _catalog_decompose(
     catalog: Any,
     vector_store: Any | None,
     project_id: str | None,
+    con: duckdb.DuckDBPyConnection | None = None,
+    models: list[GeneratedModel] | None = None,
 ) -> Any | None:
     """Try to decompose the question using the semantic catalog.
 
@@ -223,7 +228,7 @@ def _catalog_decompose(
     try:
         from headwater.explorer.decomposition import QueryDecomposer
 
-        decomposer = QueryDecomposer(catalog)
+        decomposer = QueryDecomposer(catalog, con=con, models=models)
         result = decomposer.decompose(
             question,
             vector_store=vector_store,
@@ -437,13 +442,21 @@ def _questions_similar(a: str, b: str) -> bool:
     """Check if two questions are similar enough to match.
 
     Intentionally strict: exact match or substring containment only.
-    Fuzzy word-overlap matching is dangerous -- changing one key term
-    (e.g. "by severity" -> "by inspection") changes the entire meaning
-    but barely moves the overlap ratio, leading to silently wrong SQL.
+    Rejects matches where the user adds a breakdown qualifier ("per X",
+    "by X") that the suggestion doesn't have, since that changes the
+    query structure entirely (scalar vs grouped).
     """
     if a == b:
         return True
-    return bool(a in b or b in a)
+    if a in b or b in a:
+        # Reject if one has a breakdown qualifier the other lacks
+        a_words = set(a.split())
+        b_words = set(b.split())
+        breakdown = {"by", "per", "across"}
+        a_has = bool(a_words & breakdown)
+        b_has = bool(b_words & breakdown)
+        return a_has == b_has
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +506,13 @@ _TREND_WORDS = {
 _COUNT_WORDS = {"how", "many", "count", "total", "number"}
 _BREAKDOWN_WORDS = {"by", "across", "per", "breakdown", "break", "distribution", "distributed"}
 _TOP_WORDS = {"top", "most", "highest", "worst", "best", "largest", "lowest", "least", "smallest"}
+_SCALAR_AGG_WORDS = {
+    "average": "AVG", "avg": "AVG", "mean": "AVG",
+    "maximum": "MAX", "max": "MAX", "highest": "MAX",
+    "minimum": "MIN", "min": "MIN", "lowest": "MIN",
+    "sum": "SUM", "total": "SUM",
+}
+_DISTINCT_WORDS = {"distinct", "unique", "different"}
 
 
 def _resolve_table_ref(
@@ -613,6 +633,14 @@ def _heuristic_sql(
     is_count = bool(q_words & _COUNT_WORDS)
     is_top = bool(q_words & _TOP_WORDS)
     has_breakdown_word = bool(q_words & _BREAKDOWN_WORDS)
+    has_distinct = bool(q_words & _DISTINCT_WORDS)
+
+    # Detect scalar aggregate intent: "what is the average/max/min of X?"
+    scalar_agg = None
+    for word, agg_fn in _SCALAR_AGG_WORDS.items():
+        if word in q_words:
+            scalar_agg = agg_fn
+            break
 
     # For column matching, remove table-name words (and their stems) so
     # "complaints" / "reading" from the table name doesn't shadow the user's
@@ -655,6 +683,24 @@ def _heuristic_sql(
         }
     if bool(unmatched_words) and not first_pass_matched:
         return None
+
+    # -- Scalar aggregate: "what is the average/max/min X?" (no breakdown)
+    if scalar_agg and not has_breakdown_word:
+        metric = target_metric or (metric_cols[0] if metric_cols else None)
+        if metric:
+            return (
+                f'SELECT {scalar_agg}("{metric.name}") AS '
+                f'{scalar_agg.lower()}_{metric.name} FROM {table_ref}'
+            )
+
+    # -- COUNT DISTINCT: "how many distinct X are there?"
+    if is_count and has_distinct:
+        dim = target_dim or (dimension_cols[0] if dimension_cols else None)
+        if dim:
+            return (
+                f'SELECT COUNT(DISTINCT "{dim.name}") AS '
+                f'distinct_{dim.name} FROM {table_ref}'
+            )
 
     # -- Trend query: metric over time, optionally grouped by a dimension
     if is_trend and temporal_cols:
@@ -1136,6 +1182,10 @@ _ANALYTICAL_WORDS = {
     "percent",
     "percentage",
     "pct",
+    # Quantifiers (not entity names)
+    "distinct",
+    "unique",
+    "different",
     # Trends / comparison
     "trend",
     "trends",

@@ -21,6 +21,7 @@ from headwater.api.routes import (
     execute,
     explore,
     graph,
+    health,
     insights,
     models,
     pipeline,
@@ -334,6 +335,7 @@ def create_app(*, in_memory: bool = False) -> FastAPI:
     app.include_router(project.router, prefix="/api", tags=["project"])
     app.include_router(graph.router, prefix="/api", tags=["graph"])
     app.include_router(settings.router, prefix="/api", tags=["settings"])
+    app.include_router(health.router, prefix="/api", tags=["health"])
 
     @app.get("/api/status")
     async def api_status():

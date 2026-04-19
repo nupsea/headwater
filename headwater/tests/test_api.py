@@ -642,11 +642,7 @@ class TestDictionaryAnswersE2E:
             (m for m in models if m.get("questions") and len(m["questions"]) > 0),
             None,
         )
-        if model_with_q is None:
-            # If no model has questions, at least test the endpoint works
-            model_name = models[0]["name"]
-        else:
-            model_name = model_with_q["name"]
+        model_name = models[0]["name"] if model_with_q is None else model_with_q["name"]
 
         resp = client.post(
             f"/api/models/{model_name}/answers",
@@ -745,3 +741,33 @@ class TestExplorerE2E:
         assert found_suggestions, (
             "No PK/FK suggestions generated for any table in sample data"
         )
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+class TestHealth:
+    def test_health_returns_200(self, client):
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] in ("healthy", "degraded")
+        assert "components" in data
+        assert "version" in data
+        assert "uptime_seconds" in data
+
+    def test_health_components_present(self, client):
+        resp = client.get("/api/health")
+        data = resp.json()
+        components = data["components"]
+        assert "metadata_store" in components
+        assert "analytical_engine" in components
+        assert "llm_provider" in components
+
+    def test_health_in_memory_is_healthy(self, client):
+        """In-memory test mode should report healthy status."""
+        resp = client.get("/api/health")
+        data = resp.json()
+        assert data["status"] == "healthy"
+        assert data["components"]["metadata_store"] == "ok"
+        assert data["components"]["analytical_engine"] == "ok"

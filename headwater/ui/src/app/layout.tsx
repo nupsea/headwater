@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
 import { ProjectSidebar } from "@/components/project-sidebar";
+import { ClientLayout } from "@/components/client-layout";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -61,7 +62,7 @@ export default function RootLayout({
           <ProjectSidebar />
           <main className="flex-1 px-6 py-6 overflow-y-auto">
             <div className="max-w-7xl mx-auto w-full">
-              {children}
+              <ClientLayout>{children}</ClientLayout>
             </div>
           </main>
         </div>
