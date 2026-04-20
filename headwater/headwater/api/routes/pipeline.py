@@ -44,6 +44,56 @@ def _connector_type_from_uri(uri: str) -> str:
     return "json"
 
 
+@router.post("/pipeline/test-connection")
+def test_connection(source_path: str, source_type: str = "auto"):
+    """Test connectivity to a data source without running the full pipeline.
+
+    Returns connection status, table count, and any error details.
+    """
+    if _is_db_uri(source_path):
+        resolved_type = (
+            source_type if source_type != "auto" else _connector_type_from_uri(source_path)
+        )
+        source = SourceConfig(name="__test__", type=resolved_type, uri=source_path)
+        connector = get_connector(resolved_type)
+        try:
+            connector.connect(source)
+            tables = connector.list_tables()
+            connector.close()
+            return {
+                "status": "ok",
+                "source_type": resolved_type,
+                "tables": len(tables),
+                "table_names": tables[:20],
+                "detail": f"Connected. Found {len(tables)} table(s).",
+            }
+        except Exception as exc:
+            return {
+                "status": "error",
+                "source_type": resolved_type,
+                "tables": 0,
+                "table_names": [],
+                "detail": str(exc),
+            }
+    else:
+        data_path = Path(source_path).resolve()
+        if not data_path.exists():
+            return {
+                "status": "error",
+                "source_type": "file",
+                "tables": 0,
+                "table_names": [],
+                "detail": f"Path not found: {data_path}",
+            }
+        return {
+            "status": "ok",
+            "source_type": "file",
+            "tables": 0,
+            "table_names": [],
+            "detail": f"Path exists: {data_path}",
+        }
+
+
 @router.post("/pipeline/run")
 def run_full_pipeline(
     request: Request,
@@ -172,6 +222,18 @@ def _run_pipeline_inner(
         catalog.confidence,
     )
 
+    # Step 1c: Auto-confirm high-confidence items to reduce manual review burden
+    auto_stats = _auto_confirm(discovery_result, catalog, con, _duckdb_schema)
+    logger.info(
+        "Auto-confirmed: %d columns, %d tables, %d metrics, %d dimensions, %d PKs (%d composite)",
+        auto_stats["columns"],
+        auto_stats["tables"],
+        auto_stats["metrics"],
+        auto_stats["dimensions"],
+        auto_stats["pks"],
+        auto_stats["composite_pks"],
+    )
+
     # Evaluate catalog quality
     evaluation = evaluate_catalog(catalog, discovery_result.tables, discovery_result.profiles)
     logger.info("Catalog evaluation: overall=%.2f", evaluation.confidence)
@@ -248,6 +310,7 @@ def _run_pipeline_inner(
         "catalog_dimensions": len(catalog.dimensions),
         "catalog_entities": len(catalog.entities),
         "catalog_confidence": catalog.confidence,
+        "auto_confirmed": auto_stats,
     }
 
 
@@ -354,6 +417,10 @@ def re_enrich(request: Request, force: bool = False):
         len(catalog.entities),
     )
 
+    # Auto-confirm high-confidence items (no DuckDB con for re-enrich;
+    # composite PK detection already ran during initial pipeline)
+    _auto_confirm(discovery, catalog, con=None, schema_name=None)
+
     # Evaluate catalog quality
     evaluation = evaluate_catalog(
         catalog, discovery.tables, discovery.profiles
@@ -407,6 +474,150 @@ def re_enrich(request: Request, force: bool = False):
         "catalog_confidence": catalog.confidence,
         "relationships": len(discovery.relationships),
     }
+
+
+# ---------------------------------------------------------------------------
+# Auto-confirmation of high-confidence items
+# ---------------------------------------------------------------------------
+
+# Thresholds for auto-confirmation (items above these are auto-approved)
+_AUTO_CONFIRM_PK_THRESHOLD = 0.85
+_AUTO_CONFIRM_COLUMN_THRESHOLD = 0.8
+_AUTO_CONFIRM_CATALOG_THRESHOLD = 0.8
+
+
+def _auto_confirm(discovery_result, catalog, con=None, schema_name=None) -> dict[str, int]:
+    """Auto-confirm high-confidence items to minimize manual review.
+
+    1. Runs single-column PK detection from profile stats.
+    2. If no single-column PK found AND DuckDB connection available,
+       runs composite PK detection via SQL verification.
+    3. Auto-locks columns with confidence >= threshold.
+    4. Auto-confirms tables where all columns are locked.
+    5. Auto-confirms catalog metrics/dimensions above threshold.
+
+    Returns counts of auto-confirmed items by category.
+    """
+    from datetime import datetime
+
+    from headwater.profiler.key_detection import (
+        detect_composite_keys,
+        suggest_primary_keys,
+    )
+
+    stats = {
+        "columns": 0, "tables": 0, "metrics": 0,
+        "dimensions": 0, "pks": 0, "composite_pks": 0,
+    }
+
+    # Build profile index for PK detection
+    table_row_counts = {t.name: t.row_count for t in discovery_result.tables}
+    profile_by_table: dict[str, list[dict]] = {}
+    for p in discovery_result.profiles:
+        tbl = p.table_name
+        if tbl not in profile_by_table:
+            profile_by_table[tbl] = []
+        profile_by_table[tbl].append({
+            "column_name": p.column_name,
+            "dtype": p.dtype,
+            "stats": {
+                "row_count": table_row_counts.get(tbl, 0),
+                "distinct_count": p.distinct_count,
+                "null_count": p.null_count,
+                "min": p.min_value,
+                "max": p.max_value,
+            },
+        })
+
+    # --- PK detection for every table ---
+    for table in discovery_result.tables:
+        if table.locked:
+            continue
+        if any(c.is_primary_key for c in table.columns):
+            continue
+        profiles = profile_by_table.get(table.name, [])
+        if not profiles:
+            continue
+
+        # Try single-column PK first
+        pk_candidates = suggest_primary_keys(table.name, profiles)
+        if pk_candidates and pk_candidates[0].confidence >= _AUTO_CONFIRM_PK_THRESHOLD:
+            best = pk_candidates[0]
+            col = next((c for c in table.columns if c.name == best.column), None)
+            if col:
+                col.is_primary_key = True
+                col.semantic_type = "primary_key"
+                col.role = "identifier"
+                col.confidence = max(col.confidence, best.confidence)
+                stats["pks"] += 1
+                logger.info(
+                    "Auto-detected PK: %s.%s (confidence=%.2f, reasons=%s)",
+                    table.name, best.column, best.confidence, best.reasons,
+                )
+            continue
+
+        # No single-column PK found -- try composite keys (requires DuckDB)
+        if con is None or schema_name is None:
+            continue
+        try:
+            composite = detect_composite_keys(
+                con, table.name, schema_name, profiles,
+                columns=table.columns,
+            )
+        except Exception:
+            logger.exception("Composite PK detection failed for %s", table.name)
+            continue
+
+        if composite and composite[0].confidence >= 0.7:
+            best_comp = composite[0]
+            for col_name in best_comp.columns:
+                col = next((c for c in table.columns if c.name == col_name), None)
+                if col:
+                    col.is_primary_key = True
+                    col.confidence = max(col.confidence, best_comp.confidence)
+            stats["composite_pks"] += 1
+            logger.info(
+                "Auto-detected composite PK: %s.(%s) (confidence=%.2f, reasons=%s)",
+                table.name,
+                ", ".join(best_comp.columns),
+                best_comp.confidence,
+                best_comp.reasons,
+            )
+
+    # --- Auto-lock high-confidence columns ---
+    for table in discovery_result.tables:
+        if table.locked:
+            continue
+        for col in table.columns:
+            if col.locked:
+                continue
+            if col.confidence >= _AUTO_CONFIRM_COLUMN_THRESHOLD:
+                col.locked = True
+                stats["columns"] += 1
+
+    # --- Auto-confirm tables where ALL columns are locked ---
+    for table in discovery_result.tables:
+        if table.review_status in ("reviewed", "skipped"):
+            continue
+        if all(c.locked for c in table.columns):
+            table.review_status = "reviewed"
+            table.reviewed_at = datetime.now()
+            table.locked = True
+            stats["tables"] += 1
+
+    # --- Auto-confirm high-confidence catalog metrics ---
+    for metric in catalog.metrics:
+        if metric.status == "proposed" and metric.confidence >= _AUTO_CONFIRM_CATALOG_THRESHOLD:
+            metric.status = "confirmed"
+            stats["metrics"] += 1
+
+    # --- Auto-confirm high-confidence catalog dimensions ---
+    for dim in catalog.dimensions:
+        if dim.status == "proposed" and dim.confidence >= _AUTO_CONFIRM_CATALOG_THRESHOLD:
+            dim.status = "confirmed"
+            stats["dimensions"] += 1
+
+    return stats
 
 
 # ---------------------------------------------------------------------------

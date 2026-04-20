@@ -396,6 +396,21 @@ export interface DictColumn {
   confidence: number;
   locked: boolean;
   needs_review: boolean;
+  review_signal: "auto_confirmed" | "needs_review" | "conflict";
+  review_reason: string | null;
+}
+
+export interface CatalogItemSummary {
+  name: string;
+  display_name: string;
+  item_type: "metric" | "dimension";
+  confidence: number;
+  status: "proposed" | "confirmed" | "rejected";
+  description: string | null;
+  expression: string | null;
+  agg_type: string | null;
+  column_name: string | null;
+  review_signal: "auto_confirmed" | "needs_review" | "conflict";
 }
 
 export interface DictTable {
@@ -408,6 +423,9 @@ export interface DictTable {
   columns: DictColumn[];
   relationships: RelationshipEntry[];
   questions: string[];
+  catalog_items: CatalogItemSummary[];
+  auto_confirmed_count: number;
+  needs_review_count: number;
 }
 
 export interface DictReviewSummary {
@@ -747,10 +765,26 @@ export interface CreateProjectPayload {
   description?: string;
 }
 
+// ---------- Connection test types ----------
+
+export interface ConnectionTestResult {
+  status: "ok" | "error";
+  source_type: string;
+  tables: number;
+  table_names: string[];
+  detail: string;
+}
+
 // ---------- API calls ----------
 
 export const api = {
   status: () => fetchJSON<StatusResponse>("/status"),
+
+  testConnection: (sourcePath: string, sourceType = "auto") =>
+    fetchJSON<ConnectionTestResult>(
+      `/pipeline/test-connection?source_path=${encodeURIComponent(sourcePath)}&source_type=${sourceType}`,
+      { method: "POST" }
+    ),
 
   pipelineRun: (sourcePath: string, sourceType = "auto") =>
     fetchJSON<PipelineRunResponse>(

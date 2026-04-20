@@ -33,7 +33,7 @@
 | Resilience | Health check added | `/api/health` with component status (Wave 0.3) |
 | Lint | 0 errors | Fixed in Wave 0.1 |
 | E2E integration test | Passing | `test_e2e_pipeline.py` -- 23 tests, 9 stages (Wave 0.2) |
-| Explore correctness | **88.9% (Wave E1)** | 16/18 golden answer tests pass (up from 55.6% baseline) |
+| Explore correctness | **100% (Wave E2)** | 18/18 golden answer tests pass + 9 new statistical rigor tests |
 | Press release | Versioned | "Current Availability (v0.3)" section added (Wave 0.5) |
 
 ## Completion Log
@@ -49,6 +49,7 @@
 | E0.2 | 2026-04-19 | `verify_golden.py` -- 25/25 manual checks pass |
 | E0.3 | 2026-04-19 | `test_explore_correctness.py` -- 18 tests, baseline 10/18 (55.6%) |
 | E1 | 2026-04-19 | SQL correctness: 16/18 (88.9%). Fixed: decomposer intent matching, planner scalar/COUNT DISTINCT, suggestion priority, ORDER BY alias |
+| E2 | 2026-04-20 | Statistical rigor: 18/18 (100%) + 9 new tests (14 total stat tests). Fixed: Decimal dtype, insight_type filter, FDR correction, MAD for non-normal, seasonal adjustment, change-point detection, correlation detrending, winsorization, severity calibration |
 
 ### Baseline Failure Analysis (Wave E0) -- 8 failures, 6 FIXED in E1
 
@@ -58,9 +59,9 @@
 - ~~"max reading value" returns 49302~~ FIXED: decomposer intent mismatch, planner MAX intent
 - ~~"complaints per zone" collapses to total COUNT~~ FIXED: suggestion matcher strictness
 
-**Statistical (2 failures -- Wave E2 scope):**
-- Known 10x spike in synthetic data not detected as anomaly
-- Perfect linear correlation (b=2a+5) not detected by correlation engine
+**Statistical (2 failures -- FIXED in E2):**
+- ~~Known 10x spike in synthetic data not detected as anomaly~~ FIXED: MAD fallback for non-normal data + Decimal dtype handling
+- ~~Perfect linear correlation (b=2a+5) not detected by correlation engine~~ FIXED: Decimal->Float64 cast in _load_table + detrend-aware correlation
 
 **Visualization (1 failure -- FIXED):**
 - ~~"complaints per zone" gets KPI instead of bar~~ FIXED: GROUP BY now works
@@ -1855,17 +1856,17 @@ class TestStatisticalCorrectness:
     def test_change_point_within_3_of_actual(self): ...
 ```
 
-### Wave E2 Gate
+### Wave E2 Gate (ALL MET -- 2026-04-20)
 
-- [ ] Zero false positives on 100 tables of uniform random data
-- [ ] FDR correction applied to all multi-test comparisons
-- [ ] Non-normal data uses MAD instead of z-score
-- [ ] Seasonal patterns deseasonalized before anomaly detection
-- [ ] Change-point detection finds true change points (+/- 3 positions)
-- [ ] Correlation detrended before reporting
-- [ ] Single outliers do not suppress other anomaly detection
-- [ ] Severity thresholds include magnitude, not just statistical significance
-- [ ] `uv run pytest tests/test_explore_correctness.py::TestStatisticalCorrectness` -- all pass
+- [x] Zero false positives on 100 tables of uniform random data
+- [x] FDR correction applied to all multi-test comparisons
+- [x] Non-normal data uses MAD instead of z-score
+- [x] Seasonal patterns deseasonalized before anomaly detection
+- [x] Change-point detection finds true change points (+/- 3 positions)
+- [x] Correlation detrended before reporting
+- [x] Single outliers do not suppress other anomaly detection
+- [x] Severity thresholds include magnitude, not just statistical significance
+- [x] `uv run pytest tests/test_explore_correctness.py::TestStatisticalCorrectness` -- 14/14 pass
 
 ---
 

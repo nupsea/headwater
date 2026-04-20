@@ -11,6 +11,7 @@ import {
   type Project,
   type ProjectProgress,
   type ActivityEntry,
+  type ConnectionTestResult,
 } from "@/lib/api";
 import { useToast } from "@/components/toast";
 import { PipelineStepper } from "@/components/pipeline-stepper";
@@ -37,6 +38,35 @@ export default function DashboardPage() {
     "postgresql://headwater:headwater@localhost:5434/headwater_dev"
   );
   const [error, setError] = useState("");
+  const [connStatus, setConnStatus] = useState<ConnectionTestResult | null>(null);
+  const [connTesting, setConnTesting] = useState(false);
+
+  const isDbUri = (s: string) =>
+    ["postgresql://", "postgres://", "mysql://", "sqlite://"].some((p) =>
+      s.startsWith(p)
+    );
+
+  const testConnection = async (source?: string) => {
+    const uri = source ?? sourcePath;
+    if (!isDbUri(uri)) {
+      setConnStatus(null);
+      return;
+    }
+    setConnTesting(true);
+    try {
+      const result = await api.testConnection(uri);
+      setConnStatus(result);
+    } catch {
+      setConnStatus({
+        status: "error",
+        source_type: "unknown",
+        tables: 0,
+        table_names: [],
+        detail: "Backend unreachable. Is the Headwater server running?",
+      });
+    }
+    setConnTesting(false);
+  };
 
   const refresh = async () => {
     try {
@@ -87,6 +117,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     refresh();
+    testConnection();
   }, []);
 
   const runFullPipeline = async () => {
@@ -219,10 +250,22 @@ export default function DashboardPage() {
         </div>
         {insights && (
           <div className="flex items-center gap-3">
+            {/* Inline connection indicator */}
+            {connStatus && isDbUri(sourcePath) && (
+              <div
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  connStatus.status === "ok"
+                    ? "bg-green-500"
+                    : "bg-red-500 animate-pulse"
+                }`}
+                title={connStatus.detail}
+              />
+            )}
             <input
               type="text"
               value={sourcePath}
               onChange={(e) => setSourcePath(e.target.value)}
+              onBlur={() => testConnection()}
               className="w-56 px-3 py-1.5 border border-border rounded bg-background text-xs font-mono"
             />
             <button
@@ -235,6 +278,59 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+
+      {/* Connection status banner */}
+      {connStatus && connStatus.status === "error" && (
+        <div className="mb-4 p-4 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-lg">
+          <div className="flex items-start gap-3">
+            <div className="shrink-0 w-5 h-5 mt-0.5 text-red-600 dark:text-red-400">
+              <svg viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-red-800 dark:text-red-300">
+                Connection failed
+              </h3>
+              <p className="text-sm text-red-700 dark:text-red-400 mt-0.5">
+                {connStatus.detail}
+              </p>
+              {isDbUri(sourcePath) && (
+                <div className="mt-2 text-xs text-red-600 dark:text-red-400 font-mono bg-red-100 dark:bg-red-900/40 rounded px-2 py-1 inline-block break-all">
+                  {sourcePath.replace(/\/\/([^:]+):([^@]+)@/, "//$1:***@")}
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => testConnection()}
+              disabled={connTesting}
+              className="shrink-0 px-3 py-1.5 text-xs font-medium text-red-700 dark:text-red-300 bg-red-100 dark:bg-red-900/40 rounded hover:bg-red-200 dark:hover:bg-red-900/60 disabled:opacity-50"
+            >
+              {connTesting ? "Testing..." : "Retry"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {connStatus && connStatus.status === "ok" && isDbUri(sourcePath) && !insights && (
+        <div className="mb-4 p-3 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded-lg">
+          <div className="flex items-center gap-3">
+            <div className="shrink-0 w-5 h-5 text-green-600 dark:text-green-400">
+              <svg viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+              </svg>
+            </div>
+            <div className="text-sm text-green-800 dark:text-green-300">
+              <span className="font-medium">Connected</span>
+              {connStatus.tables > 0 && (
+                <span className="text-green-600 dark:text-green-400">
+                  {" "}&middot; {connStatus.tables} table{connStatus.tables !== 1 ? "s" : ""} found
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Pipeline launcher (first run) */}
       {!insights && (
@@ -254,9 +350,17 @@ export default function DashboardPage() {
                 type="text"
                 value={sourcePath}
                 onChange={(e) => setSourcePath(e.target.value)}
+                onBlur={() => testConnection()}
                 className="w-72 px-3 py-2 border border-border rounded bg-background text-sm font-mono"
               />
             </div>
+            <button
+              onClick={() => testConnection()}
+              disabled={connTesting}
+              className="px-3 py-2 border border-border rounded text-sm font-medium hover:bg-muted/20 disabled:opacity-50"
+            >
+              {connTesting ? "Testing..." : "Test"}
+            </button>
             <button
               onClick={runFullPipeline}
               disabled={loading}
@@ -265,6 +369,65 @@ export default function DashboardPage() {
               {loading ? "Running..." : "Run Full Pipeline"}
             </button>
           </div>
+
+          {/* Connection detail split view for DB sources */}
+          {connStatus && isDbUri(sourcePath) && (
+            <div className="mt-4 text-left max-w-md mx-auto">
+              <div className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">
+                Connection Details
+              </div>
+              <div className="bg-background border border-border rounded-lg divide-y divide-border text-sm">
+                {(() => {
+                  try {
+                    const url = new URL(sourcePath);
+                    return (
+                      <>
+                        <div className="flex justify-between px-3 py-2">
+                          <span className="text-muted">Host</span>
+                          <span className="font-mono text-xs">{url.hostname || "localhost"}</span>
+                        </div>
+                        <div className="flex justify-between px-3 py-2">
+                          <span className="text-muted">Port</span>
+                          <span className="font-mono text-xs">{url.port || "5432"}</span>
+                        </div>
+                        <div className="flex justify-between px-3 py-2">
+                          <span className="text-muted">Database</span>
+                          <span className="font-mono text-xs">{url.pathname.replace("/", "") || "-"}</span>
+                        </div>
+                        <div className="flex justify-between px-3 py-2">
+                          <span className="text-muted">User</span>
+                          <span className="font-mono text-xs">{url.username || "-"}</span>
+                        </div>
+                        <div className="flex justify-between px-3 py-2">
+                          <span className="text-muted">Status</span>
+                          <span className={`font-medium text-xs ${
+                            connStatus.status === "ok"
+                              ? "text-green-600 dark:text-green-400"
+                              : "text-red-600 dark:text-red-400"
+                          }`}>
+                            {connStatus.status === "ok" ? "Connected" : "Failed"}
+                          </span>
+                        </div>
+                        {connStatus.status === "ok" && connStatus.tables > 0 && (
+                          <div className="flex justify-between px-3 py-2">
+                            <span className="text-muted">Tables</span>
+                            <span className="font-mono text-xs">{connStatus.tables}</span>
+                          </div>
+                        )}
+                      </>
+                    );
+                  } catch {
+                    return (
+                      <div className="px-3 py-2 text-muted text-xs">
+                        Could not parse connection URI
+                      </div>
+                    );
+                  }
+                })()}
+              </div>
+            </div>
+          )}
+
           {phase && (
             <div className="text-sm mt-4 p-3 bg-background rounded border border-border">
               {phase}

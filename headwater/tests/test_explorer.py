@@ -35,8 +35,8 @@ from headwater.explorer.nl_to_sql import (
     ask,
 )
 from headwater.explorer.statistical import (
+    _detect_change_points_for_column,
     _detect_correlations,
-    _detect_period_shifts,
     _detect_temporal_anomalies,
     _find_metric_columns,
     _find_temporal_columns,
@@ -605,11 +605,13 @@ class TestStatistical:
         # The spike should be positive deviation
         assert any(i.magnitude > 0 for i in anomalies)
 
-    def test_detect_period_shifts(self, duckdb_con):
+    def test_detect_change_points(self, duckdb_con):
         arrow = duckdb_con.execute("SELECT * FROM marts.mart_air_quality_daily").arrow()
         df = pl.from_arrow(arrow)
-        insights = _detect_period_shifts(df, "mart_air_quality_daily", "reading_date", "avg_value")
-        # Period shift should be detected (first half has the anomaly spike)
+        insights = _detect_change_points_for_column(
+            df, "mart_air_quality_daily", "reading_date", "avg_value"
+        )
+        # Change points may or may not be detected depending on data shape
         assert isinstance(insights, list)
 
     def test_detect_correlations(self):

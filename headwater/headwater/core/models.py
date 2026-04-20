@@ -305,7 +305,8 @@ class StatisticalInsight(BaseModel):
     metric: str  # Column or expression measured
     table_name: str
     insight_type: Literal[
-        "temporal_anomaly", "period_comparison", "correlation", "distribution_shift"
+        "temporal_anomaly", "period_comparison", "change_point",
+        "correlation", "distribution_shift",
     ]
     description: str  # Plain-English explanation
     magnitude: float  # % deviation or correlation coefficient
@@ -314,6 +315,7 @@ class StatisticalInsight(BaseModel):
     confidence_level: str | None = None  # "90%", "95%", "99%"
     time_period: str | None = None  # e.g. "2024-12-20 to 2025-01-03"
     comparison_baseline: str | None = None  # e.g. "90-day rolling average"
+    detrended: bool = False  # True if correlation was computed on detrended residuals
     severity: Literal["info", "warning", "critical"] = "info"
 
 
@@ -348,6 +350,24 @@ class DataDictionaryColumn(BaseModel):
     confidence: float = 0.0
     locked: bool = False
     needs_review: bool = False  # True when confidence < threshold
+    # Review signal: color-coded status for the UI
+    review_signal: Literal["auto_confirmed", "needs_review", "conflict"] = "needs_review"
+    review_reason: str | None = None  # Why this column needs attention
+
+
+class CatalogItemSummary(BaseModel):
+    """Compact catalog item for inline display in the data dictionary."""
+
+    name: str
+    display_name: str
+    item_type: Literal["metric", "dimension"]
+    confidence: float
+    status: str  # proposed, confirmed, rejected
+    description: str | None = None
+    expression: str | None = None  # For metrics: SUM(col), COUNT(*), etc.
+    agg_type: str | None = None  # For metrics
+    column_name: str | None = None
+    review_signal: Literal["auto_confirmed", "needs_review", "conflict"] = "needs_review"
 
 
 class DataDictionaryTable(BaseModel):
@@ -362,6 +382,10 @@ class DataDictionaryTable(BaseModel):
     columns: list[DataDictionaryColumn]
     relationships: list[Relationship] = Field(default_factory=list)
     questions: list[str] = Field(default_factory=list)  # Clarifying questions
+    # Inline catalog items for this table
+    catalog_items: list[CatalogItemSummary] = Field(default_factory=list)
+    auto_confirmed_count: int = 0
+    needs_review_count: int = 0
 
 
 class ColumnReview(BaseModel):

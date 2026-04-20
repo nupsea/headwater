@@ -102,6 +102,14 @@ _SEMANTIC_TYPE_PATTERNS: list[tuple[str, str]] = [
     (r".*pct_.*", "metric"),
     (r".*_value$|^value$", "metric"),
     (r".*_measure$|.*measure_.*", "metric"),
+    # Aggregate / summary metric patterns (generic, not dataset-specific)
+    (r".*_days$|^days_.*", "metric"),
+    (r".*percentile.*", "metric"),
+    (r".*median.*", "metric"),
+    (r".*_total$|^total_.*", "metric"),
+    (r".*_avg$|.*_average$", "metric"),
+    (r".*_max$|.*_min$|^max_.*|^min_.*", "metric"),
+    (r".*_sum$|^sum_.*", "metric"),
     (r".*latitude.*", "geographic"),
     (r".*longitude.*", "geographic"),
     (r"^lat$", "geographic"),
@@ -321,6 +329,19 @@ _HIGH_CONF_PATTERNS = {
     r".*budget.*",
     r".*latitude.*",
     r".*longitude.*",
+    r".*_days$|^days_.*",
+    r".*percentile.*",
+    r".*median.*",
+    r".*_total$|^total_.*",
+    r".*_avg$|.*_average$",
+    r".*_max$|.*_min$|^max_.*|^min_.*",
+    r".*_sum$|^sum_.*",
+    # Temporal singletons
+    r"^year$",
+    r"^month$",
+    r".*date.*",
+    r".*_at$",
+    r".*timestamp.*",
 }
 _STANDALONE_DIM_PATTERNS = {
     r"^county$",
@@ -487,13 +508,13 @@ def _compute_confidence(
         ratio = profile.distinct_count / dim_threshold if dim_threshold > 0 else 0
         # Very low relative cardinality = high confidence dimension
         if ratio < 0.2:
-            return 0.75
+            return 0.80
         if ratio < 0.5:
-            return 0.65
-        # Near the threshold = low confidence
-        return 0.45
+            return 0.75
+        # Near the threshold = moderate confidence
+        return 0.60
 
-    # Numeric with mean -> metric
+    # Numeric with mean -> metric (profile strongly supports metric role)
     if is_numeric and profile.mean is not None:
         signals = 0.0
         # Cardinality well above the dimension threshold = metric signal
@@ -513,7 +534,7 @@ def _compute_confidence(
             and profile.max_value > profile.min_value
         ):
             signals += 0.05
-        return 0.55 + signals
+        return 0.70 + signals
 
     return 0.3  # Genuinely unclear
 

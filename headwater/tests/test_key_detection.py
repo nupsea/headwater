@@ -135,23 +135,52 @@ class TestSuggestForeignKeys:
 
 class TestCompositeKeys:
     def test_two_id_columns(self):
+        import duckdb
+
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE SCHEMA IF NOT EXISTS main")
+        # 500 students x 200 courses = 100k possible combos, but only 10k rows
+        # so (student_id, course_id) should be unique
+        con.execute("""
+            CREATE TABLE main.enrollments AS
+            SELECT
+                (i % 500) + 1 AS student_id,
+                (i // 500) + 1 AS course_id
+            FROM generate_series(0, 9999) t(i)
+        """)
         profiles = [
             _profile("student_id", "INTEGER", 10000, 500, 0),
             _profile("course_id", "INTEGER", 10000, 200, 0),
         ]
-        result = detect_composite_keys("enrollments", profiles)
+        result = detect_composite_keys(con, "enrollments", "main", profiles)
         assert len(result) >= 1
-        assert "+" in result[0].column
+        assert "student_id" in result[0].columns
+        assert "course_id" in result[0].columns
+        con.close()
 
     def test_no_composite_for_single_id(self):
+        import duckdb
+
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE SCHEMA IF NOT EXISTS main")
+        con.execute("""
+            CREATE TABLE main.zones AS
+            SELECT i AS zone_id, 'zone_' || i AS name
+            FROM generate_series(1, 100) t(i)
+        """)
         profiles = [
             _profile("zone_id", "INTEGER", 100, 100, 0),
             _profile("name", "TEXT", 100, 80, 0),
         ]
-        result = detect_composite_keys("zones", profiles)
-        # zone_id is fully unique, not moderate cardinality
-        # name doesn't match _id pattern
+        result = detect_composite_keys(con, "zones", "main", profiles)
+        # zone_id is fully unique (95%+), so it's excluded as single-column PK candidate
+        # With only 2 columns and zone_id excluded, no composite key possible
         assert len(result) == 0
+        con.close()
 
     def test_empty_profiles(self):
-        assert detect_composite_keys("t", []) == []
+        import duckdb
+
+        con = duckdb.connect(":memory:")
+        assert detect_composite_keys(con, "t", "main", []) == []
+        con.close()

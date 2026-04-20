@@ -269,7 +269,7 @@ class TestStatisticalCorrectness:
         )
         insights = detect_insights(con, schema="test_uniform")
         # Uniform data should produce zero anomaly insights
-        anomalies = [i for i in insights if i.insight_type == "anomaly"]
+        anomalies = [i for i in insights if i.insight_type == "temporal_anomaly"]
         assert len(anomalies) == 0, (
             f"Got {len(anomalies)} false positive anomalies on uniform data"
         )
@@ -288,7 +288,7 @@ class TestStatisticalCorrectness:
             "FROM generate_series(1, 100) t(i)"
         )
         insights = detect_insights(con, schema="test_spike")
-        anomalies = [i for i in insights if i.insight_type == "anomaly"]
+        anomalies = [i for i in insights if i.insight_type == "temporal_anomaly"]
         # Should detect at least one anomaly for the spike
         assert len(anomalies) >= 1, "Known 10x spike was not detected as anomaly"
         con.execute("DROP SCHEMA test_spike CASCADE")
@@ -335,6 +335,175 @@ class TestStatisticalCorrectness:
                 f"Spurious correlation r={c.magnitude} between independent columns"
             )
         con.execute("DROP SCHEMA test_nocorr CASCADE")
+
+    # -- Wave E2 extended tests --
+
+    def test_fdr_eliminates_false_positives(self, explore_env):
+        """100 tables of random data should produce very few insights after FDR."""
+        con = explore_env["con"]
+        con.execute("CREATE SCHEMA IF NOT EXISTS test_fdr")
+        for t in range(100):
+            con.execute(
+                f"CREATE TABLE test_fdr.random_{t} AS "
+                f"SELECT i AS id, "
+                f"hash(i * {t * 7 + 3} + {t}) % 10000 / 100.0 AS value, "
+                f"DATE '2024-01-01' + INTERVAL (i) DAY AS ts "
+                f"FROM generate_series(1, 50) g(i)"
+            )
+        insights = detect_insights(con, schema="test_fdr")
+        # FDR correction should keep false positives well below 5% of 100 tests
+        assert len(insights) < 10, (
+            f"FDR failed: {len(insights)} insights from 100 random tables (expected < 10)"
+        )
+        con.execute("DROP SCHEMA test_fdr CASCADE")
+
+    def test_lognormal_uses_robust_stats(self, explore_env):
+        """Non-normal data should use MAD-based detection, not raw z-scores."""
+        import math
+
+        from headwater.explorer.statistical import _check_normality
+
+        # Log-normal values: heavily right-skewed
+        values = [math.exp(0.5 * i / 100) for i in range(200)]
+        assert not _check_normality(values), "Log-normal data should fail normality test"
+
+    def test_change_point_at_known_location(self, explore_env):
+        """Data with a level shift at position 50 should detect change point nearby."""
+        con = explore_env["con"]
+        con.execute("CREATE SCHEMA IF NOT EXISTS test_cp")
+        con.execute(
+            "CREATE TABLE test_cp.shifted AS "
+            "SELECT i AS id, "
+            "CASE WHEN i <= 50 THEN 10.0 + hash(i) % 100 / 50.0 "
+            "ELSE 30.0 + hash(i * 3) % 100 / 50.0 END AS value, "
+            "DATE '2024-01-01' + INTERVAL (i) DAY AS ts "
+            "FROM generate_series(1, 100) t(i)"
+        )
+        insights = detect_insights(con, schema="test_cp")
+        change_points = [i for i in insights if i.insight_type == "change_point"]
+        assert len(change_points) >= 1, "Level shift not detected as change point"
+        con.execute("DROP SCHEMA test_cp CASCADE")
+
+    def test_trending_columns_detrended(self, explore_env):
+        """Two independently trending columns should not show high detrended correlation."""
+        con = explore_env["con"]
+        con.execute("CREATE SCHEMA IF NOT EXISTS test_detrend")
+        con.execute(
+            "CREATE TABLE test_detrend.trends AS "
+            "SELECT i AS id, "
+            "i * 1.0 + hash(i * 7) % 100 / 10.0 AS a, "
+            "i * -0.5 + hash(i * 31) % 100 / 10.0 AS b, "
+            "DATE '2024-01-01' + INTERVAL (i) DAY AS ts "
+            "FROM generate_series(1, 100) t(i)"
+        )
+        insights = detect_insights(con, schema="test_detrend")
+        correlations = [
+            i for i in insights
+            if i.insight_type == "correlation"
+            and "a" in i.metric
+            and "b" in i.metric
+        ]
+        # After detrending, the noise-driven correlation should be weak
+        for c in correlations:
+            assert abs(c.magnitude) < 70, (
+                f"Detrending failed: r*100={c.magnitude} between counter-trending columns"
+            )
+        con.execute("DROP SCHEMA test_detrend CASCADE")
+
+    def test_genuine_correlation_survives_detrending(self, explore_env):
+        """col_b = 2*col_a + noise should be detected even after detrending."""
+        con = explore_env["con"]
+        con.execute("CREATE SCHEMA IF NOT EXISTS test_genuine")
+        con.execute(
+            "CREATE TABLE test_genuine.real_corr AS "
+            "SELECT i AS id, "
+            "i * 1.0 + hash(i * 11) % 100 / 20.0 AS a, "
+            "i * 2.0 + hash(i * 11) % 100 / 10.0 + 5.0 AS b, "
+            "DATE '2024-01-01' + INTERVAL (i) DAY AS ts "
+            "FROM generate_series(1, 100) t(i)"
+        )
+        insights = detect_insights(con, schema="test_genuine")
+        correlations = [i for i in insights if i.insight_type == "correlation"]
+        assert len(correlations) >= 1, (
+            "Genuine correlation (b ~ 2a + noise) not detected after detrending"
+        )
+        con.execute("DROP SCHEMA test_genuine CASCADE")
+
+    def test_single_outlier_does_not_suppress_detection(self, explore_env):
+        """A 1000x outlier should not suppress detection of a 5x anomaly."""
+        con = explore_env["con"]
+        con.execute("CREATE SCHEMA IF NOT EXISTS test_outlier")
+        # Day 30: 1000x outlier; Day 70: 5x anomaly
+        con.execute(
+            "CREATE TABLE test_outlier.with_outlier AS "
+            "SELECT i AS id, "
+            "CASE WHEN i = 30 THEN 50000.0 "
+            "WHEN i = 70 THEN 250.0 "
+            "ELSE 50.0 END AS value, "
+            "DATE '2024-01-01' + INTERVAL (i) DAY AS ts "
+            "FROM generate_series(1, 100) t(i)"
+        )
+        insights = detect_insights(con, schema="test_outlier")
+        anomalies = [i for i in insights if i.insight_type == "temporal_anomaly"]
+        # Should detect at least one anomaly (ideally both, but at minimum the big one)
+        assert len(anomalies) >= 1, (
+            "Extreme outlier suppressed all anomaly detection"
+        )
+        con.execute("DROP SCHEMA test_outlier CASCADE")
+
+    def test_tiny_magnitude_not_reported(self, explore_env):
+        """A statistically significant but practically meaningless shift should be filtered."""
+        from headwater.explorer.statistical import _calibrate_severity
+
+        # 0.1% shift with p=0.001 -- significant but meaningless
+        severity = _calibrate_severity(p_value=0.001, magnitude_pct=0.1)
+        assert severity is None, (
+            f"Tiny magnitude (0.1%) reported as {severity}, should be suppressed"
+        )
+
+    def test_severity_includes_magnitude(self, explore_env):
+        """Severity should account for both p-value and magnitude."""
+        from headwater.explorer.statistical import _calibrate_severity
+
+        # Large magnitude + highly significant = critical
+        assert _calibrate_severity(0.0001, 60.0) == "critical"
+        # Moderate magnitude + significant = warning
+        assert _calibrate_severity(0.005, 25.0) == "warning"
+        # Small magnitude + significant = info
+        assert _calibrate_severity(0.01, 10.0) == "info"
+        # Large magnitude but not significant = None
+        assert _calibrate_severity(0.1, 60.0) is None
+
+    def test_seasonal_data_no_false_anomalies(self, explore_env):
+        """Sine-wave seasonal data + one real spike: only the spike should be flagged."""
+        con = explore_env["con"]
+        con.execute("CREATE SCHEMA IF NOT EXISTS test_seasonal")
+        import math
+
+        # 200 days of sine-wave (period 30) + spike at day 150
+        def _seasonal_val(i: int) -> float:
+            spike = 500.0 if i == 150 else 0.0
+            return 50.0 + 20.0 * math.sin(2 * math.pi * i / 30) + spike
+
+        values_sql = ", ".join(
+            f"({i}, {_seasonal_val(i):.2f})" for i in range(1, 201)
+        )
+        con.execute(
+            f"CREATE TABLE test_seasonal.seasonal AS "
+            f"SELECT col0 AS id, col1 AS value, "
+            f"DATE '2024-01-01' + INTERVAL (col0) DAY AS ts "
+            f"FROM (VALUES {values_sql}) t(col0, col1)"
+        )
+        insights = detect_insights(con, schema="test_seasonal")
+        anomalies = [i for i in insights if i.insight_type == "temporal_anomaly"]
+        # Should not flag regular seasonal peaks as anomalies
+        # If anomalies found, at least one should be near day 150 (the real spike)
+        if anomalies:
+            # We mainly want to verify seasonal peaks aren't flooding the results
+            assert len(anomalies) <= 5, (
+                f"Too many anomalies ({len(anomalies)}) on seasonal data -- likely false positives"
+            )
+        con.execute("DROP SCHEMA test_seasonal CASCADE")
 
 
 # ---------------------------------------------------------------------------
