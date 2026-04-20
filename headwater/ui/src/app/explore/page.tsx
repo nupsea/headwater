@@ -14,17 +14,19 @@ import { SqlViewer } from "@/components/sql-viewer";
 import { DisambiguationUI } from "@/components/disambiguation-ui";
 
 const SOURCE_COLORS: Record<string, string> = {
-  mart: "bg-blue-100 text-blue-800 border-blue-200",
-  relationship: "bg-purple-100 text-purple-800 border-purple-200",
-  quality: "bg-amber-100 text-amber-800 border-amber-200",
-  semantic: "bg-green-100 text-green-800 border-green-200",
-  statistical: "bg-rose-100 text-rose-800 border-rose-200",
+  mart: "bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700",
+  relationship: "bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-700",
+  quality: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700",
+  semantic: "bg-green-100 text-green-800 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700",
+  statistical: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-700",
+  catalog: "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-900/30 dark:text-teal-300 dark:border-teal-700",
+  cross_table: "bg-indigo-100 text-indigo-800 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
 };
 
 const SEVERITY_COLORS: Record<string, string> = {
-  info: "border-l-blue-400 bg-blue-50",
-  warning: "border-l-amber-400 bg-amber-50",
-  critical: "border-l-red-400 bg-red-50",
+  info: "border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_10%,var(--card))]",
+  warning: "border-l-[var(--warning)] bg-[color-mix(in_srgb,var(--warning)_10%,var(--card))]",
+  critical: "border-l-[var(--danger)] bg-[color-mix(in_srgb,var(--danger)_10%,var(--card))]",
 };
 
 export default function ExplorePage() {
@@ -115,9 +117,9 @@ export default function ExplorePage() {
 
       {/* Soft review indicator (non-blocking) */}
       {reviewPct < 100 && (
-        <div className="mb-6 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">
+        <div className="mb-6 p-3 bg-[color-mix(in_srgb,var(--accent)_10%,var(--card))] border border-border rounded-lg flex items-center justify-between">
           <div>
-            <span className="text-sm text-blue-800">
+            <span className="text-sm text-foreground">
               {Math.round(reviewPct)}% of tables reviewed in the dictionary.
               Reviewing more tables improves accuracy.
             </span>
@@ -163,7 +165,7 @@ export default function ExplorePage() {
               <div className="flex items-center gap-3 text-xs text-muted">
                 <span>{result.row_count} rows</span>
                 {result.repaired && (
-                  <span className="px-2 py-0.5 rounded bg-green-100 text-green-800 border border-green-200">
+                  <span className="px-2 py-0.5 rounded bg-[var(--success)]/10 text-[var(--success)] border border-[var(--success)]/20">
                     auto-repaired
                   </span>
                 )}
@@ -198,12 +200,12 @@ export default function ExplorePage() {
             {!result.error && result.data.length > 0 && (
               <div className="flex items-center gap-2 mt-2 flex-wrap">
                 {result.repaired && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800 border border-green-200">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-[var(--success)]/10 text-[var(--success)] border border-[var(--success)]/20">
                     Auto-repaired
                   </span>
                 )}
                 {result.options.length === 0 && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800 border border-green-200">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-[var(--success)]/10 text-[var(--success)] border border-[var(--success)]/20">
                     Catalog-resolved
                   </span>
                 )}
@@ -211,7 +213,7 @@ export default function ExplorePage() {
             )}
 
             {result.error && (
-              <p className="text-sm text-red-600 mt-2">{result.error}</p>
+              <p className="text-sm text-[var(--danger)] mt-2">{result.error}</p>
             )}
           </div>
 
@@ -242,10 +244,10 @@ export default function ExplorePage() {
                 {result.warnings.map((w, i) => (
                   <div
                     key={i}
-                    className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200"
+                    className="flex items-start gap-2 p-3 rounded-lg bg-[color-mix(in_srgb,var(--warning)_10%,var(--card))] border border-[var(--warning)]/20"
                   >
-                    <span className="text-amber-600 shrink-0 mt-0.5 text-sm">!</span>
-                    <p className="text-sm text-amber-900">{w}</p>
+                    <span className="text-[var(--warning)] shrink-0 mt-0.5 text-sm">!</span>
+                    <p className="text-sm text-foreground">{w}</p>
                   </div>
                 ))}
               </div>
@@ -280,20 +282,20 @@ export default function ExplorePage() {
           )}
 
           {showRepairHistory && result.repair_history.length > 0 && (
-            <div className="p-4 border-b border-border bg-amber-50">
-              <h3 className="text-xs font-semibold text-amber-800 uppercase tracking-wider mb-3">
+            <div className="p-4 border-b border-border bg-[color-mix(in_srgb,var(--warning)_10%,var(--card))]">
+              <h3 className="text-xs font-semibold text-[var(--warning)] uppercase tracking-wider mb-3">
                 Repair History ({result.repair_history.length} attempt{result.repair_history.length > 1 ? "s" : ""})
               </h3>
               <div className="space-y-3">
                 {result.repair_history.map((attempt, i) => (
-                  <div key={i} className="text-xs border border-amber-200 rounded p-3 bg-white">
-                    <div className="font-medium text-amber-900 mb-1">
+                  <div key={i} className="text-xs border border-border rounded p-3 bg-card">
+                    <div className="font-medium text-foreground mb-1">
                       Attempt {i + 1}
                     </div>
-                    <pre className="font-mono text-[11px] bg-amber-50 p-2 rounded mb-2 overflow-auto whitespace-pre-wrap">
+                    <pre className="font-mono text-[11px] bg-background p-2 rounded mb-2 overflow-auto whitespace-pre-wrap">
                       {attempt.sql}
                     </pre>
-                    <div className="text-red-700">
+                    <div className="text-[var(--danger)]">
                       {attempt.error}
                     </div>
                   </div>

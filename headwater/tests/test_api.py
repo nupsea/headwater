@@ -366,6 +366,100 @@ class TestDriftAPI:
         assert len(data["reports"]) == 2
 
 
+class TestProjectCreation:
+    """POST /api/projects -- create a new project."""
+
+    def test_create_project_returns_201(self, client):
+        resp = client.post(
+            "/api/projects",
+            json={
+                "display_name": "My Test Project",
+                "description": "A test project",
+            },
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["display_name"] == "My Test Project"
+        assert data["slug"] == "my-test-project"
+        assert data["description"] == "A test project"
+        assert "id" in data
+
+    def test_create_project_minimal(self, client):
+        resp = client.post(
+            "/api/projects",
+            json={"display_name": "Minimal"},
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["display_name"] == "Minimal"
+        assert data["slug"] == "minimal"
+
+    def test_create_project_appears_in_list(self, client):
+        client.post("/api/projects", json={"display_name": "Listed Project"})
+        resp = client.get("/api/projects")
+        names = [p["display_name"] for p in resp.json()["projects"]]
+        assert "Listed Project" in names
+
+
+class TestProjectRename:
+    """PATCH /api/projects/{id}/rename -- update name or description."""
+
+    def _create(self, client, name="Original Name"):
+        resp = client.post("/api/projects", json={"display_name": name})
+        return resp.json()
+
+    def test_rename_project(self, client):
+        project = self._create(client)
+        resp = client.patch(
+            f"/api/projects/{project['id']}/rename",
+            json={"display_name": "New Name"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["display_name"] == "New Name"
+        assert data["slug"] == "new-name"
+
+    def test_rename_project_not_found(self, client):
+        resp = client.patch(
+            "/api/projects/nonexistent-id/rename",
+            json={"display_name": "Whatever"},
+        )
+        assert resp.status_code == 404
+
+    def test_rename_updates_description(self, client):
+        project = self._create(client)
+        resp = client.patch(
+            f"/api/projects/{project['id']}/rename",
+            json={"description": "Updated desc"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["description"] == "Updated desc"
+
+
+class TestActivityFeed:
+    """GET /api/activity -- recent activity feed."""
+
+    def test_activity_empty_initially(self, client):
+        resp = client.get("/api/activity")
+        assert resp.status_code == 200
+        assert resp.json()["activities"] == []
+
+    def test_activity_after_project_creation(self, client):
+        client.post("/api/projects", json={"display_name": "Activity Test"})
+        resp = client.get("/api/activity")
+        assert resp.status_code == 200
+        activities = resp.json()["activities"]
+        assert len(activities) >= 1
+        assert activities[0]["action"] == "project_created"
+
+    def test_activity_limit_parameter(self, client):
+        for i in range(5):
+            client.post("/api/projects", json={"display_name": f"Project {i}"})
+        resp = client.get("/api/activity", params={"limit": 3})
+        assert resp.status_code == 200
+        assert len(resp.json()["activities"]) == 3
+
+
 class TestDecisionRecording:
     """US-301: verify approve/reject writes to decisions table."""
 
@@ -408,3 +502,272 @@ class TestDecisionRecording:
         decisions = store.get_decisions("model", mart_name)
         payload = json.loads(decisions[0]["payload_json"])
         assert payload["previous_status"] == "proposed"
+
+
+class TestReEnrich:
+    """POST /api/pipeline/re-enrich endpoint."""
+
+    def test_re_enrich_no_discovery(self, client):
+        """Returns 400 when no discovery has been run."""
+        resp = client.post("/api/pipeline/re-enrich")
+        assert resp.status_code == 400
+
+    def test_re_enrich_with_discovery(self, client):
+        """Re-enriches successfully when discovery exists."""
+        from unittest.mock import patch
+
+        # Run discovery first
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+
+        with patch("headwater.api.routes.pipeline.analyze") as mock_analyze:
+            # Make analyze return the discovery unchanged (it mutates in place)
+            mock_analyze.side_effect = lambda d, p=None, **kw: d
+
+            resp = client.post("/api/pipeline/re-enrich")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "columns_enriched" in data
+            assert "provider" in data
+            assert data["columns_enriched"] >= 0
+            mock_analyze.assert_called_once()
+
+
+class TestModelAnswers:
+    """POST/GET /api/models/{name}/answers endpoints."""
+
+    def _setup(self, client):
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        client.post("/api/generate")
+
+    def test_save_answers_model_not_found(self, client):
+        """Returns 404 for unknown model name."""
+        self._setup(client)
+        resp = client.post(
+            "/api/models/nonexistent_model/answers",
+            json={"answers": [{"question_index": 0, "answer": "yes"}]},
+        )
+        assert resp.status_code == 404
+
+    def test_save_answers_success(self, client):
+        """Saves answers when model exists."""
+        self._setup(client)
+        resp = client.post(
+            "/api/models/stg_zones/answers",
+            json={
+                "answers": [
+                    {"question_index": 0, "answer": "Geographic zone identifier"},
+                    {"question_index": 1, "answer": "Daily granularity"},
+                ]
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["model_name"] == "stg_zones"
+        assert data["answers_saved"] == 2
+
+    def test_get_answers(self, client):
+        """Returns previously saved answers."""
+        self._setup(client)
+        # Save first
+        client.post(
+            "/api/models/stg_zones/answers",
+            json={
+                "answers": [
+                    {"question_index": 0, "answer": "Geographic zone identifier"},
+                ]
+            },
+        )
+        # Retrieve
+        resp = client.get("/api/models/stg_zones/answers")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["model_name"] == "stg_zones"
+        assert len(data["answers"]) == 1
+        assert data["answers"][0]["answer"] == "Geographic zone identifier"
+
+
+class TestDictionaryAnswersE2E:
+    """End-to-end: run real pipeline, then answer dictionary questions."""
+
+    def _discover(self, client):
+        resp = client.post("/api/pipeline/run", params={"source_path": SAMPLE_DATA})
+        assert resp.status_code == 200, f"Pipeline failed: {resp.text}"
+        return resp.json()
+
+    def test_dict_answers_after_discovery(self, client):
+        """After real discovery, POST dict answers returns 200."""
+        self._discover(client)
+        # Pick a table that exists
+        dict_resp = client.get("/api/dictionary")
+        assert dict_resp.status_code == 200
+        tables = dict_resp.json()["tables"]
+        assert len(tables) > 0
+        table_name = tables[0]["name"]
+
+        # Submit answers
+        resp = client.post(
+            f"/api/dictionary/{table_name}/answers",
+            json={"answers": [{"question_index": 0, "answer": "test answer"}]},
+        )
+        assert resp.status_code == 200, f"Dict answers failed: {resp.text}"
+        data = resp.json()
+        assert data["table_name"] == table_name
+        assert data["answers_saved"] == 1
+
+        # Retrieve
+        get_resp = client.get(f"/api/dictionary/{table_name}/answers")
+        assert get_resp.status_code == 200
+        assert len(get_resp.json()["answers"]) == 1
+
+    def test_dict_answers_404_unknown_table(self, client):
+        """Dict answers for unknown table returns 404 (not 500)."""
+        self._discover(client)
+        resp = client.post(
+            "/api/dictionary/nonexistent_table/answers",
+            json={"answers": [{"question_index": 0, "answer": "test"}]},
+        )
+        assert resp.status_code == 404
+
+    def test_model_answers_after_discovery(self, client):
+        """After real discovery, POST model answers for a real model returns 200."""
+        self._discover(client)
+        # Get actual model names
+        models_resp = client.get("/api/models")
+        assert models_resp.status_code == 200
+        models = models_resp.json()
+        assert len(models) > 0
+
+        # Find a model with questions
+        model_with_q = next(
+            (m for m in models if m.get("questions") and len(m["questions"]) > 0),
+            None,
+        )
+        model_name = models[0]["name"] if model_with_q is None else model_with_q["name"]
+
+        resp = client.post(
+            f"/api/models/{model_name}/answers",
+            json={"answers": [{"question_index": 0, "answer": "monthly"}]},
+        )
+        assert resp.status_code == 200, f"Model answers failed: {resp.text}"
+        assert resp.json()["answers_saved"] == 1
+
+
+class TestExplorerE2E:
+    """End-to-end: run real pipeline, verify explorer produces meaningful suggestions."""
+
+    def _run_pipeline(self, client):
+        resp = client.post("/api/pipeline/run", params={"source_path": SAMPLE_DATA})
+        assert resp.status_code == 200, f"Pipeline failed: {resp.text}"
+        return resp.json()
+
+    def test_suggestions_include_multi_table_questions(self, client):
+        """Explorer must generate cross-table or relationship suggestions."""
+        self._run_pipeline(client)
+        resp = client.get("/api/explore/suggestions")
+        assert resp.status_code == 200
+        data = resp.json()
+        suggestions = data["suggestions"]
+        assert len(suggestions) > 0, "Explorer generated 0 suggestions"
+
+        # Must have questions involving multiple tables
+        multi_table = [
+            s for s in suggestions if len(s.get("relevant_tables", [])) >= 2
+        ]
+        assert len(multi_table) > 0, (
+            f"No multi-table suggestions generated. "
+            f"Sources: {[s['source'] for s in suggestions]}"
+        )
+
+    def test_suggestions_have_sql_hints(self, client):
+        """All suggestions must have executable SQL hints."""
+        self._run_pipeline(client)
+        resp = client.get("/api/explore/suggestions")
+        suggestions = resp.json()["suggestions"]
+        for s in suggestions:
+            assert s.get("sql_hint"), (
+                f"Suggestion missing SQL hint: {s['question']}"
+            )
+
+    def test_suggestions_cover_multiple_sources(self, client):
+        """Suggestions should come from multiple sources, not just one."""
+        self._run_pipeline(client)
+        resp = client.get("/api/explore/suggestions")
+        suggestions = resp.json()["suggestions"]
+        sources = {s["source"] for s in suggestions}
+        assert len(sources) >= 2, (
+            f"Suggestions only from {sources}. Expected at least 2 sources."
+        )
+
+    def test_ask_with_suggested_question(self, client):
+        """Clicking a suggested question should produce actual data."""
+        self._run_pipeline(client)
+        resp = client.get("/api/explore/suggestions")
+        suggestions = resp.json()["suggestions"]
+        assert len(suggestions) > 0
+
+        # Ask the first suggested question
+        question = suggestions[0]["question"]
+        ask_resp = client.post(
+            "/api/explore/ask", json={"question": question}
+        )
+        assert ask_resp.status_code == 200
+        result = ask_resp.json()
+        # Should either have data or a non-empty SQL
+        assert result.get("data") or result.get("sql"), (
+            f"Asking '{question}' produced no data and no SQL"
+        )
+
+    def test_pk_fk_suggestions_after_discovery(self, client):
+        """PK/FK detection should produce suggestions for tables with _id columns."""
+        self._run_pipeline(client)
+        # Get tables
+        tables_resp = client.get("/api/tables")
+        tables = tables_resp.json()
+        assert len(tables) > 0
+
+        # Try pk-fk-suggestions for a table that likely has FK columns
+        found_suggestions = False
+        for table in tables[:3]:
+            resp = client.get(
+                f"/api/tables/{table['name']}/pk-fk-suggestions"
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("pk_candidates") or data.get("fk_candidates"):
+                    found_suggestions = True
+                    break
+
+        # At least some tables in the sample data should have PK/FK suggestions
+        assert found_suggestions, (
+            "No PK/FK suggestions generated for any table in sample data"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+class TestHealth:
+    def test_health_returns_200(self, client):
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] in ("healthy", "degraded")
+        assert "components" in data
+        assert "version" in data
+        assert "uptime_seconds" in data
+
+    def test_health_components_present(self, client):
+        resp = client.get("/api/health")
+        data = resp.json()
+        components = data["components"]
+        assert "metadata_store" in components
+        assert "analytical_engine" in components
+        assert "llm_provider" in components
+
+    def test_health_in_memory_is_healthy(self, client):
+        """In-memory test mode should report healthy status."""
+        resp = client.get("/api/health")
+        data = resp.json()
+        assert data["status"] == "healthy"
+        assert data["components"]["metadata_store"] == "ok"
+        assert data["components"]["analytical_engine"] == "ok"

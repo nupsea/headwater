@@ -1,6 +1,8 @@
-"""Tests for SQLite metadata store."""
+"""Tests for SQLite metadata store and config persistence."""
 
 from __future__ import annotations
+
+import json
 
 from headwater.core.metadata import MetadataStore
 
@@ -220,3 +222,195 @@ def test_llm_audit_log_roundtrip(meta: MetadataStore):
     assert e["provider"] == "anthropic"
     assert e["tokens_in"] == 100
     assert e["tokens_out"] == 50
+
+
+# -- v3: Activity log -------------------------------------------------------
+
+
+def test_activity_log_empty(meta: MetadataStore):
+    assert meta.get_activity() == []
+
+
+def test_log_and_get_activity(meta: MetadataStore):
+    meta.log_activity(
+        "project_created", "Created project 'Test'", artifact_type="project", artifact_id="p1"
+    )
+    meta.log_activity(
+        "table_reviewed", "Reviewed zones", artifact_type="table", artifact_id="zones"
+    )
+    activities = meta.get_activity()
+    assert len(activities) == 2
+    # Both actions present (order by id DESC since same-second timestamps)
+    actions = {a["action"] for a in activities}
+    assert "project_created" in actions
+    assert "table_reviewed" in actions
+
+
+def test_activity_log_limit(meta: MetadataStore):
+    for i in range(5):
+        meta.log_activity(f"action_{i}", f"Detail {i}")
+    assert len(meta.get_activity(limit=3)) == 3
+
+
+def test_activity_log_minimal(meta: MetadataStore):
+    meta.log_activity("simple_action")
+    activities = meta.get_activity()
+    assert len(activities) == 1
+    assert activities[0]["detail"] is None
+    assert activities[0]["artifact_type"] is None
+
+
+# -- v3: Model answers -------------------------------------------------------
+
+
+def test_model_answers_empty(meta: MetadataStore):
+    assert meta.get_model_answers("nonexistent") == []
+
+
+def test_save_and_get_model_answers(meta: MetadataStore):
+    answers = [
+        {"question_index": 0, "answer": "monthly"},
+        {"question_index": 1, "answer": "zone_id"},
+    ]
+    count = meta.save_model_answers("mart_compliance", answers)
+    assert count == 2
+    saved = meta.get_model_answers("mart_compliance")
+    assert len(saved) == 2
+    assert saved[0]["answer"] == "monthly"
+    assert saved[1]["answer"] == "zone_id"
+
+
+def test_model_answers_upsert(meta: MetadataStore):
+    meta.save_model_answers("mart_x", [{"question_index": 0, "answer": "old"}])
+    meta.save_model_answers("mart_x", [{"question_index": 0, "answer": "new"}])
+    saved = meta.get_model_answers("mart_x")
+    assert len(saved) == 1
+    assert saved[0]["answer"] == "new"
+
+
+def test_model_answers_isolated_by_model(meta: MetadataStore):
+    meta.save_model_answers("model_a", [{"question_index": 0, "answer": "a"}])
+    meta.save_model_answers("model_b", [{"question_index": 0, "answer": "b"}])
+    assert len(meta.get_model_answers("model_a")) == 1
+    assert meta.get_model_answers("model_a")[0]["answer"] == "a"
+
+
+# -- v3: PK/FK persistence --------------------------------------------------
+
+
+def test_persist_pk(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_table("zones", "src")
+    meta.upsert_column("zones", "src", "zone_id", "INTEGER")
+    meta.upsert_column("zones", "src", "name", "TEXT")
+
+    result = meta.persist_pk_fk("zones", "src", confirm_pks=["zone_id"])
+    assert result["pks_confirmed"] == 1
+
+    col = meta.con.execute(
+        "SELECT is_primary_key FROM columns WHERE table_name='zones' AND name='zone_id'"
+    ).fetchone()
+    assert col["is_primary_key"] == 1
+
+
+def test_persist_reject_pk(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_table("zones", "src")
+    meta.upsert_column("zones", "src", "zone_id", "INTEGER", is_primary_key=True)
+
+    result = meta.persist_pk_fk("zones", "src", reject_pks=["zone_id"])
+    assert result["pks_rejected"] == 1
+
+    col = meta.con.execute(
+        "SELECT is_primary_key FROM columns WHERE table_name='zones' AND name='zone_id'"
+    ).fetchone()
+    assert col["is_primary_key"] == 0
+
+
+def test_persist_confirm_fk(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    fks = [{"from_col": "zone_id", "to_table": "zones", "to_col": "zone_id"}]
+    result = meta.persist_pk_fk("inspections", "src", confirm_fks=fks)
+    assert result["fks_confirmed"] == 1
+
+    rel = meta.con.execute("SELECT * FROM relationships WHERE from_table='inspections'").fetchone()
+    assert rel is not None
+    assert rel["to_table"] == "zones"
+    assert rel["detection_source"] == "confirmed"
+
+
+def test_persist_reject_fk(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.con.execute(
+        "INSERT INTO relationships (source_name, from_table, from_column, to_table, to_column, "
+        "rel_type, confidence, ref_integrity, detection_source) "
+        "VALUES ('src', 'inspections', 'zone_id', 'zones', 'zone_id', 'fk', 0.8, 0.9, 'detected')"
+    )
+    meta.con.commit()
+    rel_id = meta.con.execute("SELECT id FROM relationships").fetchone()["id"]
+
+    result = meta.persist_pk_fk("inspections", "src", reject_fk_ids=[rel_id])
+    assert result["fks_rejected"] == 1
+    assert (
+        meta.con.execute("SELECT * FROM relationships WHERE id = ?", (rel_id,)).fetchone() is None
+    )
+
+
+# -- v3: Settings file persistence -------------------------------------------
+
+
+def test_save_and_load_settings(tmp_path):
+    from headwater.core.config import (
+        HeadwaterSettings,
+        _load_settings_from_file,
+        save_settings_to_file,
+    )
+
+    settings = HeadwaterSettings(data_dir=tmp_path, llm_provider="ollama", llm_model="llama3.2")
+    path = save_settings_to_file(settings)
+
+    assert path.exists()
+    data = json.loads(path.read_text())
+    assert data["llm_provider"] == "ollama"
+    assert data["llm_model"] == "llama3.2"
+    # Secrets should not be persisted
+    assert "llm_api_key" not in data
+
+    # Load back
+    loaded = _load_settings_from_file(tmp_path)
+    assert loaded["llm_provider"] == "ollama"
+    assert loaded["llm_model"] == "llama3.2"
+
+
+def test_load_settings_missing_file(tmp_path):
+    from headwater.core.config import _load_settings_from_file
+
+    assert _load_settings_from_file(tmp_path) == {}
+
+
+def test_load_settings_corrupt_file(tmp_path):
+    from headwater.core.config import _load_settings_from_file
+
+    (tmp_path / "settings.json").write_text("not json{{{")
+    assert _load_settings_from_file(tmp_path) == {}
+
+
+def test_settings_file_filters_unknown_keys(tmp_path):
+    from headwater.core.config import _load_settings_from_file
+
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"llm_provider": "ollama", "unknown_key": "val"})
+    )
+    loaded = _load_settings_from_file(tmp_path)
+    assert "unknown_key" not in loaded
+    assert loaded["llm_provider"] == "ollama"
+
+
+def test_new_tables_created(meta: MetadataStore):
+    """Verify v3 tables exist after init."""
+    tables = meta.con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    ).fetchall()
+    names = {r["name"] for r in tables}
+    assert "activity_log" in names
+    assert "model_answers" in names

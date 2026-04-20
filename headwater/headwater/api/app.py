@@ -21,6 +21,7 @@ from headwater.api.routes import (
     execute,
     explore,
     graph,
+    health,
     insights,
     models,
     pipeline,
@@ -147,18 +148,131 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to restore catalog from metadata")
 
+    # Try to restore models, contracts, and execution results from metadata
+    restored_staging: list = []
+    restored_marts: list = []
+    restored_contracts: list = []
+    restored_exec_results: list = []
+    if restored_discovery and not in_memory:
+        try:
+            restored_staging, restored_marts = _restore_models(store)
+            restored_contracts = _restore_contracts(store)
+            restored_exec_results = _restore_execution_results(store)
+        except Exception:
+            logger.exception("Failed to restore pipeline state from metadata")
+
     app.state.pipeline: dict[str, Any] = {
         "discovery": restored_discovery,
         "catalog": restored_catalog,
-        "staging_models": [],
-        "mart_models": [],
-        "contracts": [],
-        "execution_results": [],
+        "staging_models": restored_staging,
+        "mart_models": restored_marts,
+        "contracts": restored_contracts,
+        "execution_results": restored_exec_results,
         "quality_report": None,
     }
     yield
     app.state.duckdb_con.close()
     app.state.metadata_store.close()
+
+
+def _restore_models(store: MetadataStore) -> tuple[list, list]:
+    """Restore generated models from SQLite, split into staging and mart lists."""
+    from headwater.core.models import GeneratedModel
+
+    rows = store.get_models()
+    staging, marts = [], []
+    for r in rows:
+        try:
+            m = GeneratedModel(
+                name=r["name"],
+                model_type=r["model_type"],
+                sql=r["sql_text"],
+                description=r.get("description", ""),
+                source_tables=_parse_json_list(r.get("source_tables")),
+                depends_on=_parse_json_list(r.get("depends_on")),
+                status=r.get("status", "proposed"),
+                assumptions=_parse_json_list(r.get("assumptions")),
+                questions=_parse_json_list(r.get("questions")),
+            )
+            if m.model_type == "staging":
+                staging.append(m)
+            else:
+                marts.append(m)
+        except Exception:
+            logger.warning("Skipping malformed model row: %s", r.get("name"))
+    if staging or marts:
+        logger.info(
+            "Restored %d staging + %d mart models from metadata",
+            len(staging),
+            len(marts),
+        )
+    return staging, marts
+
+
+def _restore_contracts(store: MetadataStore) -> list:
+    """Restore data contracts from SQLite."""
+    from headwater.core.models import ContractRule
+
+    rows = store.get_contracts()
+    contracts = []
+    for r in rows:
+        try:
+            contracts.append(
+                ContractRule(
+                    id=r["id"],
+                    model_name=r["model_name"],
+                    column_name=r.get("column_name"),
+                    rule_type=r["rule_type"],
+                    expression=r["expression"],
+                    severity=r.get("severity", "warning"),
+                    description=r.get("description", ""),
+                    confidence=r.get("confidence", 0.8),
+                    status=r.get("status", "proposed"),
+                )
+            )
+        except Exception:
+            logger.warning("Skipping malformed contract row: %s", r.get("id"))
+    if contracts:
+        logger.info("Restored %d contracts from metadata", len(contracts))
+    return contracts
+
+
+def _restore_execution_results(store: MetadataStore) -> list:
+    """Restore most recent execution results from SQLite."""
+    from headwater.core.models import ExecutionResult
+
+    rows = store.get_execution_results()
+    results = []
+    for r in rows:
+        try:
+            results.append(
+                ExecutionResult(
+                    model_name=r["model_name"],
+                    success=bool(r["success"]),
+                    row_count=r.get("row_count"),
+                    execution_time_ms=r.get("execution_time_ms", 0.0),
+                    error=r.get("error"),
+                )
+            )
+        except Exception:
+            logger.warning("Skipping malformed exec result: %s", r.get("model_name"))
+    if results:
+        logger.info("Restored %d execution results from metadata", len(results))
+    return results
+
+
+def _parse_json_list(val: str | list | None) -> list:
+    """Parse a JSON string or passthrough a list."""
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return val
+    try:
+        import json
+
+        return json.loads(val)
+    except (ValueError, TypeError):
+        return []
 
 
 def create_app(*, in_memory: bool = False) -> FastAPI:
@@ -221,6 +335,7 @@ def create_app(*, in_memory: bool = False) -> FastAPI:
     app.include_router(project.router, prefix="/api", tags=["project"])
     app.include_router(graph.router, prefix="/api", tags=["graph"])
     app.include_router(settings.router, prefix="/api", tags=["settings"])
+    app.include_router(health.router, prefix="/api", tags=["health"])
 
     @app.get("/api/status")
     async def api_status():

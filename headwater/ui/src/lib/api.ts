@@ -262,7 +262,7 @@ export interface PipelineRunResponse {
 
 export interface SuggestedQuestion {
   question: string;
-  source: "mart" | "relationship" | "quality" | "semantic" | "statistical";
+  source: "mart" | "relationship" | "quality" | "semantic" | "statistical" | "catalog" | "cross_table";
   category: string;
   relevant_tables: string[];
   sql_hint: string | null;
@@ -396,6 +396,21 @@ export interface DictColumn {
   confidence: number;
   locked: boolean;
   needs_review: boolean;
+  review_signal: "auto_confirmed" | "needs_review" | "conflict";
+  review_reason: string | null;
+}
+
+export interface CatalogItemSummary {
+  name: string;
+  display_name: string;
+  item_type: "metric" | "dimension";
+  confidence: number;
+  status: "proposed" | "confirmed" | "rejected";
+  description: string | null;
+  expression: string | null;
+  agg_type: string | null;
+  column_name: string | null;
+  review_signal: "auto_confirmed" | "needs_review" | "conflict";
 }
 
 export interface DictTable {
@@ -408,6 +423,9 @@ export interface DictTable {
   columns: DictColumn[];
   relationships: RelationshipEntry[];
   questions: string[];
+  catalog_items: CatalogItemSummary[];
+  auto_confirmed_count: number;
+  needs_review_count: number;
 }
 
 export interface DictReviewSummary {
@@ -681,10 +699,92 @@ export interface DecompositionResult {
   resolution_mode: "catalog" | "exploratory" | null;
 }
 
+// ---------- v3: Activity types ----------
+
+export interface ActivityEntry {
+  id: number;
+  action: string;
+  detail: string | null;
+  artifact_type: string | null;
+  artifact_id: string | null;
+  created_at: string;
+}
+
+// ---------- v3: PK/FK suggestion types ----------
+
+export interface PKCandidate {
+  table: string;
+  column: string;
+  uniqueness_ratio: number;
+  null_rate: number;
+  confidence: number;
+  reasons: string[];
+}
+
+export interface FKCandidate {
+  from_table: string;
+  from_column: string;
+  to_table: string;
+  to_column: string;
+  value_overlap: number;
+  confidence: number;
+  reasons: string[];
+}
+
+export interface PKFKSuggestions {
+  table: string;
+  pk_candidates: PKCandidate[];
+  fk_candidates: FKCandidate[];
+}
+
+// ---------- v3: Model answers types ----------
+
+export interface ModelAnswer {
+  id: number;
+  model_name: string;
+  question_index: number;
+  answer: string;
+  created_at: string;
+}
+
+// ---------- v3: LLM verify types ----------
+
+export interface LLMVerifyResponse {
+  status: "ok" | "error";
+  provider: string;
+  model: string;
+  detail: string | null;
+  latency_ms: number | null;
+}
+
+// ---------- v3: Create project types ----------
+
+export interface CreateProjectPayload {
+  display_name: string;
+  source_path?: string;
+  description?: string;
+}
+
+// ---------- Connection test types ----------
+
+export interface ConnectionTestResult {
+  status: "ok" | "error";
+  source_type: string;
+  tables: number;
+  table_names: string[];
+  detail: string;
+}
+
 // ---------- API calls ----------
 
 export const api = {
   status: () => fetchJSON<StatusResponse>("/status"),
+
+  testConnection: (sourcePath: string, sourceType = "auto") =>
+    fetchJSON<ConnectionTestResult>(
+      `/pipeline/test-connection?source_path=${encodeURIComponent(sourcePath)}&source_type=${sourceType}`,
+      { method: "POST" }
+    ),
 
   pipelineRun: (sourcePath: string, sourceType = "auto") =>
     fetchJSON<PipelineRunResponse>(
@@ -854,4 +954,103 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+
+  // v3: List Ollama models available on the local server
+  ollamaModels: () =>
+    fetchJSON<{ models: string[]; base_url: string; error?: string }>(
+      "/settings/ollama-models"
+    ),
+
+  // v3: Verify LLM connectivity
+  verifyLLM: () => fetchJSON<LLMVerifyResponse>("/settings/verify-llm"),
+
+  // v3: Create project
+  createProject: (body: CreateProjectPayload) =>
+    fetchJSON<Project>("/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
+  // v3: Rename project
+  renameProject: (id: string, body: { display_name?: string; description?: string }) =>
+    fetchJSON<Project>(`/projects/${id}/rename`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
+  // v3: Activity feed
+  activity: (limit = 20) =>
+    fetchJSON<{ activities: ActivityEntry[] }>(`/activity?limit=${limit}`),
+
+  // v3: PK/FK suggestions
+  pkfkSuggestions: (table: string) =>
+    fetchJSON<PKFKSuggestions>(`/tables/${table}/pk-fk-suggestions`),
+
+  // v3: Confirm/reject PK/FK
+  persistKeys: (table: string, body: {
+    confirm_pks?: string[];
+    reject_pks?: string[];
+    confirm_fks?: { from_col: string; to_table: string; to_col: string }[];
+    reject_fk_ids?: number[];
+  }) =>
+    fetchJSON<{ pks_confirmed: number; pks_rejected: number; fks_confirmed: number; fks_rejected: number }>(
+      `/tables/${table}/keys`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    ),
+
+  // v3: Model answers
+  submitModelAnswers: (modelName: string, answers: { question_index: number; answer: string }[]) =>
+    fetchJSON<{ model_name: string; answers_saved: number }>(
+      `/models/${modelName}/answers`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers }),
+      }
+    ),
+
+  getModelAnswers: (modelName: string) =>
+    fetchJSON<{ model_name: string; answers: ModelAnswer[] }>(
+      `/models/${modelName}/answers`
+    ),
+
+  // v3: Dictionary answers (table-scoped)
+  submitDictAnswers: (tableName: string, answers: { question_index: number; answer: string }[]) =>
+    fetchJSON<{ table_name: string; answers_saved: number }>(
+      `/dictionary/${tableName}/answers`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers }),
+      }
+    ),
+
+  getDictAnswers: (tableName: string) =>
+    fetchJSON<{ table_name: string; answers: ModelAnswer[] }>(
+      `/dictionary/${tableName}/answers`
+    ),
+
+  // v3: Re-enrich pipeline (force=false skips already LLM-enriched tables)
+  reEnrich: (force = false) =>
+    fetchJSON<{
+      columns_enriched: number;
+      provider: string;
+      skipped: number;
+      tables_processed: number;
+      catalog_metrics?: number;
+      catalog_dimensions?: number;
+      catalog_entities?: number;
+      catalog_confidence?: number;
+      relationships?: number;
+      message?: string;
+    }>(
+      `/pipeline/re-enrich?force=${force}`,
+      { method: "POST" }
+    ),
 };

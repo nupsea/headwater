@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from headwater.generator.contracts import generate_contracts
 from headwater.generator.marts import generate_mart_models
@@ -117,3 +118,45 @@ async def reject_model(request: Request, model_name: str):
             payload={"previous_status": prev_status},
         )
     return {"name": model.name, "status": model.status}
+
+
+class AnswerItem(BaseModel):
+    question_index: int
+    answer: str
+
+
+class AnswersPayload(BaseModel):
+    answers: list[AnswerItem]
+
+
+@router.post("/models/{model_name}/answers")
+async def save_model_answers(request: Request, model_name: str, body: AnswersPayload):
+    """Save answers to a model's clarifying questions."""
+    pipeline = request.app.state.pipeline
+    all_models = pipeline["staging_models"] + pipeline["mart_models"]
+    model = next((m for m in all_models if m.name == model_name), None)
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found.")
+
+    store = getattr(request.app.state, "metadata_store", None)
+    answers_dicts = [a.model_dump() for a in body.answers]
+    saved = 0
+    if store is not None:
+        saved = store.save_model_answers(model_name, answers_dicts)
+        store.log_activity(
+            "question_answered",
+            f"Answered {len(body.answers)} questions for {model_name}",
+            artifact_type="model",
+            artifact_id=model_name,
+        )
+    return {"model_name": model_name, "answers_saved": saved}
+
+
+@router.get("/models/{model_name}/answers")
+async def get_model_answers(request: Request, model_name: str):
+    """Retrieve saved answers for a model's clarifying questions."""
+    store = getattr(request.app.state, "metadata_store", None)
+    answers = []
+    if store is not None:
+        answers = store.get_model_answers(model_name)
+    return {"model_name": model_name, "answers": answers}

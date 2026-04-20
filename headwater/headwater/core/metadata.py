@@ -243,6 +243,34 @@ CREATE TABLE IF NOT EXISTS catalog_entities (
     synonyms_json   TEXT DEFAULT '[]',
     PRIMARY KEY (name, project_id)
 );
+
+CREATE TABLE IF NOT EXISTS activity_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    action      TEXT NOT NULL,
+    detail      TEXT,
+    artifact_type TEXT,
+    artifact_id TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS model_answers (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name  TEXT NOT NULL,
+    question_index INTEGER NOT NULL,
+    answer      TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(model_name, question_index)
+);
+
+CREATE TABLE IF NOT EXISTS execution_results (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name      TEXT NOT NULL,
+    success         INTEGER NOT NULL DEFAULT 0,
+    row_count       INTEGER,
+    execution_time_ms REAL DEFAULT 0.0,
+    error           TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -1198,6 +1226,34 @@ class MetadataStore:
             rows = self.con.execute("SELECT * FROM contracts").fetchall()
         return [dict(r) for r in rows]
 
+    # -- Execution Results --------------------------------------------------
+
+    def save_execution_result(
+        self,
+        model_name: str,
+        success: bool,
+        row_count: int | None = None,
+        execution_time_ms: float = 0.0,
+        error: str | None = None,
+    ) -> None:
+        self.con.execute(
+            "INSERT INTO execution_results "
+            "(model_name, success, row_count, execution_time_ms, error) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (model_name, int(success), row_count, execution_time_ms, error),
+        )
+        self.con.commit()
+
+    def get_execution_results(self) -> list[dict]:
+        """Return the most recent execution result per model."""
+        rows = self.con.execute(
+            "SELECT * FROM execution_results "
+            "WHERE id IN ("
+            "  SELECT MAX(id) FROM execution_results GROUP BY model_name"
+            ") ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # -- Decisions ---------------------------------------------------------
 
     def record_decision(
@@ -1771,3 +1827,114 @@ class MetadataStore:
         self.con.execute("DELETE FROM catalog_dimensions WHERE project_id = ?", (project_id,))
         self.con.execute("DELETE FROM catalog_entities WHERE project_id = ?", (project_id,))
         self.con.commit()
+
+    # -- Activity log (v3) -------------------------------------------------
+
+    def log_activity(
+        self,
+        action: str,
+        detail: str | None = None,
+        *,
+        artifact_type: str | None = None,
+        artifact_id: str | None = None,
+    ) -> None:
+        """Record a user or system action in the activity log."""
+        self.con.execute(
+            "INSERT INTO activity_log (action, detail, artifact_type, artifact_id) "
+            "VALUES (?, ?, ?, ?)",
+            (action, detail, artifact_type, artifact_id),
+        )
+        self.con.commit()
+
+    def get_activity(self, limit: int = 20) -> list[dict]:
+        """Return recent activity entries, newest first."""
+        rows = self.con.execute(
+            "SELECT * FROM activity_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- Model answers (v3) ------------------------------------------------
+
+    def save_model_answers(
+        self,
+        model_name: str,
+        answers: list[dict],
+    ) -> int:
+        """Save answers to model clarifying questions.
+
+        Each answer dict has keys: question_index (int), answer (str).
+        Returns the number of answers saved.
+        """
+        count = 0
+        for a in answers:
+            self.con.execute(
+                "INSERT INTO model_answers (model_name, question_index, answer) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(model_name, question_index) DO UPDATE SET "
+                "answer = excluded.answer, created_at = datetime('now')",
+                (model_name, a["question_index"], a["answer"]),
+            )
+            count += 1
+        self.con.commit()
+        return count
+
+    def get_model_answers(self, model_name: str) -> list[dict]:
+        """Return all answers for a model's clarifying questions."""
+        rows = self.con.execute(
+            "SELECT * FROM model_answers WHERE model_name = ? ORDER BY question_index",
+            (model_name,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- PK/FK persistence (v3) --------------------------------------------
+
+    def persist_pk_fk(
+        self,
+        table_name: str,
+        source_name: str,
+        *,
+        confirm_pks: list[str] | None = None,
+        reject_pks: list[str] | None = None,
+        confirm_fks: list[dict] | None = None,
+        reject_fk_ids: list[int] | None = None,
+    ) -> dict:
+        """Persist PK/FK confirmations and rejections.
+
+        confirm_fks items: {from_col, to_table, to_col}
+        Returns counts of changes made.
+        """
+        counts = {"pks_confirmed": 0, "pks_rejected": 0, "fks_confirmed": 0, "fks_rejected": 0}
+
+        for col in confirm_pks or []:
+            self.con.execute(
+                "UPDATE columns SET is_primary_key = 1 "
+                "WHERE table_name = ? AND source_name = ? AND name = ?",
+                (table_name, source_name, col),
+            )
+            counts["pks_confirmed"] += 1
+
+        for col in reject_pks or []:
+            self.con.execute(
+                "UPDATE columns SET is_primary_key = 0 "
+                "WHERE table_name = ? AND source_name = ? AND name = ?",
+                (table_name, source_name, col),
+            )
+            counts["pks_rejected"] += 1
+
+        for fk in confirm_fks or []:
+            self.con.execute(
+                "INSERT OR REPLACE INTO relationships "
+                "(source_name, from_table, from_column, to_table, to_column, "
+                "rel_type, confidence, ref_integrity, detection_source) "
+                "VALUES (?, ?, ?, ?, ?, 'fk', 1.0, 0.0, 'confirmed')",
+                (source_name, table_name, fk["from_col"], fk["to_table"], fk["to_col"]),
+            )
+            counts["fks_confirmed"] += 1
+
+        for fk_id in reject_fk_ids or []:
+            self.con.execute("DELETE FROM relationships WHERE id = ?", (fk_id,))
+            counts["fks_rejected"] += 1
+
+        self.con.commit()
+        return counts

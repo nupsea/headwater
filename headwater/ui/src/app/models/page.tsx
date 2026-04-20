@@ -9,13 +9,16 @@ import {
   type GraphData,
   type GraphPatterns,
 } from "@/lib/api";
+import { useToast } from "@/components/toast";
 import { StatusBadge } from "@/components/status-badge";
 import { SqlViewer } from "@/components/sql-viewer";
 import { StatCard } from "@/components/stat-card";
 import { SuggestionsList } from "@/components/suggestions-list";
 import { RelationshipGraph } from "@/components/relationship-graph";
+import { QuestionResolver } from "@/components/question-resolver";
 
 export default function ModelsPage() {
+  const { toast } = useToast();
   const [models, setModels] = useState<ModelSummary[]>([]);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -80,10 +83,13 @@ export default function ModelsPage() {
     try {
       await api.approveModel(name);
       setMessage(`Approved: ${name}`);
+      toast(`Approved: ${name}`, "success");
       refresh();
       if (selected === name) api.model(name).then(setDetail);
     } catch (e) {
-      setMessage(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessage(`Error: ${msg}`);
+      toast(`Approve failed: ${msg}`, "error");
     }
   };
 
@@ -91,10 +97,13 @@ export default function ModelsPage() {
     try {
       await api.rejectModel(name);
       setMessage(`Rejected: ${name}`);
+      toast(`Rejected: ${name}`, "info");
       refresh();
       if (selected === name) api.model(name).then(setDetail);
     } catch (e) {
-      setMessage(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessage(`Error: ${msg}`);
+      toast(`Reject failed: ${msg}`, "error");
     }
   };
 
@@ -341,162 +350,24 @@ export default function ModelsPage() {
 
       {/* Lineage & Coverage */}
       {showSection === "lineage" && (
-        <div className="space-y-6">
-          {/* Source table coverage */}
-          <div className="bg-card border border-border rounded-lg p-5">
-            <h3 className="text-sm font-semibold text-muted uppercase tracking-wide mb-1">
-              Source Table Coverage
-            </h3>
-            <p className="text-xs text-muted mb-4">
-              Shows which source tables have staging models. Full coverage means every
-              discovered table has a clean, typed staging layer.
-            </p>
-            {sourceTables.length > 0 ? (
-              <>
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="flex-1 h-4 bg-border rounded-full overflow-hidden">
-                    <div
-                      className={`h-full rounded-full ${
-                        coveredSources.size === sourceTables.length
-                          ? "bg-success"
-                          : coveredSources.size >= sourceTables.length * 0.8
-                            ? "bg-warning"
-                            : "bg-danger"
-                      }`}
-                      style={{
-                        width: `${(coveredSources.size / sourceTables.length) * 100}%`,
-                      }}
-                    />
-                  </div>
-                  <span className="text-sm font-mono">
-                    {coveredSources.size}/{sourceTables.length}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                  {sourceTables.map((t) => (
-                    <div
-                      key={t}
-                      className={`flex items-center gap-2 px-3 py-2 border rounded text-sm ${
-                        coveredSources.has(t)
-                          ? "border-success/30 bg-success/5"
-                          : "border-danger/30 bg-danger/5"
-                      }`}
-                    >
-                      <span
-                        className={`w-2 h-2 rounded-full ${
-                          coveredSources.has(t) ? "bg-success" : "bg-danger"
-                        }`}
-                      />
-                      <span className="font-mono">{t}</span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <p className="text-sm text-muted">
-                Run the pipeline to see source table coverage.
-              </p>
-            )}
-          </div>
-
-          {/* Lineage diagram: source -> staging -> mart */}
-          <div className="bg-card border border-border rounded-lg p-5">
-            <h3 className="text-sm font-semibold text-muted uppercase tracking-wide mb-1">
-              Data Lineage
-            </h3>
-            <p className="text-xs text-muted mb-4">
-              Source tables feed into staging models, which feed into analytical marts.
-              Click any model to view its SQL and details.
-            </p>
-            <div className="space-y-4">
-              {/* Column headers */}
-              <div className="grid grid-cols-3 gap-4 text-xs font-semibold text-muted uppercase tracking-wide">
-                <div>Source Tables</div>
-                <div>Staging Layer</div>
-                <div>Mart Layer</div>
-              </div>
-
-              {/* For each source table, show the lineage chain */}
-              {sourceTables.map((src) => {
-                const stgModels = sourceToStaging[src] || [];
-                // Find marts that depend on these staging models
-                const dependentMarts = marts.filter((m) =>
-                  m.source_tables.some(
-                    (dep) =>
-                      stgModels.includes(dep) ||
-                      dep === src
-                  )
-                );
-
-                return (
-                  <div
-                    key={src}
-                    className="grid grid-cols-3 gap-4 items-start py-2 border-b border-border/50 last:border-0"
-                  >
-                    {/* Source */}
-                    <div className="flex items-center gap-2">
-                      <span className="px-2 py-1 bg-background border border-border rounded text-xs font-mono">
-                        {src}
-                      </span>
-                      <span className="text-muted text-xs">
-                        {insights?.table_health.find((t) => t.name === src)
-                          ?.row_count.toLocaleString() || "?"}{" "}
-                        rows
-                      </span>
-                    </div>
-
-                    {/* Staging */}
-                    <div className="space-y-1">
-                      {stgModels.length > 0 ? (
-                        stgModels.map((stg) => {
-                          const m = staging.find((s) => s.name === stg);
-                          return (
-                            <button
-                              key={stg}
-                              onClick={() => {
-                                setSelected(stg);
-                                setShowSection("browse");
-                              }}
-                              className="flex items-center gap-2 px-2 py-1 bg-success/5 border border-success/20 rounded text-xs font-mono hover:bg-success/10 transition-colors"
-                            >
-                              <span className="w-1.5 h-1.5 rounded-full bg-success" />
-                              {stg}
-                              {m && <StatusBadge status={m.status} />}
-                            </button>
-                          );
-                        })
-                      ) : (
-                        <span className="text-xs text-danger">No staging model</span>
-                      )}
-                    </div>
-
-                    {/* Marts */}
-                    <div className="space-y-1">
-                      {dependentMarts.length > 0 ? (
-                        dependentMarts.map((m) => (
-                          <button
-                            key={m.name}
-                            onClick={() => {
-                              setSelected(m.name);
-                              setShowSection("browse");
-                            }}
-                            className="flex items-center gap-2 px-2 py-1 bg-accent/5 border border-accent/20 rounded text-xs font-mono hover:bg-accent/10 transition-colors"
-                          >
-                            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-                            {m.name}
-                            <StatusBadge status={m.status} />
-                          </button>
-                        ))
-                      ) : (
-                        <span className="text-xs text-muted">--</span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
+        <LineageCoverage
+          sourceTables={sourceTables}
+          coveredSources={coveredSources}
+          sourceToStaging={sourceToStaging}
+          staging={staging}
+          marts={marts}
+          insights={insights}
+          graphData={graphData}
+          onSelectModel={(name) => {
+            setSelected(name);
+            setShowSection("browse");
+          }}
+          onLoadGraph={() => {
+            if (!graphData) {
+              api.graphData().then(setGraphData).catch(() => {});
+            }
+          }}
+        />
       )}
 
       {/* Relationships (Graph) */}
@@ -701,23 +572,15 @@ export default function ModelsPage() {
                     </div>
                   </div>
 
-                  {/* Questions -- the key advisory feature */}
+                  {/* Questions -- resolved via QuestionResolver (v3) */}
                   {m.questions.length > 0 && (
-                    <div className="bg-warning/5 border border-warning/20 rounded-lg p-3 mb-3">
-                      <h4 className="text-xs font-semibold text-warning uppercase tracking-wide mb-2">
-                        Questions for Review ({m.questions.length})
-                      </h4>
-                      <ul className="space-y-1.5">
-                        {m.questions.map((q, i) => (
-                          <li
-                            key={i}
-                            className="flex items-start gap-2 text-sm"
-                          >
-                            <span className="text-warning font-bold mt-0.5">?</span>
-                            <span>{q}</span>
-                          </li>
-                        ))}
-                      </ul>
+                    <div className="mb-3">
+                      <QuestionResolver
+                        questions={m.questions}
+                        onAnswer={async (answers) => {
+                          await api.submitModelAnswers(m.name, answers);
+                        }}
+                      />
                     </div>
                   )}
 
@@ -914,24 +777,14 @@ export default function ModelsPage() {
                     )}
                 </div>
 
-                {/* Questions */}
+                {/* Questions -- QuestionResolver (v3) */}
                 {detail.questions.length > 0 && (
-                  <div className="bg-warning/5 border border-warning/30 rounded-lg p-5">
-                    <h3 className="text-sm font-semibold text-warning uppercase tracking-wide mb-3">
-                      Questions for Review ({detail.questions.length})
-                    </h3>
-                    <ul className="space-y-2">
-                      {detail.questions.map((q, i) => (
-                        <li
-                          key={i}
-                          className="flex items-start gap-2 text-sm"
-                        >
-                          <span className="text-warning font-bold mt-0.5">?</span>
-                          <span>{q}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+                  <QuestionResolver
+                    questions={detail.questions}
+                    onAnswer={async (answers) => {
+                      await api.submitModelAnswers(detail.name, answers);
+                    }}
+                  />
                 )}
 
                 {/* Assumptions */}
@@ -984,6 +837,367 @@ export default function ModelsPage() {
               </p>
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Lineage & Coverage sub-component                                    */
+/* ------------------------------------------------------------------ */
+
+function LineageCoverage({
+  sourceTables,
+  coveredSources,
+  sourceToStaging,
+  staging,
+  marts,
+  insights,
+  graphData,
+  onSelectModel,
+  onLoadGraph,
+}: {
+  sourceTables: string[];
+  coveredSources: Set<string>;
+  sourceToStaging: Record<string, string[]>;
+  staging: ModelSummary[];
+  marts: ModelSummary[];
+  insights: InsightsResponse | null;
+  graphData: GraphData | null;
+  onSelectModel: (name: string) => void;
+  onLoadGraph: () => void;
+}) {
+  // Load graph data for FK connections if not already loaded
+  useEffect(() => {
+    onLoadGraph();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Build FK connections between source tables from graph edges
+  const fkConnections: { from: string; to: string; col: string; toCol: string; integrity: number }[] = [];
+  if (graphData) {
+    for (const edge of graphData.edges) {
+      if (sourceTables.includes(edge.source) && sourceTables.includes(edge.target)) {
+        fkConnections.push({
+          from: edge.source,
+          to: edge.target,
+          col: edge.from_column,
+          toCol: edge.to_column,
+          integrity: edge.ref_integrity,
+        });
+      }
+    }
+  }
+
+  // Build which marts connect to which source tables (through staging or direct)
+  const martToSources: Record<string, string[]> = {};
+  for (const m of marts) {
+    const sources: string[] = [];
+    for (const dep of m.source_tables) {
+      // dep could be a staging model name or a source table
+      const stgModel = staging.find((s) => s.name === dep);
+      if (stgModel) {
+        sources.push(...stgModel.source_tables);
+      } else if (sourceTables.includes(dep)) {
+        sources.push(dep);
+      }
+    }
+    martToSources[m.name] = [...new Set(sources)];
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Source table coverage */}
+      <div className="bg-card border border-border rounded-lg p-5">
+        <h3 className="text-sm font-semibold text-muted uppercase tracking-wide mb-1">
+          Source Table Coverage
+        </h3>
+        <p className="text-xs text-muted mb-4">
+          Shows which source tables have staging models. Full coverage means every
+          discovered table has a clean, typed staging layer.
+        </p>
+        {sourceTables.length > 0 ? (
+          <>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex-1 h-4 bg-border rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${
+                    coveredSources.size === sourceTables.length
+                      ? "bg-success"
+                      : coveredSources.size >= sourceTables.length * 0.8
+                        ? "bg-warning"
+                        : "bg-danger"
+                  }`}
+                  style={{
+                    width: `${(coveredSources.size / sourceTables.length) * 100}%`,
+                  }}
+                />
+              </div>
+              <span className="text-sm font-mono">
+                {coveredSources.size}/{sourceTables.length}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              {sourceTables.map((t) => (
+                <div
+                  key={t}
+                  className={`flex items-center gap-2 px-3 py-2 border rounded text-sm ${
+                    coveredSources.has(t)
+                      ? "border-success/30 bg-success/5"
+                      : "border-danger/30 bg-danger/5"
+                  }`}
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      coveredSources.has(t) ? "bg-success" : "bg-danger"
+                    }`}
+                  />
+                  <span className="font-mono">{t}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-muted">
+            Run the pipeline to see source table coverage.
+          </p>
+        )}
+      </div>
+
+      {/* FK Connections between source tables */}
+      {fkConnections.length > 0 && (
+        <div className="bg-card border border-border rounded-lg p-5">
+          <h3 className="text-sm font-semibold text-muted uppercase tracking-wide mb-1">
+            Table Relationships (FK Connections)
+          </h3>
+          <p className="text-xs text-muted mb-4">
+            Foreign key relationships between source tables. These connections
+            determine how mart models join data across tables.
+          </p>
+          <div className="space-y-2">
+            {fkConnections.map((fk, i) => (
+              <div
+                key={i}
+                className="flex items-center gap-3 px-3 py-2 border border-border/50 rounded"
+              >
+                <span className="font-mono text-sm font-medium">{fk.from}</span>
+                <span className="text-xs text-muted">.{fk.col}</span>
+                <svg width="40" height="12" className="shrink-0">
+                  <line
+                    x1="0" y1="6" x2="32" y2="6"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeDasharray="4 3"
+                    className="text-accent"
+                  />
+                  <polygon points="32,2 40,6 32,10" fill="currentColor" className="text-accent" />
+                </svg>
+                <span className="font-mono text-sm font-medium">{fk.to}</span>
+                <span className="text-xs text-muted">.{fk.toCol}</span>
+                <span className={`ml-auto text-xs px-2 py-0.5 rounded ${
+                  fk.integrity >= 0.9
+                    ? "bg-success/10 text-success"
+                    : fk.integrity >= 0.5
+                      ? "bg-warning/10 text-warning"
+                      : "bg-danger/10 text-danger"
+                }`}>
+                  {(fk.integrity * 100).toFixed(0)}% integrity
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Lineage diagram: source -> staging -> mart with FK connections */}
+      <div className="bg-card border border-border rounded-lg p-5">
+        <h3 className="text-sm font-semibold text-muted uppercase tracking-wide mb-1">
+          Data Lineage
+        </h3>
+        <p className="text-xs text-muted mb-4">
+          Source tables feed into staging models, which feed into analytical marts.
+          Dotted lines show FK relationships between source tables.
+          Click any model to view its SQL and details.
+        </p>
+        <div className="space-y-4">
+          {/* Column headers */}
+          <div className="grid grid-cols-3 gap-4 text-xs font-semibold text-muted uppercase tracking-wide">
+            <div>Source Tables</div>
+            <div>Staging Layer</div>
+            <div>Mart Layer</div>
+          </div>
+
+          {/* For each source table, show the lineage chain */}
+          {sourceTables.map((src) => {
+            const stgModels = sourceToStaging[src] || [];
+            const dependentMarts = marts.filter((m) =>
+              m.source_tables.some(
+                (dep) => stgModels.includes(dep) || dep === src
+              )
+            );
+            // FK connections FROM this source table
+            const outboundFKs = fkConnections.filter((fk) => fk.from === src);
+            const inboundFKs = fkConnections.filter((fk) => fk.to === src);
+
+            return (
+              <div
+                key={src}
+                className="grid grid-cols-3 gap-4 items-start py-2 border-b border-border/50 last:border-0"
+              >
+                {/* Source */}
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-1 bg-background border border-border rounded text-xs font-mono">
+                      {src}
+                    </span>
+                    <span className="text-muted text-xs">
+                      {insights?.table_health.find((t) => t.name === src)
+                        ?.row_count.toLocaleString() || "?"}{" "}
+                      rows
+                    </span>
+                  </div>
+                  {/* Show FK connections as dotted arrows */}
+                  {(outboundFKs.length > 0 || inboundFKs.length > 0) && (
+                    <div className="mt-1 space-y-0.5">
+                      {outboundFKs.map((fk, i) => (
+                        <div key={`out-${i}`} className="flex items-center gap-1 text-[10px] text-accent pl-2">
+                          <svg width="16" height="8" className="shrink-0">
+                            <line x1="0" y1="4" x2="12" y2="4" stroke="currentColor" strokeWidth="1" strokeDasharray="2 2" />
+                            <polygon points="12,1 16,4 12,7" fill="currentColor" />
+                          </svg>
+                          <span className="font-mono">{fk.to}</span>
+                          <span className="text-muted">via {fk.col}</span>
+                        </div>
+                      ))}
+                      {inboundFKs.map((fk, i) => (
+                        <div key={`in-${i}`} className="flex items-center gap-1 text-[10px] text-muted pl-2">
+                          <svg width="16" height="8" className="shrink-0">
+                            <line x1="4" y1="4" x2="16" y2="4" stroke="currentColor" strokeWidth="1" strokeDasharray="2 2" />
+                            <polygon points="4,1 0,4 4,7" fill="currentColor" />
+                          </svg>
+                          <span className="font-mono">{fk.from}</span>
+                          <span className="text-muted">via {fk.col}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Staging */}
+                <div className="space-y-1">
+                  {stgModels.length > 0 ? (
+                    stgModels.map((stg) => {
+                      const m = staging.find((s) => s.name === stg);
+                      return (
+                        <button
+                          key={stg}
+                          onClick={() => onSelectModel(stg)}
+                          className="flex items-center gap-2 px-2 py-1 bg-success/5 border border-success/20 rounded text-xs font-mono hover:bg-success/10 transition-colors"
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-success" />
+                          {stg}
+                          {m && <StatusBadge status={m.status} />}
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <span className="text-xs text-danger">No staging model</span>
+                  )}
+                </div>
+
+                {/* Marts */}
+                <div className="space-y-1">
+                  {dependentMarts.length > 0 ? (
+                    dependentMarts.map((m) => (
+                      <button
+                        key={m.name}
+                        onClick={() => onSelectModel(m.name)}
+                        className="flex items-center gap-2 px-2 py-1 bg-accent/5 border border-accent/20 rounded text-xs font-mono hover:bg-accent/10 transition-colors"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+                        {m.name}
+                        <StatusBadge status={m.status} />
+                      </button>
+                    ))
+                  ) : (
+                    <span className="text-xs text-muted">--</span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Mart Model Connections -- which marts share source tables */}
+      {marts.length > 1 && (
+        <div className="bg-card border border-border rounded-lg p-5">
+          <h3 className="text-sm font-semibold text-muted uppercase tracking-wide mb-1">
+            Mart Model Connections
+          </h3>
+          <p className="text-xs text-muted mb-4">
+            Mart models that share source tables or are connected through FK
+            relationships. Shared connections indicate potential join paths.
+          </p>
+          <div className="space-y-2">
+            {marts.map((m1, i) =>
+              marts.slice(i + 1).map((m2) => {
+                const m1Sources = martToSources[m1.name] || [];
+                const m2Sources = martToSources[m2.name] || [];
+                const shared = m1Sources.filter((s) => m2Sources.includes(s));
+                // Also check for FK connections between their source tables
+                const fkBridge = fkConnections.filter(
+                  (fk) =>
+                    (m1Sources.includes(fk.from) && m2Sources.includes(fk.to)) ||
+                    (m2Sources.includes(fk.from) && m1Sources.includes(fk.to))
+                );
+                if (shared.length === 0 && fkBridge.length === 0) return null;
+                return (
+                  <div
+                    key={`${m1.name}-${m2.name}`}
+                    className="flex items-center gap-3 px-3 py-2 border border-border/50 rounded"
+                  >
+                    <button
+                      onClick={() => onSelectModel(m1.name)}
+                      className="font-mono text-sm font-medium text-accent hover:underline"
+                    >
+                      {m1.name}
+                    </button>
+                    <svg width="40" height="12" className="shrink-0">
+                      <line
+                        x1="0" y1="6" x2="32" y2="6"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeDasharray="4 3"
+                        className="text-slate-400"
+                      />
+                      <circle cx="20" cy="6" r="2" fill="currentColor" className="text-slate-400" />
+                    </svg>
+                    <button
+                      onClick={() => onSelectModel(m2.name)}
+                      className="font-mono text-sm font-medium text-accent hover:underline"
+                    >
+                      {m2.name}
+                    </button>
+                    <div className="ml-auto flex gap-2 text-xs text-muted">
+                      {shared.length > 0 && (
+                        <span className="px-2 py-0.5 bg-background border border-border rounded">
+                          {shared.length} shared table{shared.length > 1 ? "s" : ""}:
+                          {" "}{shared.join(", ")}
+                        </span>
+                      )}
+                      {fkBridge.length > 0 && (
+                        <span className="px-2 py-0.5 bg-accent/10 border border-accent/20 rounded">
+                          {fkBridge.length} FK bridge{fkBridge.length > 1 ? "s" : ""}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
     </div>

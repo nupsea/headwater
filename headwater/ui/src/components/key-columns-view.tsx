@@ -4,12 +4,12 @@ import { type DictColumn, type ColumnProfile } from "@/lib/api";
 import { ConfidenceDot } from "@/components/confidence-dot";
 
 const ROLE_COLORS: Record<string, string> = {
-  dimension: "bg-purple-100 text-purple-800 border-purple-200",
-  metric: "bg-blue-100 text-blue-800 border-blue-200",
-  temporal: "bg-green-100 text-green-800 border-green-200",
-  identifier: "bg-gray-100 text-gray-700 border-gray-200",
-  geographic: "bg-teal-100 text-teal-800 border-teal-200",
-  text: "bg-slate-100 text-slate-700 border-slate-200",
+  dimension: "bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-700",
+  metric: "bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700",
+  temporal: "bg-green-100 text-green-800 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700",
+  identifier: "bg-gray-100 text-gray-700 border-gray-200 dark:bg-gray-800/30 dark:text-gray-300 dark:border-gray-600",
+  geographic: "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-900/30 dark:text-teal-300 dark:border-teal-700",
+  text: "bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800/30 dark:text-slate-300 dark:border-slate-600",
 };
 
 const ROLE_PRIORITY: Record<string, number> = {
@@ -80,9 +80,9 @@ export function KeyColumnsView({
             key={col.name}
             className={`border rounded-lg p-3 ${
               col.locked
-                ? "border-green-200 bg-green-50/30"
+                ? "border-[var(--success)]/20 bg-[var(--success)]/5"
                 : col.needs_review
-                ? "border-amber-200 bg-amber-50/30"
+                ? "border-[var(--warning)]/20 bg-[var(--warning)]/5"
                 : "border-border bg-card"
             }`}
           >
@@ -95,7 +95,7 @@ export function KeyColumnsView({
               {role && (
                 <span
                   className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${
-                    ROLE_COLORS[col.role || ""] || "bg-amber-100 text-amber-800 border-amber-200"
+                    ROLE_COLORS[col.role || ""] || "bg-[var(--warning)]/10 text-[var(--warning)] border-[var(--warning)]/20"
                   }`}
                 >
                   {role}
@@ -103,7 +103,7 @@ export function KeyColumnsView({
               )}
               <ConfidenceDot value={col.confidence} />
               {col.locked && (
-                <span className="text-[10px] text-green-600 font-medium">
+                <span className="text-[10px] text-[var(--success)] font-medium">
                   locked
                 </span>
               )}
@@ -150,7 +150,7 @@ export function KeyColumnsView({
 
             {/* Null rate warning */}
             {profile && profile.null_rate > 0.1 && (
-              <div className="text-[10px] text-amber-600">
+              <div className="text-[10px] text-[var(--warning)]">
                 {(profile.null_rate * 100).toFixed(0)}% null ({profile.null_count.toLocaleString()} rows)
               </div>
             )}
@@ -160,7 +160,7 @@ export function KeyColumnsView({
               <div className="flex gap-3 text-[10px] text-muted mt-1">
                 <span>{profile.distinct_count} distinct</span>
                 {profile.uniqueness_ratio >= 0.99 && (
-                  <span className="text-green-600">unique</span>
+                  <span className="text-[var(--success)]">unique</span>
                 )}
                 {col.semantic_type && <span>{col.semantic_type}</span>}
               </div>

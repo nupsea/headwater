@@ -1,12 +1,32 @@
-"""Headwater configuration via environment variables and headwater.yaml."""
+"""Headwater configuration via environment variables and settings.json."""
 
 from __future__ import annotations
 
+import json
+import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
+
+# Keys persisted to settings.json (never persist secrets like api_key)
+_PERSISTED_KEYS = frozenset(
+    {
+        "llm_provider",
+        "llm_model",
+        "ollama_base_url",
+        "ollama_timeout",
+        "openai_compat_base_url",
+        "sample_size",
+        "log_level",
+        "mart_min_relationships",
+        "mart_min_metric_columns",
+        "mart_min_rows",
+    }
+)
 
 
 class HeadwaterSettings(BaseSettings):
@@ -57,12 +77,63 @@ class HeadwaterSettings(BaseSettings):
     def graph_store_path(self) -> Path:
         return self.data_dir / "graph_store"
 
+    @property
+    def settings_file_path(self) -> Path:
+        return self.data_dir / "settings.json"
+
     def ensure_dirs(self) -> None:
         """Create data directory if it doesn't exist."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
 
+def _load_settings_from_file(data_dir: Path) -> dict:
+    """Load persisted settings from settings.json if it exists."""
+    settings_path = data_dir / "settings.json"
+    if settings_path.exists():
+        try:
+            with open(settings_path) as f:
+                data = json.load(f)
+            logger.info("Loaded settings from %s", settings_path)
+            return {k: v for k, v in data.items() if k in _PERSISTED_KEYS}
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to load settings.json: %s", exc)
+    return {}
+
+
+def save_settings_to_file(settings: HeadwaterSettings) -> Path:
+    """Persist non-secret settings to settings.json. Returns the file path."""
+    settings.ensure_dirs()
+    data = {}
+    for key in _PERSISTED_KEYS:
+        val = getattr(settings, key, None)
+        if val is not None:
+            data[key] = val if not isinstance(val, Path) else str(val)
+    path = settings.settings_file_path
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    logger.info("Saved settings to %s", path)
+    return path
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> HeadwaterSettings:
-    """Singleton settings accessor."""
-    return HeadwaterSettings()
+    """Singleton settings accessor. Env vars > file values > defaults.
+
+    Pydantic BaseSettings treats constructor kwargs as highest priority,
+    so we only pass file values for keys that have no env var set.
+    """
+    import os
+
+    base = HeadwaterSettings()
+    file_overrides = _load_settings_from_file(base.data_dir)
+    if file_overrides:
+        # Only use file values where the env var is NOT set
+        env_prefix = "HEADWATER_"
+        filtered = {
+            k: v
+            for k, v in file_overrides.items()
+            if f"{env_prefix}{k.upper()}" not in os.environ
+        }
+        if filtered:
+            return HeadwaterSettings(**filtered)
+    return base

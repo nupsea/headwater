@@ -14,12 +14,47 @@ from pydantic import BaseModel
 
 from headwater.analyzer.llm import NoLLMProvider, get_provider
 from headwater.core.config import get_settings
+from headwater.core.models import Relationship
 from headwater.explorer.nl_to_sql import ask
 from headwater.explorer.statistical import detect_insights
 from headwater.explorer.suggestions import generate_suggestions
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _load_confirmed_relationships(request: Request) -> list[Relationship]:
+    """Load human-confirmed FK relationships from metadata store.
+
+    These supplement auto-detected relationships for richer cross-table
+    suggestions and join-path resolution.
+    """
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        return []
+    try:
+        rows = store._exec(
+            "SELECT from_table, from_column, to_table, to_column "
+            "FROM relationships WHERE detection_source = 'confirmed'"
+        )
+        rels: list[Relationship] = []
+        for row in rows:
+            rels.append(
+                Relationship(
+                    from_table=row["from_table"],
+                    from_column=row["from_column"],
+                    to_table=row["to_table"],
+                    to_column=row["to_column"],
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                )
+            )
+        return rels
+    except Exception:
+        logger.debug("No confirmed FK relationships available")
+        return []
 
 
 class AskRequest(BaseModel):
@@ -48,6 +83,7 @@ async def get_suggestions(request: Request):
 
     catalog = pipeline.get("catalog")
     con = request.app.state.duckdb_con
+    extra_rels = _load_confirmed_relationships(request)
     suggestions = generate_suggestions(
         discovery=discovery,
         models=all_models,
@@ -55,6 +91,7 @@ async def get_suggestions(request: Request):
         quality_results=quality_results,
         con=con,
         catalog=catalog,
+        extra_relationships=extra_rels,
     )
 
     # Statistical insights from materialized marts
@@ -86,13 +123,17 @@ async def ask_question(request: Request, body: AskRequest):
     quality_report = pipeline["quality_report"]
     quality_results = quality_report.results if quality_report else []
 
-    # Generate suggestions for matching
+    # Load confirmed relationships and merge into discovery for richer suggestions
+    extra_rels = _load_confirmed_relationships(request)
+
+    # Generate suggestions for matching (with confirmed relationships)
     suggestions = generate_suggestions(
         discovery=discovery,
         models=all_models,
         contracts=contracts,
         quality_results=quality_results,
         con=con,
+        extra_relationships=extra_rels,
     )
 
     # Get LLM provider if configured
@@ -105,10 +146,26 @@ async def ask_question(request: Request, body: AskRequest):
     catalog = pipeline.get("catalog")
     vector_store = pipeline.get("vector_store")
 
+    # Enrich discovery with confirmed relationships for NL-to-SQL
+    enriched_discovery = discovery
+    if extra_rels:
+        existing_pairs = {
+            (r.from_table, r.from_column, r.to_table, r.to_column)
+            for r in discovery.relationships
+        }
+        new_rels = [
+            r for r in extra_rels
+            if (r.from_table, r.from_column, r.to_table, r.to_column) not in existing_pairs
+        ]
+        if new_rels:
+            enriched_discovery = discovery.model_copy(
+                update={"relationships": list(discovery.relationships) + new_rels}
+            )
+
     result = ask(
         question=body.question,
         con=con,
-        discovery=discovery,
+        discovery=enriched_discovery,
         models=all_models,
         suggestions=suggestions,
         provider=provider,

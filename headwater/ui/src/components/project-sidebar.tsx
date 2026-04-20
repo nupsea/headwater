@@ -3,13 +3,14 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { api, type Project, type ProjectProgress } from "@/lib/api";
+import { CreateProjectDialog } from "@/components/create-project-dialog";
 
 const MATURITY_COLORS: Record<string, string> = {
-  raw: "bg-gray-200 text-gray-700",
-  profiled: "bg-blue-100 text-blue-800",
-  documented: "bg-green-100 text-green-800",
-  modeled: "bg-purple-100 text-purple-800",
-  production: "bg-emerald-100 text-emerald-800",
+  raw: "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
+  profiled: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
+  documented: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
+  modeled: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300",
+  production: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300",
 };
 
 const MATURITY_WIDTHS: Record<string, string> = {
@@ -26,6 +27,7 @@ export function ProjectSidebar() {
     Record<string, ProjectProgress>
   >({});
   const [collapsed, setCollapsed] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
   const pathname = usePathname();
 
   useEffect(() => {
@@ -76,20 +78,38 @@ export function ProjectSidebar() {
         <span className="text-xs font-semibold text-muted uppercase tracking-wider">
           Projects
         </span>
-        <button
-          onClick={() => setCollapsed(true)}
-          className="text-muted hover:text-foreground text-xs"
-          title="Collapse sidebar"
-        >
-          &laquo;
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setShowCreate(true)}
+            className="text-accent hover:text-accent/80 text-xs font-medium"
+            title="New project"
+          >
+            [+ New]
+          </button>
+          <button
+            onClick={() => setCollapsed(true)}
+            className="text-muted hover:text-foreground text-xs"
+            title="Collapse sidebar"
+          >
+            &laquo;
+          </button>
+        </div>
       </div>
+
+      <CreateProjectDialog
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        onCreated={(proj) => {
+          setProjects((prev) => [proj, ...prev]);
+          setShowCreate(false);
+        }}
+      />
 
       {projects.length === 0 && (
         <div className="px-3 py-6 text-center">
           <p className="text-xs text-muted">No projects yet.</p>
           <p className="text-xs text-muted mt-1">
-            Run a pipeline from the Dashboard to create one.
+            Click [+ New] or run a pipeline to create one.
           </p>
         </div>
       )}

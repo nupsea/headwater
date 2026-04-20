@@ -12,15 +12,15 @@ interface DriftBannerProps {
 function changeColor(changeType: string): string {
   switch (changeType) {
     case "added":
-      return "text-green-600 bg-green-50 border-green-200";
+      return "text-[var(--success)] bg-[var(--success)]/10 border-[var(--success)]/20";
     case "removed":
-      return "text-red-600 bg-red-50 border-red-200";
+      return "text-[var(--danger)] bg-[var(--danger)]/10 border-[var(--danger)]/20";
     case "type_changed":
-      return "text-amber-600 bg-amber-50 border-amber-200";
+      return "text-[var(--warning)] bg-[var(--warning)]/10 border-[var(--warning)]/20";
     case "nullability_changed":
-      return "text-amber-600 bg-amber-50 border-amber-200";
+      return "text-[var(--warning)] bg-[var(--warning)]/10 border-[var(--warning)]/20";
     default:
-      return "text-gray-600 bg-gray-50 border-gray-200";
+      return "text-muted bg-background border-border";
   }
 }
 
@@ -79,13 +79,13 @@ export function DriftBanner({ report, onDismiss }: DriftBannerProps) {
   };
 
   return (
-    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-5">
+    <div className="bg-[color-mix(in_srgb,var(--warning)_10%,var(--card))] border border-[var(--warning)]/20 rounded-lg p-4 mb-5">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <span className="text-amber-600 font-semibold text-sm">
+          <span className="text-[var(--warning)] font-semibold text-sm">
             Schema Drift Detected
           </span>
-          <span className="text-xs text-amber-500">
+          <span className="text-xs text-muted">
             {totalChanges} change{totalChanges !== 1 ? "s" : ""} since run #
             {diff.run_id_from ?? "initial"}
           </span>
@@ -93,14 +93,14 @@ export function DriftBanner({ report, onDismiss }: DriftBannerProps) {
         <div className="flex items-center gap-2">
           <button
             onClick={() => setExpanded(!expanded)}
-            className="text-xs text-amber-700 hover:underline"
+            className="text-xs text-[var(--warning)] hover:underline"
           >
             {expanded ? "Hide details" : "View details"}
           </button>
           <button
             onClick={handleDismiss}
             disabled={dismissing}
-            className="text-xs px-3 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+            className="text-xs px-3 py-1 rounded border border-[var(--warning)]/30 text-[var(--warning)] hover:bg-[var(--warning)]/10 disabled:opacity-50"
           >
             {dismissing ? "Dismissing..." : "Dismiss"}
           </button>
@@ -112,14 +112,14 @@ export function DriftBanner({ report, onDismiss }: DriftBannerProps) {
           {/* Added tables */}
           {diff.tables_added.length > 0 && (
             <div>
-              <h4 className="text-xs font-semibold text-green-700 mb-1">
+              <h4 className="text-xs font-semibold text-[var(--success)] mb-1">
                 Tables added
               </h4>
               <div className="flex flex-wrap gap-1">
                 {diff.tables_added.map((t) => (
                   <span
                     key={t}
-                    className="px-2 py-0.5 rounded border text-xs text-green-600 bg-green-50 border-green-200 font-mono"
+                    className="px-2 py-0.5 rounded border text-xs text-[var(--success)] bg-[var(--success)]/10 border-[var(--success)]/20 font-mono"
                   >
                     {t}
                   </span>
@@ -131,14 +131,14 @@ export function DriftBanner({ report, onDismiss }: DriftBannerProps) {
           {/* Removed tables */}
           {diff.tables_removed.length > 0 && (
             <div>
-              <h4 className="text-xs font-semibold text-red-700 mb-1">
+              <h4 className="text-xs font-semibold text-[var(--danger)] mb-1">
                 Tables removed
               </h4>
               <div className="flex flex-wrap gap-1">
                 {diff.tables_removed.map((t) => (
                   <span
                     key={t}
-                    className="px-2 py-0.5 rounded border text-xs text-red-600 bg-red-50 border-red-200 font-mono"
+                    className="px-2 py-0.5 rounded border text-xs text-[var(--danger)] bg-[var(--danger)]/10 border-[var(--danger)]/20 font-mono"
                   >
                     {t}
                   </span>
@@ -150,12 +150,12 @@ export function DriftBanner({ report, onDismiss }: DriftBannerProps) {
           {/* Changed tables (column-level detail) */}
           {diff.tables_changed.length > 0 && (
             <div>
-              <h4 className="text-xs font-semibold text-amber-700 mb-1">
+              <h4 className="text-xs font-semibold text-[var(--warning)] mb-1">
                 Tables with column changes
               </h4>
               {diff.tables_changed.map((tc) => (
                 <div key={tc.table_name} className="mb-2">
-                  <span className="text-xs font-mono font-medium text-gray-700">
+                  <span className="text-xs font-mono font-medium text-foreground">
                     {tc.table_name}
                   </span>
                   <div className="flex flex-wrap gap-1 mt-1">

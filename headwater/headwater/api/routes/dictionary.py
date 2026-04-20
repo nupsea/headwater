@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from headwater.analyzer.heuristics import generate_clarifying_questions
 from headwater.core.models import (
+    CatalogItemSummary,
     DataDictionaryColumn,
     DataDictionaryTable,
     Relationship,
@@ -28,12 +29,51 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _review_signal(col) -> tuple[str, str | None]:
+    """Compute review signal and reason for a column.
+
+    Returns (signal, reason) where signal is one of:
+    - "auto_confirmed": confidence >= 0.8 or locked -- no action needed
+    - "needs_review":   confidence 0.5-0.8 -- suggestion needs verification
+    - "conflict":       confidence < 0.5 -- unclear, requires human decision
+    """
+    if col.locked or col.confidence >= 0.8:
+        return "auto_confirmed", None
+    if col.confidence >= 0.5:
+        reason = None
+        if not col.role:
+            reason = "No role assigned"
+        elif not col.description:
+            reason = "Missing description"
+        else:
+            reason = "Low confidence classification"
+        return "needs_review", reason
+    # confidence < 0.5
+    reason = "Ambiguous classification" if col.role else "Unclassified column"
+    return "conflict", reason
+
+
+def _catalog_signal(confidence: float, status: str) -> str:
+    """Compute review signal for a catalog item."""
+    if status == "confirmed":
+        return "auto_confirmed"
+    if status == "rejected":
+        return "auto_confirmed"  # Already decided
+    if confidence >= 0.8:
+        return "auto_confirmed"
+    if confidence >= 0.5:
+        return "needs_review"
+    return "conflict"
+
+
 def _build_dictionary_table(
     table,
     source_name: str,
     profiles,
     relationships,
     clarifying_questions: dict[str, list[str]],
+    catalog_metrics: list | None = None,
+    catalog_dimensions: list | None = None,
 ) -> DataDictionaryTable:
     """Build a DataDictionaryTable from a TableInfo and supporting data."""
     # Build FK index for this table
@@ -45,6 +85,7 @@ def _build_dictionary_table(
     cols = []
     for col in table.columns:
         needs_review = not col.locked and col.confidence < 0.7
+        signal, reason = _review_signal(col)
         cols.append(
             DataDictionaryColumn(
                 name=col.name,
@@ -59,12 +100,59 @@ def _build_dictionary_table(
                 confidence=col.confidence,
                 locked=col.locked,
                 needs_review=needs_review,
+                review_signal=signal,
+                review_reason=reason,
             )
         )
 
     table_rels = [
         r for r in relationships if r.from_table == table.name or r.to_table == table.name
     ]
+
+    # Build inline catalog items for this table
+    catalog_items: list[CatalogItemSummary] = []
+    if catalog_metrics:
+        for m in catalog_metrics:
+            tname = m.get("table_name") or m.get("table", "")
+            if tname == table.name:
+                sig = _catalog_signal(m.get("confidence", 0), m.get("status", "proposed"))
+                catalog_items.append(
+                    CatalogItemSummary(
+                        name=m["name"],
+                        display_name=m.get("display_name", m["name"]),
+                        item_type="metric",
+                        confidence=m.get("confidence", 0),
+                        status=m.get("status", "proposed"),
+                        description=m.get("description"),
+                        expression=m.get("expression"),
+                        agg_type=m.get("agg_type"),
+                        column_name=m.get("column_name"),
+                        review_signal=sig,
+                    )
+                )
+    if catalog_dimensions:
+        for d in catalog_dimensions:
+            if d.get("table_name") == table.name:
+                sig = _catalog_signal(d.get("confidence", 0), d.get("status", "proposed"))
+                catalog_items.append(
+                    CatalogItemSummary(
+                        name=d["name"],
+                        display_name=d.get("display_name", d["name"]),
+                        item_type="dimension",
+                        confidence=d.get("confidence", 0),
+                        status=d.get("status", "proposed"),
+                        description=d.get("description"),
+                        column_name=d.get("column_name"),
+                        review_signal=sig,
+                    )
+                )
+
+    auto_confirmed = sum(
+        1 for c in cols if c.review_signal == "auto_confirmed"
+    ) + sum(1 for ci in catalog_items if ci.review_signal == "auto_confirmed")
+    needs_review = sum(
+        1 for c in cols if c.review_signal in ("needs_review", "conflict")
+    ) + sum(1 for ci in catalog_items if ci.review_signal in ("needs_review", "conflict"))
 
     return DataDictionaryTable(
         name=table.name,
@@ -76,6 +164,9 @@ def _build_dictionary_table(
         columns=cols,
         relationships=table_rels,
         questions=clarifying_questions.get(table.name, []),
+        catalog_items=catalog_items,
+        auto_confirmed_count=auto_confirmed,
+        needs_review_count=needs_review,
     )
 
 
@@ -90,6 +181,14 @@ async def get_dictionary(request: Request):
     source_name = discovery.source.name
     clarifying = generate_clarifying_questions(discovery.tables, discovery.profiles)
 
+    # Fetch catalog data for inline embedding
+    store = getattr(request.app.state, "metadata_store", None)
+    catalog_metrics: list = []
+    catalog_dimensions: list = []
+    if store:
+        catalog_metrics = store.get_catalog_metrics(source_name)
+        catalog_dimensions = store.get_catalog_dimensions(source_name)
+
     tables = []
     for table in discovery.tables:
         tables.append(
@@ -99,6 +198,8 @@ async def get_dictionary(request: Request):
                 discovery.profiles,
                 discovery.relationships,
                 clarifying,
+                catalog_metrics=catalog_metrics,
+                catalog_dimensions=catalog_dimensions,
             )
         )
 
@@ -162,12 +263,8 @@ async def get_catalog_for_review(request: Request):
             "metrics_confirmed": sum(1 for m in metrics if m.get("status") == "confirmed"),
             "metrics_rejected": sum(1 for m in metrics if m.get("status") == "rejected"),
             "dimensions_total": len(dimensions),
-            "dimensions_confirmed": sum(
-                1 for d in dimensions if d.get("status") == "confirmed"
-            ),
-            "dimensions_rejected": sum(
-                1 for d in dimensions if d.get("status") == "rejected"
-            ),
+            "dimensions_confirmed": sum(1 for d in dimensions if d.get("status") == "confirmed"),
+            "dimensions_rejected": sum(1 for d in dimensions if d.get("status") == "rejected"),
         },
     }
 
@@ -270,6 +367,13 @@ async def get_dictionary_table(table_name: str, request: Request):
     if table is None:
         raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
 
+    store = getattr(request.app.state, "metadata_store", None)
+    catalog_metrics: list = []
+    catalog_dimensions: list = []
+    if store:
+        catalog_metrics = store.get_catalog_metrics(source_name)
+        catalog_dimensions = store.get_catalog_dimensions(source_name)
+
     clarifying = generate_clarifying_questions([table], discovery.profiles)
     result = _build_dictionary_table(
         table,
@@ -277,6 +381,8 @@ async def get_dictionary_table(table_name: str, request: Request):
         discovery.profiles,
         discovery.relationships,
         clarifying,
+        catalog_metrics=catalog_metrics,
+        catalog_dimensions=catalog_dimensions,
     )
     return result.model_dump()
 
@@ -662,3 +768,50 @@ async def remove_relationship(relationship_id: int, request: Request):
     )
 
     return {"deleted": relationship_id}
+
+
+# -- v3: Dictionary question answers ------------------------------------------
+
+
+class DictAnswerItem(BaseModel):
+    question_index: int
+    answer: str
+
+
+class DictAnswersPayload(BaseModel):
+    answers: list[DictAnswerItem]
+
+
+@router.post("/dictionary/{table_name}/answers")
+async def save_dictionary_answers(table_name: str, body: DictAnswersPayload, request: Request):
+    """Save answers to a table's clarifying questions."""
+    pipeline = request.app.state.pipeline
+    discovery = pipeline.get("discovery")
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+
+    table = next((t for t in discovery.tables if t.name == table_name), None)
+    if table is None:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
+
+    store = request.app.state.metadata_store
+    # Store with dict: prefix to distinguish from model answers
+    key = f"dict:{table_name}"
+    answers_dicts = [a.model_dump() for a in body.answers]
+    saved = store.save_model_answers(key, answers_dicts)
+    store.log_activity(
+        "dict_question_answered",
+        f"Answered {len(body.answers)} question(s) for table {table_name}",
+        artifact_type="table",
+        artifact_id=table_name,
+    )
+    return {"table_name": table_name, "answers_saved": saved}
+
+
+@router.get("/dictionary/{table_name}/answers")
+async def get_dictionary_answers(table_name: str, request: Request):
+    """Retrieve saved answers for a table's clarifying questions."""
+    store = request.app.state.metadata_store
+    key = f"dict:{table_name}"
+    answers = store.get_model_answers(key)
+    return {"table_name": table_name, "answers": answers}
