@@ -24,7 +24,7 @@ export default function ModelsPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<ModelDetail | null>(null);
   const [message, setMessage] = useState("");
-  const [showSection, setShowSection] = useState<string>("overview");
+  const [showSection, setShowSection] = useState<string>("graph");
   // Map of model name -> ModelDetail for the Review Queue tab
   const [reviewDetails, setReviewDetails] = useState<Record<string, ModelDetail>>({});
   const [reviewDetailErrors, setReviewDetailErrors] = useState<Record<string, string>>({});
@@ -154,12 +154,10 @@ export default function ModelsPage() {
   );
 
   const sections = [
-    { id: "overview", label: "Overview" },
-    { id: "lineage", label: "Lineage & Coverage" },
-    { id: "graph", label: "Relationships" },
+    { id: "graph", label: "Overview" },
+    { id: "lineage", label: "Lineage" },
     { id: "review", label: `Review Queue (${proposed.length})` },
     { id: "browse", label: "Browse All" },
-    { id: "suggestions", label: "Suggestions" },
   ];
 
   return (
@@ -370,9 +368,33 @@ export default function ModelsPage() {
         />
       )}
 
-      {/* Relationships (Graph) */}
+      {/* Overview (Relationship Graph + Summary) */}
       {showSection === "graph" && (
         <div className="space-y-6">
+          {/* Compact model summary strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <StatCard
+              label="Total Models"
+              value={models.length}
+              sub={`${staging.length} staging, ${marts.length} marts`}
+            />
+            <StatCard
+              label="Approved"
+              value={approved.length}
+              sub={`of ${models.length} total`}
+            />
+            <StatCard
+              label="Pending Review"
+              value={proposed.length}
+              sub={proposed.length > 0 ? "mart models need decisions" : "all reviewed"}
+            />
+            <StatCard
+              label="Executed"
+              value={executed.length}
+              sub={`${rejected.length} rejected`}
+            />
+          </div>
+
           {!graphData ? (
             <div className="bg-card border border-border rounded-lg p-8 text-center">
               <p className="text-sm text-muted">

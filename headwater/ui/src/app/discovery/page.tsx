@@ -7,9 +7,12 @@ import {
   type TableDetail,
   type ColumnProfile,
   type DictColumn,
+  type DictTable,
+  type ColumnReviewPayload,
 } from "@/lib/api";
 import { ProfileTable } from "@/components/profile-table";
 import { KeyColumnsView } from "@/components/key-columns-view";
+import { PKFKManager } from "@/components/pk-fk-manager";
 
 export default function DiscoveryPage() {
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
@@ -18,6 +21,12 @@ export default function DiscoveryPage() {
   const [profiles, setProfiles] = useState<ColumnProfile[]>([]);
   const [error, setError] = useState("");
   const [schemaTab, setSchemaTab] = useState<"key" | "full">("key");
+  // Dictionary editing state
+  const [dictTable, setDictTable] = useState<DictTable | null>(null);
+  const [editDescs, setEditDescs] = useState<Record<string, string>>({});
+  const [editTableDesc, setEditTableDesc] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
 
   useEffect(() => {
     api
@@ -33,7 +42,43 @@ export default function DiscoveryPage() {
     if (!selected) return;
     api.table(selected).then(setDetail);
     api.tableProfile(selected).then(setProfiles).catch(() => setProfiles([]));
+    api.dictionaryTable(selected).then((dt) => {
+      setDictTable(dt);
+      setEditTableDesc(null);
+      setEditDescs({});
+      setSaveMsg("");
+    }).catch(() => setDictTable(null));
   }, [selected]);
+
+  const handleSaveEdits = async () => {
+    if (!selected) return;
+    setSaving(true);
+    try {
+      const columns: ColumnReviewPayload[] = Object.entries(editDescs).map(
+        ([name, description]) => ({ name, description })
+      );
+      const payload = {
+        columns,
+        table_description: editTableDesc ?? undefined,
+        confirm: false,
+      };
+      await api.reviewTable(selected, payload);
+      // Reload
+      const dt = await api.dictionaryTable(selected);
+      setDictTable(dt);
+      const td = await api.table(selected);
+      setDetail(td);
+      setEditDescs({});
+      setEditTableDesc(null);
+      setSaveMsg("Changes saved.");
+      setTimeout(() => setSaveMsg(""), 3000);
+    } catch (e) {
+      setSaveMsg(e instanceof Error ? e.message : "Save failed");
+    }
+    setSaving(false);
+  };
+
+  const hasEdits = Object.keys(editDescs).length > 0 || editTableDesc !== null;
 
   if (error) {
     return (
@@ -134,13 +179,28 @@ export default function DiscoveryPage() {
               {/* Table header */}
               <div className="bg-card border border-border rounded-lg p-5">
                 <div className="flex items-start justify-between">
-                  <div>
+                  <div className="flex-1">
                     <h2 className="text-xl font-semibold font-mono">
                       {detail.name}
                     </h2>
-                    <p className="text-sm text-muted mt-1">
-                      {detail.description}
-                    </p>
+                    {editTableDesc !== null ? (
+                      <input
+                        type="text"
+                        value={editTableDesc}
+                        onChange={(e) => setEditTableDesc(e.target.value)}
+                        className="mt-1 w-full text-sm border border-border rounded px-2 py-1 bg-background"
+                        placeholder="Table description..."
+                      />
+                    ) : (
+                      <p
+                        className="text-sm text-muted mt-1 cursor-pointer hover:text-foreground transition-colors"
+                        onClick={() => setEditTableDesc(detail.description || "")}
+                        title="Click to edit description"
+                      >
+                        {detail.description || "No description — click to add"}
+                        <span className="text-[10px] ml-1 text-accent">✎</span>
+                      </p>
+                    )}
                   </div>
                   <div className="text-right">
                     <div
@@ -428,8 +488,19 @@ export default function DiscoveryPage() {
                                   </span>
                                 )}
                               </td>
-                              <td className="py-2 text-xs text-muted">
-                                {c.description || "-"}
+                              <td className="py-2">
+                                <input
+                                  type="text"
+                                  value={editDescs[c.name] ?? c.description ?? ""}
+                                  onChange={(e) =>
+                                    setEditDescs((prev) => ({
+                                      ...prev,
+                                      [c.name]: e.target.value,
+                                    }))
+                                  }
+                                  className="text-xs border border-border rounded px-1.5 py-0.5 bg-background w-full"
+                                  placeholder="Add description..."
+                                />
                               </td>
                             </tr>
                           );
@@ -439,6 +510,31 @@ export default function DiscoveryPage() {
                   </div>
                 )}
               </div>
+
+              {/* PK/FK Manager */}
+              <div className="bg-card border border-border rounded-lg p-5">
+                <PKFKManager tableName={selected} />
+              </div>
+
+              {/* Save bar */}
+              {hasEdits && (
+                <div className="flex items-center gap-3 p-3 bg-accent/5 border border-accent/20 rounded-lg">
+                  <button
+                    onClick={handleSaveEdits}
+                    disabled={saving}
+                    className="px-4 py-1.5 bg-accent text-white rounded text-sm font-medium hover:bg-accent/90 disabled:opacity-50"
+                  >
+                    {saving ? "Saving..." : "Save Changes"}
+                  </button>
+                  <span className="text-xs text-muted">
+                    {Object.keys(editDescs).length} column(s) edited
+                    {editTableDesc !== null ? " + table description" : ""}
+                  </span>
+                </div>
+              )}
+              {saveMsg && (
+                <div className="text-sm text-success">{saveMsg}</div>
+              )}
 
               {/* Statistical profiles */}
               {profiles.length > 0 && (
