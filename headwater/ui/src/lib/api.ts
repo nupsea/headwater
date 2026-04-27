@@ -1053,4 +1053,112 @@ export const api = {
       `/pipeline/re-enrich?force=${force}`,
       { method: "POST" }
     ),
+
+  // Sources (multi-source)
+  sources: () => fetchJSON<{ sources: SourceSummary[] }>("/sources"),
+  source: (name: string) => fetchJSON<SourceDetail>(`/sources/${name}`),
+  createSource: (body: SourceCreatePayload) =>
+    fetchJSON<SourceSummary>("/sources", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  syncSource: (name: string) =>
+    fetchJSON<{ name: string; status: string; health: number }>(
+      `/sources/${name}/sync`,
+      { method: "POST" }
+    ),
+  deleteSource: (name: string) =>
+    fetchJSON<{ name: string; deleted: boolean }>(
+      `/sources/${name}`,
+      { method: "DELETE" }
+    ),
+  sourceEvents: (name: string, limit = 50) =>
+    fetchJSON<{ events: SyncEvent[] }>(`/sources/${name}/events?limit=${limit}`),
+  syncEvents: (limit = 50) =>
+    fetchJSON<{ events: SyncEvent[] }>(`/sync-events?limit=${limit}`),
+  connectorCatalog: () =>
+    fetchJSON<{ connectors: ConnectorType[] }>("/connector-catalog"),
+
+  // Briefing (homepage)
+  briefingToday: () => fetchJSON<BriefingResponse>("/briefing/today"),
 };
+
+// ---------- Multi-source types ----------
+
+export interface SourceSummary {
+  name: string;
+  display_name: string | null;
+  type: string;
+  host: string | null;
+  status: "healthy" | "warning" | "error" | "idle";
+  health: number | null;
+  last_sync_at: string | null;
+  drift_count: number;
+  auto_sync: boolean;
+  tables: number;
+  rows: number;
+  schemas: number;
+}
+
+export interface SyncEvent {
+  id: number;
+  source_name: string;
+  event_type: string;
+  severity: "info" | "warning" | "error" | "success";
+  detail: string;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface SourceDetail extends SourceSummary {
+  events: SyncEvent[];
+}
+
+export interface SourceCreatePayload {
+  name: string;
+  type: string;
+  host?: string;
+  uri?: string;
+  path?: string;
+  display_name?: string;
+  auto_sync?: boolean;
+  config?: Record<string, unknown>;
+}
+
+export interface ConnectorType {
+  id: string;
+  name: string;
+  category: string;
+  color: string;
+  glyph: string;
+  supported: boolean;
+  lightGlyph?: boolean;
+}
+
+export interface BriefingPriority {
+  urgency: "high" | "medium" | "low";
+  headline: string;
+  detail: string;
+  action: string;
+  route: string;
+  deeplink: string | null;
+}
+
+export interface BriefingResponse {
+  generated_at: string;
+  summary: {
+    attention_count: number;
+    wait_count: number;
+    all_clear: boolean;
+    no_data?: boolean;
+  };
+  priorities: BriefingPriority[];
+  wins: string[];
+  stats: {
+    sources: number;
+    tables: number;
+    quality_checks: number;
+    health_pct: number;
+  };
+}

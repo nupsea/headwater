@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from headwater.api.routes import (
+    briefing,
     confidence,
     data,
     dictionary,
@@ -28,6 +29,7 @@ from headwater.api.routes import (
     project,
     quality,
     settings,
+    sources,
 )
 from headwater.core.config import get_settings
 from headwater.core.metadata import MetadataStore
@@ -336,6 +338,8 @@ def create_app(*, in_memory: bool = False) -> FastAPI:
     app.include_router(graph.router, prefix="/api", tags=["graph"])
     app.include_router(settings.router, prefix="/api", tags=["settings"])
     app.include_router(health.router, prefix="/api", tags=["health"])
+    app.include_router(sources.router, prefix="/api", tags=["sources"])
+    app.include_router(briefing.router, prefix="/api", tags=["briefing"])
 
     @app.get("/api/status")
     async def api_status():

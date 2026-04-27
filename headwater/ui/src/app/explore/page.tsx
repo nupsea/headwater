@@ -46,7 +46,8 @@ export default function ExplorePage() {
 
   const [reviewPct, setReviewPct] = useState(100);
 
-  useEffect(() => {
+  const loadSuggestions = () => {
+    setError("");
     api
       .exploreSuggestions()
       .then((res: ExploreSuggestionsResponse) => {
@@ -54,7 +55,20 @@ export default function ExplorePage() {
         setInsights(res.insights || []);
         if (typeof res.review_pct === "number") setReviewPct(res.review_pct);
       })
-      .catch(() => setError("Run the pipeline from the Dashboard first."));
+      .catch((e: Error) => {
+        const msg = String(e.message || e);
+        if (msg.includes("400") || msg.toLowerCase().includes("no discovery")) {
+          setError(
+            "No data to ask about yet. Connect a source on the Sources page and run the pipeline first."
+          );
+        } else {
+          setError(msg);
+        }
+      });
+  };
+
+  useEffect(() => {
+    loadSuggestions();
   }, []);
 
   const askQuestion = async (q: string) => {
@@ -86,20 +100,26 @@ export default function ExplorePage() {
   if (error && !suggestions.length) {
     return (
       <div>
-        <h1 className="text-2xl font-bold mb-4">Explore Data</h1>
-        <div className="bg-card border border-border rounded-lg p-8 max-w-xl mx-auto text-center">
-          <h2 className="text-lg font-semibold mb-2">No Data to Explore Yet</h2>
-          <p className="text-sm text-muted mb-4">
-            Ask natural language questions about your data and get instant answers
-            with visualizations. The explorer works on top of your materialized
-            staging and mart models.
-          </p>
-          <p className="text-sm text-muted mb-4">
-            Run the full pipeline from the Dashboard first, or use the CLI:
-          </p>
-          <div className="bg-background border border-border rounded p-4 text-left text-sm font-mono text-muted">
-            <p className="mb-1">headwater demo</p>
-            <p>headwater discover --source /path/to/data</p>
+        <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">
+          Analyze
+        </div>
+        <h1 className="text-2xl font-bold mb-4">Ask a question</h1>
+        <div className="bg-card border border-border rounded-lg p-8 max-w-xl">
+          <h2 className="text-lg font-semibold mb-2">Nothing to ask about yet</h2>
+          <p className="text-sm text-muted mb-4">{error}</p>
+          <div className="flex gap-2">
+            <a
+              href="/sources"
+              className="px-4 py-2 bg-accent text-white rounded-md text-sm font-medium"
+            >
+              Connect a source →
+            </a>
+            <button
+              onClick={loadSuggestions}
+              className="px-4 py-2 border border-border rounded-md text-sm font-medium hover:bg-background"
+            >
+              Retry
+            </button>
           </div>
         </div>
       </div>

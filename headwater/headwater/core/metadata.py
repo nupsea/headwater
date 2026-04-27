@@ -320,7 +320,33 @@ class MetadataStore:
             # Data dictionary: confidence and role on columns
             "ALTER TABLE columns ADD COLUMN confidence REAL DEFAULT 0.0",
             "ALTER TABLE columns ADD COLUMN role TEXT",
+            # Multi-source: extend sources for the Sources page
+            "ALTER TABLE sources ADD COLUMN display_name TEXT",
+            "ALTER TABLE sources ADD COLUMN host TEXT",
+            "ALTER TABLE sources ADD COLUMN config_json TEXT",
+            "ALTER TABLE sources ADD COLUMN status TEXT NOT NULL DEFAULT 'idle'",
+            "ALTER TABLE sources ADD COLUMN health INTEGER",
+            "ALTER TABLE sources ADD COLUMN last_sync_at TEXT",
+            "ALTER TABLE sources ADD COLUMN drift_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sources ADD COLUMN auto_sync INTEGER NOT NULL DEFAULT 0",
         ]
+        # sync_events table for source activity history (briefing + sources page)
+        self.con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS sync_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_name TEXT NOT NULL,
+                event_type  TEXT NOT NULL,
+                severity    TEXT NOT NULL DEFAULT 'info',
+                detail      TEXT,
+                payload     TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_sync_events_source
+                ON sync_events(source_name, created_at DESC);
+            """
+        )
+        self.con.commit()
         for sql in migrations:
             try:
                 self.con.execute(sql)
@@ -344,11 +370,74 @@ class MetadataStore:
         uri: str | None,
         mode: str = "generate",
     ) -> None:
+        # ON CONFLICT preserves the multi-source columns (status, health, etc.)
+        # that upsert_source_meta may have populated.
         self.con.execute(
-            "INSERT OR REPLACE INTO sources (name, type, path, uri, mode) VALUES (?, ?, ?, ?, ?)",
+            """
+            INSERT INTO sources (name, type, path, uri, mode)
+                 VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                type = excluded.type,
+                path = excluded.path,
+                uri  = excluded.uri,
+                mode = excluded.mode
+            """,
             (name, type_, path, uri, mode),
         )
         self.con.commit()
+
+    def upsert_source_meta(
+        self,
+        name: str,
+        *,
+        display_name: str | None = None,
+        host: str | None = None,
+        config: dict | None = None,
+        status: str | None = None,
+        health: int | None = None,
+        last_sync_at: str | None = None,
+        drift_count: int | None = None,
+        auto_sync: bool | None = None,
+    ) -> None:
+        """Update the multi-source metadata for an existing source row."""
+        fields: list[str] = []
+        params: list = []
+        if display_name is not None:
+            fields.append("display_name = ?")
+            params.append(display_name)
+        if host is not None:
+            fields.append("host = ?")
+            params.append(host)
+        if config is not None:
+            fields.append("config_json = ?")
+            params.append(json.dumps(config))
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if health is not None:
+            fields.append("health = ?")
+            params.append(int(health))
+        if last_sync_at is not None:
+            fields.append("last_sync_at = ?")
+            params.append(last_sync_at)
+        if drift_count is not None:
+            fields.append("drift_count = ?")
+            params.append(int(drift_count))
+        if auto_sync is not None:
+            fields.append("auto_sync = ?")
+            params.append(1 if auto_sync else 0)
+        if not fields:
+            return
+        params.append(name)
+        self.con.execute(f"UPDATE sources SET {', '.join(fields)} WHERE name = ?", params)
+        self.con.commit()
+
+    def delete_source(self, name: str) -> bool:
+        """Remove a source and its sync events. Returns True if a row was deleted."""
+        cur = self.con.execute("DELETE FROM sources WHERE name = ?", (name,))
+        self.con.execute("DELETE FROM sync_events WHERE source_name = ?", (name,))
+        self.con.commit()
+        return cur.rowcount > 0
 
     def get_source(self, name: str) -> dict | None:
         row = self.con.execute("SELECT * FROM sources WHERE name = ?", (name,)).fetchone()
@@ -356,6 +445,58 @@ class MetadataStore:
 
     def list_sources(self) -> list[dict]:
         return [dict(r) for r in self.con.execute("SELECT * FROM sources").fetchall()]
+
+    # -- Sync events -------------------------------------------------------
+
+    def insert_sync_event(
+        self,
+        source_name: str,
+        event_type: str,
+        detail: str,
+        *,
+        severity: str = "info",
+        payload: dict | None = None,
+    ) -> int:
+        cur = self.con.execute(
+            "INSERT INTO sync_events (source_name, event_type, severity, detail, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                source_name,
+                event_type,
+                severity,
+                detail,
+                json.dumps(payload) if payload is not None else None,
+            ),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_sync_events(
+        self,
+        source_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        if source_name:
+            rows = self.con.execute(
+                "SELECT * FROM sync_events WHERE source_name = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (source_name, limit),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM sync_events ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        import contextlib
+
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("payload"):
+                with contextlib.suppress(ValueError, TypeError):
+                    d["payload"] = json.loads(d["payload"])
+            out.append(d)
+        return out
 
     # -- Discovery runs ----------------------------------------------------
 
@@ -1380,7 +1521,11 @@ class MetadataStore:
         run_id_to: int,
         diff: dict,
     ) -> int:
-        """Persist a drift report. Returns the new report id."""
+        """Persist a drift report. Returns the new report id.
+
+        If the diff describes real changes, also emits a sync_event and bumps
+        the source's drift counter so the Briefing page can surface it.
+        """
         cur = self.con.execute(
             "INSERT INTO drift_reports "
             "(source_name, run_id_from, run_id_to, diff_json, detected_at) "
@@ -1390,6 +1535,49 @@ class MetadataStore:
         self.con.commit()
         if cur.lastrowid is None:
             raise MetadataError("Failed to create drift report")
+
+        # Skip event emission when nothing changed -- diff exists but is empty.
+        if diff.get("no_changes"):
+            return cur.lastrowid
+
+        added = len(diff.get("tables_added") or [])
+        removed = len(diff.get("tables_removed") or [])
+        changed = len(diff.get("tables_changed") or [])
+        bits = []
+        if added:
+            bits.append(f"{added} table(s) added")
+        if removed:
+            bits.append(f"{removed} table(s) removed")
+        if changed:
+            bits.append(f"{changed} table(s) changed")
+        detail = "Drift detected -- " + ", ".join(bits) if bits else "Drift detected"
+
+        try:
+            self.insert_sync_event(
+                source_name,
+                "drift",
+                detail,
+                severity="warning",
+                payload={
+                    "report_id": cur.lastrowid,
+                    "added": added,
+                    "removed": removed,
+                    "changed": changed,
+                },
+            )
+            existing = self.con.execute(
+                "SELECT drift_count FROM sources WHERE name = ?", (source_name,)
+            ).fetchone()
+            if existing is not None:
+                new_count = (existing["drift_count"] or 0) + 1
+                self.con.execute(
+                    "UPDATE sources SET drift_count = ?, status = 'warning' WHERE name = ?",
+                    (new_count, source_name),
+                )
+                self.con.commit()
+        except Exception:
+            logger.exception("Failed to emit sync_event for drift on '%s'", source_name)
+
         return cur.lastrowid
 
     def get_latest_drift_report(self, source_name: str | None = None) -> dict | None:

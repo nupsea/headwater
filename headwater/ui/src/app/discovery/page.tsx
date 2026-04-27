@@ -341,6 +341,8 @@ export default function DiscoveryPage() {
                         confidence: 0.7,
                         locked: false,
                         needs_review: false,
+                        review_signal: "auto_confirmed",
+                        review_reason: null,
                       })
                     )}
                     profiles={profiles}
