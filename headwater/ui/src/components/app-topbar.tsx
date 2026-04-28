@@ -20,16 +20,24 @@ export function AppTopbar() {
         setProject(p);
       })
       .catch(() => {});
+    // Try to get source URI for re-run
     fetch("/api/sources")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (d?.sources?.length) {
           const s = d.sources[d.sources.length - 1];
           setLastRun(s.last_sync_at);
-          setSourceUri(s.uri || s.path || s.name);
+          // Fall back through uri -> path -> host -> name
+          setSourceUri(s.uri || s.path || s.host || s.name);
         }
       })
       .catch(() => {});
+    // Also check status for discovered state
+    api.status().then((st) => {
+      if (st.discovered && !lastRun) {
+        setLastRun("discovered");
+      }
+    }).catch(() => {});
   }, []);
 
   const rerun = async () => {
@@ -42,12 +50,19 @@ export function AppTopbar() {
     }
     setRunning(true);
     try {
-      await api.pipelineRun(sourceUri);
+      await api.syncSource(sourceUri);
       toast("Pipeline complete", "success");
       setLastRun(new Date().toISOString());
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      toast(`Pipeline failed: ${msg}`, "error");
+      // Fall back to pipelineRun if syncSource fails
+      try {
+        await api.pipelineRun(sourceUri);
+        toast("Pipeline complete", "success");
+        setLastRun(new Date().toISOString());
+      } catch (e2) {
+        const msg = e2 instanceof Error ? e2.message : String(e2);
+        toast(`Pipeline failed: ${msg}`, "error");
+      }
     }
     setRunning(false);
   };
@@ -74,7 +89,11 @@ export function AppTopbar() {
       </div>
       <div className="flex items-center gap-3">
         <span className="text-[12px] text-muted">
-          {lastRun ? `Last run ${formatRelative(lastRun)}` : "No runs yet"}
+          {lastRun === "discovered"
+            ? "Data loaded"
+            : lastRun
+              ? `Last run ${formatRelative(lastRun)}`
+              : "No runs yet"}
         </span>
         <button
           onClick={rerun}
