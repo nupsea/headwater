@@ -16,6 +16,7 @@ from headwater.analyzer.eval import evaluate_catalog
 from headwater.analyzer.semantic import analyze
 from headwater.connectors.registry import get_connector
 from headwater.core.models import SourceConfig
+from headwater.drift.schema import build_snapshot_from_discovery, compare_schemas
 from headwater.profiler.engine import discover
 
 logger = logging.getLogger(__name__)
@@ -362,8 +363,52 @@ def _persist_discovery_data(request: Request, discovery, source_name: str) -> No
     )
     if removed:
         logger.info("Marked %d tables as removed: %s", len(removed), removed)
+    _persist_schema_drift(store, discovery, source_name, run_id)
     store.finish_run(run_id, table_count=len(discovery.tables))
     logger.info("Discovery run_id=%d finished", run_id)
+
+
+def _persist_schema_drift(store, discovery, source_name: str, run_id: int) -> None:
+    """Persist schema snapshot and drift report for a discovery run.
+
+    The first run establishes a baseline snapshot only. Subsequent runs compare
+    against the latest prior snapshot and persist a drift report.
+    """
+    current_snapshot = build_snapshot_from_discovery(discovery)
+    previous_record = store.get_latest_snapshot_record(source_name, before_run_id=run_id)
+    store.save_snapshot(run_id, source_name, current_snapshot)
+
+    if previous_record is None:
+        logger.info("Schema drift baseline saved for source '%s'", source_name)
+        return
+
+    diff = compare_schemas(
+        previous_record["snapshot"],
+        current_snapshot,
+        source_name,
+        run_id_from=previous_record["run_id"],
+        run_id_to=run_id,
+    )
+    report_id = store.save_drift_report(
+        source_name,
+        previous_record["run_id"],
+        run_id,
+        diff.model_dump(),
+    )
+    if not diff.no_changes:
+        try:
+            store.insert_event(
+                "schema_drift_detected",
+                "Schema drift detected",
+                source_name=source_name,
+                severity="warning",
+                artifact_type="source",
+                artifact_id=source_name,
+                payload={"report_id": report_id, **diff.model_dump()},
+                invalidates=["sources", "briefing", "health", "insights", "models"],
+            )
+        except Exception:
+            logger.exception("Failed to write normalized drift event for '%s'", source_name)
 
 
 def _persist_semantic_data(request: Request, discovery, source_name: str) -> None:

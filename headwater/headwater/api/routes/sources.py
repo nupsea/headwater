@@ -338,7 +338,9 @@ async def sync_source(request: Request, name: str):
                 con.close()
 
         latest = store.get_source(name) or row
-        health = max(0, 100 - 5 * (latest.get("drift_count") or 0))
+        drift_count = latest.get("drift_count") or 0
+        health = max(0, 100 - 5 * drift_count)
+        final_status = "warning" if drift_count else "healthy"
         store.finish_sync_run(
             run_id,
             tables_seen=result.get("tables_discovered", 0),
@@ -348,7 +350,7 @@ async def sync_source(request: Request, name: str):
         )
         store.upsert_source_meta(
             name,
-            status="healthy",
+            status=final_status,
             health=health,
             last_sync_at=_now_iso(),
         )
@@ -360,7 +362,7 @@ async def sync_source(request: Request, name: str):
             payload={"run_id": run_id, **result},
             invalidates=["sources", "briefing", "health", "insights", "models", "quality"],
         )
-        return {"name": name, "status": "healthy", "health": health, "run_id": run_id, **result}
+        return {"name": name, "status": final_status, "health": health, "run_id": run_id, **result}
     except ConnectorError as e:
         store.fail_sync_run(run_id, str(e))
         store.upsert_source_meta(name, status="error", health=0, last_sync_at=_now_iso())

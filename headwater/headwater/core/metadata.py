@@ -1710,15 +1710,29 @@ CREATE INDEX IF NOT EXISTS idx_events_type
 
         Returns None if no prior snapshot exists (first run).
         """
+        record = self.get_latest_snapshot_record(source_name, before_run_id)
+        if record is None:
+            return None
+        return record["snapshot"]
+
+    def get_latest_snapshot_record(
+        self,
+        source_name: str,
+        before_run_id: int,
+    ) -> dict | None:
+        """Return run metadata and snapshot for the latest prior snapshot."""
         row = self.con.execute(
-            "SELECT snapshot_json FROM schema_snapshots "
+            "SELECT run_id, snapshot_json FROM schema_snapshots "
             "WHERE source_name = ? AND run_id < ? "
             "ORDER BY run_id DESC LIMIT 1",
             (source_name, before_run_id),
         ).fetchone()
         if row is None:
             return None
-        return json.loads(row["snapshot_json"])
+        return {
+            "run_id": row["run_id"],
+            "snapshot": json.loads(row["snapshot_json"]),
+        }
 
     # -- Drift reports (US-401) --------------------------------------------
 
