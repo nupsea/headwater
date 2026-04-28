@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from headwater.core.metadata import MetadataStore
+from headwater.core.models import ContractCheckResult, QualityReport
 
 
 def test_init_creates_tables(meta: MetadataStore):
@@ -19,6 +20,8 @@ def test_init_creates_tables(meta: MetadataStore):
     assert "relationships" in names
     assert "models" in names
     assert "contracts" in names
+    assert "quality_runs" in names
+    assert "quality_results" in names
     assert "decisions" in names
     assert "llm_audit_log" in names
 
@@ -136,6 +139,40 @@ def test_contract_roundtrip(meta: MetadataStore):
     contracts = meta.get_contracts("stg_sites")
     assert len(contracts) == 1
     assert contracts[0]["severity"] == "error"
+
+
+def test_quality_report_roundtrip(meta: MetadataStore):
+    report = QualityReport(
+        total_contracts=2,
+        passed=1,
+        failed=1,
+        results=[
+            ContractCheckResult(
+                rule_id="c1",
+                model_name="stg_sites",
+                passed=True,
+                observed_value=0,
+                message="No nulls",
+            ),
+            ContractCheckResult(
+                rule_id="c2",
+                model_name="stg_sites",
+                passed=False,
+                observed_value=3,
+                message="3 null values found",
+            ),
+        ],
+    )
+
+    run_id = meta.save_quality_report("src", report)
+    latest = meta.get_latest_quality_report("src")
+
+    assert run_id > 0
+    assert latest is not None
+    assert latest["status"] == "failing"
+    assert latest["score"] == 50.0
+    assert len(latest["results"]) == 2
+    assert latest["results"][1]["observed_value"] == 3
 
 
 # -- Decisions (US-301) ----------------------------------------------------

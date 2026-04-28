@@ -271,6 +271,31 @@ CREATE TABLE IF NOT EXISTS execution_results (
     error           TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS quality_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name     TEXT,
+    sync_run_id     INTEGER,
+    total_contracts INTEGER NOT NULL DEFAULT 0,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    failed          INTEGER NOT NULL DEFAULT 0,
+    skipped         INTEGER NOT NULL DEFAULT 0,
+    score           REAL NOT NULL DEFAULT 100.0,
+    status          TEXT NOT NULL DEFAULT 'passing',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS quality_results (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL REFERENCES quality_runs(id),
+    source_name     TEXT,
+    rule_id         TEXT NOT NULL,
+    model_name      TEXT NOT NULL,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    observed_value_json TEXT,
+    message         TEXT DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -380,6 +405,35 @@ CREATE INDEX IF NOT EXISTS idx_events_source
     ON events(source_name, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_type
     ON events(event_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS quality_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name     TEXT,
+    sync_run_id     INTEGER,
+    total_contracts INTEGER NOT NULL DEFAULT 0,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    failed          INTEGER NOT NULL DEFAULT 0,
+    skipped         INTEGER NOT NULL DEFAULT 0,
+    score           REAL NOT NULL DEFAULT 100.0,
+    status          TEXT NOT NULL DEFAULT 'passing',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_quality_runs_source
+    ON quality_runs(source_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS quality_results (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL REFERENCES quality_runs(id),
+    source_name     TEXT,
+    rule_id         TEXT NOT NULL,
+    model_name      TEXT NOT NULL,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    observed_value_json TEXT,
+    message         TEXT DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_quality_results_run
+    ON quality_results(run_id);
 """
         )
         self.con.commit()
@@ -1574,6 +1628,103 @@ CREATE INDEX IF NOT EXISTS idx_events_type
         else:
             rows = self.con.execute("SELECT * FROM contracts").fetchall()
         return [dict(r) for r in rows]
+
+    # -- Quality Results ----------------------------------------------------
+
+    def save_quality_report(
+        self,
+        source_name: str | None,
+        report,
+        sync_run_id: int | None = None,
+    ) -> int:
+        """Persist a quality report aggregate and its contract results."""
+        total = int(getattr(report, "total_contracts", 0) or 0)
+        passed = int(getattr(report, "passed", 0) or 0)
+        failed = int(getattr(report, "failed", 0) or 0)
+        skipped = int(getattr(report, "skipped", 0) or 0)
+        score = round((passed / total) * 100, 2) if total else 100.0
+        status = "failing" if failed else "passing"
+        cur = self.con.execute(
+            """
+            INSERT INTO quality_runs
+                (source_name, sync_run_id, total_contracts, passed, failed,
+                 skipped, score, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (source_name, sync_run_id, total, passed, failed, skipped, score, status),
+        )
+        if cur.lastrowid is None:
+            raise MetadataError("Failed to create quality run")
+        run_id = cur.lastrowid
+        for result in getattr(report, "results", []) or []:
+            self.con.execute(
+                """
+                INSERT INTO quality_results
+                    (run_id, source_name, rule_id, model_name, passed,
+                     observed_value_json, message)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    source_name,
+                    getattr(result, "rule_id", "") or "",
+                    getattr(result, "model_name", "") or "",
+                    int(bool(getattr(result, "passed", False))),
+                    json.dumps(getattr(result, "observed_value", None), default=str),
+                    getattr(result, "message", "") or "",
+                ),
+            )
+        if source_name and failed:
+            existing = self.con.execute(
+                "SELECT drift_count FROM sources WHERE name = ?", (source_name,)
+            ).fetchone()
+            if existing is not None:
+                drift_count = int(existing["drift_count"] or 0)
+                health = max(0, min(int(round(score)), 100 - 5 * drift_count))
+                self.con.execute(
+                    "UPDATE sources SET status = 'warning', health = ? WHERE name = ?",
+                    (health, source_name),
+                )
+        self.con.commit()
+        return run_id
+
+    def get_latest_quality_report(self, source_name: str | None = None) -> dict | None:
+        """Return the latest persisted quality run and its result rows."""
+        if source_name:
+            row = self.con.execute(
+                "SELECT * FROM quality_runs WHERE source_name = ? ORDER BY id DESC LIMIT 1",
+                (source_name,),
+            ).fetchone()
+        else:
+            row = self.con.execute(
+                "SELECT * FROM quality_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        report = dict(row)
+        rows = self.con.execute(
+            "SELECT * FROM quality_results WHERE run_id = ? ORDER BY id",
+            (report["id"],),
+        ).fetchall()
+        results = []
+        for result_row in rows:
+            result = dict(result_row)
+            if result.get("observed_value_json") is not None:
+                try:
+                    result["observed_value"] = json.loads(result["observed_value_json"])
+                except (TypeError, ValueError):
+                    result["observed_value"] = None
+            results.append(result)
+        report["results"] = results
+        return report
+
+    def attach_quality_run_to_sync(self, quality_run_id: int, sync_run_id: int) -> None:
+        """Associate a persisted quality run with its outer source sync run."""
+        self.con.execute(
+            "UPDATE quality_runs SET sync_run_id = ? WHERE id = ?",
+            (sync_run_id, quality_run_id),
+        )
+        self.con.commit()
 
     # -- Execution Results --------------------------------------------------
 

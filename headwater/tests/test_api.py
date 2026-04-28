@@ -85,16 +85,23 @@ class TestSourcesCatalog:
         resp = client.post("/api/sources/sample_json/sync")
         assert resp.status_code == 200
         result = resp.json()
-        assert result["status"] == "healthy"
+        expected_status = "warning" if result["quality_failed"] else "healthy"
+        assert result["status"] == expected_status
         assert result["tables_discovered"] == 8
         assert result["profiles"] > 0
         assert result["quality_total"] > 0
 
         detail = client.get("/api/sources/sample_json").json()
-        assert detail["status"] == "healthy"
+        assert detail["status"] == expected_status
         assert detail["tables"] == 8
         assert detail["runs"][0]["status"] == "succeeded"
         assert any(e["event_type"] == "sync_completed" for e in detail["events"])
+
+        latest_quality = client.app.state.metadata_store.get_latest_quality_report("sample_json")
+        assert latest_quality is not None
+        assert latest_quality["total_contracts"] == result["quality_total"]
+        assert latest_quality["score"] == result["quality_score"]
+        assert latest_quality["sync_run_id"] == result["run_id"]
 
 
 class TestDiscovery:
@@ -232,6 +239,11 @@ class TestQuality:
         data = resp.json()
         assert data["total"] > 0
         assert data["passed"] + data["failed"] == data["total"]
+        assert data["quality_run_id"] > 0
+
+        latest_quality = client.app.state.metadata_store.get_latest_quality_report("source")
+        assert latest_quality is not None
+        assert latest_quality["total_contracts"] == data["total"]
 
     def test_quality_report(self, client):
         resp = client.get("/api/quality")

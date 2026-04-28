@@ -292,6 +292,9 @@ def _run_pipeline_inner(
     check_results = check_contracts(con, contracts, only_active=True)
     report = build_report(check_results)
     pipeline["quality_report"] = report
+    quality_run_id = None
+    if store is not None:
+        quality_run_id = _persist_quality_report(store, source_name, report)
 
     return {
         "tables_loaded": len(tables_loaded),
@@ -306,6 +309,10 @@ def _run_pipeline_inner(
         "quality_total": report.total_contracts,
         "quality_passed": report.passed,
         "quality_failed": report.failed,
+        "quality_score": round((report.passed / report.total_contracts) * 100, 2)
+        if report.total_contracts
+        else 100.0,
+        "quality_run_id": quality_run_id,
         "catalog_metrics": len(catalog.metrics),
         "catalog_dimensions": len(catalog.dimensions),
         "catalog_entities": len(catalog.entities),
@@ -680,3 +687,38 @@ def _persist_execution_results(store: object, results: list) -> None:
         except Exception:
             logger.exception("Failed to persist exec result for %s", r.model_name)
     logger.info("Persisted %d execution results", len(results))
+
+
+def _persist_quality_report(
+    store: object,
+    source_name: str,
+    report,
+    sync_run_id: int | None = None,
+):
+    """Persist quality report and emit an event when contracts fail."""
+    run_id = store.save_quality_report(  # type: ignore[union-attr]
+        source_name,
+        report,
+        sync_run_id=sync_run_id,
+    )
+    if report.failed:
+        try:
+            store.insert_event(  # type: ignore[union-attr]
+                "quality_checks_failed",
+                f"{report.failed} quality contract(s) failed",
+                source_name=source_name,
+                severity="warning",
+                artifact_type="quality_run",
+                artifact_id=str(run_id),
+                payload={
+                    "quality_run_id": run_id,
+                    "total": report.total_contracts,
+                    "passed": report.passed,
+                    "failed": report.failed,
+                },
+                invalidates=["sources", "briefing", "health", "insights", "quality"],
+            )
+        except Exception:
+            logger.exception("Failed to emit quality event for '%s'", source_name)
+    logger.info("Persisted quality run %s for source '%s'", run_id, source_name)
+    return run_id

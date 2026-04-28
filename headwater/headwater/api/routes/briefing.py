@@ -50,6 +50,7 @@ async def briefing_today(request: Request):
     mart_models = pipeline.get("mart_models") or []
     contracts = pipeline.get("contracts") or []
     exec_results = pipeline.get("execution_results") or []
+    latest_quality = store.get_latest_quality_report()
 
     priorities: list[dict] = []
     wins: list[str] = []
@@ -129,23 +130,43 @@ async def briefing_today(request: Request):
             )
 
     # 4. Failed quality contracts
-    failed_contracts = [c for c in contracts if getattr(c, "status", "") == "failed"]
-    if failed_contracts:
+    if latest_quality and latest_quality.get("failed", 0) > 0:
         priorities.append(
             _priority(
                 "high",
-                f"{len(failed_contracts)} quality contract"
-                f"{'s' if len(failed_contracts) != 1 else ''} failing",
+                f"{latest_quality['failed']} quality contract"
+                f"{'s' if latest_quality['failed'] != 1 else ''} failing",
                 "Validation rules broke since the last run. Investigate before downstream "
                 "models pick up bad data.",
                 "View quality report",
                 "/quality",
             )
         )
-    elif contracts:
-        passing = sum(1 for c in contracts if getattr(c, "status", "") in ("passing", "observing"))
-        if passing:
-            wins.append(f"{passing} quality contracts passing -- no regressions")
+    elif latest_quality and latest_quality.get("total_contracts", 0) > 0:
+        wins.append(
+            f"{latest_quality['passed']} of {latest_quality['total_contracts']} "
+            "quality contracts passing"
+        )
+    else:
+        failed_contracts = [c for c in contracts if getattr(c, "status", "") == "failed"]
+        if failed_contracts:
+            priorities.append(
+                _priority(
+                    "high",
+                    f"{len(failed_contracts)} quality contract"
+                    f"{'s' if len(failed_contracts) != 1 else ''} failing",
+                    "Validation rules broke since the last run. Investigate before downstream "
+                    "models pick up bad data.",
+                    "View quality report",
+                    "/quality",
+                )
+            )
+        elif contracts:
+            passing = sum(
+                1 for c in contracts if getattr(c, "status", "") in ("passing", "observing")
+            )
+            if passing:
+                wins.append(f"{passing} quality contracts passing -- no regressions")
 
     # 5. Wins worth surfacing
     if discovery and discovery.relationships:
@@ -172,8 +193,8 @@ async def briefing_today(request: Request):
     stats = {
         "sources": len(sources),
         "tables": len(discovery.tables) if discovery else 0,
-        "quality_checks": len(contracts),
-        "health_pct": _overall_health(sources, contracts),
+        "quality_checks": latest_quality["total_contracts"] if latest_quality else len(contracts),
+        "health_pct": _overall_health(sources, contracts, latest_quality),
     }
 
     no_data = not sources and not discovery
@@ -193,13 +214,19 @@ async def briefing_today(request: Request):
     }
 
 
-def _overall_health(sources: list[dict], contracts: list) -> int:
+def _overall_health(
+    sources: list[dict],
+    contracts: list,
+    latest_quality: dict | None = None,
+) -> int:
     """Cheap overall-health metric for the briefing footer."""
     if not sources:
         return 0
     src_health = [s.get("health") for s in sources if s.get("health") is not None]
     avg_src = sum(src_health) / len(src_health) if src_health else 100
-    if contracts:
+    if latest_quality:
+        contract_pct = float(latest_quality.get("score") or 0)
+    elif contracts:
         passing = sum(1 for c in contracts if getattr(c, "status", "") in ("passing", "observing"))
         contract_pct = (passing / len(contracts)) * 100
     else:

@@ -49,11 +49,14 @@ async def run_quality_checks(request: Request):
     results = check_contracts(con, contracts, only_active=True)
     report = build_report(results)
     pipeline["quality_report"] = report
+    source_name = _active_source_name(pipeline)
+    quality_run_id = _persist_quality_report(request, source_name, report)
 
     return {
         "total": report.total_contracts,
         "passed": report.passed,
         "failed": report.failed,
+        "quality_run_id": quality_run_id,
         "results": [
             {
                 "rule_id": r.rule_id,
@@ -71,11 +74,24 @@ async def get_quality_report(request: Request):
     """Get the latest quality report."""
     report = request.app.state.pipeline["quality_report"]
     if not report:
+        store = getattr(request.app.state, "metadata_store", None)
+        latest = store.get_latest_quality_report() if store is not None else None
+        if latest:
+            return {
+                "total": latest["total_contracts"],
+                "passed": latest["passed"],
+                "failed": latest["failed"],
+                "score": latest["score"],
+                "quality_run_id": latest["id"],
+            }
         return {"total": 0, "passed": 0, "failed": 0, "results": []}
     return {
         "total": report.total_contracts,
         "passed": report.passed,
         "failed": report.failed,
+        "score": round((report.passed / report.total_contracts) * 100, 2)
+        if report.total_contracts
+        else 100.0,
     }
 
 
@@ -111,3 +127,36 @@ async def get_audit_log(request: Request, limit: int = 100):
     if store is None:
         return []
     return store.get_llm_audit_log(limit=limit)
+
+
+def _active_source_name(pipeline: dict) -> str:
+    discovery = pipeline.get("discovery")
+    source = getattr(discovery, "source", None)
+    return getattr(source, "name", None) or "source"
+
+
+def _persist_quality_report(request: Request, source_name: str, report):
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        return None
+    run_id = store.save_quality_report(source_name, report)
+    if report.failed:
+        try:
+            store.insert_event(
+                "quality_checks_failed",
+                f"{report.failed} quality contract(s) failed",
+                source_name=source_name,
+                severity="warning",
+                artifact_type="quality_run",
+                artifact_id=str(run_id),
+                payload={
+                    "quality_run_id": run_id,
+                    "total": report.total_contracts,
+                    "passed": report.passed,
+                    "failed": report.failed,
+                },
+                invalidates=["sources", "briefing", "health", "insights", "quality"],
+            )
+        except Exception:
+            logger.exception("Failed to emit quality event for '%s'", source_name)
+    return run_id

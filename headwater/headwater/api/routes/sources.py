@@ -339,8 +339,14 @@ async def sync_source(request: Request, name: str):
 
         latest = store.get_source(name) or row
         drift_count = latest.get("drift_count") or 0
-        health = max(0, 100 - 5 * drift_count)
-        final_status = "warning" if drift_count else "healthy"
+        drift_health = max(0, 100 - 5 * drift_count)
+        quality_failed = int(result.get("quality_failed") or 0)
+        quality_score = int(round(result.get("quality_score", 100)))
+        health = min(drift_health, quality_score)
+        final_status = "warning" if drift_count or quality_failed else "healthy"
+        quality_run_id = result.get("quality_run_id")
+        if quality_run_id:
+            store.attach_quality_run_to_sync(int(quality_run_id), run_id)
         store.finish_sync_run(
             run_id,
             tables_seen=result.get("tables_discovered", 0),
