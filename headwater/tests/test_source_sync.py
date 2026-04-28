@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from headwater.core.events import EventType
 from headwater.core.metadata import MetadataStore
 from headwater.services.source_sync import SourceNotFoundError, SourceSyncService
 
@@ -33,7 +34,7 @@ def test_record_event_writes_normalized_and_legacy_events(meta: MetadataStore):
     service = SourceSyncService(_request(meta))
 
     service.record_event(
-        "sync_started",
+        EventType.SYNC_STARTED,
         "Source sync started",
         source_name="src",
         payload={"run_id": 1},

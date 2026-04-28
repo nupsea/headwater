@@ -16,6 +16,7 @@ from headwater.connectors.registry import (
     connector_status,
     list_connector_catalog,
 )
+from headwater.core.events import EventType
 from headwater.core.exceptions import ConnectorError
 from headwater.services.source_sync import SourceNotFoundError, SourceSyncService
 
@@ -46,6 +47,11 @@ class SourceSummary(BaseModel):
     health: int | None
     last_sync_at: str | None
     drift_count: int
+    quality_failed: int
+    quality_score: float | None
+    latest_run_status: str | None
+    latest_run_duration_ms: int | None
+    latest_error: str | None
     auto_sync: bool
     tables: int
     rows: int
@@ -71,6 +77,8 @@ def _aggregate_counts(store, name: str) -> tuple[int, int, int]:
 
 def _row_to_summary(store, row: dict) -> dict:
     schemas, tables, rows_count = _aggregate_counts(store, row["name"])
+    latest_run = store.get_latest_sync_run(row["name"])
+    latest_quality = store.get_latest_quality_report(row["name"])
     return {
         "name": row["name"],
         "display_name": row.get("display_name") or row["name"],
@@ -80,6 +88,11 @@ def _row_to_summary(store, row: dict) -> dict:
         "health": row.get("health"),
         "last_sync_at": row.get("last_sync_at"),
         "drift_count": row.get("drift_count") or 0,
+        "quality_failed": latest_quality["failed"] if latest_quality else 0,
+        "quality_score": latest_quality["score"] if latest_quality else None,
+        "latest_run_status": latest_run["status"] if latest_run else None,
+        "latest_run_duration_ms": latest_run.get("duration_ms") if latest_run else None,
+        "latest_error": latest_run.get("error") if latest_run else None,
         "auto_sync": bool(row.get("auto_sync")),
         "tables": tables,
         "rows": rows_count,
@@ -149,7 +162,7 @@ async def create_source(request: Request, body: SourceCreate):
         severity="info",
     )
     SourceSyncService(request).record_event(
-        "source_registered",
+        EventType.SOURCE_REGISTERED,
         f"Source '{body.display_name or body.name}' registered ({body.type})",
         source_name=body.name,
         invalidates=["sources", "briefing"],
@@ -169,7 +182,7 @@ async def test_source(request: Request, name: str):
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ConnectorError as e:
         service.record_event(
-            "connection_test_failed",
+            EventType.CONNECTION_TEST_FAILED,
             str(e),
             source_name=name,
             severity="error",

@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from headwater.core.events import EventType
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
 
@@ -143,7 +144,7 @@ def _persist_quality_report(request: Request, source_name: str, report):
     if report.failed:
         try:
             store.insert_event(
-                "quality_checks_failed",
+                EventType.QUALITY_CHECKS_FAILED,
                 f"{report.failed} quality contract(s) failed",
                 source_name=source_name,
                 severity="warning",

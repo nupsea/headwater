@@ -14,13 +14,18 @@ const STATUS_STYLES: Record<
   string,
   { label: string; chip: string; bar: string }
 > = {
+  syncing: {
+    label: "Syncing",
+    chip: "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-400 dark:border-blue-900",
+    bar: "bg-blue-500",
+  },
   healthy: {
     label: "Healthy",
     chip: "bg-green-50 text-green-700 border-green-200 dark:bg-green-950/40 dark:text-green-400 dark:border-green-900",
     bar: "bg-green-500",
   },
   warning: {
-    label: "Drift",
+    label: "Attention",
     chip: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-900",
     bar: "bg-amber-500",
   },
@@ -36,8 +41,9 @@ const STATUS_STYLES: Record<
   },
 };
 
-const FILTER_ORDER: ("all" | "healthy" | "warning" | "error" | "idle")[] = [
+const FILTER_ORDER: ("all" | "syncing" | "healthy" | "warning" | "error" | "idle")[] = [
   "all",
+  "syncing",
   "healthy",
   "warning",
   "error",
@@ -46,8 +52,9 @@ const FILTER_ORDER: ("all" | "healthy" | "warning" | "error" | "idle")[] = [
 
 const FILTER_LABEL: Record<string, string> = {
   all: "All",
+  syncing: "Syncing",
   healthy: "Healthy",
-  warning: "Drift",
+  warning: "Attention",
   error: "Errors",
   idle: "Idle",
 };
@@ -61,6 +68,7 @@ export default function SourcesPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState<Set<string>>(new Set());
 
   const refresh = () => {
     api
@@ -92,14 +100,31 @@ export default function SourcesPage() {
   const connectorById = (id: string) => connectors.find((c) => c.id === id);
 
   const sync = async (name: string) => {
+    setSyncing((current) => new Set(current).add(name));
+    setSources((current) =>
+      current.map((source) =>
+        source.name === name ? { ...source, status: "syncing" } : source
+      )
+    );
     try {
-      await api.syncSource(name);
-      toast(`Synced ${name}`, "success");
+      const result = await api.syncSource(name);
+      toast(
+        result.quality_failed
+          ? `Synced ${name}; ${result.quality_failed} quality issue(s) need review`
+          : `Synced ${name}`,
+        result.quality_failed ? "info" : "success"
+      );
       refresh();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       toast(`Sync failed: ${msg}`, "error");
       refresh();
+    } finally {
+      setSyncing((current) => {
+        const next = new Set(current);
+        next.delete(name);
+        return next;
+      });
     }
   };
 
@@ -193,7 +218,8 @@ export default function SourcesPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
           {visible.map((src) => {
             const isSel = selected === src.name;
-            const status = STATUS_STYLES[src.status] ?? STATUS_STYLES.idle;
+            const isSyncing = syncing.has(src.name) || src.status === "syncing";
+            const status = STATUS_STYLES[isSyncing ? "syncing" : src.status] ?? STATUS_STYLES.idle;
             const conn = connectorById(src.type);
             return (
               <div
@@ -253,6 +279,26 @@ export default function SourcesPage() {
                   />
                 </div>
 
+                <div className="grid grid-cols-3 gap-2 mb-3">
+                  <Cell
+                    label="Quality"
+                    value={
+                      src.quality_score === null
+                        ? "—"
+                        : `${Math.round(src.quality_score)}%`
+                    }
+                  />
+                  <Cell label="Issues" value={src.quality_failed} />
+                  <Cell
+                    label="Duration"
+                    value={
+                      src.latest_run_duration_ms === null
+                        ? "—"
+                        : formatDuration(src.latest_run_duration_ms)
+                    }
+                  />
+                </div>
+
                 <div className="flex items-center gap-2.5">
                   <div className="flex-1 h-1 bg-border rounded-full overflow-hidden">
                     <div
@@ -268,18 +314,30 @@ export default function SourcesPage() {
                       ↗ {src.drift_count} drift
                     </span>
                   )}
+                  {src.quality_failed > 0 && (
+                    <span className="text-[10px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/40 px-1.5 py-0.5 rounded">
+                      ! {src.quality_failed} quality
+                    </span>
+                  )}
                 </div>
 
                 {isSel && (
-                  <div className="mt-3 pt-3 border-t border-border flex flex-wrap gap-2">
+                  <div className="mt-3 pt-3 border-t border-border">
+                    {src.latest_error && (
+                      <div className="mb-2 text-[11px] text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded px-2 py-1">
+                        {src.latest_error}
+                      </div>
+                    )}
+                    <div className="flex flex-wrap gap-2">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
                         sync(src.name);
                       }}
-                      className="px-2.5 py-1 bg-accent text-white rounded text-[11px] font-medium"
+                      disabled={isSyncing}
+                      className="px-2.5 py-1 bg-accent text-white rounded text-[11px] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Sync now
+                      {isSyncing ? "Syncing…" : "Sync now"}
                     </button>
                     <button
                       onClick={(e) => {
@@ -290,6 +348,7 @@ export default function SourcesPage() {
                     >
                       Disconnect
                     </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -366,4 +425,11 @@ function formatRel(iso: string): string {
   if (h < 24) return `${h}h ago`;
   const d = Math.floor(h / 24);
   return `${d}d ago`;
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }

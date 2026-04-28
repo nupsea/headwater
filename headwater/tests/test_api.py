@@ -95,6 +95,10 @@ class TestSourcesCatalog:
         assert detail["status"] == expected_status
         assert detail["tables"] == 8
         assert detail["runs"][0]["status"] == "succeeded"
+        assert detail["latest_run_status"] == "succeeded"
+        assert detail["latest_run_duration_ms"] is not None
+        assert detail["quality_failed"] == result["quality_failed"]
+        assert detail["quality_score"] == result["quality_score"]
         assert any(e["event_type"] == "sync_completed" for e in detail["events"])
 
         latest_quality = client.app.state.metadata_store.get_latest_quality_report("sample_json")

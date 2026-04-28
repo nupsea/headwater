@@ -9,6 +9,7 @@ import duckdb
 
 from headwater.connectors.registry import get_connector
 from headwater.core.config import get_settings
+from headwater.core.events import EventType
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 
@@ -47,7 +48,7 @@ class SourceSyncService:
             if hasattr(connector, "close"):
                 connector.close()
             self.record_event(
-                "connection_tested",
+                EventType.CONNECTION_TESTED,
                 "Connection verified",
                 source_name=name,
                 payload={"table_count": table_count},
@@ -66,7 +67,7 @@ class SourceSyncService:
         run_id = self.store.start_sync_run(name, mode="full")
         self.store.upsert_source_meta(name, status="syncing", last_sync_at=_now_iso())
         self.record_event(
-            "sync_started",
+            EventType.SYNC_STARTED,
             "Source sync started",
             source_name=name,
             payload={"run_id": run_id},
@@ -99,7 +100,7 @@ class SourceSyncService:
                 last_sync_at=_now_iso(),
             )
             self.record_event(
-                "sync_completed",
+                EventType.SYNC_COMPLETED,
                 f"Source sync completed: {result.get('tables_discovered', 0)} table(s) discovered",
                 source_name=name,
                 payload={"run_id": run_id, **result},
@@ -122,7 +123,7 @@ class SourceSyncService:
 
     def record_event(
         self,
-        event_type: str,
+        event_type: EventType | str,
         summary: str,
         *,
         source_name: str,
@@ -136,7 +137,7 @@ class SourceSyncService:
         """Write normalized and legacy source events."""
         try:
             self.store.insert_event(
-                event_type,
+                str(event_type),
                 summary,
                 source_name=source_name,
                 severity=severity,
@@ -151,7 +152,7 @@ class SourceSyncService:
         try:
             self.store.insert_sync_event(
                 source_name,
-                event_type,
+                str(event_type),
                 summary,
                 severity=severity,
                 payload=payload,
@@ -205,7 +206,7 @@ class SourceSyncService:
         self.store.fail_sync_run(run_id, error)
         self.store.upsert_source_meta(name, status="error", health=0, last_sync_at=_now_iso())
         self.record_event(
-            "sync_failed",
+            EventType.SYNC_FAILED,
             error,
             source_name=name,
             severity="error",

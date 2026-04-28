@@ -15,6 +15,7 @@ from headwater.analyzer.llm import get_provider
 from headwater.analyzer.semantic import analyze
 from headwater.connectors.registry import get_connector
 from headwater.core.config import get_settings
+from headwater.core.events import EventType
 from headwater.core.models import SourceConfig
 from headwater.executor.duckdb_backend import DuckDBBackend
 from headwater.executor.runner import run_models
@@ -704,7 +705,7 @@ def _persist_quality_report(
     if report.failed:
         try:
             store.insert_event(  # type: ignore[union-attr]
-                "quality_checks_failed",
+                EventType.QUALITY_CHECKS_FAILED,
                 f"{report.failed} quality contract(s) failed",
                 source_name=source_name,
                 severity="warning",

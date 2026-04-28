@@ -1064,7 +1064,15 @@ export const api = {
       body: JSON.stringify(body),
     }),
   syncSource: (name: string) =>
-    fetchJSON<{ name: string; status: string; health: number }>(
+    fetchJSON<{
+      name: string;
+      status: string;
+      health: number;
+      run_id: number;
+      quality_total?: number;
+      quality_failed?: number;
+      quality_score?: number;
+    }>(
       `/sources/${name}/sync`,
       { method: "POST" }
     ),
@@ -1091,10 +1099,15 @@ export interface SourceSummary {
   display_name: string | null;
   type: string;
   host: string | null;
-  status: "healthy" | "warning" | "error" | "idle";
+  status: "healthy" | "warning" | "error" | "idle" | "syncing";
   health: number | null;
   last_sync_at: string | null;
   drift_count: number;
+  quality_failed: number;
+  quality_score: number | null;
+  latest_run_status: string | null;
+  latest_run_duration_ms: number | null;
+  latest_error: string | null;
   auto_sync: boolean;
   tables: number;
   rows: number;
@@ -1113,6 +1126,22 @@ export interface SyncEvent {
 
 export interface SourceDetail extends SourceSummary {
   events: SyncEvent[];
+  runs: SyncRun[];
+}
+
+export interface SyncRun {
+  id: number;
+  source_name: string;
+  mode: string;
+  status: "running" | "succeeded" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  tables_seen: number;
+  profiles_written: number;
+  contracts_checked: number;
+  error: string | null;
+  payload?: Record<string, unknown> | null;
 }
 
 export interface SourceCreatePayload {

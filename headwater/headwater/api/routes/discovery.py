@@ -15,6 +15,7 @@ from headwater.analyzer.companion import (
 from headwater.analyzer.eval import evaluate_catalog
 from headwater.analyzer.semantic import analyze
 from headwater.connectors.registry import get_connector
+from headwater.core.events import EventType
 from headwater.core.models import SourceConfig
 from headwater.drift.schema import build_snapshot_from_discovery, compare_schemas
 from headwater.profiler.engine import discover
@@ -398,7 +399,7 @@ def _persist_schema_drift(store, discovery, source_name: str, run_id: int) -> No
     if not diff.no_changes:
         try:
             store.insert_event(
-                "schema_drift_detected",
+                EventType.SCHEMA_DRIFT_DETECTED,
                 "Schema drift detected",
                 source_name=source_name,
                 severity="warning",
