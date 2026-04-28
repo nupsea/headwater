@@ -7,6 +7,7 @@ from typing import Protocol
 import duckdb
 import pyarrow as pa
 
+from headwater.connectors.capabilities import ConnectorCapabilities
 from headwater.core.models import SourceConfig
 
 
@@ -25,6 +26,14 @@ class BaseConnector(Protocol):
 
     def connect(self, config: SourceConfig) -> None:
         """Validate and prepare the connection to the data source."""
+        ...
+
+    def capabilities(self) -> ConnectorCapabilities:
+        """Return the connector's supported operations."""
+        ...
+
+    def list_tables(self) -> list[str]:
+        """Return connector-native table names."""
         ...
 
     def load_to_duckdb(self, con: duckdb.DuckDBPyConnection, schema: str) -> list[str]:

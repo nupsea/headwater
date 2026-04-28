@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from headwater.connectors.capabilities import UNSUPPORTED_CAPABILITIES, ConnectorCapabilities
 from headwater.connectors.csv_loader import CsvLoader
 from headwater.connectors.json_loader import JsonLoader
 from headwater.connectors.postgres_loader import PostgresConnector
@@ -178,10 +179,27 @@ def register_connector(source_type: str, cls: type) -> None:
 
 def list_connector_catalog() -> list[dict]:
     """Return the full connector picker catalog used by the UI."""
-    return [dict(c) for c in CONNECTOR_CATALOG]
+    catalog = []
+    for connector in CONNECTOR_CATALOG:
+        item = dict(connector)
+        item["capabilities"] = get_connector_capabilities(item["id"]).model_dump()
+        catalog.append(item)
+    return catalog
 
 
 def connector_status(source_type: str) -> str | None:
     """Return support status for a catalogued connector."""
     catalogued = next((c for c in CONNECTOR_CATALOG if c["id"] == source_type), None)
     return catalogued["status"] if catalogued else None
+
+
+def get_connector_capabilities(source_type: str) -> ConnectorCapabilities:
+    """Return declared connector capabilities without opening a source connection."""
+    cls = _REGISTRY.get(source_type)
+    if cls is None:
+        return UNSUPPORTED_CAPABILITIES
+    connector = cls()
+    capabilities = getattr(connector, "capabilities", None)
+    if capabilities is None:
+        return UNSUPPORTED_CAPABILITIES
+    return capabilities()

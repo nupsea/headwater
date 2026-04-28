@@ -47,6 +47,9 @@ class TestSourcesCatalog:
         assert connectors["csv"]["status"] == "supported"
         assert connectors["mysql"]["status"] == "planned"
         assert connectors["mysql"]["supported"] is False
+        assert connectors["json"]["capabilities"]["list_tables"] is True
+        assert connectors["postgres"]["capabilities"]["execute_readonly"] is True
+        assert connectors["mysql"]["capabilities"]["test"] is False
 
     def test_create_source_rejects_planned_connector(self, client):
         resp = client.post(

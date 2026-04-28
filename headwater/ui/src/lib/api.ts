@@ -1163,7 +1163,22 @@ export interface ConnectorType {
   glyph: string;
   status: "supported" | "preview" | "planned";
   supported: boolean;
+  capabilities: ConnectorCapabilities;
   lightGlyph?: boolean;
+}
+
+export interface ConnectorCapabilities {
+  test: boolean;
+  list_schemas: boolean;
+  list_tables: boolean;
+  list_columns: boolean;
+  list_constraints: boolean;
+  estimate_row_count: boolean;
+  profile_table: boolean;
+  sample_arrow: boolean;
+  execute_readonly: boolean;
+  load_to_duckdb: boolean;
+  modes: string[];
 }
 
 export interface BriefingPriority {

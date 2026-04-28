@@ -9,7 +9,12 @@ import pytest
 
 from headwater.connectors.csv_loader import CsvLoader
 from headwater.connectors.json_loader import JsonLoader
-from headwater.connectors.registry import connector_status, get_connector, list_connector_catalog
+from headwater.connectors.registry import (
+    connector_status,
+    get_connector,
+    get_connector_capabilities,
+    list_connector_catalog,
+)
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 from headwater.profiler.schema import extract_schema
@@ -89,11 +94,24 @@ class TestRegistry:
         assert catalog["mysql"]["status"] == "planned"
         assert catalog["json"]["supported"] is True
         assert catalog["mysql"]["supported"] is False
+        assert catalog["json"]["capabilities"]["list_tables"] is True
+        assert catalog["json"]["capabilities"]["sample_arrow"] is True
+        assert catalog["mysql"]["capabilities"]["test"] is False
 
     def test_connector_status_helper(self):
         assert connector_status("postgres") == "supported"
         assert connector_status("mysql") == "planned"
         assert connector_status("mongo") is None
+
+    def test_connector_capabilities_helper(self):
+        json_caps = get_connector_capabilities("json")
+        postgres_caps = get_connector_capabilities("postgres")
+        mysql_caps = get_connector_capabilities("mysql")
+
+        assert json_caps.load_to_duckdb is True
+        assert postgres_caps.execute_readonly is True
+        assert postgres_caps.load_to_duckdb is False
+        assert mysql_caps.test is False
 
     def test_get_planned_connector_explains_status(self):
         with pytest.raises(ConnectorError, match="planned"):
@@ -200,6 +218,17 @@ class TestJsonLoaderProfile:
         loader.load_to_duckdb(ddb, "env_health")
         stats = loader.profile("zones")
         assert stats["zone_id"]["count"] == 25
+
+    def test_capabilities_and_listing(self):
+        loader = JsonLoader()
+        loader.connect(SourceConfig(name="sample", type="json", path=str(SAMPLE_DIR)))
+
+        caps = loader.capabilities()
+        columns = loader.list_columns("zones")
+
+        assert caps.list_tables is True
+        assert "zones" in loader.list_tables()
+        assert columns[0]["name"] == "zone_id"
 
 
 class TestSourceConfigMode:
