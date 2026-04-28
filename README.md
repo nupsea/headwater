@@ -116,9 +116,11 @@ For database sources (Postgres), profiling queries run directly in the source vi
 **Arrow-native flow**
 Data moves between Polars and DuckDB as Apache Arrow. No Pandas, no CSV intermediaries, zero-copy.
 
-**Two-mode connector architecture**
-- `generate` mode (Postgres, CSV, JSON): profile in-place, generate deployable staging + mart SQL
-- `observe` mode (Snowflake, BigQuery, Redshift): profile in-place, govern what's already there — zero data movement. *(Phase 2)*
+**Capability-aware connector direction**
+Headwater currently supports Postgres, CSV, and JSON. The next connector refactor will make
+each connector declare whether it can sample, profile in-place, execute read-only SQL,
+materialize models, or operate in observe-only mode. Warehouse and catalog connectors are
+planned after source-scoped sync, drift, and quality history are hardened.
 
 **LLM is optional**
 Three tiers: `none` (heuristics only), `anthropic` (Claude via API). Everything works without a network call. The LLM receives only column names, data types, and statistical summaries -- never raw data rows.
@@ -133,12 +135,16 @@ Every approve, reject, and edit is recorded. Headwater computes description acce
 
 ## Source Connectors
 
-| Type | Mode | Command |
+| Type | Status | Current behavior |
 |---|---|---|
-| Postgres | generate | `--source postgresql://user:pass@host:5432/db` |
-| JSON (NDJSON) | generate | `--source /path/to/dir --type json` |
-| CSV | generate | `--source /path/to/dir --type csv` |
-| Snowflake / BigQuery / Redshift | observe | Phase 2 |
+| Postgres | Supported | Discover schemas/tables, sample bounded Arrow batches, profile locally after sampling |
+| JSON / NDJSON | Supported | Load local directory files into DuckDB for discovery, profiling, models, and contracts |
+| CSV | Supported | Load local directory files into DuckDB for discovery, profiling, models, and contracts |
+| DuckDB | Planned | Local embedded database connector after the capability protocol lands |
+| SQLite | Planned | Lightweight local database connector after the capability protocol lands |
+| MySQL | Planned | OLTP connector after Postgres/CSV/JSON are refactored to the shared protocol |
+| Snowflake / BigQuery | Planned | Observe-mode warehouse connectors after source sync, drift, and quality history are reliable |
+| Glue / Unity Catalog / Iceberg REST | Planned | Metadata-first catalog connectors after source lifecycle is mature |
 
 ---
 

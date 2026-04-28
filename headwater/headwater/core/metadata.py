@@ -333,18 +333,54 @@ class MetadataStore:
         # sync_events table for source activity history (briefing + sources page)
         self.con.executescript(
             """
-            CREATE TABLE IF NOT EXISTS sync_events (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_name TEXT NOT NULL,
-                event_type  TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS sync_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
                 severity    TEXT NOT NULL DEFAULT 'info',
                 detail      TEXT,
                 payload     TEXT,
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            CREATE INDEX IF NOT EXISTS idx_sync_events_source
-                ON sync_events(source_name, created_at DESC);
-            """
+);
+CREATE INDEX IF NOT EXISTS idx_sync_events_source
+    ON sync_events(source_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS sync_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    mode        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    started_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    duration_ms INTEGER,
+    tables_seen INTEGER DEFAULT 0,
+    profiles_written INTEGER DEFAULT 0,
+    contracts_checked INTEGER DEFAULT 0,
+    error       TEXT,
+    payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sync_runs_source
+    ON sync_runs(source_name, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT,
+    event_type  TEXT NOT NULL,
+    severity    TEXT NOT NULL DEFAULT 'info',
+    artifact_type TEXT,
+    artifact_id TEXT,
+    summary     TEXT NOT NULL,
+    detail      TEXT,
+    payload_json TEXT,
+    invalidates_json TEXT DEFAULT '[]',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    acknowledged_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_source
+    ON events(source_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_type
+    ON events(event_type, created_at DESC);
+"""
         )
         self.con.commit()
         for sql in migrations:
@@ -495,6 +531,178 @@ class MetadataStore:
             if d.get("payload"):
                 with contextlib.suppress(ValueError, TypeError):
                     d["payload"] = json.loads(d["payload"])
+            out.append(d)
+        return out
+
+    # -- Sync runs ---------------------------------------------------------
+
+    def start_sync_run(self, source_name: str, mode: str = "full") -> int:
+        """Create a sync_runs row and return its id."""
+        cur = self.con.execute(
+            "INSERT INTO sync_runs (source_name, mode, status) VALUES (?, ?, 'running')",
+            (source_name, mode),
+        )
+        self.con.commit()
+        if cur.lastrowid is None:
+            raise MetadataError("Failed to create sync run")
+        return cur.lastrowid
+
+    def finish_sync_run(
+        self,
+        run_id: int,
+        *,
+        tables_seen: int = 0,
+        profiles_written: int = 0,
+        contracts_checked: int = 0,
+        payload: dict | None = None,
+    ) -> None:
+        """Mark a sync run successful."""
+        self.con.execute(
+            """
+            UPDATE sync_runs
+               SET status = 'succeeded',
+                   finished_at = datetime('now'),
+                   duration_ms = CAST(
+                       (julianday(datetime('now')) - julianday(started_at)) * 86400000
+                       AS INTEGER
+                   ),
+                   tables_seen = ?,
+                   profiles_written = ?,
+                   contracts_checked = ?,
+                   payload_json = ?
+             WHERE id = ?
+            """,
+            (
+                tables_seen,
+                profiles_written,
+                contracts_checked,
+                json.dumps(payload) if payload is not None else None,
+                run_id,
+            ),
+        )
+        self.con.commit()
+
+    def fail_sync_run(self, run_id: int, error: str, payload: dict | None = None) -> None:
+        """Mark a sync run failed."""
+        self.con.execute(
+            """
+            UPDATE sync_runs
+               SET status = 'failed',
+                   finished_at = datetime('now'),
+                   duration_ms = CAST(
+                       (julianday(datetime('now')) - julianday(started_at)) * 86400000
+                       AS INTEGER
+                   ),
+                   error = ?,
+                   payload_json = ?
+             WHERE id = ?
+            """,
+            (error, json.dumps(payload) if payload is not None else None, run_id),
+        )
+        self.con.commit()
+
+    def list_sync_runs(self, source_name: str | None = None, limit: int = 20) -> list[dict]:
+        """Return recent sync runs."""
+        if source_name:
+            rows = self.con.execute(
+                "SELECT * FROM sync_runs WHERE source_name = ? "
+                "ORDER BY started_at DESC, id DESC LIMIT ?",
+                (source_name, limit),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM sync_runs ORDER BY started_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            if d.get("payload_json"):
+                try:
+                    d["payload"] = json.loads(d["payload_json"])
+                except (TypeError, ValueError):
+                    d["payload"] = None
+            out.append(d)
+        return out
+
+    def get_latest_sync_run(self, source_name: str) -> dict | None:
+        """Return the most recent sync run for a source."""
+        row = self.con.execute(
+            "SELECT * FROM sync_runs WHERE source_name = ? "
+            "ORDER BY started_at DESC, id DESC LIMIT 1",
+            (source_name,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    # -- Normalized events -------------------------------------------------
+
+    def insert_event(
+        self,
+        event_type: str,
+        summary: str,
+        *,
+        source_name: str | None = None,
+        severity: str = "info",
+        artifact_type: str | None = None,
+        artifact_id: str | None = None,
+        detail: str | None = None,
+        payload: dict | None = None,
+        invalidates: list[str] | None = None,
+    ) -> int:
+        """Insert a normalized event and return its id."""
+        cur = self.con.execute(
+            """
+            INSERT INTO events
+                (source_name, event_type, severity, artifact_type, artifact_id,
+                 summary, detail, payload_json, invalidates_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_name,
+                event_type,
+                severity,
+                artifact_type,
+                artifact_id,
+                summary,
+                detail,
+                json.dumps(payload) if payload is not None else None,
+                json.dumps(invalidates or []),
+            ),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_events(
+        self,
+        source_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return recent normalized events."""
+        if source_name:
+            rows = self.con.execute(
+                "SELECT * FROM events WHERE source_name = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (source_name, limit),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM events ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            for db_key, out_key, default in (
+                ("payload_json", "payload", None),
+                ("invalidates_json", "invalidates", []),
+            ):
+                if d.get(db_key):
+                    try:
+                        d[out_key] = json.loads(d[db_key])
+                    except (TypeError, ValueError):
+                        d[out_key] = default
+                else:
+                    d[out_key] = default
             out.append(d)
         return out
 

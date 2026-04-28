@@ -133,7 +133,7 @@ export function ConnectorWizard({ open, onClose, onCreated }: Props) {
                         onClick={() => {
                           if (!t.supported) {
                             toast(
-                              `${t.name} is in the picker but not yet implemented.`,
+                              `${t.name} is ${t.status ?? "planned"} and not supported in this build.`,
                               "info"
                             );
                             return;
@@ -164,7 +164,7 @@ export function ConnectorWizard({ open, onClose, onCreated }: Props) {
                           </div>
                           {!t.supported && (
                             <div className="text-[10px] text-muted">
-                              coming soon
+                              {t.status ?? "planned"}
                             </div>
                           )}
                         </div>

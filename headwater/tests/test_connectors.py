@@ -9,7 +9,7 @@ import pytest
 
 from headwater.connectors.csv_loader import CsvLoader
 from headwater.connectors.json_loader import JsonLoader
-from headwater.connectors.registry import get_connector
+from headwater.connectors.registry import connector_status, get_connector, list_connector_catalog
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 from headwater.profiler.schema import extract_schema
@@ -80,6 +80,24 @@ class TestRegistry:
     def test_get_unknown(self):
         with pytest.raises(ConnectorError):
             get_connector("mongo")
+
+    def test_catalog_exposes_support_status(self):
+        catalog = {c["id"]: c for c in list_connector_catalog()}
+        assert catalog["json"]["status"] == "supported"
+        assert catalog["csv"]["status"] == "supported"
+        assert catalog["postgres"]["status"] == "supported"
+        assert catalog["mysql"]["status"] == "planned"
+        assert catalog["json"]["supported"] is True
+        assert catalog["mysql"]["supported"] is False
+
+    def test_connector_status_helper(self):
+        assert connector_status("postgres") == "supported"
+        assert connector_status("mysql") == "planned"
+        assert connector_status("mongo") is None
+
+    def test_get_planned_connector_explains_status(self):
+        with pytest.raises(ConnectorError, match="planned"):
+            get_connector("mysql")
 
 
 # -- Schema extraction -----------------------------------------------------

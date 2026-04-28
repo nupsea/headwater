@@ -1,164 +1,217 @@
-# Headwater Launches: The Open-Source Advisory Companion for Data Engineers
+# Headwater Refocuses on Decision-Ready Data Operations
 
-**Auto-discovery, documentation, quality contracts, and model scaffolding -- so data professionals can focus on the work that actually requires their expertise.**
+**An open-source advisory workspace for data professionals: connect sources, understand the data estate, harden models and pipelines, and move toward decision intelligence without adding another black-box platform.**
 
 ---
 
 **April 2026**
 
-Data engineers are caught in a paradox. AI-powered tooling promises to automate everything, yet over half of a data engineer's time still goes to maintenance -- keeping pipelines running, chasing schema changes, writing documentation that falls out of date immediately, and answering ad-hoc questions from stakeholders. The meaningful work -- data modeling, business logic, architecture decisions, stakeholder collaboration -- gets squeezed into whatever time is left.
+Data teams do not need another tool that promises to “ask anything” and returns unverifiable SQL. They need a system that makes the existing data estate understandable, trustworthy, and operationally mature.
 
-The problem is not a lack of tools. It is a lack of tools that data professionals actually trust. The modern data stack delivered a 10-15 tool maintenance surface that takes months to set up and years to maintain. Data quality issues are rising: resolution time is up 166%, and 74% of quality problems are still discovered by business users rather than by the systems designed to catch them. Meanwhile, AI-powered data tools ask for broad access and return confident-sounding but unverifiable results. Data engineers have seen the hallucinations. They have tried the "magic" demos that break on real data.
+Headwater is being refocused around that practical goal: help data professionals connect to their sources, inspect what is actually there, surface risks and opportunities, and turn a loose collection of tables, models, and checks into a decision-ready data system.
 
-Today, **Headwater** launches as an open-source advisory companion for data professionals. It handles the mechanical groundwork -- discovery, profiling, documentation, quality baselines, staging model boilerplate -- so that data engineers, analytics engineers, and data analysts can reclaim their time for the work that actually requires human judgment.
-
-Point Headwater at any data source -- an existing catalog (AWS Glue, Databricks Unity Catalog, Iceberg REST), a production database (Postgres, MySQL), or flat files -- and within minutes receive a complete discovery report: every table mapped, every column profiled, every relationship detected, every quality concern flagged, and documentation generated. Headwater then proposes analytical models and data quality contracts for your review. You bring the domain knowledge. Headwater brings the scaffolding.
-
-Headwater is advisory by design. It proposes. You decide. Staging models that involve no business logic are auto-approved. Mart models that encode business definitions -- how you calculate revenue, what counts as an active user -- are presented one at a time with the SQL, the assumptions, and clarifying questions. Quality contracts enter observation mode first, tracking violations silently so you can validate the rules before turning them on. There is no "auto-apply everything" button. Your expertise is what makes the output trustworthy.
-
-Critically, Headwater **tracks its own accuracy over time**. Description acceptance rate, quality contract false-positive rate, model edit distance, drift detection lead time -- all measured and surfaced. Instead of asking you to trust it on faith, Headwater gives you quantitative evidence. A tool that publishes its own accuracy metrics earns trust; a tool that hides behind "AI-powered" deserves skepticism.
-
-> "We built Headwater because we have been the overloaded data engineer. You know the feeling: you built the pipeline, you maintain the pipeline, you document the pipeline, you answer every question about the pipeline, and somehow you are also supposed to be building the next thing. Headwater does not replace data engineers -- it takes the mechanical drudgery off their plate. The discovery, the profiling, the documentation, the quality baselines, the staging boilerplate -- that is Headwater's job. The business logic, the modeling decisions, the stakeholder conversations -- that is yours. And Headwater shows you exactly how accurate its suggestions are, so you can decide how much to trust it."
+The product direction is deliberately advisory. Headwater discovers, profiles, explains, proposes, and monitors. Humans approve business definitions, model logic, governance choices, and pipeline changes. This is not a limitation; it is the trust boundary that makes the product useful in real organizations.
 
 ---
 
-## How It Works
+## What Exists Today
 
-**1. Connect** -- Run `docker-compose up` and point Headwater at your data source. Connect to an existing catalog for metadata-enriched discovery, or directly to a database. No cloud accounts required. No API keys needed for core functionality.
+Headwater already has a strong foundation:
 
-```bash
-docker-compose up
+- **Discovery pipeline** for JSON, CSV, and Postgres sources.
+- **Profiling and relationship detection** across tables and columns.
+- **Semantic enrichment** with heuristic and optional LLM-assisted descriptions.
+- **Staging and mart model generation** with review-oriented assumptions and questions.
+- **Quality contract generation** and validation.
+- **SQLite metadata store** with sources, tables, columns, profiles, relationships, models, contracts, decisions, drift reports, and audit logs.
+- **FastAPI backend and Next.js UI** covering briefing, sources, health, discovery, dictionary, models, quality, data, insights, explore, and settings.
+- **Briefing-led workflow** that starts from “what needs attention?” instead of a generic dashboard.
+- **Source registry and event log** for connected sources and sync events.
 
-# Connect to a catalog (mature orgs):
-headwater discover --catalog glue --region us-east-1 --database analytics_prod
-
-# Or connect directly to a database:
-headwater discover --source postgres://your-db:5432/production
-```
-
-**2. Discover** -- Headwater crawls your data source, profiles every column, detects relationships between tables, classifies business domains, and generates documentation. A catalog-connected source completes in minutes. A 50-table OLTP database completes in 5-15 minutes. The discovery report surfaces quality issues, missing relationships, and data patterns that often surprise even the engineers who built the database.
-
-```
-Discovered 47 tables across 3 schemas
-Detected 5 business domains, 18 relationships
-Flagged 12 quality observations
-Proposed 12 staging models, 5 mart models
-Generated 168 quality contracts (observation mode)
-Confidence baseline established -- accuracy tracking begins
-```
-
-**3. Review & Refine** -- Open the review UI in your browser. Staging models are auto-approved (mechanical transformations, no judgment required). Each proposed mart model is presented individually with the SQL, the assumptions made, and questions Headwater could not answer on its own. You approve, edit, or reject based on your domain knowledge. Headwater materializes approved models and begins monitoring for quality issues and schema changes -- alerting you before stakeholders notice problems. Every acceptance, edit, and rejection feeds the confidence metrics.
+The direction is right. The gaps are in workflow integration, connector depth, event semantics, and decision-level insight.
 
 ---
 
-## Who Is Headwater For
+## What Needs to Change
 
-**The data engineer** maintaining 80 tables, 12 dashboards, and everyone's ad-hoc requests. Headwater handles discovery, documentation, and quality baselines so they can focus on modeling and architecture instead of firefighting. "I ran Headwater against our Postgres. It found 6 referential integrity gaps I didn't know about and generated quality contracts I would have taken two weeks to write manually."
+Headwater should stop positioning itself as a broad “connect to anything and solve everything” platform until the workflow is defensible end-to-end. The next refactor should optimize for depth of value, not breadth of claims.
 
-**The analytics engineer** inheriting a pipeline they did not build. Headwater maps the existing data estate in minutes -- relationships, quality issues, domain boundaries -- providing the context that would otherwise take weeks to reverse-engineer. Exports to dbt format so they can start building immediately.
+### Not Worth Pursuing Now
 
-**The data analyst** who asks better questions when they have better context. Headwater's auto-generated documentation means they can discover what tables exist, what columns mean, and where quality issues lurk without interrupting the data engineer.
-
-**The data platform engineer** auditing an existing infrastructure. Connects Headwater to a Glue or Unity Catalog to find documentation gaps, undocumented cross-schema relationships, and tables with no quality coverage.
-
-**The engineering manager** who uses Headwater's confidence dashboard in monthly reviews -- tracking how suggestion accuracy improves over time, monitoring data estate health, and making tooling ROI decisions based on data rather than anecdotes.
-
-**The backend engineer wearing a data hat** who needs to stand up basic reporting without becoming a full-time data engineer. Headwater scaffolds the foundation; they add the business logic. "I needed revenue reporting for our Series A board deck. Headwater proposed a mart model with the right joins. I just had to answer its questions about how we recognize revenue."
-
----
-
-## What Headwater Is NOT
-
-Headwater is explicit about its scope. It is **not a replacement for data engineers** -- it is a tool in their kit, like dbt or Great Expectations. It is **not a data warehouse**, a BI tool, or an enterprise governance platform. It is **not magic** -- auto-generated models are a starting point, not a finished product, and Headwater publishes its own accuracy metrics so you know exactly how often it gets things right. It is **not for real-time** streaming analytics. It does not force a methodology or opinionated workflow -- it integrates with your existing stack and adapts to how your team already works.
+- **Catalog connectors before source connectors**: Glue, Unity Catalog, and Iceberg REST are valuable later, but they add metadata breadth before Headwater has source-sync depth.
+- **A full semantic layer runtime**: generating semantic metadata and metric definitions is useful; running a competing semantic query engine is not worth the maintenance burden.
+- **Streaming support**: batch and scheduled sync cover the immediate pain. Streaming would distract from source discovery, drift, quality, and model maturity.
+- **Managed cloud and enterprise features**: SSO, RBAC, billing, and multi-tenant hosting should wait until local OSS usage proves repeatable value.
+- **Marketplace-style plugin architecture too early**: define stable connector interfaces first; external plugins before interface maturity create churn.
+- **Autonomous model changes**: no “auto-fix my marts” workflow. Headwater can propose changes and impact analysis, but humans own business logic.
+- **Broad connector logos without support**: the UI may show future connectors, but public docs should clearly separate supported, preview, and planned connectors.
+- **Generic AI assistant as the centerpiece**: natural-language query is useful only after catalog, lineage, quality, and model semantics are reliable.
 
 ---
 
-## Technical Highlights
+## The New Product Promise
 
-**Arrow-native architecture.** Data flows from source to analytics as Apache Arrow memory throughout. Polars handles profiling. DuckDB handles complex queries and model materialization. Zero serialization overhead between components. This makes profiling a 10-million-row table on a laptop practical, not theoretical.
+Headwater helps a data organization answer four operational questions:
 
-**LLM-optional with three operating modes.** Headwater operates in three tiers: **Air-Gapped** (no network calls, heuristic descriptions, statistical profiling, rule-based contracts -- fully functional at $0), **Local LLM** via Ollama (better descriptions, domain classification -- data never leaves your network), or **Cloud LLM** via Claude API (rich semantic analysis, mart model proposals, ~$2-5 per full discovery run). The LLM enhances; it does not provide the foundation.
+1. **What data do we have, and can we trust it?**
+2. **What changed since the last time we looked?**
+3. **Which models, contracts, and definitions need human review?**
+4. **Which decisions can this data support with evidence?**
 
-**Privacy-first with defense-in-depth.** Six independent layers protect your data: schema-only mode runs before any profiling; statistical summaries replace raw data in all LLM context (never raw rows); PII is automatically detected and excluded; prompts are sandboxed and responses validated; every LLM interaction is logged in a queryable audit trail; all data stays in your infrastructure. LLM prompts never receive raw data rows -- only statistical aggregates and schema metadata.
-
-**Semantic metadata generator, not a semantic layer runtime.** Headwater auto-generates business-context metadata (descriptions, domain classifications, relationships) and exports it to existing semantic layer tools (dbt metrics, Cube.dev, Looker LookML). It meets your stack where it is rather than forcing adoption of another runtime.
-
-**Works with your existing stack.** Connects to data catalogs (AWS Glue, Databricks Unity, Iceberg REST) for metadata-enriched discovery, or directly to OLTP databases (Postgres, MySQL). Exports to dbt project format, generates SQLMesh-compatible models, and connects to external warehouses (Snowflake, BigQuery). It does not force you to abandon your tools -- it gives you a head start within them.
-
-**Plugin architecture.** Seven plugin types (source connectors, warehouse backends, LLM providers, notifiers, model templates, exporters, cloud deployers) via Python entry_points. Install a connector with `pip install headwater-connector-snowflake`. Scaffold a new plugin with `headwater plugin scaffold`.
-
-**Defensive by design.** Circuit breakers halt ingestion on anomalous volume shifts. A drift budget prevents infinite detect-fix-detect loops. Tiered approval prevents review fatigue. Quality contracts observe before they enforce. Confidence metrics track accuracy over time. Every artifact is reviewable, editable, revertible, and explainable.
+This reframes Headwater from a one-shot discovery demo into a continuous data-improvement tool.
 
 ---
 
-> "I inherited a Postgres database with 60 tables, zero documentation, and the person who built it had left three months before I joined. My first week was supposed to be productive. Instead, I spent it writing SELECT * queries and trying to guess what columns meant from their names. I ran Headwater on day two. In 20 minutes I had a complete map -- relationships, quality flags, domain classifications. It found a referential integrity gap between orders and payments that nobody knew about. More importantly, it generated quality contracts that caught a silent data drop the following week, before the CEO noticed the dashboard numbers were off. Three months in, Headwater's description acceptance rate is at 82% -- I trust its documentation now and only edit the edge cases. Headwater did not do my job -- it gave me the map so I could do my job from day one instead of day thirty."
->
-> -- Data Engineer, 45-person SaaS company (first month on the job)
+## The Refactor Direction
+
+### 1. Source-Native Sync
+
+Every source should have the same lifecycle:
+
+`registered -> tested -> discovered -> profiled -> drift-compared -> quality-checked -> briefed`
+
+The existing `/sources/{name}/sync` endpoint should stop being a connection test only. It should become the source-scoped entry point for the full continuous workflow.
+
+### 2. Connector Contract
+
+Headwater should standardize a connector protocol that works for databases, warehouses, files, and catalogs:
+
+- list namespaces/schemas
+- list tables
+- list columns and constraints
+- estimate row counts
+- run safe aggregate profiles
+- fetch bounded Arrow samples where allowed
+- expose freshness metadata where available
+- identify capabilities such as `can_sample`, `can_profile_pushdown`, `can_materialize`, and `observe_only`
+
+This makes “connect to any data source” technically credible without pretending every connector supports the same operations.
+
+### 3. Event-Driven State
+
+All important changes should emit normalized events:
+
+- source registered
+- sync started/completed/failed
+- schema drift detected
+- statistical drift detected
+- quality check failed/recovered
+- model proposed/approved/rejected/executed
+- column description confirmed
+- relationship confirmed/rejected
+- metric definition changed
+
+Briefing, Sources, Insights, Health, and Review Queue should read from this event layer instead of each page inventing its own state logic.
+
+### 4. Decision Intelligence Layer
+
+Headwater should introduce a decision graph:
+
+`source -> table -> column -> relationship -> metric -> model -> contract -> insight -> decision`
+
+The product should not merely answer “what does this column mean?” It should answer:
+
+- Which metrics are decision-ready?
+- Which decisions are blocked by missing definitions, failing contracts, or stale data?
+- Which upstream changes affect a dashboard, metric, model, or business question?
+- What evidence supports a generated insight?
+
+This is the novel direction. Most data tools stop at metadata, lineage, observability, or BI. Headwater should connect those layers into a practical maturity path.
 
 ---
 
-## Pricing & Availability
+## Phased Implementation Plan
 
-Headwater is open-source under the Apache 2.0 license and available today on GitHub. It runs on any machine with Docker.
+### Phase 0: Reality Alignment
 
-The core platform is and will always be free. This includes: schema discovery, statistical profiling, relationship detection, auto-documentation, quality contract generation, staging model generation, mart model proposals, schema drift detection, confidence tracking, and the full review UI.
+- Make docs and UI copy match shipped support: JSON, CSV, Postgres.
+- Label unsupported connectors as planned, not available.
+- Stop claiming catalog support, Parquet support, managed cloud, or dbt export until implemented.
+- Add a supported/preview/planned matrix to README and UI.
 
-An optional cloud LLM integration (for enhanced semantic analysis and AI-powered documentation) uses the Anthropic Claude API at approximately $2-5 per full discovery run. Local LLM support via Ollama is free. Air-gapped mode with no network calls is a first-class experience -- not a degraded fallback.
+### Phase 1: Continuous Source Workflow
 
-A managed cloud version with built-in Postgres, LLM integration, SSO, and team collaboration is planned for 2027.
+- Refactor `/sources/{name}/sync` into full source-scoped discovery.
+- Persist sync lifecycle events.
+- Wire schema snapshots and drift reports into every discovery run.
+- Persist quality check results and contract runtime status.
+- Make Briefing and Sources reflect real sync, drift, and quality state.
 
----
+### Phase 2: Connector Platform
 
-## Current Availability (v0.3)
+- Replace ad hoc connector methods with a capability-aware protocol.
+- Implement first-class Postgres, CSV, JSON, DuckDB, SQLite, and MySQL connectors.
+- Add strict safety controls: query timeout, row/sample limits, read-only mode, schema allowlists, and credential redaction.
+- Add connector contract tests so every connector proves the same behavior.
 
-Available today:
-- JSON, CSV, Parquet file connectors
-- Postgres database connector
-- Full discovery-to-quality pipeline (discover, profile, analyze, generate, execute, validate)
-- LLM-optional with three modes: air-gapped heuristic, local Ollama, cloud Anthropic
-- React review UI with dashboard, dictionary, models, quality, data, explore, and settings pages
-- Health check endpoint with component-level status
-- Schema drift detection and alerting
-- Semantic locking (approved classifications persist across runs)
-- Quality contracts with observation mode
-- Confidence tracking per table and column
+### Phase 3: Model and Pipeline Maturity
 
-On the roadmap:
-- Snowflake, BigQuery, MySQL, Redshift connectors
-- AWS Glue, Databricks Unity Catalog, Iceberg REST catalog connectors
-- dbt project export
-- Plugin architecture for connectors, exporters, LLM providers
-- Explore deep insights with statistical rigor and correctness validation
-- Observe mode for cloud warehouses (read-only, no materialization)
-- Managed cloud version with SSO and team collaboration
+- Stop auto-approving mart models outside demo mode.
+- Add model maturity states: drafted, reviewed, approved, materialized, monitored, deprecated.
+- Add dependency and impact analysis from sources through models and contracts.
+- Add rerun planning: when a source changes, show what must be regenerated, reviewed, or revalidated.
+- Export reviewed models and contracts to dbt-compatible files after core maturity is stable.
 
----
+### Phase 4: Deep Insights
 
-## Get Started
+- Build statistical insight generation over profiles, relationships, quality history, and drift.
+- Require every insight to include evidence, confidence, affected assets, and recommended next action.
+- Add anomaly and segment discovery: outliers, high-null clusters, orphan records, unexpected cardinality changes, and relationship integrity breaks.
+- Add “insight review” so humans can mark useful, irrelevant, false positive, or needs investigation.
 
-10 minutes from zero to your first discovery report:
+### Phase 5: Decision Readiness
 
-```bash
-git clone https://github.com/headwater-data/headwater
-cd headwater
-docker-compose up
-
-# Try the built-in demo (no database required):
-headwater demo
-
-# Or connect your own database:
-headwater discover --source postgres://localhost:5432/mydb
-
-# Or connect your catalog:
-headwater discover --catalog glue --region us-east-1 --database analytics_prod
-```
-
-**GitHub**: github.com/headwater-data/headwater
-**Documentation**: docs.headwater.dev
-**Community**: discord.gg/headwater
+- Introduce metrics and decision entities.
+- Score decision readiness from semantic confidence, model review state, quality pass rate, freshness, drift, and lineage completeness.
+- Add decision briefs: “This metric is safe for weekly revenue review, but not board reporting because refund logic is unresolved.”
+- Add controlled NL question answering only over reviewed metadata, approved models, and evidence-backed insights.
 
 ---
 
-*Headwater. Where your data story begins.*
+## Why This Matters
 
-*Built with Polars, DuckDB, and the Anthropic Claude API. Apache 2.0 License.*
+Most data teams do not fail because they lack dashboards. They fail because no one can tell which data is trustworthy, which definitions are official, which pipelines are fragile, and which metrics are safe to use for decisions.
+
+Headwater’s opportunity is to become the advisory system that makes that maturity visible and achievable:
+
+- **From unknown data** to discovered data.
+- **From discovered data** to documented data.
+- **From documented data** to modeled data.
+- **From modeled data** to monitored data.
+- **From monitored data** to decision-ready data.
+
+That is a stronger position than “AI data assistant.” It is also more useful.
+
+---
+
+## Current Availability
+
+Available now:
+
+- JSON and CSV file discovery
+- Postgres discovery
+- Profiling and relationship detection
+- Semantic enrichment and locking
+- Model and contract generation
+- Quality validation
+- FastAPI backend
+- Next.js review UI
+- Briefing and Sources pages
+- Sync event table and source metadata
+- Schema drift storage primitives
+
+Needs implementation or hardening:
+
+- Source-scoped full sync
+- Statistical drift detection
+- Connector capability protocol
+- DuckDB, SQLite, MySQL, warehouse, and catalog connectors
+- Persisted quality result history
+- Event-driven UI invalidation
+- Decision graph and readiness scoring
+- dbt export
+- Managed cloud
+
+---
+
+*Headwater. From connected data to decision-ready intelligence.*

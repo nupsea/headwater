@@ -1132,6 +1132,7 @@ export interface ConnectorType {
   category: string;
   color: string;
   glyph: string;
+  status: "supported" | "preview" | "planned";
   supported: boolean;
   lightGlyph?: boolean;
 }

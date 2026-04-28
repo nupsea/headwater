@@ -36,6 +36,67 @@ class TestStatus:
         assert data["tables"] == 8
 
 
+class TestSourcesCatalog:
+    def test_connector_catalog_exposes_support_status(self, client):
+        resp = client.get("/api/connector-catalog")
+        assert resp.status_code == 200
+        connectors = {c["id"]: c for c in resp.json()["connectors"]}
+
+        assert connectors["postgres"]["status"] == "supported"
+        assert connectors["json"]["status"] == "supported"
+        assert connectors["csv"]["status"] == "supported"
+        assert connectors["mysql"]["status"] == "planned"
+        assert connectors["mysql"]["supported"] is False
+
+    def test_create_source_rejects_planned_connector(self, client):
+        resp = client.post(
+            "/api/sources",
+            json={
+                "name": "future_mysql",
+                "type": "mysql",
+                "uri": "mysql://user:pass@localhost/db",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "planned" in resp.json()["detail"]
+
+    def test_source_test_endpoint_verifies_supported_source(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+
+        resp = client.post("/api/sources/sample_json/test")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+        detail = client.get("/api/sources/sample_json").json()
+        assert any(e["event_type"] == "connection_tested" for e in detail["events"])
+
+    def test_source_sync_runs_full_pipeline_for_json_source(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+
+        resp = client.post("/api/sources/sample_json/sync")
+        assert resp.status_code == 200
+        result = resp.json()
+        assert result["status"] == "healthy"
+        assert result["tables_discovered"] == 8
+        assert result["profiles"] > 0
+        assert result["quality_total"] > 0
+
+        detail = client.get("/api/sources/sample_json").json()
+        assert detail["status"] == "healthy"
+        assert detail["tables"] == 8
+        assert detail["runs"][0]["status"] == "succeeded"
+        assert any(e["event_type"] == "sync_completed" for e in detail["events"])
+
+
 class TestDiscovery:
     def test_discover(self, client):
         resp = client.post("/api/discover", params={"source_path": SAMPLE_DATA})

@@ -13,9 +13,14 @@ _REGISTRY: dict[str, type] = {
     "postgres": PostgresConnector,
 }
 
-# Catalog shown in the UI connector picker. `supported: True` means we can
-# actually connect; `False` means the connector wizard accepts the choice but
-# the backend will return a "not yet implemented" error.
+# Catalog shown in the UI connector picker.
+#
+# status:
+#   supported -> the backend can register and connect with this connector today
+#   preview   -> implemented behind limited validation; not a default path yet
+#   planned   -> visible roadmap item, not registerable yet
+#
+# `supported` remains for backward compatibility with the current UI and tests.
 CONNECTOR_CATALOG: list[dict] = [
     {
         "id": "postgres",
@@ -23,6 +28,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "OLTP",
         "color": "#336791",
         "glyph": "P",
+        "status": "supported",
         "supported": True,
     },
     {
@@ -31,6 +37,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "OLTP",
         "color": "#4479a1",
         "glyph": "M",
+        "status": "planned",
         "supported": False,
     },
     {
@@ -39,6 +46,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Warehouse",
         "color": "#29b5e8",
         "glyph": "S",
+        "status": "planned",
         "supported": False,
     },
     {
@@ -47,6 +55,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Warehouse",
         "color": "#4285f4",
         "glyph": "BQ",
+        "status": "planned",
         "supported": False,
     },
     {
@@ -55,6 +64,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Warehouse",
         "color": "#cc2b5e",
         "glyph": "R",
+        "status": "planned",
         "supported": False,
     },
     {
@@ -63,6 +73,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Lakehouse",
         "color": "#ff3621",
         "glyph": "DB",
+        "status": "planned",
         "supported": False,
     },
     {
@@ -71,6 +82,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "OLTP",
         "color": "#a91d22",
         "glyph": "SQ",
+        "status": "planned",
         "supported": False,
     },
     {
@@ -79,6 +91,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Embedded",
         "color": "#fff100",
         "glyph": "D",
+        "status": "planned",
         "supported": False,
         "lightGlyph": True,
     },
@@ -88,6 +101,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "OLTP",
         "color": "#f80000",
         "glyph": "O",
+        "status": "planned",
         "supported": False,
     },
     {
@@ -96,6 +110,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "OLAP",
         "color": "#ffcc00",
         "glyph": "CH",
+        "status": "planned",
         "supported": False,
         "lightGlyph": True,
     },
@@ -105,6 +120,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Embedded",
         "color": "#003b57",
         "glyph": "SL",
+        "status": "planned",
         "supported": False,
     },
     {
@@ -113,6 +129,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Federated",
         "color": "#dd00a1",
         "glyph": "T",
+        "status": "planned",
         "supported": False,
     },
     {
@@ -121,6 +138,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Files",
         "color": "#64748b",
         "glyph": "JS",
+        "status": "supported",
         "supported": True,
     },
     {
@@ -129,6 +147,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Files",
         "color": "#64748b",
         "glyph": "CS",
+        "status": "supported",
         "supported": True,
     },
 ]
@@ -143,8 +162,8 @@ def get_connector(source_type: str):
         catalogued = next((c for c in CONNECTOR_CATALOG if c["id"] == source_type), None)
         if catalogued is not None:
             raise ConnectorError(
-                f"Connector '{catalogued['name']}' is in the picker but not yet implemented. "
-                "Pick a supported source type for now."
+                f"Connector '{catalogued['name']}' is {catalogued['status']}, "
+                "not supported in this build. Pick a supported source type for now."
             )
         raise ConnectorError(
             f"Unknown source type: {source_type}. Available: {list(_REGISTRY.keys())}"
@@ -160,3 +179,9 @@ def register_connector(source_type: str, cls: type) -> None:
 def list_connector_catalog() -> list[dict]:
     """Return the full connector picker catalog used by the UI."""
     return [dict(c) for c in CONNECTOR_CATALOG]
+
+
+def connector_status(source_type: str) -> str | None:
+    """Return support status for a catalogued connector."""
+    catalogued = next((c for c in CONNECTOR_CATALOG if c["id"] == source_type), None)
+    return catalogued["status"] if catalogued else None
