@@ -232,6 +232,21 @@ class TestStagingGenerator:
         sql = models[0].sql
         assert 'CAST("created_at" AS TIMESTAMP)' in sql
 
+    def test_leading_digit_column_names_are_sanitized(self):
+        tables = [
+            TableInfo(
+                name="air_quality",
+                columns=[
+                    ColumnInfo(name="90th_percentile_aqi", dtype="float64"),
+                    ColumnInfo(name="1st_max_value", dtype="float64"),
+                ],
+            )
+        ]
+        models = generate_staging_models(tables, source_schema="raw")
+        sql = models[0].sql
+        assert "AS _90th_percentile_aqi" in sql
+        assert "AS _1st_max_value" in sql
+
     def test_source_tables_populated(self):
         models = generate_staging_models(_sample_tables(), source_schema="env_health")
         zones_model = next(m for m in models if m.name == "stg_zones")
@@ -346,6 +361,31 @@ class TestMartGenerator:
         assert "AVG(\"revenue\") AS avg_revenue" in model.sql
         assert "avg_revenue AS current_avg_revenue" in model.sql
 
+    def test_period_comparison_sql_uses_flexible_date_parsing(self):
+        from headwater.core.models import ColumnInfo
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="events", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="event_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="event_date", dtype="varchar", semantic_type="temporal"),
+                        ColumnInfo(name="revenue", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+
+        model = next(m for m in generate_mart_models(discovery) if "by_period" in m.name)
+
+        assert "TRY_CAST" in model.sql
+        assert "TRY_STRPTIME" in model.sql
+        assert "CAST(\"event_date\" AS DATE)" not in model.sql
+
     def test_metric_with_fk_gets_entity_summary(self):
         """US-501: A source with metric columns + FK to dimension gets entity_summary."""
         from headwater.core.models import ColumnInfo, Relationship
@@ -402,6 +442,51 @@ class TestMartGenerator:
         assert any("by_customers" in n for n in archetypes), (
             f"Expected an entity_summary mart. Got: {archetypes}"
         )
+
+    def test_entity_summary_uses_relationship_join_columns(self):
+        from headwater.core.models import ColumnInfo, Relationship
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="sales", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(name="order_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(
+                            name="customer_id", dtype="varchar", semantic_type="foreign_key"
+                        ),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="customers",
+                    row_count=200,
+                    columns=[
+                        ColumnInfo(name="client_key", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="country", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="orders",
+                    from_column="customer_id",
+                    to_table="customers",
+                    to_column="client_key",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.99,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        model = next(m for m in generate_mart_models(discovery) if m.name == "mart_orders_by_customers")
+
+        assert 'f."customer_id" = d."client_key"' in model.sql
+        assert "f.customer_id = d.customer_id" not in model.sql
 
 
 # ---------------------------------------------------------------------------
