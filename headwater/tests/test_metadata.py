@@ -500,6 +500,21 @@ def test_persist_reject_fk(meta: MetadataStore):
     )
 
 
+def test_bulk_column_pk_review_records_replayable_decision(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_table("readings", "src")
+    meta.upsert_column("readings", "src", "reading_date", "DATE", is_primary_key=True)
+
+    meta.bulk_update_columns(
+        "readings",
+        "src",
+        [{"name": "reading_date", "is_primary_key": False}],
+        lock=True,
+    )
+
+    assert meta.get_pk_decision("src", "readings", "reading_date") == "rejected"
+
+
 # -- v3: Settings file persistence -------------------------------------------
 
 

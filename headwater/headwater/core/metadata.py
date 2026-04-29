@@ -982,6 +982,76 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
             )
         self.con.commit()
 
+    def get_pk_decision(self, source_name: str, table_name: str, column_name: str) -> str | None:
+        """Return the latest human PK decision for a column, if one exists."""
+        artifact_id = f"{source_name}.{table_name}.{column_name}"
+        row = self.con.execute(
+            "SELECT action FROM decisions "
+            "WHERE artifact_type = 'pk_candidate' AND artifact_id = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (artifact_id,),
+        ).fetchone()
+        return row["action"] if row else None
+
+    def apply_key_decisions_to_discovery(self, discovery) -> None:
+        """Replay saved PK/FK confirmations onto an in-memory discovery result."""
+        source_name = discovery.source.name if discovery.source else ""
+        if not source_name:
+            return
+
+        for table in discovery.tables:
+            for col in table.columns:
+                decision = self.get_pk_decision(source_name, table.name, col.name)
+                if decision == "confirmed":
+                    col.is_primary_key = True
+                    col.semantic_type = "primary_key"
+                    col.role = "identifier"
+                    col.confidence = max(col.confidence, 1.0)
+                elif decision == "rejected":
+                    col.is_primary_key = False
+                    if col.semantic_type == "primary_key":
+                        col.semantic_type = None
+
+        confirmed_rels = self.con.execute(
+            "SELECT id, from_table, from_column, to_table, to_column, rel_type, "
+            "confidence, ref_integrity, detection_source "
+            "FROM relationships "
+            "WHERE source_name = ? AND detection_source IN ('declared', 'confirmed')",
+            (source_name,),
+        ).fetchall()
+        existing = {
+            (r.from_table, r.from_column, r.to_table, r.to_column)
+            for r in discovery.relationships
+        }
+        for row in confirmed_rels:
+            key = (
+                row["from_table"],
+                row["from_column"],
+                row["to_table"],
+                row["to_column"],
+            )
+            if key in existing:
+                continue
+            from headwater.core.models import Relationship
+
+            rel_type = row["rel_type"]
+            if rel_type == "fk":
+                rel_type = "many_to_one"
+            discovery.relationships.append(
+                Relationship(
+                    id=row["id"],
+                    from_table=row["from_table"],
+                    from_column=row["from_column"],
+                    to_table=row["to_table"],
+                    to_column=row["to_column"],
+                    type=rel_type,
+                    confidence=row["confidence"],
+                    referential_integrity=row["ref_integrity"],
+                    source="declared",
+                )
+            )
+            existing.add(key)
+
     def get_tables(self, source_name: str) -> list[dict]:
         return [
             dict(r)
@@ -1085,6 +1155,11 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
             if "is_primary_key" in col and col["is_primary_key"] is not None:
                 sets.append("is_primary_key = ?")
                 params.append(int(col["is_primary_key"]))
+                self.record_decision(
+                    "pk_candidate",
+                    f"{source_name}.{table_name}.{col_name}",
+                    "confirmed" if col["is_primary_key"] else "rejected",
+                )
 
             if lock:
                 sets.append("locked = 1")

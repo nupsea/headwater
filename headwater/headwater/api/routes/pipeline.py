@@ -211,6 +211,8 @@ def _run_pipeline_inner(
     # Semantic analysis (heuristic enrichment + deep descriptions)
     store = getattr(request.app.state, "metadata_store", None)
     analyze(discovery_result, store=store, source_name=source_name)
+    if store is not None:
+        store.apply_key_decisions_to_discovery(discovery_result)
     pipeline["discovery"] = discovery_result
 
     # Step 1b: Build semantic catalog (v2)

@@ -318,3 +318,48 @@ class TestKeyPersistence:
             pk["column"] != "reading_date"
             for pk in after.json()["pk_candidates"]
         )
+
+    def test_confirmed_and_rejected_pks_survive_active_discovery_rerun(self, client):
+        confirm = client.patch(
+            "/api/tables/sites/keys",
+            json={"confirm_pks": ["site_id"]},
+        )
+        assert confirm.status_code == 200
+
+        reject = client.patch(
+            "/api/tables/readings/keys",
+            json={"reject_pks": ["reading_date"]},
+        )
+        assert reject.status_code == 200
+
+        store = client.app.state.metadata_store
+        discovery = client.app.state.pipeline["discovery"]
+
+        # Simulate a fresh autodetection pass that disagrees with user choices.
+        for table in discovery.tables:
+            for col in table.columns:
+                if table.name == "sites" and col.name == "site_id":
+                    col.is_primary_key = False
+                    col.semantic_type = None
+                if table.name == "readings" and col.name == "reading_date":
+                    col.is_primary_key = True
+                    col.semantic_type = "primary_key"
+
+        store.apply_key_decisions_to_discovery(discovery)
+
+        sites = next(t for t in discovery.tables if t.name == "sites")
+        site_id = next(c for c in sites.columns if c.name == "site_id")
+        assert site_id.is_primary_key is True
+        assert site_id.semantic_type == "primary_key"
+
+        readings = next(t for t in discovery.tables if t.name == "readings")
+        reading_date = next(c for c in readings.columns if c.name == "reading_date")
+        assert reading_date.is_primary_key is False
+        assert reading_date.semantic_type is None
+
+        suggestions = client.get("/api/tables/readings/pk-fk-suggestions")
+        assert suggestions.status_code == 200
+        assert all(
+            pk["column"] != "reading_date"
+            for pk in suggestions.json()["pk_candidates"]
+        )

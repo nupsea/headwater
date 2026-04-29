@@ -82,6 +82,10 @@ async def run_discovery(
     analyze(discovery)
     logger.info("Semantic analysis complete")
 
+    store = request.app.state.metadata_store
+    store.apply_key_decisions_to_discovery(discovery)
+    logger.info("Applied persisted key decisions")
+
     # Build semantic catalog (heuristic tier 0)
     catalog = build_catalog(discovery)
     logger.info(
