@@ -106,6 +106,22 @@ def test_relationship_roundtrip(meta: MetadataStore):
     assert rels[0]["from_table"] == "sites"
 
 
+def test_persist_pk_fk_stores_reload_safe_relationship_values(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    result = meta.persist_pk_fk(
+        "transactions",
+        "src",
+        confirm_fks=[
+            {"from_col": "account_key", "to_table": "accounts", "to_col": "account_key"}
+        ],
+    )
+
+    assert result["fks_confirmed"] == 1
+    rel = meta.get_relationships("src")[0]
+    assert rel["rel_type"] == "many_to_one"
+    assert rel["detection_source"] == "declared"
+
+
 def test_model_roundtrip(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     meta.upsert_model(
@@ -450,6 +466,8 @@ def test_persist_reject_pk(meta: MetadataStore):
         "SELECT is_primary_key FROM columns WHERE table_name='zones' AND name='zone_id'"
     ).fetchone()
     assert col["is_primary_key"] == 0
+    decisions = meta.get_decisions("pk_candidate", "src.zones.zone_id")
+    assert decisions[0]["action"] == "rejected"
 
 
 def test_persist_confirm_fk(meta: MetadataStore):
@@ -461,7 +479,8 @@ def test_persist_confirm_fk(meta: MetadataStore):
     rel = meta.con.execute("SELECT * FROM relationships WHERE from_table='inspections'").fetchone()
     assert rel is not None
     assert rel["to_table"] == "zones"
-    assert rel["detection_source"] == "confirmed"
+    assert rel["rel_type"] == "many_to_one"
+    assert rel["detection_source"] == "declared"
 
 
 def test_persist_reject_fk(meta: MetadataStore):

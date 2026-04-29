@@ -1536,6 +1536,14 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         logger.info("rebuild_discovery: found %d relationship rows", len(rel_rows))
         relationships: list[Relationship] = []
         for rrow in rel_rows:
+            rel_type = rrow["rel_type"]
+            if rel_type == "fk":
+                rel_type = "many_to_one"
+            detection_source = rrow["detection_source"]
+            if detection_source in ("confirmed", "llm_inferred"):
+                detection_source = (
+                    "declared" if detection_source == "confirmed" else "inferred_name"
+                )
             relationships.append(
                 Relationship(
                     id=rrow["id"],
@@ -1543,10 +1551,10 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                     from_column=rrow["from_column"],
                     to_table=rrow["to_table"],
                     to_column=rrow["to_column"],
-                    type=rrow["rel_type"],
+                    type=rel_type,
                     confidence=rrow["confidence"],
                     referential_integrity=rrow["ref_integrity"],
-                    source=rrow["detection_source"],
+                    source=detection_source,
                 )
             )
 
@@ -2728,6 +2736,11 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                 "WHERE table_name = ? AND source_name = ? AND name = ?",
                 (table_name, source_name, col),
             )
+            self.record_decision(
+                "pk_candidate",
+                f"{source_name}.{table_name}.{col}",
+                "confirmed",
+            )
             counts["pks_confirmed"] += 1
 
         for col in reject_pks or []:
@@ -2736,6 +2749,11 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                 "WHERE table_name = ? AND source_name = ? AND name = ?",
                 (table_name, source_name, col),
             )
+            self.record_decision(
+                "pk_candidate",
+                f"{source_name}.{table_name}.{col}",
+                "rejected",
+            )
             counts["pks_rejected"] += 1
 
         for fk in confirm_fks or []:
@@ -2743,7 +2761,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                 "INSERT OR REPLACE INTO relationships "
                 "(source_name, from_table, from_column, to_table, to_column, "
                 "rel_type, confidence, ref_integrity, detection_source) "
-                "VALUES (?, ?, ?, ?, ?, 'fk', 1.0, 0.0, 'confirmed')",
+                "VALUES (?, ?, ?, ?, ?, 'many_to_one', 1.0, 0.0, 'declared')",
                 (source_name, table_name, fk["from_col"], fk["to_table"], fk["to_col"]),
             )
             counts["fks_confirmed"] += 1

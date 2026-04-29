@@ -555,7 +555,7 @@ def derive_relationships_from_llm(
                     to_table=target_table,
                     to_column=target_col,
                     type="many_to_one",
-                    source="llm_inferred",
+                    source="inferred_name",
                     confidence=0.7,
                     referential_integrity=0.0,
                 )

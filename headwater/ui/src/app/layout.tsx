@@ -37,7 +37,7 @@ export default function RootLayout({
           <div className="flex flex-1 overflow-hidden">
             <AppSidebar />
             <main className="flex-1 overflow-y-auto">
-              <div className="max-w-6xl mx-auto w-full px-6 py-6">
+              <div className="mx-auto w-full max-w-[min(1800px,100vw)] px-6 py-6">
                 <RerunBanner />
                 {children}
               </div>

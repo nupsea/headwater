@@ -47,7 +47,6 @@ export default function ExplorePage() {
   const [reviewPct, setReviewPct] = useState(100);
 
   const loadSuggestions = () => {
-    setError("");
     api
       .exploreSuggestions()
       .then((res: ExploreSuggestionsResponse) => {
@@ -145,10 +144,10 @@ export default function ExplorePage() {
             </span>
           </div>
           <a
-            href="/dictionary"
+            href="/discovery"
             className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 transition-colors shrink-0 ml-4"
           >
-            Review Dictionary
+            Review Discovery
           </a>
         </div>
       )}

@@ -523,6 +523,10 @@ class TestDictionaryAPI:
         resp = client.get("/api/dictionary/summary")
         assert resp.json()["reviewed"] == 1
 
+        resp = client.get("/api/dictionary/env_complaints")
+        assert resp.status_code == 200
+        assert resp.json()["needs_review_count"] == 0
+
     def test_skip_table(self, client):
         resp = client.post("/api/dictionary/env_complaints/skip", json={})
         assert resp.status_code == 200

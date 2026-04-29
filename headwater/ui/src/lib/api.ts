@@ -272,8 +272,29 @@ export interface ModelSuggestion {
   detail: string;
 }
 
+export interface DataInsightChartPoint {
+  label: string;
+  value: number;
+}
+
+export interface DataInsight {
+  id: string;
+  category: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  detail: string;
+  table: string;
+  column?: string;
+  metric: string;
+  value: number;
+  unit: string;
+  chart_type: "bar" | "line" | "pie" | "histogram";
+  chart: DataInsightChartPoint[];
+}
+
 export interface InsightsResponse {
   data_profile: DataProfile;
+  top_insights: DataInsight[];
   workflow: Workflow;
   advisory_actions: AdvisoryAction[];
   overview: {

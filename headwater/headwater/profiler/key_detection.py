@@ -33,6 +33,7 @@ class FKCandidate(BaseModel):
 _ID_SUFFIX = re.compile(r"(?:_id|_key|_code)$", re.IGNORECASE)
 _ID_EXACT = re.compile(r"^id$", re.IGNORECASE)
 _INTEGER_TYPES = {"INTEGER", "BIGINT", "INT", "SMALLINT", "INT64", "INT32"}
+_KEY_SUFFIXES = ("_id", "_key", "_code")
 
 
 def _get_stat(stats: dict, key: str, default=None):
@@ -40,6 +41,15 @@ def _get_stat(stats: dict, key: str, default=None):
     if isinstance(stats, dict):
         return stats.get(key, default)
     return default
+
+
+def _strip_key_suffix(column_name: str) -> str | None:
+    """Return the likely entity stem for key-like column names."""
+    lower = column_name.lower()
+    for suffix in _KEY_SUFFIXES:
+        if lower.endswith(suffix):
+            return column_name[: -len(suffix)]
+    return None
 
 
 def suggest_primary_keys(
@@ -225,9 +235,9 @@ def _find_fk_targets(
     """Find candidate target (table, column) pairs for a FK column."""
     matches: list[tuple[str, str]] = []
 
-    # Strip _id suffix to get potential table name
-    base_name = re.sub(r"_id$", "", from_col, flags=re.IGNORECASE)
-    if not base_name or base_name == from_col:
+    # Strip key suffix to get potential table name.
+    base_name = _strip_key_suffix(from_col)
+    if not base_name:
         return matches
 
     # Try exact table name match and plural forms
@@ -282,6 +292,17 @@ _KEY_PARTICIPANT_RE = re.compile(
     r"^category$|^department$|^zone$|^district$|^class$|^group$)",
     re.IGNORECASE,
 )
+_MEASURE_NAME_RE = re.compile(
+    r"(days?$|_days?$|^count$|_count$|count_|total|amount|score|rate|ratio|percent|percentile|"
+    r"median|mean|avg|average|min_|max_|_min$|_max$|aqi|good|moderate|"
+    r"unhealthy|hazardous)",
+    re.IGNORECASE,
+)
+_NATURAL_KEY_NAME_RE = re.compile(
+    r"(^state$|^county$|^country$|^region$|^city$|^district$|^year$|^month$|"
+    r"^date$|_code$|_key$|_id$|^id$)",
+    re.IGNORECASE,
+)
 
 
 def detect_composite_keys(
@@ -328,6 +349,7 @@ def detect_composite_keys(
     if columns:
         for c in columns:
             col_info_map[c.name] = c
+    profile_order = {prof["column_name"]: i for i, prof in enumerate(profiles)}
 
     # Step 1: Identify candidate columns for composite key participation
     key_candidates: list[tuple[str, int, float]] = []  # (col_name, distinct, uniqueness)
@@ -359,6 +381,12 @@ def detect_composite_keys(
 
         # Check role/semantic_type from enrichment
         col = col_info_map.get(col_name)
+        if (
+            (col and (col.role == "metric" or col.semantic_type == "metric"))
+            or _MEASURE_NAME_RE.search(col_name)
+        ):
+            continue
+
         if col:
             if col.role in _COMPOSITE_KEY_ROLES:
                 is_candidate = True
@@ -402,7 +430,7 @@ def detect_composite_keys(
 
     for width in range(2, min(max_key_width + 1, len(key_candidates) + 1)):
         for combo in combinations(key_candidates, width):
-            col_names = [c[0] for c in combo]
+            col_names = sorted((c[0] for c in combo), key=lambda c: profile_order.get(c, 0))
 
             # Heuristic pre-check: product of distinct counts should be >= row_count
             # This avoids expensive SQL for clearly non-unique combinations
@@ -458,6 +486,15 @@ def detect_composite_keys(
                     confidence += 0.15
                     reasons.append("All columns have key-like names")
                 elif key_pattern_count > 0:
+                    confidence += 0.05
+
+                natural_key_count = sum(
+                    1 for c in col_names if _NATURAL_KEY_NAME_RE.search(c)
+                )
+                if natural_key_count == len(col_names):
+                    confidence += 0.15
+                    reasons.append("All columns look like natural key attributes")
+                elif natural_key_count > 0:
                     confidence += 0.05
 
                 # Bonus for no nulls in any column

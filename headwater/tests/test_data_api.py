@@ -53,9 +53,17 @@ def client():
                 row_count=5,
                 columns=[
                     ColumnInfo(name="site_id", dtype="int64"),
+                    ColumnInfo(name="reading_date", dtype="date"),
                     ColumnInfo(name="value", dtype="float64"),
                     ColumnInfo(name="status", dtype="varchar"),
-                    ColumnInfo(name="reading_date", dtype="date"),
+                ],
+            ),
+            TableInfo(
+                name="sites",
+                row_count=3,
+                columns=[
+                    ColumnInfo(name="site_id", dtype="int64"),
+                    ColumnInfo(name="name", dtype="varchar"),
                 ],
             ),
         ],
@@ -66,6 +74,20 @@ def client():
                 dtype="int64",
                 distinct_count=3,
                 uniqueness_ratio=0.6,
+            ),
+            ColumnProfile(
+                table_name="readings",
+                column_name="reading_date",
+                dtype="date",
+                distinct_count=5,
+                uniqueness_ratio=1.0,
+            ),
+            ColumnProfile(
+                table_name="sites",
+                column_name="site_id",
+                dtype="int64",
+                distinct_count=3,
+                uniqueness_ratio=1.0,
             ),
         ],
     )
@@ -131,6 +153,20 @@ class TestDataPreview:
         assert data["row_count"] == 5
         assert len(data["data"]) == 5
         assert "site_id" in data["columns"]
+
+    def test_preview_accepts_staging_table_name(self, client):
+        resp = client.get("/api/data/stg_readings/preview")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["row_count"] == 5
+        assert data["sql"] == "SELECT * FROM \"staging\".\"stg_readings\" LIMIT 100"
+
+    def test_preview_accepts_qualified_table_name(self, client):
+        resp = client.get("/api/data/staging.stg_readings/preview")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["row_count"] == 5
+        assert data["sql"] == "SELECT * FROM \"staging\".\"stg_readings\" LIMIT 100"
 
     def test_preview_respects_limit(self, client):
         resp = client.get("/api/data/readings/preview?limit=2")
@@ -224,3 +260,61 @@ class TestDataQuery:
             },
         )
         assert resp.status_code == 400
+
+
+class TestKeyPersistence:
+    def test_confirmed_keys_update_active_discovery(self, client):
+        pk_resp = client.patch(
+            "/api/tables/sites/keys",
+            json={
+                "confirm_pks": ["site_id"],
+            },
+        )
+        assert pk_resp.status_code == 200
+
+        fk_resp = client.patch(
+            "/api/tables/readings/keys",
+            json={
+                "confirm_fks": [
+                    {"from_col": "site_id", "to_table": "sites", "to_col": "site_id"}
+                ],
+            },
+        )
+        assert fk_resp.status_code == 200
+
+        discovery = client.app.state.pipeline["discovery"]
+        sites = next(t for t in discovery.tables if t.name == "sites")
+        site_pk = next(c for c in sites.columns if c.name == "site_id")
+        assert site_pk.is_primary_key is True
+
+        readings = next(t for t in discovery.tables if t.name == "readings")
+        site_id = next(c for c in readings.columns if c.name == "site_id")
+        assert site_id.semantic_type == "foreign_key"
+        assert any(
+            r.from_table == "readings"
+            and r.from_column == "site_id"
+            and r.to_table == "sites"
+            and r.to_column == "site_id"
+            for r in discovery.relationships
+        )
+
+    def test_rejected_pk_candidate_is_removed_from_suggestions(self, client):
+        before = client.get("/api/tables/readings/pk-fk-suggestions")
+        assert before.status_code == 200
+        assert any(
+            pk["column"] == "reading_date"
+            for pk in before.json()["pk_candidates"]
+        )
+
+        reject = client.patch(
+            "/api/tables/readings/keys",
+            json={"reject_pks": ["reading_date"]},
+        )
+        assert reject.status_code == 200
+
+        after = client.get("/api/tables/readings/pk-fk-suggestions")
+        assert after.status_code == 200
+        assert all(
+            pk["column"] != "reading_date"
+            for pk in after.json()["pk_candidates"]
+        )

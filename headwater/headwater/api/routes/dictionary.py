@@ -147,12 +147,18 @@ def _build_dictionary_table(
                     )
                 )
 
-    auto_confirmed = sum(
-        1 for c in cols if c.review_signal == "auto_confirmed"
-    ) + sum(1 for ci in catalog_items if ci.review_signal == "auto_confirmed")
-    needs_review = sum(
-        1 for c in cols if c.review_signal in ("needs_review", "conflict")
-    ) + sum(1 for ci in catalog_items if ci.review_signal in ("needs_review", "conflict"))
+    if table.review_status in ("reviewed", "skipped"):
+        auto_confirmed = len(cols) + len(catalog_items)
+        needs_review = 0
+    else:
+        auto_confirmed = sum(
+            1 for c in cols if c.review_signal == "auto_confirmed"
+        ) + sum(1 for ci in catalog_items if ci.review_signal == "auto_confirmed")
+        needs_review = sum(
+            1 for c in cols if c.review_signal in ("needs_review", "conflict")
+        ) + sum(
+            1 for ci in catalog_items if ci.review_signal in ("needs_review", "conflict")
+        )
 
     return DataDictionaryTable(
         name=table.name,

@@ -258,7 +258,7 @@ def _maturity_blockers(progress: dict) -> list[dict]:
                 "title": "Column descriptions need confirmation",
                 "detail": f"{confirmed} of {total} confirmed",
                 "severity": "warning",
-                "route": "/dictionary",
+                "route": "/discovery",
             }
         )
     if progress["contracts_enforcing"] == 0 and progress["quality_contracts"]:

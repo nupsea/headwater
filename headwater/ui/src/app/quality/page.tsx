@@ -249,7 +249,7 @@ export default function QualityPage() {
             {criticalIssues.map((ci, i) => (
               <Link
                 key={`issue-${i}`}
-                href="/dictionary"
+                href="/discovery"
                 className="block border-l-4 border-l-[var(--danger)] bg-[color-mix(in_srgb,var(--danger)_10%,var(--card))] rounded-r-lg p-3 hover:opacity-80 transition-opacity"
               >
                 <div className="flex items-center justify-between">

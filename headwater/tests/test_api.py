@@ -233,6 +233,34 @@ class TestDiscovery:
         rels = resp.json()
         assert len(rels) > 0
 
+    def test_insights_include_ranked_statistical_cards(self, client):
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        resp = client.get("/api/insights")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        top_insights = data["top_insights"]
+
+        assert top_insights
+        business_prefixes = (
+            "temporal_peak:",
+            "metric_peak:",
+            "segment_concentration:",
+            "metric_driver:",
+            "value_distribution:",
+        )
+        assert any(i["id"].startswith(business_prefixes) for i in top_insights)
+        assert sum(1 for i in top_insights[:5] if i["chart_type"] == "line") <= 2
+        assert len({i["table"] for i in top_insights}) >= 2
+        for insight in top_insights:
+            assert insight["category"] == "Did You Know"
+            assert insight["title"]
+            assert insight["detail"]
+            assert insight["metric"]
+            assert insight["chart_type"] in {"bar", "line", "pie", "histogram"}
+            assert insight["chart"]
+            assert {"label", "value"} <= set(insight["chart"][0])
+
 
 class TestModels:
     def _setup(self, client):

@@ -125,7 +125,7 @@ async def briefing_today(request: Request):
                     f"Auto-generated descriptions are below the confidence threshold "
                     f"(e.g. {sample}). A quick confirm-or-edit locks them in.",
                     "Review descriptions",
-                    "/dictionary",
+                    "/discovery",
                 )
             )
 

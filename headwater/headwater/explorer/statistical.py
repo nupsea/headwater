@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import math
 import statistics
+import warnings
 from datetime import datetime
 
 import duckdb
@@ -124,7 +125,9 @@ def _check_normality(values: list[float], sample_size: int = 200) -> bool:
     if len(sample) < 20:
         return True  # Not enough data to test; assume normal
     try:
-        _, p = stats.jarque_bera(sample)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            _, p = stats.jarque_bera(sample)
         return p > 0.05  # Fail to reject normality
     except Exception:
         return True  # On error, fall back to normal assumption

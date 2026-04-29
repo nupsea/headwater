@@ -5,9 +5,10 @@ import { api, type PKFKSuggestions } from "@/lib/api";
 
 interface PKFKManagerProps {
   tableName: string;
+  onChanged?: () => void | Promise<void>;
 }
 
-export function PKFKManager({ tableName }: PKFKManagerProps) {
+export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
   const [suggestions, setSuggestions] = useState<PKFKSuggestions | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -33,6 +34,7 @@ export function PKFKManager({ tableName }: PKFKManagerProps) {
       await api.persistKeys(tableName, { confirm_pks: [column] });
       setMessage(`PK confirmed: ${column}`);
       load();
+      await onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -43,6 +45,7 @@ export function PKFKManager({ tableName }: PKFKManagerProps) {
       await api.persistKeys(tableName, { reject_pks: [column] });
       setMessage(`PK rejected: ${column}`);
       load();
+      await onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -55,6 +58,7 @@ export function PKFKManager({ tableName }: PKFKManagerProps) {
       });
       setMessage(`FK confirmed: ${fromCol} -> ${toTable}.${toCol}`);
       load();
+      await onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }

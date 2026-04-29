@@ -191,7 +191,7 @@ export default function HealthPage() {
           .slice(0, 3)
           .map((c) => `${c.table}.${c.column}`)
           .join(", ")}${lowConfCols.length > 3 ? "..." : ""}`,
-        link: "/dictionary",
+        link: "/discovery",
         severity: "warning",
       });
     }

@@ -8,6 +8,7 @@ import re
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from headwater.core.models import Relationship
 from headwater.explorer.utils import resolve_table_ref, table_exists
 
 router = APIRouter()
@@ -82,6 +83,14 @@ def _find_table(table_name: str, request: Request) -> str | None:
     con = request.app.state.duckdb_con
     pipeline = request.app.state.pipeline
     models = pipeline.get("staging_models", []) + pipeline.get("mart_models", [])
+
+    if "." in table_name:
+        schema, tbl = table_name.split(".", 1)
+        if table_exists(con, schema, tbl):
+            return f'"{schema}"."{tbl}"'
+
+    if table_name.startswith("stg_") and table_exists(con, "staging", table_name):
+        return f'"staging"."{table_name}"'
 
     ref = resolve_table_ref(table_name, con, models)
 
@@ -283,7 +292,26 @@ def get_pk_fk_suggestions(request: Request, table_name: str):
 
     from headwater.profiler.key_detection import suggest_foreign_keys, suggest_primary_keys
 
-    pk_candidates = suggest_primary_keys(table_name, table_profiles)
+    store = request.app.state.metadata_store
+    source_name = discovery.source.name if discovery.source else ""
+    table_info = next((t for t in discovery.tables if t.name == table_name), None)
+    existing_pks = {c.name for c in table_info.columns if c.is_primary_key} if table_info else set()
+    rejected_pks: set[str] = set()
+    if source_name and hasattr(store, "get_decisions"):
+        for col in table_profiles:
+            col_name = col["column_name"]
+            decisions = store.get_decisions(
+                "pk_candidate",
+                f"{source_name}.{table_name}.{col_name}",
+            )
+            if decisions and decisions[0].get("action") == "rejected":
+                rejected_pks.add(col_name)
+
+    pk_candidates = [
+        c
+        for c in suggest_primary_keys(table_name, table_profiles)
+        if c.column not in existing_pks and c.column not in rejected_pks
+    ]
 
     # Build profiles for all tables for FK detection
     all_profiles: dict[str, list[dict]] = {}
@@ -294,8 +322,6 @@ def get_pk_fk_suggestions(request: Request, table_name: str):
         all_profiles[tbl].append(_profile_to_dict(p, tbl))
 
     # Get known PKs from metadata
-    store = request.app.state.metadata_store
-    source_name = discovery.source.name if discovery.source else ""
     pk_columns: dict[str, list[str]] = {}
     if source_name:
         for tbl_info in discovery.tables:
@@ -308,7 +334,16 @@ def get_pk_fk_suggestions(request: Request, table_name: str):
 
     fk_candidates = suggest_foreign_keys(all_profiles, pk_columns if pk_columns else None)
     # Filter FK candidates to those relevant to this table
-    fk_candidates = [fk for fk in fk_candidates if fk.from_table == table_name]
+    existing_fks = {
+        (r.from_table, r.from_column, r.to_table, r.to_column)
+        for r in discovery.relationships
+    }
+    fk_candidates = [
+        fk
+        for fk in fk_candidates
+        if fk.from_table == table_name
+        and (fk.from_table, fk.from_column, fk.to_table, fk.to_column) not in existing_fks
+    ]
 
     return {
         "table": table_name,
@@ -337,6 +372,8 @@ def persist_keys(request: Request, table_name: str, body: KeyPersistRequest):
         reject_fk_ids=body.reject_fk_ids or None,
     )
 
+    _apply_key_changes_to_discovery(discovery, table_name, body)
+
     store.log_activity(
         "keys_updated",
         f"Updated keys for {table_name}: {result}",
@@ -345,3 +382,57 @@ def persist_keys(request: Request, table_name: str, body: KeyPersistRequest):
     )
 
     return result
+
+
+def _apply_key_changes_to_discovery(discovery, table_name: str, body: KeyPersistRequest) -> None:
+    """Keep active discovery state in sync with key confirmations."""
+    table = next((t for t in discovery.tables if t.name == table_name), None)
+    if table is None:
+        return
+
+    for col_name in body.confirm_pks:
+        col = next((c for c in table.columns if c.name == col_name), None)
+        if col:
+            col.is_primary_key = True
+            col.semantic_type = "primary_key"
+            col.role = "identifier"
+            col.confidence = max(col.confidence, 1.0)
+
+    for col_name in body.reject_pks:
+        col = next((c for c in table.columns if c.name == col_name), None)
+        if col:
+            col.is_primary_key = False
+            if col.semantic_type == "primary_key":
+                col.semantic_type = None
+
+    for fk in body.confirm_fks:
+        key = (table_name, fk["from_col"], fk["to_table"], fk["to_col"])
+        exists = any(
+            (r.from_table, r.from_column, r.to_table, r.to_column) == key
+            for r in discovery.relationships
+        )
+        if not exists:
+            discovery.relationships.append(
+                Relationship(
+                    from_table=table_name,
+                    from_column=fk["from_col"],
+                    to_table=fk["to_table"],
+                    to_column=fk["to_col"],
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=0.0,
+                    source="declared",
+                )
+            )
+
+        col = next((c for c in table.columns if c.name == fk["from_col"]), None)
+        if col:
+            col.semantic_type = "foreign_key"
+            col.role = "identifier"
+            col.confidence = max(col.confidence, 1.0)
+
+    if body.reject_fk_ids:
+        reject_ids = set(body.reject_fk_ids)
+        discovery.relationships = [
+            r for r in discovery.relationships if r.id not in reject_ids
+        ]

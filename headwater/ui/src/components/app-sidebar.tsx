@@ -25,8 +25,7 @@ const NAV_GROUPS: {
     label: "Catalog",
     items: [
       { href: "/sources", label: "Sources" },
-      { href: "/discovery", label: "Discover & Assess" },
-      { href: "/dictionary", label: "Dictionary" },
+      { href: "/discovery", label: "Discover & Access" },
     ],
   },
   {
