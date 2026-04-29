@@ -195,7 +195,9 @@ class ContractRule(BaseModel):
     severity: Literal["error", "warning", "info"] = "warning"
     description: str = ""
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
-    status: Literal["proposed", "observing", "enforced", "disabled"] = "proposed"
+    status: Literal[
+        "proposed", "observing", "enforced", "failing", "recovered", "disabled"
+    ] = "proposed"
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +233,8 @@ class QualityReport(BaseModel):
     failed: int = 0
     skipped: int = 0
     results: list[ContractCheckResult] = Field(default_factory=list)
+    contract_status_transitions: dict[str, list[str]] = Field(default_factory=dict)
+    previous_failed: int = 0
 
 
 # ---------------------------------------------------------------------------

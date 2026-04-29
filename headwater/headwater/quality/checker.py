@@ -47,10 +47,15 @@ def check_contracts(
     *,
     only_active: bool = True,
 ) -> list[ContractCheckResult]:
-    """Evaluate all contract rules. By default only checks observing/enforced rules."""
+    """Evaluate all active contract rules."""
     results: list[ContractCheckResult] = []
     for rule in rules:
-        if only_active and rule.status not in ("observing", "enforced"):
+        if only_active and rule.status not in (
+            "observing",
+            "enforced",
+            "failing",
+            "recovered",
+        ):
             continue
         results.append(check_contract(con, rule))
     return results

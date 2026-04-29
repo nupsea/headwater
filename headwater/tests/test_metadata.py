@@ -221,6 +221,48 @@ def test_quality_report_roundtrip(meta: MetadataStore):
     assert latest["results"][1]["observed_value"] == 3
 
 
+def test_quality_report_updates_contract_lifecycle(meta: MetadataStore):
+    meta.upsert_contract("c1", "stg_sites", "not_null", "site_id IS NOT NULL")
+    failing = QualityReport(
+        total_contracts=1,
+        passed=0,
+        failed=1,
+        results=[
+            ContractCheckResult(
+                rule_id="c1",
+                model_name="stg_sites",
+                passed=False,
+                observed_value=2,
+                message="2 null values found",
+            )
+        ],
+    )
+    meta.save_quality_report("src", failing)
+
+    assert meta.get_contracts("stg_sites")[0]["status"] == "failing"
+    assert failing.contract_status_transitions["failing"] == ["c1"]
+
+    recovered = QualityReport(
+        total_contracts=1,
+        passed=1,
+        failed=0,
+        results=[
+            ContractCheckResult(
+                rule_id="c1",
+                model_name="stg_sites",
+                passed=True,
+                observed_value=0,
+                message="No nulls",
+            )
+        ],
+    )
+    meta.save_quality_report("src", recovered)
+
+    assert meta.get_contracts("stg_sites")[0]["status"] == "recovered"
+    assert recovered.contract_status_transitions["recovered"] == ["c1"]
+    assert recovered.previous_failed == 1
+
+
 # -- Decisions (US-301) ----------------------------------------------------
 
 

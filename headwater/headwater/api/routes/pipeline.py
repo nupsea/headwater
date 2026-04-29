@@ -25,6 +25,7 @@ from headwater.generator.staging import generate_staging_models
 from headwater.profiler.engine import discover
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
+from headwater.services.contract_lifecycle import apply_contract_statuses
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +292,7 @@ def _run_pipeline_inner(
         if c.status == "proposed":
             c.status = "observing"
     check_results = check_contracts(con, contracts, only_active=True)
+    apply_contract_statuses(contracts, check_results)
     report = build_report(check_results)
     pipeline["quality_report"] = report
     quality_run_id = None
@@ -721,5 +723,25 @@ def _persist_quality_report(
             )
         except Exception:
             logger.exception("Failed to emit quality event for '%s'", source_name)
+    elif getattr(report, "previous_failed", 0):
+        try:
+            store.insert_event(  # type: ignore[union-attr]
+                EventType.QUALITY_CHECKS_RECOVERED,
+                "Quality contracts recovered",
+                source_name=source_name,
+                severity="info",
+                artifact_type="quality_run",
+                artifact_id=str(run_id),
+                payload={
+                    "quality_run_id": run_id,
+                    "total": report.total_contracts,
+                    "passed": report.passed,
+                    "failed": report.failed,
+                    "previous_failed": getattr(report, "previous_failed", 0),
+                },
+                invalidates=["sources", "briefing", "health", "insights", "quality"],
+            )
+        except Exception:
+            logger.exception("Failed to emit quality recovery event for '%s'", source_name)
     logger.info("Persisted quality run %s for source '%s'", run_id, source_name)
     return run_id

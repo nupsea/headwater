@@ -1826,6 +1826,44 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
             rows = self.con.execute("SELECT * FROM contracts").fetchall()
         return [dict(r) for r in rows]
 
+    def update_contract_status(self, id_: str, status: str) -> None:
+        self.con.execute("UPDATE contracts SET status = ? WHERE id = ?", (status, id_))
+        self.con.commit()
+
+    def apply_quality_contract_statuses(self, results: list) -> dict:
+        """Update contract runtime statuses from quality check results."""
+        transitions = {"failing": [], "recovered": [], "observing": []}
+        for result in results:
+            rule_id = getattr(result, "rule_id", "") or ""
+            if not rule_id:
+                continue
+            row = self.con.execute(
+                "SELECT status FROM contracts WHERE id = ?",
+                (rule_id,),
+            ).fetchone()
+            if row is None:
+                continue
+            current = row["status"]
+            if current == "disabled":
+                continue
+
+            next_status = current
+            if not bool(getattr(result, "passed", False)):
+                next_status = "failing"
+            elif current == "failing":
+                next_status = "recovered"
+            elif current == "proposed":
+                next_status = "observing"
+
+            if next_status != current:
+                self.con.execute(
+                    "UPDATE contracts SET status = ? WHERE id = ?",
+                    (next_status, rule_id),
+                )
+                transitions.setdefault(next_status, []).append(rule_id)
+        self.con.commit()
+        return transitions
+
     # -- Quality Results ----------------------------------------------------
 
     def save_quality_report(
@@ -1835,6 +1873,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         sync_run_id: int | None = None,
     ) -> int:
         """Persist a quality report aggregate and its contract results."""
+        previous = self.get_latest_quality_report(source_name)
         total = int(getattr(report, "total_contracts", 0) or 0)
         passed = int(getattr(report, "passed", 0) or 0)
         failed = int(getattr(report, "failed", 0) or 0)
@@ -1871,6 +1910,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                     getattr(result, "message", "") or "",
                 ),
             )
+        transitions = self.apply_quality_contract_statuses(getattr(report, "results", []) or [])
         if source_name and failed:
             existing = self.con.execute(
                 "SELECT drift_count FROM sources WHERE name = ?", (source_name,)
@@ -1882,6 +1922,22 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                     "UPDATE sources SET status = 'warning', health = ? WHERE name = ?",
                     (health, source_name),
                 )
+        elif source_name:
+            existing = self.con.execute(
+                "SELECT drift_count FROM sources WHERE name = ?", (source_name,)
+            ).fetchone()
+            if existing is not None:
+                drift_count = int(existing["drift_count"] or 0)
+                health = max(0, min(int(round(score)), 100 - 5 * drift_count))
+                source_status = "warning" if drift_count else "healthy"
+                self.con.execute(
+                    "UPDATE sources SET status = ?, health = ? WHERE name = ?",
+                    (source_status, health, source_name),
+                )
+        if transitions:
+            report.contract_status_transitions = transitions
+        if previous:
+            report.previous_failed = previous.get("failed", 0)
         self.con.commit()
         return run_id
 

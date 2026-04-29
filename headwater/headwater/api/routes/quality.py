@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from headwater.core.events import EventType
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
+from headwater.services.contract_lifecycle import apply_contract_statuses
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ async def run_quality_checks(request: Request):
 
     con = request.app.state.duckdb_con
     results = check_contracts(con, contracts, only_active=True)
+    apply_contract_statuses(contracts, results)
     report = build_report(results)
     pipeline["quality_report"] = report
     source_name = _active_source_name(pipeline)
@@ -160,4 +162,24 @@ def _persist_quality_report(request: Request, source_name: str, report):
             )
         except Exception:
             logger.exception("Failed to emit quality event for '%s'", source_name)
+    elif getattr(report, "previous_failed", 0):
+        try:
+            store.insert_event(
+                EventType.QUALITY_CHECKS_RECOVERED,
+                "Quality contracts recovered",
+                source_name=source_name,
+                severity="info",
+                artifact_type="quality_run",
+                artifact_id=str(run_id),
+                payload={
+                    "quality_run_id": run_id,
+                    "total": report.total_contracts,
+                    "passed": report.passed,
+                    "failed": report.failed,
+                    "previous_failed": getattr(report, "previous_failed", 0),
+                },
+                invalidates=["sources", "briefing", "health", "insights", "quality"],
+            )
+        except Exception:
+            logger.exception("Failed to emit quality recovery event for '%s'", source_name)
     return run_id

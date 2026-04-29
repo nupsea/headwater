@@ -5,7 +5,6 @@ import Link from "next/link";
 import { api, type InsightsResponse, type ContractSummary } from "@/lib/api";
 import { NullHeatmap } from "@/components/null-heatmap";
 import { SuggestionsList } from "@/components/suggestions-list";
-import { ProfileTable } from "@/components/profile-table";
 import { ConfidenceDot } from "@/components/confidence-dot";
 
 export default function QualityPage() {
@@ -71,9 +70,11 @@ export default function QualityPage() {
     if (!contractsByStatus[s]) contractsByStatus[s] = [];
     contractsByStatus[s].push(c);
   });
-  const enforcing = contractsByStatus["enforcing"] || [];
+  const enforcing = contractsByStatus["enforced"] || contractsByStatus["enforcing"] || [];
   const observing = contractsByStatus["observing"] || contractsByStatus["active"] || [];
   const proposed = contractsByStatus["proposed"] || [];
+  const failing = contractsByStatus["failing"] || [];
+  const recovered = contractsByStatus["recovered"] || [];
 
   return (
     <div>
@@ -339,13 +340,21 @@ export default function QualityPage() {
           <div className="flex items-center gap-2 px-3 py-2 border border-green-200 bg-green-50/50 rounded-lg">
             <span className="w-2 h-2 rounded-full bg-green-500" />
             <span className="text-sm font-medium">
-              {enforcing.length} Enforcing
+              {enforcing.length} Enforced
             </span>
+          </div>
+          <div className="flex items-center gap-2 px-3 py-2 border border-red-200 bg-red-50/50 rounded-lg">
+            <span className="w-2 h-2 rounded-full bg-red-500" />
+            <span className="text-sm font-medium">{failing.length} Failing</span>
+          </div>
+          <div className="flex items-center gap-2 px-3 py-2 border border-emerald-200 bg-emerald-50/50 rounded-lg">
+            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+            <span className="text-sm font-medium">{recovered.length} Recovered</span>
           </div>
           <div className="flex items-center gap-2 px-3 py-2 border border-blue-200 bg-blue-50/50 rounded-lg">
             <span className="w-2 h-2 rounded-full bg-blue-500" />
             <span className="text-sm font-medium">
-              {observing.length || contracts.length - enforcing.length - proposed.length} Observing
+              {observing.length} Observing
             </span>
           </div>
           <div className="flex items-center gap-2 px-3 py-2 border border-gray-200 bg-gray-50/50 rounded-lg">
@@ -398,7 +407,11 @@ export default function QualityPage() {
                     <td className="px-3 py-2">
                       <span
                         className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                          c.status === "enforcing"
+                          c.status === "failing"
+                            ? "bg-red-100 text-red-800"
+                            : c.status === "recovered"
+                            ? "bg-emerald-100 text-emerald-800"
+                            : c.status === "enforced" || c.status === "enforcing"
                             ? "bg-green-100 text-green-800"
                             : c.status === "active" || c.status === "observing"
                             ? "bg-blue-100 text-blue-800"
