@@ -50,7 +50,7 @@ export function RerunBanner() {
       .then((d) => {
         if (d?.sources?.length) {
           const s = d.sources[d.sources.length - 1];
-          setSourceUri(s.uri || s.path || s.name);
+          setSourceUri(s.uri || s.path || null);
           setSourceName(s.name);
         }
       })
@@ -82,13 +82,17 @@ export function RerunBanner() {
   };
 
   const rerun = async () => {
-    if (!sourceUri) {
+    if (!sourceName && !sourceUri) {
       toast("No source registered. Add one on the Sources page.", "error");
       return;
     }
     setRunning(true);
     try {
-      await api.pipelineRun(sourceUri);
+      if (sourceName) {
+        await api.syncSource(sourceName);
+      } else if (sourceUri) {
+        await api.pipelineRun(sourceUri);
+      }
       setDone(true);
       toast("Pipeline complete -- analysis updated", "success");
       setTimeout(dismiss, 1800);
