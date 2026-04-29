@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, type RerunPlan } from "@/lib/api";
 import { useToast } from "@/components/toast";
 
 const STORAGE_KEY = "hw-needs-rerun";
@@ -17,16 +17,18 @@ const STORAGE_KEY = "hw-needs-rerun";
  */
 export function RerunBanner() {
   const { toast } = useToast();
-  const [needs, setNeeds] = useState(false);
+  const [needs, setNeeds] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      localStorage.getItem(STORAGE_KEY) === "1"
+  );
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
   const [sourceUri, setSourceUri] = useState<string | null>(null);
+  const [sourceName, setSourceName] = useState<string | null>(null);
+  const [plan, setPlan] = useState<RerunPlan | null>(null);
 
   useEffect(() => {
-    const stored =
-      typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
-    if (stored === "1") setNeeds(true);
-
     const onSet = () => {
       setNeeds(true);
       setDone(false);
@@ -49,6 +51,7 @@ export function RerunBanner() {
         if (d?.sources?.length) {
           const s = d.sources[d.sources.length - 1];
           setSourceUri(s.uri || s.path || s.name);
+          setSourceName(s.name);
         }
       })
       .catch(() => {});
@@ -58,6 +61,16 @@ export function RerunBanner() {
       window.removeEventListener("hw-rerun-cleared", onClear);
     };
   }, []);
+
+  useEffect(() => {
+    api
+      .rerunPlan(sourceName || undefined)
+      .then((nextPlan) => {
+        setPlan(nextPlan);
+        if (!nextPlan.no_action_needed) setNeeds(true);
+      })
+      .catch(() => {});
+  }, [sourceName]);
 
   if (!needs) return null;
 
@@ -112,18 +125,28 @@ export function RerunBanner() {
               ? "Pipeline complete -- analysis updated"
               : running
               ? "Running pipeline…"
-              : "Metadata changes detected"}
+              : plan?.human_review_required
+              ? "Review required after drift"
+              : "Rerun recommended"}
           </div>
           {!done && (
             <div className="text-[11px] text-amber-700 dark:text-amber-400/80 mt-0.5">
-              Re-run Headwater to apply your edits and refine analysis across
-              all pages.
+              {plan?.summary ||
+                "Re-run Headwater to apply edits and refine analysis across all pages."}
             </div>
           )}
         </div>
       </div>
       {!done && (
         <div className="flex gap-2 shrink-0">
+          {plan && !plan.no_action_needed && (
+            <a
+              href="/models"
+              className="px-3 py-1 border border-border rounded-md text-[11px] text-muted hover:bg-background"
+            >
+              View plan
+            </a>
+          )}
           <button
             onClick={rerun}
             disabled={running}

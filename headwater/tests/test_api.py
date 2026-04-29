@@ -560,6 +560,62 @@ class TestDriftAPI:
         data = resp.json()
         assert len(data["reports"]) == 2
 
+    def test_rerun_plan_for_drift_report(self, client):
+        """GET /api/rerun-plan returns targeted actions from drift and impacts."""
+        store = client.app.state.metadata_store
+        store.upsert_source("src", "json", "/data", None)
+        run1 = store.start_run("src")
+        store.finish_run(run1, table_count=1)
+        run2 = store.start_run("src")
+        store.finish_run(run2, table_count=1)
+        diff = {
+            "source_name": "src",
+            "run_id_from": run1,
+            "run_id_to": run2,
+            "no_changes": False,
+            "tables_added": [],
+            "tables_removed": [],
+            "tables_changed": [
+                {
+                    "table_name": "orders",
+                    "change_type": "columns_changed",
+                    "column_changes": [
+                        {
+                            "column_name": "amount",
+                            "change_type": "type_changed",
+                            "before": "float64",
+                            "after": "varchar",
+                        }
+                    ],
+                }
+            ],
+            "detected_at": "2026-01-01T00:00:00Z",
+        }
+        report_id = store.save_drift_report("src", run1, run2, diff)
+        store.save_model_impacts(
+            [
+                {
+                    "source_name": "src",
+                    "drift_report_id": report_id,
+                    "model_name": "stg_orders",
+                    "impact_type": "source_column_type_changed",
+                    "severity": "error",
+                    "source_table": "orders",
+                    "source_column": "amount",
+                    "reason": "Referenced source column changed type",
+                }
+            ]
+        )
+
+        resp = client.get(f"/api/rerun-plan?source=src&drift_report_id={report_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["drift_report_id"] == report_id
+        assert data["regenerate_models"] is True
+        assert data["rerun_contracts"] is True
+        assert data["human_review_required"] is True
+        assert data["impacted_models"] == ["stg_orders"]
+
 
 class TestProjectCreation:
     """POST /api/projects -- create a new project."""

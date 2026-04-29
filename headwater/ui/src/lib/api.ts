@@ -112,6 +112,28 @@ export interface ModelImpactResponse {
   models: ModelImpactRow[];
 }
 
+export interface RerunPlanAction {
+  action: string;
+  priority: "required" | "recommended" | "info";
+  reason: string;
+  scope: Record<string, unknown>;
+}
+
+export interface RerunPlan {
+  source_name: string | null;
+  drift_report_id: number | null;
+  regenerate_descriptions: boolean;
+  regenerate_models: boolean;
+  rerun_contracts: boolean;
+  human_review_required: boolean;
+  no_action_needed: boolean;
+  actions: RerunPlanAction[];
+  impacted_models: string[];
+  impacted_contracts: string[];
+  capability_notes: string[];
+  summary: string;
+}
+
 export interface ContractSummary {
   id: string;
   model_name: string;
@@ -842,6 +864,11 @@ export const api = {
   model: (name: string) => fetchJSON<ModelDetail>(`/models/${name}`),
 
   modelImpact: () => fetchJSON<ModelImpactResponse>("/models/impact"),
+
+  rerunPlan: (source?: string) =>
+    fetchJSON<RerunPlan>(
+      `/rerun-plan${source ? `?source=${encodeURIComponent(source)}` : ""}`
+    ),
 
   approveModel: (name: string) =>
     fetchJSON<{ name: string; status: string }>(`/models/${name}/approve`, {

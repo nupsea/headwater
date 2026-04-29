@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from headwater.core.metadata import MetadataStore
+from headwater.services.rerun_planner import build_rerun_plan
 
 
 @pytest.fixture()
@@ -151,3 +152,61 @@ class TestAdditiveUpdates:
         cols = meta.con.execute("PRAGMA table_info(tables)").fetchall()
         col_names = {c["name"] for c in cols}
         assert "removed_in_run_id" in col_names
+
+
+class TestRerunPlanner:
+    def test_no_drift_plan_has_no_actions(self):
+        plan = build_rerun_plan(
+            drift_report={
+                "id": 1,
+                "source_name": "src",
+                "diff": {"no_changes": True},
+            },
+            model_impacts=[],
+            latest_quality=None,
+            source_capabilities={"profile_table": True, "execute_readonly": True},
+        )
+
+        assert plan["no_action_needed"] is True
+        assert plan["actions"] == []
+
+    def test_breaking_drift_requires_model_review_and_contract_rerun(self):
+        plan = build_rerun_plan(
+            drift_report={
+                "id": 2,
+                "source_name": "src",
+                "diff": {
+                    "no_changes": False,
+                    "tables_added": [],
+                    "tables_removed": [],
+                    "tables_changed": [
+                        {
+                            "table_name": "orders",
+                            "column_changes": [
+                                {
+                                    "column_name": "amount",
+                                    "change_type": "type_changed",
+                                    "before": "float64",
+                                    "after": "varchar",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            model_impacts=[
+                {
+                    "model_name": "stg_orders",
+                    "contract_id": None,
+                    "severity": "error",
+                }
+            ],
+            latest_quality={"failed": 0},
+            source_capabilities={"profile_table": True, "execute_readonly": True},
+        )
+
+        assert plan["no_action_needed"] is False
+        assert plan["regenerate_models"] is True
+        assert plan["rerun_contracts"] is True
+        assert plan["human_review_required"] is True
+        assert plan["impacted_models"] == ["stg_orders"]
