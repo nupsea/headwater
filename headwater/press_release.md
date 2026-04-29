@@ -140,7 +140,7 @@ This is the novel direction. Most data tools stop at metadata, lineage, observab
 ### Phase 2: Connector Platform
 
 - Replace ad hoc connector methods with a capability-aware protocol.
-- Implement first-class Postgres, CSV, JSON, DuckDB, SQLite, and MySQL connectors.
+- Implement first-class Postgres, CSV, JSON, DuckDB, and SQLite connectors, with MySQL as a preview connector until live integration validation is complete.
 - Add strict safety controls: query timeout, row/sample limits, read-only mode, schema allowlists, and credential redaction.
 - Add connector contract tests so every connector proves the same behavior.
 
@@ -205,7 +205,7 @@ Needs implementation or hardening:
 - Source-scoped full sync
 - Statistical drift detection
 - Connector capability protocol
-- DuckDB, SQLite, MySQL, warehouse, and catalog connectors
+- DuckDB, SQLite, MySQL preview, warehouse, and catalog connectors
 - Persisted quality result history
 - Event-driven UI invalidation
 - Decision graph and readiness scoring

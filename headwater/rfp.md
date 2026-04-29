@@ -296,7 +296,7 @@ Deliverables:
 - Define `ConnectorCapabilities`, `TableRef`, `ColumnRef`, `TableProfile`, and `SourceProfile`.
 - Refactor Postgres, CSV, and JSON connectors to the new protocol.
 - Add DuckDB and SQLite connectors as low-friction high-value targets.
-- Add MySQL after the protocol stabilizes.
+- Add MySQL as preview capability work after the protocol stabilizes; keep registration blocked until live integration validation passes.
 - Implement connector contract tests shared by every connector.
 - Add safety controls: read-only enforcement, schema filters, query timeout, sample limit, max tables, max columns, credential redaction.
 - Store source config as redacted/encrypted metadata; never expose credentials in API responses or logs.
@@ -307,7 +307,7 @@ Connector priority:
 2. CSV and JSON hardening
 3. DuckDB
 4. SQLite
-5. MySQL
+5. MySQL preview
 6. Snowflake observe mode
 7. BigQuery observe mode
 8. Catalog connectors only after source sync is mature
@@ -317,6 +317,7 @@ Acceptance criteria:
 - Each connector passes the same behavior test suite.
 - The pipeline degrades gracefully when a connector is observe-only.
 - Unsupported connector operations produce actionable errors.
+- Preview connectors expose capabilities but remain blocked from registration until integration tests prove the full lifecycle.
 
 ### Phase 3: Model and Pipeline Maturity
 
@@ -521,6 +522,7 @@ Existing `sync_events` can either be migrated to `events` or retained as a compa
 - Refactor Postgres connector.
 - Refactor CSV and JSON connectors.
 - Add SQLite and DuckDB connectors.
+- Add MySQL preview connector capabilities.
 - Add connector contract test suite.
 
 ### Milestone 4: Maturity Is Real
@@ -568,7 +570,7 @@ The next refactor should start with backend workflow, not UI polish.
 3. Wire drift and quality history.
 4. Update Briefing and Sources to use durable state.
 5. Stabilize connector protocol.
-6. Add DuckDB/SQLite/MySQL connectors.
+6. Add DuckDB/SQLite connectors and MySQL preview capabilities.
 7. Add model impact and maturity scoring.
 8. Add evidence-backed insights.
 9. Add decision readiness.

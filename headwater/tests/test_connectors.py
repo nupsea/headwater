@@ -11,6 +11,7 @@ import pytest
 from headwater.connectors.csv_loader import CsvLoader
 from headwater.connectors.duckdb_loader import DuckDBConnector
 from headwater.connectors.json_loader import JsonLoader
+from headwater.connectors.mysql_loader import MySQLConnector, _parse_mysql_uri
 from headwater.connectors.registry import (
     connector_status,
     get_connector,
@@ -104,20 +105,21 @@ class TestRegistry:
         assert catalog["duckdb"]["status"] == "supported"
         assert catalog["sqlite"]["status"] == "supported"
         assert catalog["postgres"]["status"] == "supported"
-        assert catalog["mysql"]["status"] == "planned"
+        assert catalog["mysql"]["status"] == "preview"
         assert catalog["json"]["supported"] is True
         assert catalog["mysql"]["supported"] is False
         assert catalog["json"]["capabilities"]["list_tables"] is True
         assert catalog["duckdb"]["capabilities"]["execute_readonly"] is True
         assert catalog["sqlite"]["capabilities"]["execute_readonly"] is True
         assert catalog["json"]["capabilities"]["sample_arrow"] is True
-        assert catalog["mysql"]["capabilities"]["test"] is False
+        assert catalog["mysql"]["capabilities"]["test"] is True
+        assert catalog["mysql"]["capabilities"]["load_to_duckdb"] is False
 
     def test_connector_status_helper(self):
         assert connector_status("postgres") == "supported"
         assert connector_status("duckdb") == "supported"
         assert connector_status("sqlite") == "supported"
-        assert connector_status("mysql") == "planned"
+        assert connector_status("mysql") == "preview"
         assert connector_status("mongo") is None
 
     def test_connector_capabilities_helper(self):
@@ -134,10 +136,12 @@ class TestRegistry:
         assert sqlite_caps.execute_readonly is True
         assert postgres_caps.execute_readonly is True
         assert postgres_caps.load_to_duckdb is False
-        assert mysql_caps.test is False
+        assert mysql_caps.test is True
+        assert mysql_caps.execute_readonly is True
+        assert mysql_caps.load_to_duckdb is False
 
     def test_get_planned_connector_explains_status(self):
-        with pytest.raises(ConnectorError, match="planned"):
+        with pytest.raises(ConnectorError, match="preview"):
             get_connector("mysql")
 
 
@@ -262,6 +266,52 @@ class TestSQLiteConnector:
                     path=str(tmp_path / "missing.sqlite"),
                 )
             )
+
+
+class TestMySQLConnector:
+    def test_mysql_preview_capabilities_are_declared(self):
+        caps = MySQLConnector().capabilities()
+        assert caps.test is True
+        assert caps.list_tables is True
+        assert caps.profile_table is True
+        assert caps.execute_readonly is True
+        assert caps.load_to_duckdb is False
+        assert caps.modes == ["generate", "observe"]
+
+    def test_mysql_requires_uri(self):
+        loader = MySQLConnector()
+        with pytest.raises(ConnectorError, match="requires a URI"):
+            loader.connect(SourceConfig(name="mysql", type="mysql"))
+
+    def test_mysql_missing_driver_error_is_actionable(self, monkeypatch):
+        import headwater.connectors.mysql_loader as mysql_loader
+
+        def missing_driver(name: str):
+            if name == "pymysql":
+                raise ImportError("missing")
+            return None
+
+        monkeypatch.setattr(mysql_loader.importlib, "import_module", missing_driver)
+
+        loader = MySQLConnector()
+        with pytest.raises(ConnectorError, match="uv add pymysql"):
+            loader.connect(
+                SourceConfig(
+                    name="mysql",
+                    type="mysql",
+                    uri="mysql://user:pass@localhost:3306/analytics",
+                )
+            )
+
+    def test_mysql_uri_parsing(self):
+        parts = _parse_mysql_uri("mysql://user:p%40ss@example.com:3307/analytics")
+        assert parts == {
+            "host": "example.com",
+            "port": 3307,
+            "user": "user",
+            "password": "p@ss",
+            "database": "analytics",
+        }
 
 
 # -- BaseConnector new methods (US-100) ------------------------------------

@@ -48,15 +48,16 @@ class TestSourcesCatalog:
         assert connectors["csv"]["status"] == "supported"
         assert connectors["duckdb"]["status"] == "supported"
         assert connectors["sqlite"]["status"] == "supported"
-        assert connectors["mysql"]["status"] == "planned"
+        assert connectors["mysql"]["status"] == "preview"
         assert connectors["mysql"]["supported"] is False
         assert connectors["json"]["capabilities"]["list_tables"] is True
         assert connectors["duckdb"]["capabilities"]["load_to_duckdb"] is True
         assert connectors["sqlite"]["capabilities"]["load_to_duckdb"] is True
         assert connectors["postgres"]["capabilities"]["execute_readonly"] is True
-        assert connectors["mysql"]["capabilities"]["test"] is False
+        assert connectors["mysql"]["capabilities"]["test"] is True
+        assert connectors["mysql"]["capabilities"]["load_to_duckdb"] is False
 
-    def test_create_source_rejects_planned_connector(self, client):
+    def test_create_source_rejects_preview_connector(self, client):
         resp = client.post(
             "/api/sources",
             json={
@@ -67,7 +68,7 @@ class TestSourcesCatalog:
         )
 
         assert resp.status_code == 400
-        assert "planned" in resp.json()["detail"]
+        assert "preview" in resp.json()["detail"]
 
     def test_source_test_endpoint_verifies_supported_source(self, client):
         create = client.post(

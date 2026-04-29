@@ -6,6 +6,7 @@ from headwater.connectors.capabilities import UNSUPPORTED_CAPABILITIES, Connecto
 from headwater.connectors.csv_loader import CsvLoader
 from headwater.connectors.duckdb_loader import DuckDBConnector
 from headwater.connectors.json_loader import JsonLoader
+from headwater.connectors.mysql_loader import MySQLConnector
 from headwater.connectors.postgres_loader import PostgresConnector
 from headwater.connectors.sqlite_loader import SQLiteConnector
 from headwater.core.exceptions import ConnectorError
@@ -16,6 +17,11 @@ _REGISTRY: dict[str, type] = {
     "duckdb": DuckDBConnector,
     "sqlite": SQLiteConnector,
     "postgres": PostgresConnector,
+}
+
+_CAPABILITY_REGISTRY: dict[str, type] = {
+    **_REGISTRY,
+    "mysql": MySQLConnector,
 }
 
 # Catalog shown in the UI connector picker.
@@ -42,7 +48,7 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "OLTP",
         "color": "#4479a1",
         "glyph": "M",
-        "status": "planned",
+        "status": "preview",
         "supported": False,
     },
     {
@@ -179,6 +185,7 @@ def get_connector(source_type: str):
 def register_connector(source_type: str, cls: type) -> None:
     """Register a custom connector class."""
     _REGISTRY[source_type] = cls
+    _CAPABILITY_REGISTRY[source_type] = cls
 
 
 def list_connector_catalog() -> list[dict]:
@@ -199,7 +206,7 @@ def connector_status(source_type: str) -> str | None:
 
 def get_connector_capabilities(source_type: str) -> ConnectorCapabilities:
     """Return declared connector capabilities without opening a source connection."""
-    cls = _REGISTRY.get(source_type)
+    cls = _CAPABILITY_REGISTRY.get(source_type)
     if cls is None:
         return UNSUPPORTED_CAPABILITIES
     connector = cls()
