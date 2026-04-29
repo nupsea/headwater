@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from headwater.core.models import ColumnProfile, ContractRule
@@ -20,6 +21,7 @@ def generate_contracts(
 
     for p in profiles:
         model_name = f"{target_schema}.{model_prefix}{p.table_name}"
+        column_name = _to_sql_identifier(_to_snake_case(p.column_name))
 
         # Not-null contract
         if p.null_rate == 0.0 and p.distinct_count > 0:
@@ -27,9 +29,9 @@ def generate_contracts(
                 ContractRule(
                     id=_make_id(),
                     model_name=model_name,
-                    column_name=p.column_name,
+                    column_name=column_name,
                     rule_type="not_null",
-                    expression=f'"{p.column_name}" IS NOT NULL',
+                    expression=f'"{column_name}" IS NOT NULL',
                     severity="error",
                     description=f"{p.column_name} must not be null (observed 0% nulls)",
                     confidence=0.95,
@@ -43,9 +45,9 @@ def generate_contracts(
                 ContractRule(
                     id=_make_id(),
                     model_name=model_name,
-                    column_name=p.column_name,
+                    column_name=column_name,
                     rule_type="unique",
-                    expression=(f'COUNT(*) = COUNT(DISTINCT "{p.column_name}")'),
+                    expression=(f'COUNT(*) = COUNT(DISTINCT "{column_name}")'),
                     severity="error",
                     description=f"{p.column_name} must be unique (observed 100% uniqueness)",
                     confidence=0.9,
@@ -65,9 +67,9 @@ def generate_contracts(
                 ContractRule(
                     id=_make_id(),
                     model_name=model_name,
-                    column_name=p.column_name,
+                    column_name=column_name,
                     rule_type="range",
-                    expression=(f'"{p.column_name}" BETWEEN {lower:.2f} AND {upper:.2f}'),
+                    expression=(f'"{column_name}" BETWEEN {lower:.2f} AND {upper:.2f}'),
                     severity="warning",
                     description=(
                         f"{p.column_name} expected in range "
@@ -87,9 +89,9 @@ def generate_contracts(
                 ContractRule(
                     id=_make_id(),
                     model_name=model_name,
-                    column_name=p.column_name,
+                    column_name=column_name,
                     rule_type="cardinality",
-                    expression=f'"{p.column_name}" IN ({values_str})',
+                    expression=f'"{column_name}" IN ({values_str})',
                     severity="warning",
                     description=(
                         f"{p.column_name} expected to be one of {len(allowed)} known values"
@@ -111,3 +113,18 @@ def generate_contracts(
 
 def _make_id() -> str:
     return str(uuid.uuid4())[:8]
+
+
+def _to_snake_case(name: str) -> str:
+    s = re.sub(r"([a-z])([A-Z])", r"\1_\2", name)
+    return s.lower()
+
+
+def _to_sql_identifier(name: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    if not safe:
+        return "_col"
+    if safe[0].isdigit():
+        safe = f"_{safe}"
+    return safe

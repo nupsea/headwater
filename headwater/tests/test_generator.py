@@ -386,6 +386,37 @@ class TestMartGenerator:
         assert "TRY_STRPTIME" in model.sql
         assert "CAST(\"event_date\" AS DATE)" not in model.sql
 
+    def test_period_comparison_sanitizes_metric_column_refs(self):
+        from headwater.core.models import ColumnInfo
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="aqi", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="aqi_by_county",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="county", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="90th_percentile_aqi", dtype="float64", semantic_type="metric"
+                        ),
+                        ColumnInfo(
+                            name="days_with_aqi", dtype="float64", semantic_type="metric"
+                        ),
+                        ColumnInfo(
+                            name="reported_at", dtype="timestamp", semantic_type="temporal"
+                        ),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+
+        model = next(m for m in generate_mart_models(discovery) if "by_period" in m.name)
+
+        assert 'AVG("_90th_percentile_aqi") AS avg__90th_percentile_aqi' in model.sql
+        assert 'avg__90th_percentile_aqi AS current_avg__90th_percentile_aqi' in model.sql
+
     def test_metric_with_fk_gets_entity_summary(self):
         """US-501: A source with metric columns + FK to dimension gets entity_summary."""
         from headwater.core.models import ColumnInfo, Relationship
@@ -488,6 +519,52 @@ class TestMartGenerator:
         assert 'f."customer_id" = d."client_key"' in model.sql
         assert "f.customer_id = d.customer_id" not in model.sql
 
+    def test_entity_summary_sanitizes_metric_column_refs(self):
+        from headwater.core.models import ColumnInfo, Relationship
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="aqi", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="aqi_by_county",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="county_id", dtype="varchar", semantic_type="foreign_key"),
+                        ColumnInfo(
+                            name="90th_percentile_aqi", dtype="float64", semantic_type="metric"
+                        ),
+                    ],
+                ),
+                TableInfo(
+                    name="counties",
+                    row_count=50,
+                    columns=[
+                        ColumnInfo(name="county_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="county_name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="aqi_by_county",
+                    from_column="county_id",
+                    to_table="counties",
+                    to_column="county_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.99,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        model = next(
+            m for m in generate_mart_models(discovery) if m.name == "mart_aqi_by_county_by_counties"
+        )
+
+        assert 'AVG(f."_90th_percentile_aqi") AS avg__90th_percentile_aqi' in model.sql
+        assert 'SUM(f."_90th_percentile_aqi") AS total__90th_percentile_aqi' in model.sql
+
 
 # ---------------------------------------------------------------------------
 # Contract generator tests
@@ -581,3 +658,34 @@ class TestContractGenerator:
         )
         # min_value=0, max_value=50000, headroom=25000, lower=max(0, -25000)=0
         assert "BETWEEN 0.00" in pop_range.expression
+
+    def test_leading_digit_profile_names_are_sanitized(self):
+        profiles = [
+            ColumnProfile(
+                table_name="air_quality",
+                column_name="90th_percentile_aqi",
+                dtype="float64",
+                null_count=0,
+                null_rate=0.0,
+                distinct_count=10,
+                uniqueness_ratio=0.0,
+                min_value=0.0,
+                max_value=100.0,
+            ),
+            ColumnProfile(
+                table_name="daily_pm25",
+                column_name="1st_max_value",
+                dtype="float64",
+                null_count=0,
+                null_rate=0.0,
+                distinct_count=10,
+                uniqueness_ratio=0.0,
+                min_value=0.0,
+                max_value=100.0,
+            ),
+        ]
+        rules = generate_contracts(profiles)
+        col_names = {r.column_name for r in rules}
+        assert "_90th_percentile_aqi" in col_names
+        assert "_1st_max_value" in col_names
+        assert all('"_' in r.expression for r in rules)

@@ -264,14 +264,15 @@ def _render_period_comparison(
     ]
     metric_cols = [c for c in candidate.candidate_columns if c not in time_cols]
     time_col = time_cols[0] if time_cols else "created_at"
-    period_expr = _period_expression(f'"{time_col}"')
+    time_ref = f'"{_sql_identifier(time_col)}"'
+    period_expr = _period_expression(time_ref)
 
-    inner_metrics = [f'AVG("{c}") AS avg_{c}' for c in metric_cols[:5]]
+    inner_metrics = [f'AVG("{_sql_identifier(c)}") AS avg_{_sql_identifier(c)}' for c in metric_cols[:5]]
     if not inner_metrics:
         inner_metrics = ["COUNT(*) AS record_count"]
     inner_select = _format_select_items(inner_metrics + ["COUNT(*) AS row_count"], indent=8)
     outer_metrics = [
-        f"avg_{c} AS current_avg_{c}"
+        f"avg_{_sql_identifier(c)} AS current_avg_{_sql_identifier(c)}"
         for c in metric_cols[:5]
     ]
     if not outer_metrics:
@@ -349,7 +350,9 @@ def _render_entity_summary(
     metric_cols = candidate.candidate_columns
 
     metric_lines = "\n".join(
-        f'    AVG(f."{c}") AS avg_{c},\n    SUM(f."{c}") AS total_{c},' for c in metric_cols[:3]
+        f'    AVG(f."{_sql_identifier(c)}") AS avg_{_sql_identifier(c)},\n'
+        f'    SUM(f."{_sql_identifier(c)}") AS total_{_sql_identifier(c)},'
+        for c in metric_cols[:3]
     )
     if not metric_lines:
         metric_lines = "    COUNT(*) AS record_count,"
@@ -358,12 +361,13 @@ def _render_entity_summary(
     if dim_table:
         if candidate.join_from_column and candidate.join_to_column:
             join_clause = (
-                f'JOIN staging.stg_{dim_table} d ON f."{candidate.join_from_column}" '
-                f'= d."{candidate.join_to_column}"'
+                f'JOIN staging.stg_{dim_table} d ON f."{_sql_identifier(candidate.join_from_column)}" '
+                f'= d."{_sql_identifier(candidate.join_to_column)}"'
             )
         else:
             dim_key = dim_table[:-1] if dim_table.endswith("s") else dim_table
-            join_clause = f"JOIN staging.stg_{dim_table} d ON f.{dim_key}_id = d.{dim_key}_id"
+            dim_key_ref = _sql_identifier(f"{dim_key}_id")
+            join_clause = f'JOIN staging.stg_{dim_table} d ON f."{dim_key_ref}" = d."{dim_key_ref}"'
 
     sql = f"""-- Mart: {candidate.proposed_name}
 -- Archetype: entity_summary
@@ -433,6 +437,19 @@ FROM staging.stg_{table_name}"""
 def _humanize_name(name: str) -> str:
     """Convert snake_case to Title Case."""
     return name.replace("_", " ").title()
+
+
+def _sql_identifier(name: str) -> str:
+    """Return a safe SQL identifier matching staging aliases."""
+    import re
+
+    safe = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    if not safe:
+        return "_col"
+    if safe[0].isdigit():
+        safe = f"_{safe}"
+    return safe
 
 
 _ARCHETYPE_RENDERERS = {
