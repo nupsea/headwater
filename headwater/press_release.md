@@ -18,7 +18,7 @@ The product direction is deliberately advisory. Headwater discovers, profiles, e
 
 Headwater already has a strong foundation:
 
-- **Discovery pipeline** for JSON, CSV, and Postgres sources.
+- **Discovery pipeline** for JSON, CSV, DuckDB, and Postgres sources.
 - **Profiling and relationship detection** across tables and columns.
 - **Semantic enrichment** with heuristic and optional LLM-assisted descriptions.
 - **Staging and mart model generation** with review-oriented assumptions and questions.

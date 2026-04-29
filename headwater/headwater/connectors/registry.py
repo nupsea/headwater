@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from headwater.connectors.capabilities import UNSUPPORTED_CAPABILITIES, ConnectorCapabilities
 from headwater.connectors.csv_loader import CsvLoader
+from headwater.connectors.duckdb_loader import DuckDBConnector
 from headwater.connectors.json_loader import JsonLoader
 from headwater.connectors.postgres_loader import PostgresConnector
 from headwater.core.exceptions import ConnectorError
@@ -11,6 +12,7 @@ from headwater.core.exceptions import ConnectorError
 _REGISTRY: dict[str, type] = {
     "json": JsonLoader,
     "csv": CsvLoader,
+    "duckdb": DuckDBConnector,
     "postgres": PostgresConnector,
 }
 
@@ -92,8 +94,8 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Embedded",
         "color": "#fff100",
         "glyph": "D",
-        "status": "planned",
-        "supported": False,
+        "status": "supported",
+        "supported": True,
         "lightGlyph": True,
     },
     {

@@ -45,9 +45,11 @@ class TestSourcesCatalog:
         assert connectors["postgres"]["status"] == "supported"
         assert connectors["json"]["status"] == "supported"
         assert connectors["csv"]["status"] == "supported"
+        assert connectors["duckdb"]["status"] == "supported"
         assert connectors["mysql"]["status"] == "planned"
         assert connectors["mysql"]["supported"] is False
         assert connectors["json"]["capabilities"]["list_tables"] is True
+        assert connectors["duckdb"]["capabilities"]["load_to_duckdb"] is True
         assert connectors["postgres"]["capabilities"]["execute_readonly"] is True
         assert connectors["mysql"]["capabilities"]["test"] is False
 
@@ -109,6 +111,38 @@ class TestSourcesCatalog:
         assert latest_quality["total_contracts"] == result["quality_total"]
         assert latest_quality["score"] == result["quality_score"]
         assert latest_quality["sync_run_id"] == result["run_id"]
+
+    def test_duckdb_source_can_be_registered_and_synced(self, client, tmp_path):
+        import duckdb
+
+        db_path = tmp_path / "source.duckdb"
+        con = duckdb.connect(str(db_path))
+        try:
+            con.execute("CREATE TABLE users (user_id INTEGER, email VARCHAR)")
+            con.execute("INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com')")
+            con.execute("CREATE TABLE orders (order_id INTEGER, user_id INTEGER, amount DOUBLE)")
+            con.execute("INSERT INTO orders VALUES (10, 1, 20.5), (11, 2, 31.0)")
+        finally:
+            con.close()
+
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_duckdb", "type": "duckdb", "path": str(db_path)},
+        )
+        assert create.status_code == 201
+
+        test = client.post("/api/sources/sample_duckdb/test")
+        assert test.status_code == 200
+        assert test.json()["tables"] == 2
+
+        sync = client.post("/api/sources/sample_duckdb/sync")
+        assert sync.status_code == 200
+        result = sync.json()
+        assert result["tables_discovered"] == 2
+
+        detail = client.get("/api/sources/sample_duckdb").json()
+        assert detail["tables"] == 2
+        assert detail["latest_run_status"] == "succeeded"
 
 
 class TestDiscovery:

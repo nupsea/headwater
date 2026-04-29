@@ -8,6 +8,7 @@ import duckdb
 import pytest
 
 from headwater.connectors.csv_loader import CsvLoader
+from headwater.connectors.duckdb_loader import DuckDBConnector
 from headwater.connectors.json_loader import JsonLoader
 from headwater.connectors.registry import (
     connector_status,
@@ -82,6 +83,10 @@ class TestRegistry:
         c = get_connector("csv")
         assert isinstance(c, CsvLoader)
 
+    def test_get_duckdb(self):
+        c = get_connector("duckdb")
+        assert isinstance(c, DuckDBConnector)
+
     def test_get_unknown(self):
         with pytest.raises(ConnectorError):
             get_connector("mongo")
@@ -90,25 +95,31 @@ class TestRegistry:
         catalog = {c["id"]: c for c in list_connector_catalog()}
         assert catalog["json"]["status"] == "supported"
         assert catalog["csv"]["status"] == "supported"
+        assert catalog["duckdb"]["status"] == "supported"
         assert catalog["postgres"]["status"] == "supported"
         assert catalog["mysql"]["status"] == "planned"
         assert catalog["json"]["supported"] is True
         assert catalog["mysql"]["supported"] is False
         assert catalog["json"]["capabilities"]["list_tables"] is True
+        assert catalog["duckdb"]["capabilities"]["execute_readonly"] is True
         assert catalog["json"]["capabilities"]["sample_arrow"] is True
         assert catalog["mysql"]["capabilities"]["test"] is False
 
     def test_connector_status_helper(self):
         assert connector_status("postgres") == "supported"
+        assert connector_status("duckdb") == "supported"
         assert connector_status("mysql") == "planned"
         assert connector_status("mongo") is None
 
     def test_connector_capabilities_helper(self):
         json_caps = get_connector_capabilities("json")
+        duckdb_caps = get_connector_capabilities("duckdb")
         postgres_caps = get_connector_capabilities("postgres")
         mysql_caps = get_connector_capabilities("mysql")
 
         assert json_caps.load_to_duckdb is True
+        assert duckdb_caps.load_to_duckdb is True
+        assert duckdb_caps.execute_readonly is True
         assert postgres_caps.execute_readonly is True
         assert postgres_caps.load_to_duckdb is False
         assert mysql_caps.test is False
@@ -168,6 +179,41 @@ class TestSchemaExtraction:
         tables = extract_schema(ddb, "env_health")
         readings = next(t for t in tables if t.name == "readings")
         assert readings.row_count == 49302
+
+
+class TestDuckDBConnector:
+    def test_duckdb_load_to_duckdb_copies_source_tables(self, tmp_path: Path):
+        db_path = tmp_path / "source.duckdb"
+        source = duckdb.connect(str(db_path))
+        try:
+            source.execute("CREATE TABLE users (user_id INTEGER, email VARCHAR)")
+            source.execute("INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com')")
+        finally:
+            source.close()
+
+        loader = DuckDBConnector()
+        loader.connect(SourceConfig(name="sample_duckdb", type="duckdb", path=str(db_path)))
+        target = duckdb.connect(":memory:")
+        try:
+            tables = loader.load_to_duckdb(target, "env_health")
+            count = target.execute('SELECT COUNT(*) FROM "env_health"."users"').fetchone()[0]
+        finally:
+            target.close()
+            loader.close()
+
+        assert tables == ["users"]
+        assert count == 2
+
+    def test_duckdb_connect_missing_path(self, tmp_path: Path):
+        loader = DuckDBConnector()
+        with pytest.raises(ConnectorError):
+            loader.connect(
+                SourceConfig(
+                    name="missing_duckdb",
+                    type="duckdb",
+                    path=str(tmp_path / "missing.duckdb"),
+                )
+            )
 
 
 # -- BaseConnector new methods (US-100) ------------------------------------
