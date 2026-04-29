@@ -410,6 +410,11 @@ export interface ExploreSuggestionsResponse {
   review_pct: number;
 }
 
+export interface ExploreInsightsResponse {
+  insights: StatisticalInsight[];
+  total: number;
+}
+
 // ---------- Drift types (US-402, US-403) ----------
 
 export interface ColumnChange {
@@ -976,6 +981,9 @@ export const api = {
 
   exploreSuggestions: () =>
     fetchJSON<ExploreSuggestionsResponse>("/explore/suggestions"),
+
+  exploreInsights: () =>
+    fetchJSON<ExploreInsightsResponse>("/explore/insights"),
 
   exploreAsk: (question: string) =>
     fetchJSON<ExplorationResult>("/explore/ask", {

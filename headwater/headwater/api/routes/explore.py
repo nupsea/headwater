@@ -22,6 +22,24 @@ from headwater.explorer.suggestions import generate_suggestions
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_INSIGHTS_ENDPOINT_LIMIT = 50
+
+
+def _rank_statistical_insights(insights):
+    severity_rank = {"critical": 0, "warning": 1, "info": 2}
+    return sorted(
+        insights,
+        key=lambda insight: (
+            severity_rank.get(insight.severity, 3),
+            insight.p_value if insight.p_value is not None else 1.0,
+            -abs(insight.magnitude),
+        ),
+    )
+
+
+def _serialize_statistical_insights(insights, limit: int) -> list[dict]:
+    return [i.model_dump() for i in _rank_statistical_insights(insights)[:limit]]
+
 
 def _load_confirmed_relationships(request: Request) -> list[Relationship]:
     """Load human-confirmed FK relationships from metadata store.
@@ -82,25 +100,20 @@ async def get_suggestions(request: Request):
     quality_results = quality_report.results if quality_report else []
 
     catalog = pipeline.get("catalog")
-    con = request.app.state.duckdb_con
     extra_rels = _load_confirmed_relationships(request)
     suggestions = generate_suggestions(
         discovery=discovery,
         models=all_models,
         contracts=contracts,
         quality_results=quality_results,
-        con=con,
+        con=request.app.state.duckdb_con,
         catalog=catalog,
         extra_relationships=extra_rels,
     )
 
-    # Statistical insights from materialized marts
-    insights = detect_insights(con, schema="staging")
-    insights.extend(detect_insights(con, schema="marts"))
-
     return {
         "suggestions": [s.model_dump() for s in suggestions],
-        "insights": [i.model_dump() for i in insights],
+        "insights": [],
         "review_pct": round(review_pct, 1),
     }
 
@@ -188,6 +201,6 @@ async def get_statistical_insights(request: Request):
     insights.extend(detect_insights(con, schema="marts"))
 
     return {
-        "insights": [i.model_dump() for i in insights],
+        "insights": _serialize_statistical_insights(insights, _INSIGHTS_ENDPOINT_LIMIT),
         "total": len(insights),
     }

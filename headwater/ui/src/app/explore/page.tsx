@@ -7,6 +7,7 @@ import {
   type StatisticalInsight,
   type ExplorationResult,
   type ExploreSuggestionsResponse,
+  type ExploreInsightsResponse,
   type DimensionOption,
 } from "@/lib/api";
 import { ResultChart } from "@/components/result-chart";
@@ -40,6 +41,8 @@ export default function ExplorePage() {
   const [showSql, setShowSql] = useState(false);
   const [showRepairHistory, setShowRepairHistory] = useState(false);
   const [showTable, setShowTable] = useState(false);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsLoaded, setInsightsLoaded] = useState(false);
   const [activeTab, setActiveTab] = useState<"questions" | "insights">(
     "questions"
   );
@@ -69,6 +72,24 @@ export default function ExplorePage() {
   useEffect(() => {
     loadSuggestions();
   }, []);
+
+  const loadInsights = () => {
+    if (insightsLoaded || insightsLoading) {
+      return;
+    }
+    setInsightsLoading(true);
+    api
+      .exploreInsights()
+      .then((res: ExploreInsightsResponse) => {
+        setInsights(res.insights || []);
+        setInsightsLoaded(true);
+      })
+      .catch((e: Error) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setInsightsLoaded(true);
+      })
+      .finally(() => setInsightsLoading(false));
+  };
 
   const askQuestion = async (q: string) => {
     setLoading(true);
@@ -433,7 +454,10 @@ export default function ExplorePage() {
           Suggested Questions ({suggestions.length})
         </button>
         <button
-          onClick={() => setActiveTab("insights")}
+          onClick={() => {
+            setActiveTab("insights");
+            loadInsights();
+          }}
           className={`pb-2 text-sm font-medium transition-colors ${
             activeTab === "insights"
               ? "border-b-2 border-foreground text-foreground"
@@ -498,7 +522,11 @@ export default function ExplorePage() {
       {/* Statistical Insights tab */}
       {activeTab === "insights" && (
         <div className="space-y-3">
-          {insights.length === 0 ? (
+          {insightsLoading ? (
+            <p className="text-muted text-sm">
+              Looking for statistically significant patterns...
+            </p>
+          ) : insights.length === 0 ? (
             <p className="text-muted text-sm">
               No statistically significant patterns detected yet. Run the
               pipeline to materialize models and surface insights.
