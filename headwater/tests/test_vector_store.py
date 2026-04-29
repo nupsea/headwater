@@ -1,7 +1,11 @@
 """Tests for the LanceDB vector store."""
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
+import headwater.core.vector_store as vector_store_module
 from headwater.core.vector_store import VectorStore, encode_text, encode_texts
 
 
@@ -36,6 +40,36 @@ class TestEncoding:
         sim_12 = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
         sim_13 = np.dot(v1, v3) / (np.linalg.norm(v1) * np.linalg.norm(v3))
         assert sim_12 > sim_13
+
+    def test_embedding_model_uses_local_cache(self, monkeypatch, tmp_path):
+        calls = {}
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name: str, cache_folder: str):
+                calls["model_name"] = model_name
+                calls["cache_folder"] = cache_folder
+
+            def encode(self, text, convert_to_numpy=True, batch_size=64):
+                if isinstance(text, list):
+                    return [[0.0] * 384 for _ in text]
+                return [0.0] * 384
+
+        fake_module = SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+        monkeypatch.setattr(
+            vector_store_module,
+            "get_settings",
+            lambda: SimpleNamespace(
+                embedding_cache_path=tmp_path / "embedding_cache",
+                ensure_dirs=lambda: None,
+            ),
+        )
+        monkeypatch.setattr(vector_store_module, "_model", None)
+
+        vector_store_module._get_model()
+
+        assert calls["model_name"] == "all-MiniLM-L6-v2"
+        assert calls["cache_folder"] == str(tmp_path / "embedding_cache")
 
 
 class TestVectorStore:

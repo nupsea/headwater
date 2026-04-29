@@ -74,6 +74,10 @@ class HeadwaterSettings(BaseSettings):
         return self.data_dir / "vector_store"
 
     @property
+    def embedding_cache_path(self) -> Path:
+        return self.data_dir / "embedding_cache"
+
+    @property
     def graph_store_path(self) -> Path:
         return self.data_dir / "graph_store"
 

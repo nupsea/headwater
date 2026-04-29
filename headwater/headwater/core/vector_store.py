@@ -14,6 +14,8 @@ from typing import Any
 import lancedb
 import pyarrow as pa
 
+from headwater.core.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 # Default embedding model -- lightweight, CPU-friendly, 384-dim
@@ -35,7 +37,11 @@ def _get_model():
     if _model is None:
         from sentence_transformers import SentenceTransformer
 
-        _model = SentenceTransformer(_DEFAULT_MODEL)
+        settings = get_settings()
+        settings.ensure_dirs()
+        cache_dir = settings.embedding_cache_path
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        _model = SentenceTransformer(_DEFAULT_MODEL, cache_folder=str(cache_dir))
         logger.info("Loaded embedding model: %s", _DEFAULT_MODEL)
     return _model
 
