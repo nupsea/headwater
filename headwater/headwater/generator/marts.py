@@ -259,9 +259,25 @@ def _render_period_comparison(
     metric_cols = [c for c in candidate.candidate_columns if c not in time_cols]
     time_col = time_cols[0] if time_cols else "created_at"
 
-    metric_lines = "\n".join(f'    AVG("{c}") AS avg_{c},' for c in metric_cols[:5])
-    if not metric_lines:
-        metric_lines = "    COUNT(*) AS record_count,"
+    inner_metrics = [f'AVG("{c}") AS avg_{c}' for c in metric_cols[:5]]
+    if not inner_metrics:
+        inner_metrics = ["COUNT(*) AS record_count"]
+    inner_select = _format_select_items(inner_metrics + ["COUNT(*) AS row_count"], indent=8)
+    outer_metrics = [
+        f"avg_{c} AS current_avg_{c}"
+        for c in metric_cols[:5]
+    ]
+    if not outer_metrics:
+        outer_metrics = ["record_count"]
+    outer_select = _format_select_items(
+        [
+            "period",
+            "row_count",
+            *outer_metrics,
+            "LAG(row_count) OVER (ORDER BY period) AS prev_period_row_count",
+        ],
+        indent=4,
+    )
 
     sql = f"""-- Mart: {candidate.proposed_name}
 -- Archetype: period_comparison
@@ -271,16 +287,12 @@ CREATE OR REPLACE TABLE {target_schema}.{candidate.proposed_name} AS
 WITH by_period AS (
     SELECT
         DATE_TRUNC('month', CAST("{time_col}" AS DATE)) AS period,
-{metric_lines}
-        COUNT(*) AS row_count
+{inner_select}
     FROM staging.stg_{table_name}
     GROUP BY 1
 )
 SELECT
-    period,
-    row_count,
-{metric_lines.replace("AVG(", "    ").replace(" AS avg_", " AS current_avg_")},
-    LAG(row_count) OVER (ORDER BY period) AS prev_period_row_count
+{outer_select}
 FROM by_period
 ORDER BY period"""
 
@@ -298,6 +310,12 @@ ORDER BY period"""
         assumptions=candidate.assumptions,
         questions=candidate.questions,
     )
+
+
+def _format_select_items(items: list[str], *, indent: int = 4) -> str:
+    """Format SQL select items with commas between items only."""
+    pad = " " * indent
+    return ",\n".join(f"{pad}{item}" for item in items)
 
 
 def _render_entity_summary(

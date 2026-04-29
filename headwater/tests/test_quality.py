@@ -245,7 +245,8 @@ class TestBatchChecking:
         )
         result = check_contract(con, rule)
         assert result.passed is False
-        assert "error" in result.message.lower()
+        assert result.skipped is True
+        assert "not materialized" in result.message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +287,35 @@ class TestQualityReport:
         assert report.total_contracts == 0
         assert report.passed == 0
         assert report.failed == 0
+
+    def test_skipped_checks_do_not_count_as_failed(self):
+        con = _make_con()
+        rules = [
+            ContractRule(
+                id="r1",
+                model_name="stg_items",
+                column_name="item_id",
+                rule_type="not_null",
+                expression='"item_id" IS NOT NULL',
+                status="observing",
+            ),
+            ContractRule(
+                id="r2",
+                model_name="missing_model",
+                column_name="name",
+                rule_type="not_null",
+                expression='"name" IS NOT NULL',
+                status="observing",
+            ),
+        ]
+        results = check_contracts(con, rules, only_active=True)
+        report = build_report(results)
+
+        assert report.total_contracts == 2
+        assert report.passed == 1
+        assert report.failed == 0
+        assert report.skipped == 1
+        assert results[1].skipped is True
 
 
 # ---------------------------------------------------------------------------

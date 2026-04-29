@@ -12,6 +12,8 @@ def apply_contract_statuses(contracts: list[Any], results: list[Any]) -> dict:
     by_id = {getattr(contract, "id", None): contract for contract in contracts}
     transitions = {"failing": [], "recovered": [], "observing": []}
     for result in results:
+        if getattr(result, "skipped", False):
+            continue
         rule_id = getattr(result, "rule_id", "") or ""
         contract = by_id.get(rule_id)
         if contract is None:

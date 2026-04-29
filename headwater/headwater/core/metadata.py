@@ -1834,6 +1834,8 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         """Update contract runtime statuses from quality check results."""
         transitions = {"failing": [], "recovered": [], "observing": []}
         for result in results:
+            if getattr(result, "skipped", False):
+                continue
             rule_id = getattr(result, "rule_id", "") or ""
             if not rule_id:
                 continue

@@ -221,6 +221,7 @@ class ContractCheckResult(BaseModel):
     rule_id: str
     model_name: str
     passed: bool
+    skipped: bool = False
     observed_value: Any = None
     message: str = ""
 

@@ -320,6 +320,32 @@ class TestMartGenerator:
             f"Expected a period_comparison mart. Got: {archetypes}"
         )
 
+    def test_period_comparison_sql_has_valid_commas(self):
+        """Period comparison SQL should not emit duplicate commas in SELECT lists."""
+        from headwater.core.models import ColumnInfo
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="events", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="event_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="event_date", dtype="timestamp", semantic_type="temporal"),
+                        ColumnInfo(name="revenue", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+
+        model = next(m for m in generate_mart_models(discovery) if "by_period" in m.name)
+
+        assert ",," not in model.sql
+        assert "AVG(\"revenue\") AS avg_revenue" in model.sql
+        assert "avg_revenue AS current_avg_revenue" in model.sql
+
     def test_metric_with_fk_gets_entity_summary(self):
         """US-501: A source with metric columns + FK to dimension gets entity_summary."""
         from headwater.core.models import ColumnInfo, Relationship

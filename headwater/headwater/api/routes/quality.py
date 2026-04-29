@@ -59,12 +59,14 @@ async def run_quality_checks(request: Request):
         "total": report.total_contracts,
         "passed": report.passed,
         "failed": report.failed,
+        "skipped": report.skipped,
         "quality_run_id": quality_run_id,
         "results": [
             {
                 "rule_id": r.rule_id,
                 "model_name": r.model_name,
                 "passed": r.passed,
+                "skipped": r.skipped,
                 "message": r.message,
             }
             for r in report.results
@@ -84,6 +86,7 @@ async def get_quality_report(request: Request):
                 "total": latest["total_contracts"],
                 "passed": latest["passed"],
                 "failed": latest["failed"],
+                "skipped": latest["skipped"],
                 "score": latest["score"],
                 "quality_run_id": latest["id"],
             }
@@ -92,6 +95,7 @@ async def get_quality_report(request: Request):
         "total": report.total_contracts,
         "passed": report.passed,
         "failed": report.failed,
+        "skipped": report.skipped,
         "score": round((report.passed / report.total_contracts) * 100, 2)
         if report.total_contracts
         else 100.0,
