@@ -84,6 +84,11 @@ export default function HealthPage() {
             try {
               const progRes = await api.projectProgress(proj.id);
               setProgress(progRes.progress);
+              setProject({
+                ...proj,
+                maturity: progRes.maturity as Project["maturity"],
+                maturity_score: progRes.maturity_score,
+              });
             } catch {
               /* progress endpoint may not return data yet */
             }
@@ -116,8 +121,10 @@ export default function HealthPage() {
   };
 
   useEffect(() => {
-    refresh();
-    testConnection();
+    queueMicrotask(() => {
+      refresh();
+      testConnection();
+    });
   }, []);
 
   const runFullPipeline = async () => {

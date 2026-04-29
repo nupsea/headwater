@@ -559,6 +559,10 @@ export interface ProjectProgress {
   tables_reviewed: number;
   tables_modeled: number;
   tables_mart_ready: number;
+  mart_models_review_pending?: number;
+  materialized_models?: number;
+  invalidated_models?: number;
+  impacted_models?: number;
   columns_total: number;
   columns_described: number;
   columns_confirmed: number;
@@ -570,7 +574,28 @@ export interface ProjectProgress {
   dimensions_confirmed: number;
   quality_contracts: number;
   contracts_enforcing: number;
+  contracts_observing?: number;
+  contracts_failing?: number;
+  contracts_recovered?: number;
+  quality_failed?: number;
+  quality_score?: number;
+  source_drift_count?: number;
   catalog_coverage: number;
+  maturity_blockers?: MaturityBlocker[];
+  next_actions?: MaturityNextAction[];
+}
+
+export interface MaturityBlocker {
+  title: string;
+  detail: string;
+  severity: "critical" | "warning" | "info";
+  route: string;
+}
+
+export interface MaturityNextAction {
+  title: string;
+  priority: "critical" | "warning" | "info";
+  route: string;
 }
 
 export interface Project {

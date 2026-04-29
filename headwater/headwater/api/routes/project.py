@@ -46,12 +46,17 @@ def _compute_progress(
     contracts = pipeline.get("contracts", [])
     staging_models = pipeline.get("staging_models", [])
     mart_models = pipeline.get("mart_models", [])
+    execution_results = pipeline.get("execution_results", [])
+    source_name = getattr(getattr(discovery, "source", None), "name", None) or project_id
 
     tables_discovered = len(tables)
     tables_profiled = sum(1 for _ in profiles) and tables_discovered  # profiled if profiles exist
     tables_reviewed = sum(1 for t in tables if t.review_status == "reviewed")
     tables_modeled = len({m.source_tables[0] for m in staging_models if m.source_tables})
-    tables_mart_ready = sum(1 for m in mart_models if m.status == "approved")
+    tables_mart_ready = sum(1 for m in mart_models if m.status in {"approved", "executed"})
+    mart_models_review_pending = sum(1 for m in mart_models if m.status == "proposed")
+    invalidated_models = sum(1 for m in staging_models + mart_models if m.status == "invalidated")
+    materialized_models = sum(1 for r in execution_results if getattr(r, "success", False))
 
     columns_total = sum(len(t.columns) for t in tables)
     columns_described = sum(
@@ -74,7 +79,17 @@ def _compute_progress(
 
     # Contracts
     quality_contracts = len(contracts)
-    contracts_enforcing = sum(1 for c in contracts if c.status == "enforcing")
+    contracts_enforcing = sum(1 for c in contracts if c.status in {"enforced", "enforcing"})
+    contracts_observing = sum(1 for c in contracts if c.status == "observing")
+    contracts_failing = sum(1 for c in contracts if c.status == "failing")
+    contracts_recovered = sum(1 for c in contracts if c.status == "recovered")
+    latest_quality = store.get_latest_quality_report(source_name)
+    quality_failed = int((latest_quality or {}).get("failed") or 0)
+    quality_score = float((latest_quality or {}).get("score") or 100.0)
+    source_row = store.get_source(source_name)
+    source_drift_count = int((source_row or {}).get("drift_count") or 0)
+    persisted_impacts = store.list_model_impacts(source_name=source_name, limit=200)
+    impacted_models = len({impact["model_name"] for impact in persisted_impacts})
 
     # Catalog coverage: % of analytical columns referenced in catalog
     catalog_columns = set()
@@ -86,12 +101,16 @@ def _compute_progress(
     analytical_columns = max(columns_total, 1)
     catalog_coverage = round(len(catalog_columns) / analytical_columns, 3)
 
-    return {
+    progress = {
         "tables_discovered": tables_discovered,
         "tables_profiled": tables_profiled,
         "tables_reviewed": tables_reviewed,
         "tables_modeled": tables_modeled,
         "tables_mart_ready": tables_mart_ready,
+        "mart_models_review_pending": mart_models_review_pending,
+        "materialized_models": materialized_models,
+        "invalidated_models": invalidated_models,
+        "impacted_models": impacted_models,
         "columns_total": columns_total,
         "columns_described": columns_described,
         "columns_confirmed": columns_confirmed,
@@ -103,49 +122,166 @@ def _compute_progress(
         "dimensions_confirmed": dimensions_confirmed,
         "quality_contracts": quality_contracts,
         "contracts_enforcing": contracts_enforcing,
+        "contracts_observing": contracts_observing,
+        "contracts_failing": contracts_failing,
+        "contracts_recovered": contracts_recovered,
+        "quality_failed": quality_failed,
+        "quality_score": quality_score,
+        "source_drift_count": source_drift_count,
         "catalog_coverage": catalog_coverage,
     }
+    progress["maturity_blockers"] = _maturity_blockers(progress)
+    progress["next_actions"] = _next_actions(progress)
+    return progress
 
 
 def _compute_maturity(progress: dict) -> tuple[str, float]:
-    """Derive maturity level and score from progress counters.
+    """Derive maturity level and score from progress counters."""
+    tables = max(progress["tables_discovered"], 1)
+    columns = max(progress["columns_total"], 1)
+    quality_contracts = max(progress["quality_contracts"], 1)
 
-    Levels:
-        raw        -> Data loaded, not yet profiled
-        profiled   -> Schema extracted, stats computed
-        documented -> Dictionary reviewed, catalog generated
-        modeled    -> Staging + mart models generated and approved
-        production -> Quality contracts enforcing
-    """
-    score = 0.0
-    level = "raw"
-
-    total = max(progress["tables_discovered"], 1)
-
-    # Profiled: tables have been discovered and profiled
-    if progress["tables_profiled"] > 0:
-        level = "profiled"
-        score = 0.2
-
-    # Documented: >=60% columns described AND catalog exists
-    desc_ratio = progress["columns_described"] / max(progress["columns_total"], 1)
-    if desc_ratio >= 0.6 and progress["metrics_defined"] > 0:
-        level = "documented"
-        score = 0.4 + 0.1 * min(progress["catalog_coverage"] / 0.8, 1.0)
-
-    # Modeled: at least one mart approved
-    if progress["tables_mart_ready"] >= 1:
-        level = "modeled"
-        score = 0.6 + 0.1 * min(progress["tables_mart_ready"] / total, 1.0)
-
-    # Production: at least one contract enforcing
-    if progress["contracts_enforcing"] >= 1:
-        level = "production"
-        score = 0.8 + 0.2 * min(
-            progress["contracts_enforcing"] / max(progress["quality_contracts"], 1), 1.0
+    profile_score = _ratio(progress["tables_profiled"], tables)
+    documentation_score = (
+        _ratio(progress["columns_confirmed"], columns) * 0.6
+        + _ratio(progress["tables_reviewed"], tables) * 0.2
+        + min(progress["catalog_coverage"] / 0.8, 1.0) * 0.2
+    )
+    model_score = (
+        _ratio(progress["tables_modeled"], tables) * 0.3
+        + _ratio(
+            progress["tables_mart_ready"],
+            max(
+                progress["tables_mart_ready"] + progress["mart_models_review_pending"],
+                1,
+            ),
         )
+        * 0.4
+        + _ratio(progress["materialized_models"], max(progress["tables_modeled"], 1)) * 0.3
+    )
+    quality_score = (
+        _ratio(progress["contracts_enforcing"] + progress["contracts_recovered"], quality_contracts)
+        * 0.5
+        + (float(progress.get("quality_score") or 100.0) / 100.0) * 0.5
+    )
+    drift_score = 0.0 if progress["source_drift_count"] else 1.0
 
+    score = (
+        profile_score * 0.2
+        + documentation_score * 0.2
+        + model_score * 0.25
+        + quality_score * 0.25
+        + drift_score * 0.1
+    )
+    if (
+        progress["invalidated_models"]
+        or progress["contracts_failing"]
+        or progress["quality_failed"]
+    ):
+        score -= 0.15
+    if progress["source_drift_count"]:
+        score -= 0.1
+    score = max(0.0, min(score, 1.0))
+
+    if score >= 0.8 and not _critical_blockers(progress):
+        level = "production"
+    elif score >= 0.6 and progress["tables_mart_ready"]:
+        level = "modeled"
+    elif score >= 0.4 and progress["columns_described"]:
+        level = "documented"
+    elif score >= 0.2 and progress["tables_profiled"]:
+        level = "profiled"
+    else:
+        level = "raw"
     return level, round(score, 3)
+
+
+def _ratio(numerator: int | float, denominator: int | float) -> float:
+    if denominator <= 0:
+        return 0.0
+    return max(0.0, min(float(numerator) / float(denominator), 1.0))
+
+
+def _critical_blockers(progress: dict) -> list[dict]:
+    return [
+        blocker
+        for blocker in _maturity_blockers(progress)
+        if blocker["severity"] == "critical"
+    ]
+
+
+def _maturity_blockers(progress: dict) -> list[dict]:
+    blockers = []
+    if progress["source_drift_count"]:
+        blockers.append(
+            {
+                "title": "Schema drift needs review",
+                "detail": f"{progress['source_drift_count']} unresolved drift event(s)",
+                "severity": "critical",
+                "route": "/models",
+            }
+        )
+    if progress["invalidated_models"] or progress["impacted_models"]:
+        affected = max(progress["invalidated_models"], progress["impacted_models"])
+        blockers.append(
+            {
+                "title": "Models impacted by source changes",
+                "detail": f"{affected} model(s) affected",
+                "severity": "critical",
+                "route": "/models",
+            }
+        )
+    if progress["quality_failed"] or progress["contracts_failing"]:
+        failing = max(progress["quality_failed"], progress["contracts_failing"])
+        blockers.append(
+            {
+                "title": "Quality contracts failing",
+                "detail": f"{failing} failing check(s)",
+                "severity": "critical",
+                "route": "/quality",
+            }
+        )
+    if progress["mart_models_review_pending"]:
+        blockers.append(
+            {
+                "title": "Mart models awaiting review",
+                "detail": f"{progress['mart_models_review_pending']} proposed mart model(s)",
+                "severity": "warning",
+                "route": "/models",
+            }
+        )
+    if progress["columns_confirmed"] < progress["columns_total"]:
+        confirmed = progress["columns_confirmed"]
+        total = progress["columns_total"]
+        blockers.append(
+            {
+                "title": "Column descriptions need confirmation",
+                "detail": f"{confirmed} of {total} confirmed",
+                "severity": "warning",
+                "route": "/dictionary",
+            }
+        )
+    if progress["contracts_enforcing"] == 0 and progress["quality_contracts"]:
+        blockers.append(
+            {
+                "title": "Contracts are not enforced",
+                "detail": f"{progress['quality_contracts']} contract(s) still below enforcement",
+                "severity": "info",
+                "route": "/quality",
+            }
+        )
+    return blockers[:5]
+
+
+def _next_actions(progress: dict) -> list[dict]:
+    return [
+        {
+            "title": blocker["title"],
+            "priority": blocker["severity"],
+            "route": blocker["route"],
+        }
+        for blocker in _maturity_blockers(progress)[:3]
+    ]
 
 
 @router.post("/projects", status_code=201)
