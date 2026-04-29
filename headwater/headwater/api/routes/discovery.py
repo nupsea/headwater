@@ -17,6 +17,7 @@ from headwater.analyzer.semantic import analyze
 from headwater.connectors.registry import get_connector
 from headwater.core.events import EventType
 from headwater.core.models import SourceConfig
+from headwater.core.redaction import redact_secrets
 from headwater.drift.schema import build_snapshot_from_discovery, compare_schemas
 from headwater.profiler.engine import discover
 
@@ -287,8 +288,8 @@ def _persist_discovery_data(request: Request, discovery, source_name: str) -> No
         "Persisting source: name=%s, type=%s, path=%s, uri=%s, mode=%s",
         source_name,
         source.type,
-        source.path,
-        source.uri,
+        redact_secrets(source.path),
+        redact_secrets(source.uri),
         source.mode,
     )
     store.upsert_source(source_name, source.type, source.path, source.uri, mode=source.mode)

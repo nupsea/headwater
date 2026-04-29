@@ -13,6 +13,7 @@ from headwater.connectors.capabilities import (
 )
 from headwater.core.exceptions import ConnectorError, HeadwaterConnectionError
 from headwater.core.models import SourceConfig
+from headwater.core.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ def _wrap_operational_error(exc: Exception, dsn: str) -> HeadwaterConnectionErro
             f"Database '{parts['dbname']}' does not exist on {parts['host']}."
         )
     # General fallback
-    return HeadwaterConnectionError(str(exc))
+    return HeadwaterConnectionError(redact_secrets(str(exc)))
 
 
 class PostgresConnector:

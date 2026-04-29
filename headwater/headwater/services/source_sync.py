@@ -12,6 +12,7 @@ from headwater.core.config import get_settings
 from headwater.core.events import EventType
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
+from headwater.core.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -135,16 +136,19 @@ class SourceSyncService:
         detail: str | None = None,
     ) -> None:
         """Write normalized and legacy source events."""
+        safe_summary = redact_secrets(summary)
+        safe_detail = redact_secrets(detail)
+        safe_payload = redact_secrets(payload)
         try:
             self.store.insert_event(
                 str(event_type),
-                summary,
+                safe_summary,
                 source_name=source_name,
                 severity=severity,
                 artifact_type=artifact_type,
                 artifact_id=artifact_id,
-                detail=detail,
-                payload=payload,
+                detail=safe_detail,
+                payload=safe_payload,
                 invalidates=invalidates,
             )
         except Exception:
@@ -153,9 +157,9 @@ class SourceSyncService:
             self.store.insert_sync_event(
                 source_name,
                 str(event_type),
-                summary,
+                safe_summary,
                 severity=severity,
-                payload=payload,
+                payload=safe_payload,
             )
         except Exception:
             logger.exception("Failed to write legacy sync_event '%s'", event_type)

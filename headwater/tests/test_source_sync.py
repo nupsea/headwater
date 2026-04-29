@@ -47,3 +47,21 @@ def test_record_event_writes_normalized_and_legacy_events(meta: MetadataStore):
     assert normalized[0]["invalidates"] == ["sources"]
     assert legacy[0]["event_type"] == "sync_started"
     assert legacy[0]["payload"] == {"run_id": 1}
+
+
+def test_record_event_redacts_secret_payloads(meta: MetadataStore):
+    meta.upsert_source("src", "postgres", None, "postgresql://user:secret@localhost/db")
+    service = SourceSyncService(_request(meta))
+
+    service.record_event(
+        EventType.CONNECTION_TEST_FAILED,
+        "Failed postgresql://user:secret@localhost/db",
+        source_name="src",
+        severity="error",
+        payload={"uri": "postgresql://user:secret@localhost/db", "password": "secret"},
+    )
+
+    event = meta.list_events("src")[0]
+    assert "secret" not in event["summary"]
+    assert event["payload"]["uri"] == "postgresql://user:***@localhost/db"
+    assert event["payload"]["password"] == "***"
