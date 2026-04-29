@@ -74,6 +74,44 @@ export interface ModelDetail extends ModelSummary {
   depends_on: string[];
 }
 
+export interface ModelImpactRow {
+  name: string;
+  model_type: string;
+  status: string;
+  maturity_state: string;
+  source_tables: string[];
+  source_names: string[];
+  depends_on: string[];
+  downstream_models: string[];
+  contracts: number;
+  quality_failures: number;
+  source_drift_count: number;
+  blockers: string[];
+}
+
+export interface ModelImpactSummary {
+  total_models: number;
+  mart_models: number;
+  reviewed_marts: number;
+  materialized_models: number;
+  monitored_models: number;
+  invalidated_models: number;
+  contracts: number;
+  review_pct: number;
+  materialized_pct: number;
+  monitored_pct: number;
+  contract_coverage_pct: number;
+  quality_score: number;
+  maturity_score: number;
+  impacted_models: number;
+  top_blockers: { title: string; count: number }[];
+}
+
+export interface ModelImpactResponse {
+  summary: ModelImpactSummary;
+  models: ModelImpactRow[];
+}
+
 export interface ContractSummary {
   id: string;
   model_name: string;
@@ -802,6 +840,8 @@ export const api = {
   models: () => fetchJSON<ModelSummary[]>("/models"),
 
   model: (name: string) => fetchJSON<ModelDetail>(`/models/${name}`),
+
+  modelImpact: () => fetchJSON<ModelImpactResponse>("/models/impact"),
 
   approveModel: (name: string) =>
     fetchJSON<{ name: string; status: string }>(`/models/${name}/approve`, {

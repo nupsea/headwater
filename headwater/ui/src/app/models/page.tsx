@@ -5,6 +5,7 @@ import {
   api,
   type ModelSummary,
   type ModelDetail,
+  type ModelImpactResponse,
   type InsightsResponse,
   type GraphData,
   type GraphPatterns,
@@ -21,6 +22,7 @@ export default function ModelsPage() {
   const { toast } = useToast();
   const [models, setModels] = useState<ModelSummary[]>([]);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
+  const [impact, setImpact] = useState<ModelImpactResponse | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<ModelDetail | null>(null);
   const [message, setMessage] = useState("");
@@ -35,7 +37,10 @@ export default function ModelsPage() {
   const refresh = () =>
     api
       .models()
-      .then(setModels)
+      .then((nextModels) => {
+        setModels(nextModels);
+        return api.modelImpact().then(setImpact);
+      })
       .catch(() => setMessage("Generate models from the Dashboard first."));
 
   useEffect(() => {
@@ -43,6 +48,10 @@ export default function ModelsPage() {
     api
       .insights()
       .then(setInsights)
+      .catch(() => {});
+    api
+      .modelImpact()
+      .then(setImpact)
       .catch(() => {});
   }, []);
 
@@ -394,6 +403,91 @@ export default function ModelsPage() {
               sub={`${rejected.length} rejected`}
             />
           </div>
+
+          {impact && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <div className="bg-card border border-border rounded-lg p-5">
+                <div className="text-xs text-muted uppercase tracking-wide mb-1">
+                  Model Maturity
+                </div>
+                <div className="text-3xl font-bold">
+                  {Math.round(impact.summary.maturity_score)}%
+                </div>
+                <div className="text-xs text-muted mt-2">
+                  {impact.summary.reviewed_marts}/{impact.summary.mart_models} marts reviewed ·{" "}
+                  {impact.summary.materialized_models} materialized ·{" "}
+                  {impact.summary.monitored_models} monitored
+                </div>
+              </div>
+              <div className="bg-card border border-border rounded-lg p-5">
+                <div className="text-xs text-muted uppercase tracking-wide mb-1">
+                  Impacted Models
+                </div>
+                <div className="text-3xl font-bold">
+                  {impact.summary.impacted_models}
+                </div>
+                <div className="text-xs text-muted mt-2">
+                  {impact.summary.invalidated_models} invalidated by drift or quality failures
+                </div>
+              </div>
+              <div className="bg-card border border-border rounded-lg p-5">
+                <div className="text-xs text-muted uppercase tracking-wide mb-3">
+                  Top Blockers
+                </div>
+                {impact.summary.top_blockers.length > 0 ? (
+                  <div className="space-y-2">
+                    {impact.summary.top_blockers.map((blocker) => (
+                      <div key={blocker.title} className="flex justify-between text-sm">
+                        <span>{blocker.title}</span>
+                        <span className="text-muted">{blocker.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-sm text-muted">No model maturity blockers.</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {impact && impact.models.some((m) => m.blockers.length > 0) && (
+            <div className="bg-card border border-border rounded-lg overflow-hidden">
+              <div className="px-5 py-3 border-b border-border">
+                <h3 className="text-sm font-semibold">Model Impact Queue</h3>
+                <p className="text-xs text-muted">
+                  Models blocked by review, materialization, drift, or quality failures.
+                </p>
+              </div>
+              <div className="divide-y divide-border">
+                {impact.models
+                  .filter((m) => m.blockers.length > 0)
+                  .slice(0, 8)
+                  .map((model) => (
+                    <button
+                      key={model.name}
+                      onClick={() => {
+                        setSelected(model.name);
+                        setShowSection("browse");
+                      }}
+                      className="w-full px-5 py-3 text-left hover:bg-background transition-colors"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="font-mono text-sm">{model.name}</div>
+                          <div className="text-xs text-muted">
+                            {model.maturity_state} · downstream{" "}
+                            {model.downstream_models.length} · contracts {model.contracts}
+                          </div>
+                        </div>
+                        <div className="text-xs text-warning text-right">
+                          {model.blockers.join(", ")}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+              </div>
+            </div>
+          )}
 
           {!graphData ? (
             <div className="bg-card border border-border rounded-lg p-8 text-center">

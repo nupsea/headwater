@@ -14,3 +14,5 @@ class EventType(StrEnum):
     SYNC_FAILED = "sync_failed"
     SCHEMA_DRIFT_DETECTED = "schema_drift_detected"
     QUALITY_CHECKS_FAILED = "quality_checks_failed"
+    MODEL_REVIEWED = "model_reviewed"
+    MODEL_IMPACTED = "model_impacted"

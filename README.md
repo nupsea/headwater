@@ -209,6 +209,7 @@ make ui                    # UI only
 |---|---|---|
 | POST | `/api/generate` | Generate models and contracts |
 | GET | `/api/models` | List all models (staging + mart) |
+| GET | `/api/models/impact` | Model maturity, blockers, downstream impact, and contract coverage |
 | GET | `/api/models/{name}` | Model detail with SQL, assumptions, questions |
 | POST | `/api/models/{name}/approve` | Approve a proposed mart model |
 | POST | `/api/models/{name}/reject` | Reject a proposed mart model |

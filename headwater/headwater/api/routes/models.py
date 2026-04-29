@@ -7,9 +7,12 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from headwater.core.events import EventType
 from headwater.generator.contracts import generate_contracts
 from headwater.generator.marts import generate_mart_models
 from headwater.generator.staging import generate_staging_models
+from headwater.services.model_maturity import build_model_impact_report
+from headwater.services.source_sync import SourceSyncService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -36,6 +39,15 @@ async def generate_models(
     request.app.state.pipeline["mart_models"] = marts
     request.app.state.pipeline["contracts"] = contracts
 
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is not None:
+        _persist_models_and_contracts(
+            store,
+            staging + marts,
+            contracts,
+            source_name=discovery.source.name,
+        )
+
     return {
         "staging_models": len(staging),
         "mart_models": len(marts),
@@ -60,6 +72,28 @@ async def list_models(request: Request):
         }
         for m in all_models
     ]
+
+
+@router.get("/models/impact")
+async def model_impact(request: Request):
+    """Return model maturity and impact analysis for the current pipeline."""
+    pipeline = request.app.state.pipeline
+    all_models = pipeline["staging_models"] + pipeline["mart_models"]
+    store = getattr(request.app.state, "metadata_store", None)
+    latest_quality = store.get_latest_quality_report() if store is not None else None
+    sources = store.list_sources() if store is not None else []
+    discovery = pipeline.get("discovery")
+    table_sources = {}
+    if discovery is not None:
+        table_sources = {table.name: discovery.source.name for table in discovery.tables}
+    return build_model_impact_report(
+        models=all_models,
+        contracts=pipeline.get("contracts", []),
+        execution_results=pipeline.get("execution_results", []),
+        latest_quality=latest_quality,
+        sources=sources,
+        table_sources=table_sources,
+    )
 
 
 @router.get("/models/{model_name}")
@@ -90,11 +124,21 @@ async def approve_model(request: Request, model_name: str):
     model.status = "approved"
     store = getattr(request.app.state, "metadata_store", None)
     if store is not None:
+        store.update_model_status(model_name, "approved")
         store.record_decision(
             "model",
             model_name,
             "approved",
             payload={"previous_status": prev_status},
+        )
+        SourceSyncService(request).record_event(
+            EventType.MODEL_REVIEWED,
+            f"Model '{model_name}' approved",
+            source_name=_current_source_name(request),
+            severity="info",
+            artifact_type="model",
+            artifact_id=model_name,
+            invalidates=["models", "briefing"],
         )
     return {"name": model.name, "status": model.status}
 
@@ -111,13 +155,32 @@ async def reject_model(request: Request, model_name: str):
     model.status = "rejected"
     store = getattr(request.app.state, "metadata_store", None)
     if store is not None:
+        store.update_model_status(model_name, "rejected")
         store.record_decision(
             "model",
             model_name,
             "rejected",
             payload={"previous_status": prev_status},
         )
+        SourceSyncService(request).record_event(
+            EventType.MODEL_REVIEWED,
+            f"Model '{model_name}' rejected",
+            source_name=_current_source_name(request),
+            severity="info",
+            artifact_type="model",
+            artifact_id=model_name,
+            invalidates=["models", "briefing"],
+        )
     return {"name": model.name, "status": model.status}
+
+
+def _current_source_name(request: Request) -> str:
+    discovery = request.app.state.pipeline.get("discovery")
+    if discovery is not None:
+        return discovery.source.name
+    store = getattr(request.app.state, "metadata_store", None)
+    sources = store.list_sources() if store is not None else []
+    return sources[-1]["name"] if sources else "source"
 
 
 class AnswerItem(BaseModel):
@@ -160,3 +223,37 @@ async def get_model_answers(request: Request, model_name: str):
     if store is not None:
         answers = store.get_model_answers(model_name)
     return {"model_name": model_name, "answers": answers}
+
+
+def _persist_models_and_contracts(
+    store,
+    models: list,
+    contracts: list,
+    *,
+    source_name: str,
+) -> None:
+    for model in models:
+        store.upsert_model(
+            name=model.name,
+            source_name=source_name,
+            model_type=model.model_type,
+            sql_text=model.sql,
+            description=model.description,
+            source_tables=model.source_tables,
+            depends_on=model.depends_on,
+            status=model.status,
+            assumptions=getattr(model, "assumptions", []),
+            questions=getattr(model, "questions", []),
+        )
+    for contract in contracts:
+        store.upsert_contract(
+            id_=contract.id or f"{contract.model_name}_{contract.rule_type}_{contract.column_name}",
+            model_name=contract.model_name,
+            rule_type=contract.rule_type,
+            expression=contract.expression,
+            column_name=contract.column_name,
+            severity=contract.severity,
+            description=contract.description,
+            confidence=contract.confidence,
+            status=contract.status,
+        )

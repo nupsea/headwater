@@ -254,6 +254,13 @@ class TestModels:
         # 8 staging + at least 1 mart (pattern-matched)
         assert len(models) >= 9
 
+    def test_generate_persists_models_for_maturity(self, client):
+        self._setup(client)
+        store = client.app.state.metadata_store
+        models = store.get_models("source")
+        assert len(models) >= 9
+        assert any(m["model_type"] == "mart" for m in models)
+
     def test_get_model(self, client):
         self._setup(client)
         resp = client.get("/api/models/stg_zones")
@@ -271,6 +278,11 @@ class TestModels:
         resp = client.post(f"/api/models/{mart['name']}/approve")
         assert resp.status_code == 200
         assert resp.json()["status"] == "approved"
+        persisted = {
+            model["name"]: model
+            for model in client.app.state.metadata_store.get_models("source")
+        }
+        assert persisted[mart["name"]]["status"] == "approved"
 
     def test_reject_model(self, client):
         self._setup(client)
@@ -281,6 +293,20 @@ class TestModels:
         resp = client.post(f"/api/models/{mart['name']}/reject")
         assert resp.status_code == 200
         assert resp.json()["status"] == "rejected"
+
+    def test_model_impact_report(self, client):
+        self._setup(client)
+        resp = client.get("/api/models/impact")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["summary"]["total_models"] >= 9
+        assert data["summary"]["mart_models"] >= 1
+        assert data["summary"]["impacted_models"] >= 1
+        assert any(
+            blocker["title"] == "Needs human review"
+            for blocker in data["summary"]["top_blockers"]
+        )
+        assert any(m["maturity_state"] == "review_pending" for m in data["models"])
 
     def test_approve_non_proposed(self, client):
         self._setup(client)
@@ -299,6 +325,8 @@ class TestExecution:
         # Only staging models are approved by default
         assert len(results) == 8
         assert all(r["success"] for r in results)
+        impact = client.get("/api/models/impact").json()
+        assert impact["summary"]["materialized_models"] == 8
 
     def test_execute_no_models(self, client):
         resp = client.post("/api/execute")
