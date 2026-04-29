@@ -197,12 +197,15 @@ export function ConnectorWizard({ open, onClose, onCreated }: Props) {
                   onChange={(v) => setForm((f) => ({ ...f, uri: v }))}
                 />
               ) : null}
-              {chosen.id === "json" || chosen.id === "csv" || chosen.id === "duckdb" ? (
+              {chosen.id === "json" ||
+              chosen.id === "csv" ||
+              chosen.id === "duckdb" ||
+              chosen.id === "sqlite" ? (
                 <Field
                   label="Path"
                   hint={
-                    chosen.id === "duckdb"
-                      ? "Absolute path to a .duckdb database file"
+                    chosen.id === "duckdb" || chosen.id === "sqlite"
+                      ? "Absolute path to a local database file"
                       : "Absolute path to a directory of files"
                   }
                   value={form.path ?? ""}

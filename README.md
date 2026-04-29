@@ -141,7 +141,7 @@ Every approve, reject, and edit is recorded. Headwater computes description acce
 | JSON / NDJSON | Supported | Load local directory files into DuckDB for discovery, profiling, models, and contracts |
 | CSV | Supported | Load local directory files into DuckDB for discovery, profiling, models, and contracts |
 | DuckDB | Supported | Read an existing local DuckDB database file without mutating it |
-| SQLite | Planned | Lightweight local database connector after the capability protocol lands |
+| SQLite | Supported | Read an existing local SQLite database file without mutating it |
 | MySQL | Planned | OLTP connector after Postgres/CSV/JSON are refactored to the shared protocol |
 | Snowflake / BigQuery | Planned | Observe-mode warehouse connectors after source sync, drift, and quality history are reliable |
 | Glue / Unity Catalog / Iceberg REST | Planned | Metadata-first catalog connectors after source lifecycle is mature |

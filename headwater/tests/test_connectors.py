@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import duckdb
@@ -16,6 +17,7 @@ from headwater.connectors.registry import (
     get_connector_capabilities,
     list_connector_catalog,
 )
+from headwater.connectors.sqlite_loader import SQLiteConnector
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 from headwater.profiler.schema import extract_schema
@@ -87,6 +89,10 @@ class TestRegistry:
         c = get_connector("duckdb")
         assert isinstance(c, DuckDBConnector)
 
+    def test_get_sqlite(self):
+        c = get_connector("sqlite")
+        assert isinstance(c, SQLiteConnector)
+
     def test_get_unknown(self):
         with pytest.raises(ConnectorError):
             get_connector("mongo")
@@ -96,30 +102,36 @@ class TestRegistry:
         assert catalog["json"]["status"] == "supported"
         assert catalog["csv"]["status"] == "supported"
         assert catalog["duckdb"]["status"] == "supported"
+        assert catalog["sqlite"]["status"] == "supported"
         assert catalog["postgres"]["status"] == "supported"
         assert catalog["mysql"]["status"] == "planned"
         assert catalog["json"]["supported"] is True
         assert catalog["mysql"]["supported"] is False
         assert catalog["json"]["capabilities"]["list_tables"] is True
         assert catalog["duckdb"]["capabilities"]["execute_readonly"] is True
+        assert catalog["sqlite"]["capabilities"]["execute_readonly"] is True
         assert catalog["json"]["capabilities"]["sample_arrow"] is True
         assert catalog["mysql"]["capabilities"]["test"] is False
 
     def test_connector_status_helper(self):
         assert connector_status("postgres") == "supported"
         assert connector_status("duckdb") == "supported"
+        assert connector_status("sqlite") == "supported"
         assert connector_status("mysql") == "planned"
         assert connector_status("mongo") is None
 
     def test_connector_capabilities_helper(self):
         json_caps = get_connector_capabilities("json")
         duckdb_caps = get_connector_capabilities("duckdb")
+        sqlite_caps = get_connector_capabilities("sqlite")
         postgres_caps = get_connector_capabilities("postgres")
         mysql_caps = get_connector_capabilities("mysql")
 
         assert json_caps.load_to_duckdb is True
         assert duckdb_caps.load_to_duckdb is True
         assert duckdb_caps.execute_readonly is True
+        assert sqlite_caps.load_to_duckdb is True
+        assert sqlite_caps.execute_readonly is True
         assert postgres_caps.execute_readonly is True
         assert postgres_caps.load_to_duckdb is False
         assert mysql_caps.test is False
@@ -212,6 +224,42 @@ class TestDuckDBConnector:
                     name="missing_duckdb",
                     type="duckdb",
                     path=str(tmp_path / "missing.duckdb"),
+                )
+            )
+
+
+class TestSQLiteConnector:
+    def test_sqlite_load_to_duckdb_copies_source_tables(self, tmp_path: Path):
+        db_path = tmp_path / "source.sqlite"
+        source = sqlite3.connect(db_path)
+        try:
+            source.execute("CREATE TABLE users (user_id INTEGER, email TEXT)")
+            source.execute("INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com')")
+            source.commit()
+        finally:
+            source.close()
+
+        loader = SQLiteConnector()
+        loader.connect(SourceConfig(name="sample_sqlite", type="sqlite", path=str(db_path)))
+        target = duckdb.connect(":memory:")
+        try:
+            tables = loader.load_to_duckdb(target, "env_health")
+            count = target.execute('SELECT COUNT(*) FROM "env_health"."users"').fetchone()[0]
+        finally:
+            target.close()
+            loader.close()
+
+        assert tables == ["users"]
+        assert count == 2
+
+    def test_sqlite_connect_missing_path(self, tmp_path: Path):
+        loader = SQLiteConnector()
+        with pytest.raises(ConnectorError):
+            loader.connect(
+                SourceConfig(
+                    name="missing_sqlite",
+                    type="sqlite",
+                    path=str(tmp_path / "missing.sqlite"),
                 )
             )
 

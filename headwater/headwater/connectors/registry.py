@@ -7,12 +7,14 @@ from headwater.connectors.csv_loader import CsvLoader
 from headwater.connectors.duckdb_loader import DuckDBConnector
 from headwater.connectors.json_loader import JsonLoader
 from headwater.connectors.postgres_loader import PostgresConnector
+from headwater.connectors.sqlite_loader import SQLiteConnector
 from headwater.core.exceptions import ConnectorError
 
 _REGISTRY: dict[str, type] = {
     "json": JsonLoader,
     "csv": CsvLoader,
     "duckdb": DuckDBConnector,
+    "sqlite": SQLiteConnector,
     "postgres": PostgresConnector,
 }
 
@@ -123,8 +125,8 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Embedded",
         "color": "#003b57",
         "glyph": "SL",
-        "status": "planned",
-        "supported": False,
+        "status": "supported",
+        "supported": True,
     },
     {
         "id": "trino",

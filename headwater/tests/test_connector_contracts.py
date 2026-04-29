@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import duckdb
@@ -9,6 +10,7 @@ import duckdb
 from headwater.connectors.csv_loader import CsvLoader
 from headwater.connectors.duckdb_loader import DuckDBConnector
 from headwater.connectors.json_loader import JsonLoader
+from headwater.connectors.sqlite_loader import SQLiteConnector
 from headwater.core.models import SourceConfig
 from tests.connectors.contract import assert_connector_contract
 
@@ -62,6 +64,29 @@ def test_duckdb_connector_contract(tmp_path: Path):
     assert_connector_contract(
         DuckDBConnector(),
         SourceConfig(name="duckdb_sample", type="duckdb", path=str(db_path)),
+        expected_tables={"users", "orders"},
+        expected_columns={
+            "users": {"user_id", "email"},
+            "orders": {"order_id", "amount"},
+        },
+    )
+
+
+def test_sqlite_connector_contract(tmp_path: Path):
+    db_path = tmp_path / "sample.sqlite"
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("CREATE TABLE users (user_id INTEGER PRIMARY KEY, email TEXT, age INTEGER)")
+        con.execute("INSERT INTO users VALUES (1, 'a@example.com', 30), (2, 'b@example.com', 41)")
+        con.execute("CREATE TABLE orders (order_id INTEGER, user_id INTEGER, amount REAL)")
+        con.execute("INSERT INTO orders VALUES (10, 1, 20.5), (11, 2, 31.0)")
+        con.commit()
+    finally:
+        con.close()
+
+    assert_connector_contract(
+        SQLiteConnector(),
+        SourceConfig(name="sqlite_sample", type="sqlite", path=str(db_path)),
         expected_tables={"users", "orders"},
         expected_columns={
             "users": {"user_id", "email"},

@@ -42,7 +42,7 @@ This RFP replaces broad claims with an implementation plan anchored in current c
 - **Drift is not fully wired**: schema snapshot and drift report storage exist, but the discovery persistence flow does not consistently create drift reports.
 - **Statistical drift is missing**: schema drift detects structural change, but Headwater also needs value distribution, null-rate, cardinality, row-count, freshness, and referential-integrity drift.
 - **Quality state is incomplete**: quality report results are not persisted as a durable history that Briefing and Insights can reliably aggregate.
-- **Connector support is narrower than public copy**: JSON, CSV, DuckDB, and Postgres are real; broad catalog, warehouse, Parquet, and enterprise connector claims should be treated as planned.
+- **Connector support is narrower than public copy**: JSON, CSV, DuckDB, SQLite, and Postgres are real; broad catalog, warehouse, Parquet, and enterprise connector claims should be treated as planned.
 - **Events are under-modeled**: sync events exist, but the system needs a normalized event contract for all pipeline and human-review actions.
 - **Model maturity is coarse**: statuses do not yet express drafted, reviewed, approved, materialized, monitored, deprecated, and impacted-by-change.
 - **Decision intelligence is not modeled**: there is no first-class link between sources, metrics, models, contracts, insights, and business decisions.

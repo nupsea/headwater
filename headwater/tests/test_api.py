@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -46,10 +47,12 @@ class TestSourcesCatalog:
         assert connectors["json"]["status"] == "supported"
         assert connectors["csv"]["status"] == "supported"
         assert connectors["duckdb"]["status"] == "supported"
+        assert connectors["sqlite"]["status"] == "supported"
         assert connectors["mysql"]["status"] == "planned"
         assert connectors["mysql"]["supported"] is False
         assert connectors["json"]["capabilities"]["list_tables"] is True
         assert connectors["duckdb"]["capabilities"]["load_to_duckdb"] is True
+        assert connectors["sqlite"]["capabilities"]["load_to_duckdb"] is True
         assert connectors["postgres"]["capabilities"]["execute_readonly"] is True
         assert connectors["mysql"]["capabilities"]["test"] is False
 
@@ -141,6 +144,37 @@ class TestSourcesCatalog:
         assert result["tables_discovered"] == 2
 
         detail = client.get("/api/sources/sample_duckdb").json()
+        assert detail["tables"] == 2
+        assert detail["latest_run_status"] == "succeeded"
+
+    def test_sqlite_source_can_be_registered_and_synced(self, client, tmp_path):
+        db_path = tmp_path / "source.sqlite"
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute("CREATE TABLE users (user_id INTEGER, email TEXT)")
+            con.execute("INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com')")
+            con.execute("CREATE TABLE orders (order_id INTEGER, user_id INTEGER, amount REAL)")
+            con.execute("INSERT INTO orders VALUES (10, 1, 20.5), (11, 2, 31.0)")
+            con.commit()
+        finally:
+            con.close()
+
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_sqlite", "type": "sqlite", "path": str(db_path)},
+        )
+        assert create.status_code == 201
+
+        test = client.post("/api/sources/sample_sqlite/test")
+        assert test.status_code == 200
+        assert test.json()["tables"] == 2
+
+        sync = client.post("/api/sources/sample_sqlite/sync")
+        assert sync.status_code == 200
+        result = sync.json()
+        assert result["tables_discovered"] == 2
+
+        detail = client.get("/api/sources/sample_sqlite").json()
         assert detail["tables"] == 2
         assert detail["latest_run_status"] == "succeeded"
 
