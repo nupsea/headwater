@@ -565,6 +565,33 @@ class TestMartGenerator:
         assert 'AVG(f."_90th_percentile_aqi") AS avg__90th_percentile_aqi' in model.sql
         assert 'SUM(f."_90th_percentile_aqi") AS total__90th_percentile_aqi' in model.sql
 
+    def test_aggregation_sanitizes_metric_column_refs(self):
+        from headwater.core.models import ColumnInfo
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="aqi", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="daily_pm25",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(
+                            name="1st_max_value", dtype="float64", semantic_type="metric"
+                        ),
+                        ColumnInfo(
+                            name="90th_percentile_aqi", dtype="float64", semantic_type="metric"
+                        ),
+                    ],
+                ),
+            ],
+            relationships=[],
+        )
+
+        model = next(m for m in generate_mart_models(discovery) if m.name == "mart_daily_pm25_summary")
+
+        assert 'AVG("_1st_max_value") AS avg__1st_max_value' in model.sql
+        assert 'MIN("_90th_percentile_aqi") AS min__90th_percentile_aqi' in model.sql
+
 
 # ---------------------------------------------------------------------------
 # Contract generator tests

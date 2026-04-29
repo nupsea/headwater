@@ -407,7 +407,9 @@ def _render_aggregation(
     metric_cols = candidate.candidate_columns
 
     metric_lines = "\n".join(
-        f'    AVG("{c}") AS avg_{c},\n    MIN("{c}") AS min_{c},\n    MAX("{c}") AS max_{c},'
+        f'    AVG("{_sql_identifier(c)}") AS avg_{_sql_identifier(c)},\n'
+        f'    MIN("{_sql_identifier(c)}") AS min_{_sql_identifier(c)},\n'
+        f'    MAX("{_sql_identifier(c)}") AS max_{_sql_identifier(c)},'
         for c in metric_cols[:5]
     )
 
