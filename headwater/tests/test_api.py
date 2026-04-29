@@ -275,7 +275,14 @@ class TestModels:
         mart = next(
             m for m in models_resp.json() if m["model_type"] == "mart" and m["status"] == "proposed"
         )
-        resp = client.post(f"/api/models/{mart['name']}/approve")
+        resp = client.post(
+            f"/api/models/{mart['name']}/approve",
+            json={
+                "reviewer": "analyst@example.com",
+                "reason": "Looks aligned with the source grain",
+                "diff_summary": "No SQL edits",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["status"] == "approved"
         persisted = {
@@ -283,6 +290,10 @@ class TestModels:
             for model in client.app.state.metadata_store.get_models("source")
         }
         assert persisted[mart["name"]]["status"] == "approved"
+        reviews = client.get(f"/api/models/{mart['name']}/reviews").json()["reviews"]
+        assert reviews[0]["decision"] == "approved"
+        assert reviews[0]["reviewer"] == "analyst@example.com"
+        assert reviews[0]["reason"] == "Looks aligned with the source grain"
 
     def test_reject_model(self, client):
         self._setup(client)
@@ -290,9 +301,16 @@ class TestModels:
         mart = next(
             m for m in models_resp.json() if m["model_type"] == "mart" and m["status"] == "proposed"
         )
-        resp = client.post(f"/api/models/{mart['name']}/reject")
+        resp = client.post(
+            f"/api/models/{mart['name']}/reject",
+            json={"reason": "The aggregation grain is ambiguous"},
+        )
         assert resp.status_code == 200
         assert resp.json()["status"] == "rejected"
+        store = client.app.state.metadata_store
+        reviews = store.list_model_reviews(mart["name"])
+        assert reviews[0]["decision"] == "rejected"
+        assert reviews[0]["reason"] == "The aggregation grain is ambiguous"
 
     def test_model_impact_report(self, client):
         self._setup(client)

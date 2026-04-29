@@ -18,6 +18,13 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+class ReviewPayload(BaseModel):
+    reviewer: str | None = None
+    reason: str | None = None
+    diff_summary: str | None = None
+    payload: dict | None = None
+
+
 @router.post("/generate")
 async def generate_models(
     request: Request,
@@ -108,7 +115,7 @@ async def get_model(request: Request, model_name: str):
 
 
 @router.post("/models/{model_name}/approve")
-async def approve_model(request: Request, model_name: str):
+async def approve_model(request: Request, model_name: str, body: ReviewPayload | None = None):
     """Approve a proposed model for execution."""
     pipeline = request.app.state.pipeline
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
@@ -124,27 +131,42 @@ async def approve_model(request: Request, model_name: str):
     model.status = "approved"
     store = getattr(request.app.state, "metadata_store", None)
     if store is not None:
+        review = body or ReviewPayload()
+        source_name = _current_source_name(request)
+        payload = {"previous_status": prev_status, **(review.payload or {})}
         store.update_model_status(model_name, "approved")
+        review_id = store.record_model_review(
+            model_name,
+            "approved",
+            source_name=source_name,
+            reviewer=review.reviewer,
+            reason=review.reason,
+            diff_summary=review.diff_summary,
+            payload=payload,
+        )
         store.record_decision(
             "model",
             model_name,
             "approved",
-            payload={"previous_status": prev_status},
+            reason=review.reason,
+            payload={**payload, "review_id": review_id},
         )
         SourceSyncService(request).record_event(
             EventType.MODEL_REVIEWED,
             f"Model '{model_name}' approved",
-            source_name=_current_source_name(request),
+            source_name=source_name,
             severity="info",
             artifact_type="model",
             artifact_id=model_name,
+            detail=review.reason,
+            payload={"review_id": review_id},
             invalidates=["models", "briefing"],
         )
     return {"name": model.name, "status": model.status}
 
 
 @router.post("/models/{model_name}/reject")
-async def reject_model(request: Request, model_name: str):
+async def reject_model(request: Request, model_name: str, body: ReviewPayload | None = None):
     """Reject a proposed model."""
     pipeline = request.app.state.pipeline
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
@@ -155,20 +177,35 @@ async def reject_model(request: Request, model_name: str):
     model.status = "rejected"
     store = getattr(request.app.state, "metadata_store", None)
     if store is not None:
+        review = body or ReviewPayload()
+        source_name = _current_source_name(request)
+        payload = {"previous_status": prev_status, **(review.payload or {})}
         store.update_model_status(model_name, "rejected")
+        review_id = store.record_model_review(
+            model_name,
+            "rejected",
+            source_name=source_name,
+            reviewer=review.reviewer,
+            reason=review.reason,
+            diff_summary=review.diff_summary,
+            payload=payload,
+        )
         store.record_decision(
             "model",
             model_name,
             "rejected",
-            payload={"previous_status": prev_status},
+            reason=review.reason,
+            payload={**payload, "review_id": review_id},
         )
         SourceSyncService(request).record_event(
             EventType.MODEL_REVIEWED,
             f"Model '{model_name}' rejected",
-            source_name=_current_source_name(request),
+            source_name=source_name,
             severity="info",
             artifact_type="model",
             artifact_id=model_name,
+            detail=review.reason,
+            payload={"review_id": review_id},
             invalidates=["models", "briefing"],
         )
     return {"name": model.name, "status": model.status}
@@ -181,6 +218,15 @@ def _current_source_name(request: Request) -> str:
     store = getattr(request.app.state, "metadata_store", None)
     sources = store.list_sources() if store is not None else []
     return sources[-1]["name"] if sources else "source"
+
+
+@router.get("/models/{model_name}/reviews")
+async def list_model_reviews(request: Request, model_name: str):
+    """Return review history for a model."""
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        return {"model_name": model_name, "reviews": []}
+    return {"model_name": model_name, "reviews": store.list_model_reviews(model_name)}
 
 
 class AnswerItem(BaseModel):

@@ -20,6 +20,7 @@ def test_init_creates_tables(meta: MetadataStore):
     assert "relationships" in names
     assert "models" in names
     assert "contracts" in names
+    assert "model_reviews" in names
     assert "quality_runs" in names
     assert "quality_results" in names
     assert "decisions" in names
@@ -125,6 +126,25 @@ def test_model_status_update(meta: MetadataStore):
     meta.update_model_status("mart_x", "approved")
     m = meta.get_models("src")
     assert m[0]["status"] == "approved"
+
+
+def test_model_review_roundtrip(meta: MetadataStore):
+    review_id = meta.record_model_review(
+        "mart_x",
+        "rejected",
+        source_name="src",
+        reviewer="analyst@example.com",
+        reason="Grain needs clarification",
+        diff_summary="No SQL edits",
+        payload={"previous_status": "proposed"},
+    )
+
+    reviews = meta.list_model_reviews("mart_x")
+    assert review_id > 0
+    assert len(reviews) == 1
+    assert reviews[0]["decision"] == "rejected"
+    assert reviews[0]["reason"] == "Grain needs clarification"
+    assert reviews[0]["payload"]["previous_status"] == "proposed"
 
 
 def test_contract_roundtrip(meta: MetadataStore):

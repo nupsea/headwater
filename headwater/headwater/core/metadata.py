@@ -103,6 +103,18 @@ CREATE TABLE IF NOT EXISTS models (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS model_reviews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name  TEXT NOT NULL,
+    source_name TEXT,
+    reviewer    TEXT,
+    decision    TEXT NOT NULL,
+    reason      TEXT,
+    diff_summary TEXT,
+    payload_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS contracts (
     id          TEXT PRIMARY KEY,
     model_name  TEXT NOT NULL,
@@ -434,6 +446,20 @@ CREATE TABLE IF NOT EXISTS quality_results (
 );
 CREATE INDEX IF NOT EXISTS idx_quality_results_run
     ON quality_results(run_id);
+
+CREATE TABLE IF NOT EXISTS model_reviews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name  TEXT NOT NULL,
+    source_name TEXT,
+    reviewer    TEXT,
+    decision    TEXT NOT NULL,
+    reason      TEXT,
+    diff_summary TEXT,
+    payload_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_model_reviews_model
+    ON model_reviews(model_name, created_at DESC);
 """
         )
         self.con.commit()
@@ -1585,6 +1611,74 @@ CREATE INDEX IF NOT EXISTS idx_quality_results_run
             (status, name),
         )
         self.con.commit()
+
+    def record_model_review(
+        self,
+        model_name: str,
+        decision: str,
+        *,
+        source_name: str | None = None,
+        reviewer: str | None = None,
+        reason: str | None = None,
+        diff_summary: str | None = None,
+        payload: dict | None = None,
+    ) -> int:
+        """Persist an audit record for a model review decision."""
+        cur = self.con.execute(
+            """
+            INSERT INTO model_reviews
+                (model_name, source_name, reviewer, decision, reason,
+                 diff_summary, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                model_name,
+                source_name,
+                reviewer,
+                decision,
+                reason,
+                diff_summary,
+                json.dumps(payload) if payload is not None else None,
+            ),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_model_reviews(
+        self,
+        model_name: str | None = None,
+        *,
+        source_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return model review records, newest first."""
+        clauses = []
+        params: list = []
+        if model_name:
+            clauses.append("model_name = ?")
+            params.append(model_name)
+        if source_name:
+            clauses.append("source_name = ?")
+            params.append(source_name)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self.con.execute(
+            f"SELECT * FROM model_reviews {where} "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        reviews = []
+        for row in rows:
+            review = dict(row)
+            if review.get("payload_json"):
+                try:
+                    review["payload"] = json.loads(review["payload_json"])
+                except (TypeError, ValueError):
+                    review["payload"] = None
+            else:
+                review["payload"] = None
+            reviews.append(review)
+        return reviews
 
     # -- Contracts ---------------------------------------------------------
 
