@@ -115,6 +115,21 @@ CREATE TABLE IF NOT EXISTS model_reviews (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS model_impacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    drift_report_id INTEGER,
+    model_name  TEXT NOT NULL,
+    impact_type TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    source_table TEXT,
+    source_column TEXT,
+    contract_id TEXT,
+    reason      TEXT NOT NULL,
+    payload_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS contracts (
     id          TEXT PRIMARY KEY,
     model_name  TEXT NOT NULL,
@@ -460,6 +475,25 @@ CREATE TABLE IF NOT EXISTS model_reviews (
 );
 CREATE INDEX IF NOT EXISTS idx_model_reviews_model
     ON model_reviews(model_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS model_impacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    drift_report_id INTEGER,
+    model_name  TEXT NOT NULL,
+    impact_type TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    source_table TEXT,
+    source_column TEXT,
+    contract_id TEXT,
+    reason      TEXT NOT NULL,
+    payload_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_model_impacts_source
+    ON model_impacts(source_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_model_impacts_model
+    ON model_impacts(model_name, created_at DESC);
 """
         )
         self.con.commit()
@@ -1679,6 +1713,75 @@ CREATE INDEX IF NOT EXISTS idx_model_reviews_model
                 review["payload"] = None
             reviews.append(review)
         return reviews
+
+    def save_model_impacts(self, impacts: list[dict]) -> list[int]:
+        """Persist computed model impacts and return inserted ids."""
+        ids: list[int] = []
+        for impact in impacts:
+            cur = self.con.execute(
+                """
+                INSERT INTO model_impacts
+                    (source_name, drift_report_id, model_name, impact_type,
+                     severity, source_table, source_column, contract_id,
+                     reason, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    impact["source_name"],
+                    impact.get("drift_report_id"),
+                    impact["model_name"],
+                    impact["impact_type"],
+                    impact["severity"],
+                    impact.get("source_table"),
+                    impact.get("source_column"),
+                    impact.get("contract_id"),
+                    impact["reason"],
+                    json.dumps(impact.get("payload")) if impact.get("payload") else None,
+                ),
+            )
+            ids.append(cur.lastrowid or 0)
+        self.con.commit()
+        return ids
+
+    def list_model_impacts(
+        self,
+        *,
+        source_name: str | None = None,
+        model_name: str | None = None,
+        drift_report_id: int | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return persisted model impacts, newest first."""
+        clauses = []
+        params: list = []
+        if source_name:
+            clauses.append("source_name = ?")
+            params.append(source_name)
+        if model_name:
+            clauses.append("model_name = ?")
+            params.append(model_name)
+        if drift_report_id is not None:
+            clauses.append("drift_report_id = ?")
+            params.append(drift_report_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self.con.execute(
+            f"SELECT * FROM model_impacts {where} "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        impacts = []
+        for row in rows:
+            impact = dict(row)
+            if impact.get("payload_json"):
+                try:
+                    impact["payload"] = json.loads(impact["payload_json"])
+                except (TypeError, ValueError):
+                    impact["payload"] = None
+            else:
+                impact["payload"] = None
+            impacts.append(impact)
+        return impacts
 
     # -- Contracts ---------------------------------------------------------
 

@@ -533,6 +533,54 @@ def test_persist_discovery_detects_schema_drift(meta: MetadataStore):
     assert events[0]["payload"]["report_id"] == reports[0]["id"]
 
 
+def test_schema_drift_persists_model_impacts(meta: MetadataStore):
+    """Breaking drift against a referenced column invalidates affected models."""
+    request = _metadata_request(meta)
+    _persist_discovery_data(
+        request,
+        _discovery_with_orders(
+            [
+                ColumnInfo(name="id", dtype="int64", nullable=False),
+                ColumnInfo(name="amount", dtype="float64", nullable=True),
+            ]
+        ),
+        "src",
+    )
+    meta.upsert_model(
+        "stg_orders",
+        "src",
+        "staging",
+        'SELECT "id", "amount" FROM orders',
+        source_tables=["orders"],
+        status="approved",
+    )
+
+    _persist_discovery_data(
+        request,
+        _discovery_with_orders(
+            [
+                ColumnInfo(name="id", dtype="int64", nullable=False),
+                ColumnInfo(name="amount", dtype="varchar", nullable=True),
+            ]
+        ),
+        "src",
+    )
+
+    report = meta.get_latest_drift_report("src")
+    assert report is not None
+    impacts = meta.list_model_impacts(source_name="src")
+    assert len(impacts) == 1
+    assert impacts[0]["drift_report_id"] == report["id"]
+    assert impacts[0]["model_name"] == "stg_orders"
+    assert impacts[0]["impact_type"] == "source_column_type_changed"
+    assert impacts[0]["severity"] == "error"
+
+    models = {model["name"]: model for model in meta.get_models("src")}
+    assert models["stg_orders"]["status"] == "invalidated"
+    events = meta.list_events("src")
+    assert any(event["event_type"] == "model_impacted" for event in events)
+
+
 # ---------------------------------------------------------------------------
 # US-402: get_drift_reports (list)
 # ---------------------------------------------------------------------------

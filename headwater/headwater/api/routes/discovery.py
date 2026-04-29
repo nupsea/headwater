@@ -20,6 +20,10 @@ from headwater.core.models import SourceConfig
 from headwater.core.redaction import redact_secrets
 from headwater.drift.schema import build_snapshot_from_discovery, compare_schemas
 from headwater.profiler.engine import discover
+from headwater.services.model_impacts import (
+    compute_schema_drift_model_impacts,
+    invalidated_model_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -398,6 +402,12 @@ def _persist_schema_drift(store, discovery, source_name: str, run_id: int) -> No
         diff.model_dump(),
     )
     if not diff.no_changes:
+        _persist_model_impacts_for_drift(
+            store,
+            source_name,
+            report_id,
+            diff.model_dump(),
+        )
         try:
             store.insert_event(
                 EventType.SCHEMA_DRIFT_DETECTED,
@@ -411,6 +421,50 @@ def _persist_schema_drift(store, discovery, source_name: str, run_id: int) -> No
             )
         except Exception:
             logger.exception("Failed to write normalized drift event for '%s'", source_name)
+
+
+def _persist_model_impacts_for_drift(
+    store,
+    source_name: str,
+    drift_report_id: int,
+    diff: dict,
+) -> None:
+    models = store.get_models(source_name)
+    if not models:
+        return
+    impacts = compute_schema_drift_model_impacts(
+        source_name=source_name,
+        drift_report_id=drift_report_id,
+        diff=diff,
+        models=models,
+    )
+    if not impacts:
+        return
+
+    impact_ids = store.save_model_impacts(impacts)
+    invalidated = invalidated_model_names(impacts)
+    for model_name in invalidated:
+        store.update_model_status(model_name, "invalidated")
+        try:
+            store.insert_event(
+                EventType.MODEL_IMPACTED,
+                f"Model '{model_name}' impacted by schema drift",
+                source_name=source_name,
+                severity="warning",
+                artifact_type="model",
+                artifact_id=model_name,
+                payload={
+                    "drift_report_id": drift_report_id,
+                    "impact_ids": [
+                        impact_id
+                        for impact_id, impact in zip(impact_ids, impacts, strict=False)
+                        if impact["model_name"] == model_name
+                    ],
+                },
+                invalidates=["models", "briefing", "health"],
+            )
+        except Exception:
+            logger.exception("Failed to write model impact event for '%s'", model_name)
 
 
 def _persist_semantic_data(request: Request, discovery, source_name: str) -> None:

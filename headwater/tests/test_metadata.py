@@ -21,6 +21,7 @@ def test_init_creates_tables(meta: MetadataStore):
     assert "models" in names
     assert "contracts" in names
     assert "model_reviews" in names
+    assert "model_impacts" in names
     assert "quality_runs" in names
     assert "quality_results" in names
     assert "decisions" in names
@@ -145,6 +146,31 @@ def test_model_review_roundtrip(meta: MetadataStore):
     assert reviews[0]["decision"] == "rejected"
     assert reviews[0]["reason"] == "Grain needs clarification"
     assert reviews[0]["payload"]["previous_status"] == "proposed"
+
+
+def test_model_impact_roundtrip(meta: MetadataStore):
+    ids = meta.save_model_impacts(
+        [
+            {
+                "source_name": "src",
+                "drift_report_id": 7,
+                "model_name": "stg_orders",
+                "impact_type": "source_column_type_changed",
+                "severity": "error",
+                "source_table": "orders",
+                "source_column": "amount",
+                "reason": "Referenced source column changed type",
+                "payload": {"before": "float64", "after": "varchar"},
+            }
+        ]
+    )
+
+    impacts = meta.list_model_impacts(source_name="src")
+    assert ids[0] > 0
+    assert len(impacts) == 1
+    assert impacts[0]["model_name"] == "stg_orders"
+    assert impacts[0]["severity"] == "error"
+    assert impacts[0]["payload"]["after"] == "varchar"
 
 
 def test_contract_roundtrip(meta: MetadataStore):
