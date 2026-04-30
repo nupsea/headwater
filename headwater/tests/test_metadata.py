@@ -55,6 +55,61 @@ def test_upsert_source_idempotent(meta: MetadataStore):
     assert src["path"] == "/new"
 
 
+def test_delete_source_clears_source_scoped_state(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    run_id = meta.start_run("src")
+    meta.upsert_table("readings", "src", run_id=run_id)
+    meta.upsert_column("readings", "src", "reading_id", "INTEGER", is_primary_key=True)
+    meta.upsert_profile("readings", "reading_id", "src", "INTEGER", {"distinct_count": 3}, run_id)
+    meta.insert_relationship(
+        "src",
+        "readings",
+        "site_id",
+        "sites",
+        "site_id",
+        "many_to_one",
+        1.0,
+        1.0,
+        "declared",
+        run_id=run_id,
+    )
+    meta.save_snapshot(run_id, "src", {"tables": {}})
+    meta.persist_pk_fk("readings", "src", reject_pks=["reading_id"])
+    meta.upsert_model(
+        "mart_readings",
+        "src",
+        "mart",
+        "select 1",
+        "Readings mart",
+        source_tables=["readings"],
+    )
+    meta.record_model_review(
+        "mart_readings",
+        "approved",
+        source_name="src",
+        reviewer="tester",
+    )
+    meta.con.execute(
+        "INSERT INTO contracts (id, model_name, rule_type, expression) "
+        "VALUES ('rule_1', 'mart_readings', 'row_count', 'count(*) > 0')"
+    )
+    meta.con.commit()
+
+    assert meta.delete_source("src") is True
+
+    assert meta.get_source("src") is None
+    assert meta.get_tables("src") == []
+    assert meta.get_columns("readings", "src") == []
+    assert meta.get_profiles("src") == []
+    assert meta.get_relationships("src") == []
+    assert meta.get_decisions("pk_candidate", "src.readings.reading_id") == []
+    assert meta.get_models("src") == []
+    contract = meta.con.execute(
+        "SELECT * FROM contracts WHERE model_name='mart_readings'"
+    ).fetchone()
+    assert contract is None
+
+
 def test_discovery_run_lifecycle(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     run_id = meta.start_run("src")

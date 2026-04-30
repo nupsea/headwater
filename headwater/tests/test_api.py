@@ -116,6 +116,24 @@ class TestSourcesCatalog:
         assert latest_quality["score"] == result["quality_score"]
         assert latest_quality["sync_run_id"] == result["run_id"]
 
+    def test_delete_source_resets_active_source_state(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+        sync = client.post("/api/sources/sample_json/sync")
+        assert sync.status_code == 200
+        assert client.app.state.pipeline["discovery"] is not None
+
+        delete = client.delete("/api/sources/sample_json")
+        assert delete.status_code == 200
+
+        assert client.app.state.pipeline["discovery"] is None
+        assert client.app.state.pipeline["staging_models"] == []
+        assert client.app.state.metadata_store.get_source("sample_json") is None
+        assert client.app.state.metadata_store.get_tables("sample_json") == []
+
     def test_duckdb_source_can_be_registered_and_synced(self, client, tmp_path):
         import duckdb
 

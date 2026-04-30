@@ -129,10 +129,16 @@ export default function SourcesPage() {
   };
 
   const remove = async (name: string) => {
-    if (!confirm(`Disconnect source "${name}"? This removes the source registration but does NOT touch the source database.`)) return;
+    if (
+      !confirm(
+        `Disconnect source "${name}"? This clears Headwater metadata, review decisions, and run history for this source, but does NOT touch the source database.`
+      )
+    ) {
+      return;
+    }
     try {
       await api.deleteSource(name);
-      toast(`Disconnected ${name}`, "success");
+      toast(`Disconnected ${name}; Headwater state cleared`, "success");
       refresh();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

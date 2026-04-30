@@ -213,6 +213,17 @@ async def delete_source_route(request: Request, name: str):
     if not store.get_source(name):
         raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
     store.delete_source(name)
+    pipeline = getattr(request.app.state, "pipeline", None)
+    if pipeline and pipeline.get("discovery"):
+        active_source = pipeline["discovery"].source.name if pipeline["discovery"].source else None
+        if active_source == name:
+            pipeline["discovery"] = None
+            pipeline["catalog"] = None
+            pipeline["staging_models"] = []
+            pipeline["mart_models"] = []
+            pipeline["contracts"] = []
+            pipeline["execution_results"] = []
+            pipeline["quality_report"] = None
     return {"name": name, "deleted": True}
 
 

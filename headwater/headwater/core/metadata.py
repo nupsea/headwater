@@ -583,9 +583,79 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         self.con.commit()
 
     def delete_source(self, name: str) -> bool:
-        """Remove a source and its sync events. Returns True if a row was deleted."""
-        cur = self.con.execute("DELETE FROM sources WHERE name = ?", (name,))
+        """Remove a source and all Headwater-owned state for it.
+
+        This is intentionally a metadata reset for the source only. It does not
+        touch the external database, files, or warehouse objects.
+        """
+        model_rows = self.con.execute(
+            "SELECT name FROM models WHERE source_name = ?",
+            (name,),
+        ).fetchall()
+        model_names = [r["name"] for r in model_rows]
+
+        quality_run_rows = self.con.execute(
+            "SELECT id FROM quality_runs WHERE source_name = ?",
+            (name,),
+        ).fetchall()
+        quality_run_ids = [r["id"] for r in quality_run_rows]
+
+        drift_report_rows = self.con.execute(
+            "SELECT id FROM drift_reports WHERE source_name = ?",
+            (name,),
+        ).fetchall()
+        drift_report_ids = [r["id"] for r in drift_report_rows]
+
+        for run_id in quality_run_ids:
+            self.con.execute("DELETE FROM quality_results WHERE run_id = ?", (run_id,))
+        self.con.execute("DELETE FROM quality_results WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM quality_runs WHERE source_name = ?", (name,))
+
+        for drift_id in drift_report_ids:
+            self.con.execute("DELETE FROM model_impacts WHERE drift_report_id = ?", (drift_id,))
+        self.con.execute("DELETE FROM model_impacts WHERE source_name = ?", (name,))
+
+        for model_name in model_names:
+            self.con.execute("DELETE FROM contracts WHERE model_name = ?", (model_name,))
+            self.con.execute("DELETE FROM execution_results WHERE model_name = ?", (model_name,))
+            self.con.execute("DELETE FROM model_answers WHERE model_name = ?", (model_name,))
+            self.con.execute("DELETE FROM model_reviews WHERE model_name = ?", (model_name,))
+            self.con.execute(
+                "DELETE FROM decisions WHERE artifact_type = 'model' AND artifact_id = ?",
+                (model_name,),
+            )
+        self.con.execute("DELETE FROM model_reviews WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM models WHERE source_name = ?", (name,))
+
+        self.con.execute("DELETE FROM catalog_metrics WHERE project_id = ?", (name,))
+        self.con.execute("DELETE FROM catalog_dimensions WHERE project_id = ?", (name,))
+        self.con.execute("DELETE FROM catalog_entities WHERE project_id = ?", (name,))
+        self.con.execute("DELETE FROM projects WHERE id = ?", (name,))
+
+        self.con.execute("DELETE FROM table_semantic_details WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM companion_docs WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM relationships WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM profiles WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM columns WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM tables WHERE source_name = ?", (name,))
+
+        self.con.execute("DELETE FROM schema_snapshots WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM drift_reports WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM discovery_runs WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM sync_runs WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM sync_events WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM events WHERE source_name = ?", (name,))
+
+        self.con.execute(
+            "DELETE FROM decisions WHERE artifact_id = ? OR artifact_id LIKE ?",
+            (name, f"{name}.%"),
+        )
+        self.con.execute(
+            "DELETE FROM activity_log WHERE artifact_id = ? OR artifact_id LIKE ?",
+            (name, f"{name}.%"),
+        )
+
+        cur = self.con.execute("DELETE FROM sources WHERE name = ?", (name,))
         self.con.commit()
         return cur.rowcount > 0
 
