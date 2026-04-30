@@ -24,6 +24,18 @@ _MUTATING_PATTERN = re.compile(
 # Schemas that DuckDB uses internally; hide from the catalog.
 _INTERNAL_SCHEMAS = {"information_schema", "pg_catalog"}
 _SOURCE_SCHEMAS = ("public", "main")
+_SQL_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+    }
+)
 
 
 def _serialize_value(val):
@@ -45,6 +57,11 @@ def _empty_query_result(sql: str, error: str) -> dict:
         "sql": sql,
         "error": error,
     }
+
+
+def _normalize_sql(sql: str) -> str:
+    """Normalize paste-friendly SQL punctuation before sending it to DuckDB."""
+    return sql.translate(_SQL_QUOTE_TRANSLATION).strip().rstrip(";")
 
 
 def _get_schemas(con) -> list[str]:
@@ -234,7 +251,7 @@ def run_query(request: Request, body: QueryRequest):
     """
     _require_discovery(request)
 
-    sql = body.sql.strip().rstrip(";")
+    sql = _normalize_sql(body.sql)
     if not sql:
         return _empty_query_result(body.sql, "SQL query must not be empty.")
 

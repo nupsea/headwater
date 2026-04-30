@@ -243,6 +243,25 @@ class TestDataQuery:
         assert "status" in data["columns"]
         assert "cnt" in data["columns"]
 
+    def test_query_normalizes_smart_quotes(self, client):
+        resp = client.post(
+            "/api/data/query",
+            json={
+                "sql": (
+                    'SELECT “status”, COUNT(*) AS cnt '
+                    'FROM staging.stg_readings GROUP BY "status"'
+                ),
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["error"] is None
+        assert data["row_count"] > 0
+        assert data["sql"] == (
+            'SELECT "status", COUNT(*) AS cnt '
+            'FROM staging.stg_readings GROUP BY "status"'
+        )
+
     def test_query_rejects_write(self, client):
         for stmt in [
             "INSERT INTO staging.stg_readings VALUES (99, 1.0, 'x', '2024-01-01')",
