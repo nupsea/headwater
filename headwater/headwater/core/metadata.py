@@ -103,6 +103,33 @@ CREATE TABLE IF NOT EXISTS models (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS model_reviews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name  TEXT NOT NULL,
+    source_name TEXT,
+    reviewer    TEXT,
+    decision    TEXT NOT NULL,
+    reason      TEXT,
+    diff_summary TEXT,
+    payload_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS model_impacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    drift_report_id INTEGER,
+    model_name  TEXT NOT NULL,
+    impact_type TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    source_table TEXT,
+    source_column TEXT,
+    contract_id TEXT,
+    reason      TEXT NOT NULL,
+    payload_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS contracts (
     id          TEXT PRIMARY KEY,
     model_name  TEXT NOT NULL,
@@ -271,6 +298,31 @@ CREATE TABLE IF NOT EXISTS execution_results (
     error           TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS quality_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name     TEXT,
+    sync_run_id     INTEGER,
+    total_contracts INTEGER NOT NULL DEFAULT 0,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    failed          INTEGER NOT NULL DEFAULT 0,
+    skipped         INTEGER NOT NULL DEFAULT 0,
+    score           REAL NOT NULL DEFAULT 100.0,
+    status          TEXT NOT NULL DEFAULT 'passing',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS quality_results (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL REFERENCES quality_runs(id),
+    source_name     TEXT,
+    rule_id         TEXT NOT NULL,
+    model_name      TEXT NOT NULL,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    observed_value_json TEXT,
+    message         TEXT DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -320,7 +372,131 @@ class MetadataStore:
             # Data dictionary: confidence and role on columns
             "ALTER TABLE columns ADD COLUMN confidence REAL DEFAULT 0.0",
             "ALTER TABLE columns ADD COLUMN role TEXT",
+            # Multi-source: extend sources for the Sources page
+            "ALTER TABLE sources ADD COLUMN display_name TEXT",
+            "ALTER TABLE sources ADD COLUMN host TEXT",
+            "ALTER TABLE sources ADD COLUMN config_json TEXT",
+            "ALTER TABLE sources ADD COLUMN status TEXT NOT NULL DEFAULT 'idle'",
+            "ALTER TABLE sources ADD COLUMN health INTEGER",
+            "ALTER TABLE sources ADD COLUMN last_sync_at TEXT",
+            "ALTER TABLE sources ADD COLUMN drift_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sources ADD COLUMN auto_sync INTEGER NOT NULL DEFAULT 0",
         ]
+        # sync_events table for source activity history (briefing + sources page)
+        self.con.executescript(
+            """
+CREATE TABLE IF NOT EXISTS sync_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+                severity    TEXT NOT NULL DEFAULT 'info',
+                detail      TEXT,
+                payload     TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sync_events_source
+    ON sync_events(source_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS sync_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    mode        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    started_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    duration_ms INTEGER,
+    tables_seen INTEGER DEFAULT 0,
+    profiles_written INTEGER DEFAULT 0,
+    contracts_checked INTEGER DEFAULT 0,
+    error       TEXT,
+    payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sync_runs_source
+    ON sync_runs(source_name, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT,
+    event_type  TEXT NOT NULL,
+    severity    TEXT NOT NULL DEFAULT 'info',
+    artifact_type TEXT,
+    artifact_id TEXT,
+    summary     TEXT NOT NULL,
+    detail      TEXT,
+    payload_json TEXT,
+    invalidates_json TEXT DEFAULT '[]',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    acknowledged_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_source
+    ON events(source_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_type
+    ON events(event_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS quality_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name     TEXT,
+    sync_run_id     INTEGER,
+    total_contracts INTEGER NOT NULL DEFAULT 0,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    failed          INTEGER NOT NULL DEFAULT 0,
+    skipped         INTEGER NOT NULL DEFAULT 0,
+    score           REAL NOT NULL DEFAULT 100.0,
+    status          TEXT NOT NULL DEFAULT 'passing',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_quality_runs_source
+    ON quality_runs(source_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS quality_results (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL REFERENCES quality_runs(id),
+    source_name     TEXT,
+    rule_id         TEXT NOT NULL,
+    model_name      TEXT NOT NULL,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    observed_value_json TEXT,
+    message         TEXT DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_quality_results_run
+    ON quality_results(run_id);
+
+CREATE TABLE IF NOT EXISTS model_reviews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name  TEXT NOT NULL,
+    source_name TEXT,
+    reviewer    TEXT,
+    decision    TEXT NOT NULL,
+    reason      TEXT,
+    diff_summary TEXT,
+    payload_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_model_reviews_model
+    ON model_reviews(model_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS model_impacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    drift_report_id INTEGER,
+    model_name  TEXT NOT NULL,
+    impact_type TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    source_table TEXT,
+    source_column TEXT,
+    contract_id TEXT,
+    reason      TEXT NOT NULL,
+    payload_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_model_impacts_source
+    ON model_impacts(source_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_model_impacts_model
+    ON model_impacts(model_name, created_at DESC);
+"""
+        )
+        self.con.commit()
         for sql in migrations:
             try:
                 self.con.execute(sql)
@@ -344,11 +520,144 @@ class MetadataStore:
         uri: str | None,
         mode: str = "generate",
     ) -> None:
+        # ON CONFLICT preserves the multi-source columns (status, health, etc.)
+        # that upsert_source_meta may have populated.
         self.con.execute(
-            "INSERT OR REPLACE INTO sources (name, type, path, uri, mode) VALUES (?, ?, ?, ?, ?)",
+            """
+            INSERT INTO sources (name, type, path, uri, mode)
+                 VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                type = excluded.type,
+                path = excluded.path,
+                uri  = excluded.uri,
+                mode = excluded.mode
+            """,
             (name, type_, path, uri, mode),
         )
         self.con.commit()
+
+    def upsert_source_meta(
+        self,
+        name: str,
+        *,
+        display_name: str | None = None,
+        host: str | None = None,
+        config: dict | None = None,
+        status: str | None = None,
+        health: int | None = None,
+        last_sync_at: str | None = None,
+        drift_count: int | None = None,
+        auto_sync: bool | None = None,
+    ) -> None:
+        """Update the multi-source metadata for an existing source row."""
+        fields: list[str] = []
+        params: list = []
+        if display_name is not None:
+            fields.append("display_name = ?")
+            params.append(display_name)
+        if host is not None:
+            fields.append("host = ?")
+            params.append(host)
+        if config is not None:
+            fields.append("config_json = ?")
+            params.append(json.dumps(config))
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if health is not None:
+            fields.append("health = ?")
+            params.append(int(health))
+        if last_sync_at is not None:
+            fields.append("last_sync_at = ?")
+            params.append(last_sync_at)
+        if drift_count is not None:
+            fields.append("drift_count = ?")
+            params.append(int(drift_count))
+        if auto_sync is not None:
+            fields.append("auto_sync = ?")
+            params.append(1 if auto_sync else 0)
+        if not fields:
+            return
+        params.append(name)
+        self.con.execute(f"UPDATE sources SET {', '.join(fields)} WHERE name = ?", params)
+        self.con.commit()
+
+    def delete_source(self, name: str) -> bool:
+        """Remove a source and all Headwater-owned state for it.
+
+        This is intentionally a metadata reset for the source only. It does not
+        touch the external database, files, or warehouse objects.
+        """
+        model_rows = self.con.execute(
+            "SELECT name FROM models WHERE source_name = ?",
+            (name,),
+        ).fetchall()
+        model_names = [r["name"] for r in model_rows]
+
+        quality_run_rows = self.con.execute(
+            "SELECT id FROM quality_runs WHERE source_name = ?",
+            (name,),
+        ).fetchall()
+        quality_run_ids = [r["id"] for r in quality_run_rows]
+
+        drift_report_rows = self.con.execute(
+            "SELECT id FROM drift_reports WHERE source_name = ?",
+            (name,),
+        ).fetchall()
+        drift_report_ids = [r["id"] for r in drift_report_rows]
+
+        for run_id in quality_run_ids:
+            self.con.execute("DELETE FROM quality_results WHERE run_id = ?", (run_id,))
+        self.con.execute("DELETE FROM quality_results WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM quality_runs WHERE source_name = ?", (name,))
+
+        for drift_id in drift_report_ids:
+            self.con.execute("DELETE FROM model_impacts WHERE drift_report_id = ?", (drift_id,))
+        self.con.execute("DELETE FROM model_impacts WHERE source_name = ?", (name,))
+
+        for model_name in model_names:
+            self.con.execute("DELETE FROM contracts WHERE model_name = ?", (model_name,))
+            self.con.execute("DELETE FROM execution_results WHERE model_name = ?", (model_name,))
+            self.con.execute("DELETE FROM model_answers WHERE model_name = ?", (model_name,))
+            self.con.execute("DELETE FROM model_reviews WHERE model_name = ?", (model_name,))
+            self.con.execute(
+                "DELETE FROM decisions WHERE artifact_type = 'model' AND artifact_id = ?",
+                (model_name,),
+            )
+        self.con.execute("DELETE FROM model_reviews WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM models WHERE source_name = ?", (name,))
+
+        self.con.execute("DELETE FROM catalog_metrics WHERE project_id = ?", (name,))
+        self.con.execute("DELETE FROM catalog_dimensions WHERE project_id = ?", (name,))
+        self.con.execute("DELETE FROM catalog_entities WHERE project_id = ?", (name,))
+        self.con.execute("DELETE FROM projects WHERE id = ?", (name,))
+
+        self.con.execute("DELETE FROM table_semantic_details WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM companion_docs WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM relationships WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM profiles WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM columns WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM tables WHERE source_name = ?", (name,))
+
+        self.con.execute("DELETE FROM schema_snapshots WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM drift_reports WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM discovery_runs WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM sync_runs WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM sync_events WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM events WHERE source_name = ?", (name,))
+
+        self.con.execute(
+            "DELETE FROM decisions WHERE artifact_id = ? OR artifact_id LIKE ?",
+            (name, f"{name}.%"),
+        )
+        self.con.execute(
+            "DELETE FROM activity_log WHERE artifact_id = ? OR artifact_id LIKE ?",
+            (name, f"{name}.%"),
+        )
+
+        cur = self.con.execute("DELETE FROM sources WHERE name = ?", (name,))
+        self.con.commit()
+        return cur.rowcount > 0
 
     def get_source(self, name: str) -> dict | None:
         row = self.con.execute("SELECT * FROM sources WHERE name = ?", (name,)).fetchone()
@@ -356,6 +665,230 @@ class MetadataStore:
 
     def list_sources(self) -> list[dict]:
         return [dict(r) for r in self.con.execute("SELECT * FROM sources").fetchall()]
+
+    # -- Sync events -------------------------------------------------------
+
+    def insert_sync_event(
+        self,
+        source_name: str,
+        event_type: str,
+        detail: str,
+        *,
+        severity: str = "info",
+        payload: dict | None = None,
+    ) -> int:
+        cur = self.con.execute(
+            "INSERT INTO sync_events (source_name, event_type, severity, detail, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                source_name,
+                event_type,
+                severity,
+                detail,
+                json.dumps(payload) if payload is not None else None,
+            ),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_sync_events(
+        self,
+        source_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        if source_name:
+            rows = self.con.execute(
+                "SELECT * FROM sync_events WHERE source_name = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (source_name, limit),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM sync_events ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        import contextlib
+
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("payload"):
+                with contextlib.suppress(ValueError, TypeError):
+                    d["payload"] = json.loads(d["payload"])
+            out.append(d)
+        return out
+
+    # -- Sync runs ---------------------------------------------------------
+
+    def start_sync_run(self, source_name: str, mode: str = "full") -> int:
+        """Create a sync_runs row and return its id."""
+        cur = self.con.execute(
+            "INSERT INTO sync_runs (source_name, mode, status) VALUES (?, ?, 'running')",
+            (source_name, mode),
+        )
+        self.con.commit()
+        if cur.lastrowid is None:
+            raise MetadataError("Failed to create sync run")
+        return cur.lastrowid
+
+    def finish_sync_run(
+        self,
+        run_id: int,
+        *,
+        tables_seen: int = 0,
+        profiles_written: int = 0,
+        contracts_checked: int = 0,
+        payload: dict | None = None,
+    ) -> None:
+        """Mark a sync run successful."""
+        self.con.execute(
+            """
+            UPDATE sync_runs
+               SET status = 'succeeded',
+                   finished_at = datetime('now'),
+                   duration_ms = CAST(
+                       (julianday(datetime('now')) - julianday(started_at)) * 86400000
+                       AS INTEGER
+                   ),
+                   tables_seen = ?,
+                   profiles_written = ?,
+                   contracts_checked = ?,
+                   payload_json = ?
+             WHERE id = ?
+            """,
+            (
+                tables_seen,
+                profiles_written,
+                contracts_checked,
+                json.dumps(payload) if payload is not None else None,
+                run_id,
+            ),
+        )
+        self.con.commit()
+
+    def fail_sync_run(self, run_id: int, error: str, payload: dict | None = None) -> None:
+        """Mark a sync run failed."""
+        self.con.execute(
+            """
+            UPDATE sync_runs
+               SET status = 'failed',
+                   finished_at = datetime('now'),
+                   duration_ms = CAST(
+                       (julianday(datetime('now')) - julianday(started_at)) * 86400000
+                       AS INTEGER
+                   ),
+                   error = ?,
+                   payload_json = ?
+             WHERE id = ?
+            """,
+            (error, json.dumps(payload) if payload is not None else None, run_id),
+        )
+        self.con.commit()
+
+    def list_sync_runs(self, source_name: str | None = None, limit: int = 20) -> list[dict]:
+        """Return recent sync runs."""
+        if source_name:
+            rows = self.con.execute(
+                "SELECT * FROM sync_runs WHERE source_name = ? "
+                "ORDER BY started_at DESC, id DESC LIMIT ?",
+                (source_name, limit),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM sync_runs ORDER BY started_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            if d.get("payload_json"):
+                try:
+                    d["payload"] = json.loads(d["payload_json"])
+                except (TypeError, ValueError):
+                    d["payload"] = None
+            out.append(d)
+        return out
+
+    def get_latest_sync_run(self, source_name: str) -> dict | None:
+        """Return the most recent sync run for a source."""
+        row = self.con.execute(
+            "SELECT * FROM sync_runs WHERE source_name = ? "
+            "ORDER BY started_at DESC, id DESC LIMIT 1",
+            (source_name,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    # -- Normalized events -------------------------------------------------
+
+    def insert_event(
+        self,
+        event_type: str,
+        summary: str,
+        *,
+        source_name: str | None = None,
+        severity: str = "info",
+        artifact_type: str | None = None,
+        artifact_id: str | None = None,
+        detail: str | None = None,
+        payload: dict | None = None,
+        invalidates: list[str] | None = None,
+    ) -> int:
+        """Insert a normalized event and return its id."""
+        cur = self.con.execute(
+            """
+            INSERT INTO events
+                (source_name, event_type, severity, artifact_type, artifact_id,
+                 summary, detail, payload_json, invalidates_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_name,
+                event_type,
+                severity,
+                artifact_type,
+                artifact_id,
+                summary,
+                detail,
+                json.dumps(payload) if payload is not None else None,
+                json.dumps(invalidates or []),
+            ),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_events(
+        self,
+        source_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return recent normalized events."""
+        if source_name:
+            rows = self.con.execute(
+                "SELECT * FROM events WHERE source_name = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (source_name, limit),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM events ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            for db_key, out_key, default in (
+                ("payload_json", "payload", None),
+                ("invalidates_json", "invalidates", []),
+            ):
+                if d.get(db_key):
+                    try:
+                        d[out_key] = json.loads(d[db_key])
+                    except (TypeError, ValueError):
+                        d[out_key] = default
+                else:
+                    d[out_key] = default
+            out.append(d)
+        return out
 
     # -- Discovery runs ----------------------------------------------------
 
@@ -519,6 +1052,76 @@ class MetadataStore:
             )
         self.con.commit()
 
+    def get_pk_decision(self, source_name: str, table_name: str, column_name: str) -> str | None:
+        """Return the latest human PK decision for a column, if one exists."""
+        artifact_id = f"{source_name}.{table_name}.{column_name}"
+        row = self.con.execute(
+            "SELECT action FROM decisions "
+            "WHERE artifact_type = 'pk_candidate' AND artifact_id = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (artifact_id,),
+        ).fetchone()
+        return row["action"] if row else None
+
+    def apply_key_decisions_to_discovery(self, discovery) -> None:
+        """Replay saved PK/FK confirmations onto an in-memory discovery result."""
+        source_name = discovery.source.name if discovery.source else ""
+        if not source_name:
+            return
+
+        for table in discovery.tables:
+            for col in table.columns:
+                decision = self.get_pk_decision(source_name, table.name, col.name)
+                if decision == "confirmed":
+                    col.is_primary_key = True
+                    col.semantic_type = "primary_key"
+                    col.role = "identifier"
+                    col.confidence = max(col.confidence, 1.0)
+                elif decision == "rejected":
+                    col.is_primary_key = False
+                    if col.semantic_type == "primary_key":
+                        col.semantic_type = None
+
+        confirmed_rels = self.con.execute(
+            "SELECT id, from_table, from_column, to_table, to_column, rel_type, "
+            "confidence, ref_integrity, detection_source "
+            "FROM relationships "
+            "WHERE source_name = ? AND detection_source IN ('declared', 'confirmed')",
+            (source_name,),
+        ).fetchall()
+        existing = {
+            (r.from_table, r.from_column, r.to_table, r.to_column)
+            for r in discovery.relationships
+        }
+        for row in confirmed_rels:
+            key = (
+                row["from_table"],
+                row["from_column"],
+                row["to_table"],
+                row["to_column"],
+            )
+            if key in existing:
+                continue
+            from headwater.core.models import Relationship
+
+            rel_type = row["rel_type"]
+            if rel_type == "fk":
+                rel_type = "many_to_one"
+            discovery.relationships.append(
+                Relationship(
+                    id=row["id"],
+                    from_table=row["from_table"],
+                    from_column=row["from_column"],
+                    to_table=row["to_table"],
+                    to_column=row["to_column"],
+                    type=rel_type,
+                    confidence=row["confidence"],
+                    referential_integrity=row["ref_integrity"],
+                    source="declared",
+                )
+            )
+            existing.add(key)
+
     def get_tables(self, source_name: str) -> list[dict]:
         return [
             dict(r)
@@ -622,6 +1225,11 @@ class MetadataStore:
             if "is_primary_key" in col and col["is_primary_key"] is not None:
                 sets.append("is_primary_key = ?")
                 params.append(int(col["is_primary_key"]))
+                self.record_decision(
+                    "pk_candidate",
+                    f"{source_name}.{table_name}.{col_name}",
+                    "confirmed" if col["is_primary_key"] else "rejected",
+                )
 
             if lock:
                 sets.append("locked = 1")
@@ -1073,6 +1681,14 @@ class MetadataStore:
         logger.info("rebuild_discovery: found %d relationship rows", len(rel_rows))
         relationships: list[Relationship] = []
         for rrow in rel_rows:
+            rel_type = rrow["rel_type"]
+            if rel_type == "fk":
+                rel_type = "many_to_one"
+            detection_source = rrow["detection_source"]
+            if detection_source in ("confirmed", "llm_inferred"):
+                detection_source = (
+                    "declared" if detection_source == "confirmed" else "inferred_name"
+                )
             relationships.append(
                 Relationship(
                     id=rrow["id"],
@@ -1080,10 +1696,10 @@ class MetadataStore:
                     from_column=rrow["from_column"],
                     to_table=rrow["to_table"],
                     to_column=rrow["to_column"],
-                    type=rrow["rel_type"],
+                    type=rel_type,
                     confidence=rrow["confidence"],
                     referential_integrity=rrow["ref_integrity"],
-                    source=rrow["detection_source"],
+                    source=detection_source,
                 )
             )
 
@@ -1183,6 +1799,143 @@ class MetadataStore:
         )
         self.con.commit()
 
+    def record_model_review(
+        self,
+        model_name: str,
+        decision: str,
+        *,
+        source_name: str | None = None,
+        reviewer: str | None = None,
+        reason: str | None = None,
+        diff_summary: str | None = None,
+        payload: dict | None = None,
+    ) -> int:
+        """Persist an audit record for a model review decision."""
+        cur = self.con.execute(
+            """
+            INSERT INTO model_reviews
+                (model_name, source_name, reviewer, decision, reason,
+                 diff_summary, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                model_name,
+                source_name,
+                reviewer,
+                decision,
+                reason,
+                diff_summary,
+                json.dumps(payload) if payload is not None else None,
+            ),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_model_reviews(
+        self,
+        model_name: str | None = None,
+        *,
+        source_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return model review records, newest first."""
+        clauses = []
+        params: list = []
+        if model_name:
+            clauses.append("model_name = ?")
+            params.append(model_name)
+        if source_name:
+            clauses.append("source_name = ?")
+            params.append(source_name)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self.con.execute(
+            f"SELECT * FROM model_reviews {where} "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        reviews = []
+        for row in rows:
+            review = dict(row)
+            if review.get("payload_json"):
+                try:
+                    review["payload"] = json.loads(review["payload_json"])
+                except (TypeError, ValueError):
+                    review["payload"] = None
+            else:
+                review["payload"] = None
+            reviews.append(review)
+        return reviews
+
+    def save_model_impacts(self, impacts: list[dict]) -> list[int]:
+        """Persist computed model impacts and return inserted ids."""
+        ids: list[int] = []
+        for impact in impacts:
+            cur = self.con.execute(
+                """
+                INSERT INTO model_impacts
+                    (source_name, drift_report_id, model_name, impact_type,
+                     severity, source_table, source_column, contract_id,
+                     reason, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    impact["source_name"],
+                    impact.get("drift_report_id"),
+                    impact["model_name"],
+                    impact["impact_type"],
+                    impact["severity"],
+                    impact.get("source_table"),
+                    impact.get("source_column"),
+                    impact.get("contract_id"),
+                    impact["reason"],
+                    json.dumps(impact.get("payload")) if impact.get("payload") else None,
+                ),
+            )
+            ids.append(cur.lastrowid or 0)
+        self.con.commit()
+        return ids
+
+    def list_model_impacts(
+        self,
+        *,
+        source_name: str | None = None,
+        model_name: str | None = None,
+        drift_report_id: int | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return persisted model impacts, newest first."""
+        clauses = []
+        params: list = []
+        if source_name:
+            clauses.append("source_name = ?")
+            params.append(source_name)
+        if model_name:
+            clauses.append("model_name = ?")
+            params.append(model_name)
+        if drift_report_id is not None:
+            clauses.append("drift_report_id = ?")
+            params.append(drift_report_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self.con.execute(
+            f"SELECT * FROM model_impacts {where} "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        impacts = []
+        for row in rows:
+            impact = dict(row)
+            if impact.get("payload_json"):
+                try:
+                    impact["payload"] = json.loads(impact["payload_json"])
+                except (TypeError, ValueError):
+                    impact["payload"] = None
+            else:
+                impact["payload"] = None
+            impacts.append(impact)
+        return impacts
+
     # -- Contracts ---------------------------------------------------------
 
     def upsert_contract(
@@ -1225,6 +1978,161 @@ class MetadataStore:
         else:
             rows = self.con.execute("SELECT * FROM contracts").fetchall()
         return [dict(r) for r in rows]
+
+    def update_contract_status(self, id_: str, status: str) -> None:
+        self.con.execute("UPDATE contracts SET status = ? WHERE id = ?", (status, id_))
+        self.con.commit()
+
+    def apply_quality_contract_statuses(self, results: list) -> dict:
+        """Update contract runtime statuses from quality check results."""
+        transitions = {"failing": [], "recovered": [], "observing": []}
+        for result in results:
+            if getattr(result, "skipped", False):
+                continue
+            rule_id = getattr(result, "rule_id", "") or ""
+            if not rule_id:
+                continue
+            row = self.con.execute(
+                "SELECT status FROM contracts WHERE id = ?",
+                (rule_id,),
+            ).fetchone()
+            if row is None:
+                continue
+            current = row["status"]
+            if current == "disabled":
+                continue
+
+            next_status = current
+            if not bool(getattr(result, "passed", False)):
+                next_status = "failing"
+            elif current == "failing":
+                next_status = "recovered"
+            elif current == "proposed":
+                next_status = "observing"
+
+            if next_status != current:
+                self.con.execute(
+                    "UPDATE contracts SET status = ? WHERE id = ?",
+                    (next_status, rule_id),
+                )
+                transitions.setdefault(next_status, []).append(rule_id)
+        self.con.commit()
+        return transitions
+
+    # -- Quality Results ----------------------------------------------------
+
+    def save_quality_report(
+        self,
+        source_name: str | None,
+        report,
+        sync_run_id: int | None = None,
+    ) -> int:
+        """Persist a quality report aggregate and its contract results."""
+        previous = self.get_latest_quality_report(source_name)
+        total = int(getattr(report, "total_contracts", 0) or 0)
+        passed = int(getattr(report, "passed", 0) or 0)
+        failed = int(getattr(report, "failed", 0) or 0)
+        skipped = int(getattr(report, "skipped", 0) or 0)
+        score = round((passed / total) * 100, 2) if total else 100.0
+        status = "failing" if failed else "passing"
+        cur = self.con.execute(
+            """
+            INSERT INTO quality_runs
+                (source_name, sync_run_id, total_contracts, passed, failed,
+                 skipped, score, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (source_name, sync_run_id, total, passed, failed, skipped, score, status),
+        )
+        if cur.lastrowid is None:
+            raise MetadataError("Failed to create quality run")
+        run_id = cur.lastrowid
+        for result in getattr(report, "results", []) or []:
+            self.con.execute(
+                """
+                INSERT INTO quality_results
+                    (run_id, source_name, rule_id, model_name, passed,
+                     observed_value_json, message)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    source_name,
+                    getattr(result, "rule_id", "") or "",
+                    getattr(result, "model_name", "") or "",
+                    int(bool(getattr(result, "passed", False))),
+                    json.dumps(getattr(result, "observed_value", None), default=str),
+                    getattr(result, "message", "") or "",
+                ),
+            )
+        transitions = self.apply_quality_contract_statuses(getattr(report, "results", []) or [])
+        if source_name and failed:
+            existing = self.con.execute(
+                "SELECT drift_count FROM sources WHERE name = ?", (source_name,)
+            ).fetchone()
+            if existing is not None:
+                drift_count = int(existing["drift_count"] or 0)
+                health = max(0, min(int(round(score)), 100 - 5 * drift_count))
+                self.con.execute(
+                    "UPDATE sources SET status = 'warning', health = ? WHERE name = ?",
+                    (health, source_name),
+                )
+        elif source_name:
+            existing = self.con.execute(
+                "SELECT drift_count FROM sources WHERE name = ?", (source_name,)
+            ).fetchone()
+            if existing is not None:
+                drift_count = int(existing["drift_count"] or 0)
+                health = max(0, min(int(round(score)), 100 - 5 * drift_count))
+                source_status = "warning" if drift_count else "healthy"
+                self.con.execute(
+                    "UPDATE sources SET status = ?, health = ? WHERE name = ?",
+                    (source_status, health, source_name),
+                )
+        if transitions:
+            report.contract_status_transitions = transitions
+        if previous:
+            report.previous_failed = previous.get("failed", 0)
+        self.con.commit()
+        return run_id
+
+    def get_latest_quality_report(self, source_name: str | None = None) -> dict | None:
+        """Return the latest persisted quality run and its result rows."""
+        if source_name:
+            row = self.con.execute(
+                "SELECT * FROM quality_runs WHERE source_name = ? ORDER BY id DESC LIMIT 1",
+                (source_name,),
+            ).fetchone()
+        else:
+            row = self.con.execute(
+                "SELECT * FROM quality_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        report = dict(row)
+        rows = self.con.execute(
+            "SELECT * FROM quality_results WHERE run_id = ? ORDER BY id",
+            (report["id"],),
+        ).fetchall()
+        results = []
+        for result_row in rows:
+            result = dict(result_row)
+            if result.get("observed_value_json") is not None:
+                try:
+                    result["observed_value"] = json.loads(result["observed_value_json"])
+                except (TypeError, ValueError):
+                    result["observed_value"] = None
+            results.append(result)
+        report["results"] = results
+        return report
+
+    def attach_quality_run_to_sync(self, quality_run_id: int, sync_run_id: int) -> None:
+        """Associate a persisted quality run with its outer source sync run."""
+        self.con.execute(
+            "UPDATE quality_runs SET sync_run_id = ? WHERE id = ?",
+            (sync_run_id, quality_run_id),
+        )
+        self.con.commit()
 
     # -- Execution Results --------------------------------------------------
 
@@ -1361,15 +2269,29 @@ class MetadataStore:
 
         Returns None if no prior snapshot exists (first run).
         """
+        record = self.get_latest_snapshot_record(source_name, before_run_id)
+        if record is None:
+            return None
+        return record["snapshot"]
+
+    def get_latest_snapshot_record(
+        self,
+        source_name: str,
+        before_run_id: int,
+    ) -> dict | None:
+        """Return run metadata and snapshot for the latest prior snapshot."""
         row = self.con.execute(
-            "SELECT snapshot_json FROM schema_snapshots "
+            "SELECT run_id, snapshot_json FROM schema_snapshots "
             "WHERE source_name = ? AND run_id < ? "
             "ORDER BY run_id DESC LIMIT 1",
             (source_name, before_run_id),
         ).fetchone()
         if row is None:
             return None
-        return json.loads(row["snapshot_json"])
+        return {
+            "run_id": row["run_id"],
+            "snapshot": json.loads(row["snapshot_json"]),
+        }
 
     # -- Drift reports (US-401) --------------------------------------------
 
@@ -1380,7 +2302,11 @@ class MetadataStore:
         run_id_to: int,
         diff: dict,
     ) -> int:
-        """Persist a drift report. Returns the new report id."""
+        """Persist a drift report. Returns the new report id.
+
+        If the diff describes real changes, also emits a sync_event and bumps
+        the source's drift counter so the Briefing page can surface it.
+        """
         cur = self.con.execute(
             "INSERT INTO drift_reports "
             "(source_name, run_id_from, run_id_to, diff_json, detected_at) "
@@ -1390,6 +2316,49 @@ class MetadataStore:
         self.con.commit()
         if cur.lastrowid is None:
             raise MetadataError("Failed to create drift report")
+
+        # Skip event emission when nothing changed -- diff exists but is empty.
+        if diff.get("no_changes"):
+            return cur.lastrowid
+
+        added = len(diff.get("tables_added") or [])
+        removed = len(diff.get("tables_removed") or [])
+        changed = len(diff.get("tables_changed") or [])
+        bits = []
+        if added:
+            bits.append(f"{added} table(s) added")
+        if removed:
+            bits.append(f"{removed} table(s) removed")
+        if changed:
+            bits.append(f"{changed} table(s) changed")
+        detail = "Drift detected -- " + ", ".join(bits) if bits else "Drift detected"
+
+        try:
+            self.insert_sync_event(
+                source_name,
+                "drift",
+                detail,
+                severity="warning",
+                payload={
+                    "report_id": cur.lastrowid,
+                    "added": added,
+                    "removed": removed,
+                    "changed": changed,
+                },
+            )
+            existing = self.con.execute(
+                "SELECT drift_count FROM sources WHERE name = ?", (source_name,)
+            ).fetchone()
+            if existing is not None:
+                new_count = (existing["drift_count"] or 0) + 1
+                self.con.execute(
+                    "UPDATE sources SET drift_count = ?, status = 'warning' WHERE name = ?",
+                    (new_count, source_name),
+                )
+                self.con.commit()
+        except Exception:
+            logger.exception("Failed to emit sync_event for drift on '%s'", source_name)
+
         return cur.lastrowid
 
     def get_latest_drift_report(self, source_name: str | None = None) -> dict | None:
@@ -1912,6 +2881,11 @@ class MetadataStore:
                 "WHERE table_name = ? AND source_name = ? AND name = ?",
                 (table_name, source_name, col),
             )
+            self.record_decision(
+                "pk_candidate",
+                f"{source_name}.{table_name}.{col}",
+                "confirmed",
+            )
             counts["pks_confirmed"] += 1
 
         for col in reject_pks or []:
@@ -1920,6 +2894,11 @@ class MetadataStore:
                 "WHERE table_name = ? AND source_name = ? AND name = ?",
                 (table_name, source_name, col),
             )
+            self.record_decision(
+                "pk_candidate",
+                f"{source_name}.{table_name}.{col}",
+                "rejected",
+            )
             counts["pks_rejected"] += 1
 
         for fk in confirm_fks or []:
@@ -1927,7 +2906,7 @@ class MetadataStore:
                 "INSERT OR REPLACE INTO relationships "
                 "(source_name, from_table, from_column, to_table, to_column, "
                 "rel_type, confidence, ref_integrity, detection_source) "
-                "VALUES (?, ?, ?, ?, ?, 'fk', 1.0, 0.0, 'confirmed')",
+                "VALUES (?, ?, ?, ?, ?, 'many_to_one', 1.0, 0.0, 'declared')",
                 (source_name, table_name, fk["from_col"], fk["to_table"], fk["to_col"]),
             )
             counts["fks_confirmed"] += 1

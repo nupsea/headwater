@@ -22,7 +22,7 @@ export function ReviewQueue({
     {
       label: "Dictionary Review",
       count: dictPending,
-      link: "/dictionary",
+      link: "/discovery",
       description: "Tables awaiting column and metadata review",
     },
     {

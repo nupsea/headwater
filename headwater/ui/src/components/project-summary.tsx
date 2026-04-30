@@ -61,6 +61,7 @@ export function ProjectSummary({
   const stageIdx = MATURITY_STAGES.indexOf(
     project.maturity as (typeof MATURITY_STAGES)[number]
   );
+  const blockers = p?.maturity_blockers || [];
 
   return (
     <div className="bg-card border border-border rounded-lg p-5">
@@ -117,58 +118,97 @@ export function ProjectSummary({
 
       {/* Progress grid */}
       {p && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <ProgressFraction
-            label="Tables Reviewed"
-            done={p.tables_reviewed}
-            total={p.tables_discovered}
-            sub={`${p.tables_profiled} profiled, ${p.tables_modeled} modeled`}
-          />
-          <ProgressFraction
-            label="Columns Confirmed"
-            done={p.columns_confirmed}
-            total={p.columns_total}
-            sub={`${p.columns_described} described`}
-          />
-          <ProgressFraction
-            label="Metrics Confirmed"
-            done={p.metrics_confirmed ?? 0}
-            total={p.metrics_defined}
-          />
-          <ProgressFraction
-            label="Dimensions Confirmed"
-            done={p.dimensions_confirmed ?? 0}
-            total={p.dimensions_defined}
-          />
-          <ProgressFraction
-            label="Relationships"
-            done={p.relationships_confirmed}
-            total={p.relationships_detected}
-          />
-          <ProgressFraction
-            label="Quality Contracts"
-            done={p.contracts_enforcing}
-            total={p.quality_contracts}
-            sub={p.contracts_enforcing > 0 ? `${p.contracts_enforcing} enforcing` : "observing"}
-          />
-          <div className="col-span-2">
-            <div className="flex items-baseline justify-between mb-1">
-              <span className="text-xs text-muted">Catalog Coverage</span>
-              <span className="text-sm font-bold font-mono">
-                {Math.round(p.catalog_coverage * 100)}%
-              </span>
-            </div>
-            <div className="h-1 bg-border rounded-full overflow-hidden">
-              <div
-                className="h-full bg-accent rounded-full transition-all"
-                style={{ width: `${p.catalog_coverage * 100}%` }}
-              />
-            </div>
-            <div className="text-[10px] text-muted mt-0.5">
-              Analytical columns represented in the semantic catalog
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <ProgressFraction
+              label="Tables Reviewed"
+              done={p.tables_reviewed}
+              total={p.tables_discovered}
+              sub={`${p.tables_profiled} profiled, ${p.tables_modeled} modeled`}
+            />
+            <ProgressFraction
+              label="Columns Confirmed"
+              done={p.columns_confirmed}
+              total={p.columns_total}
+              sub={`${p.columns_described} described`}
+            />
+            <ProgressFraction
+              label="Metrics Confirmed"
+              done={p.metrics_confirmed ?? 0}
+              total={p.metrics_defined}
+            />
+            <ProgressFraction
+              label="Dimensions Confirmed"
+              done={p.dimensions_confirmed ?? 0}
+              total={p.dimensions_defined}
+            />
+            <ProgressFraction
+              label="Relationships"
+              done={p.relationships_confirmed}
+              total={p.relationships_detected}
+            />
+            <ProgressFraction
+              label="Quality Contracts"
+              done={p.contracts_enforcing}
+              total={p.quality_contracts}
+              sub={
+                p.contracts_enforcing > 0
+                  ? `${p.contracts_enforcing} enforced`
+                  : `${p.contracts_observing ?? 0} observing`
+              }
+            />
+            <div className="col-span-2">
+              <div className="flex items-baseline justify-between mb-1">
+                <span className="text-xs text-muted">Catalog Coverage</span>
+                <span className="text-sm font-bold font-mono">
+                  {Math.round(p.catalog_coverage * 100)}%
+                </span>
+              </div>
+              <div className="h-1 bg-border rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-accent rounded-full transition-all"
+                  style={{ width: `${p.catalog_coverage * 100}%` }}
+                />
+              </div>
+              <div className="text-[10px] text-muted mt-0.5">
+                Analytical columns represented in the semantic catalog
+              </div>
             </div>
           </div>
-        </div>
+
+          {blockers.length > 0 && (
+            <div className="mt-5 border-t border-border pt-4">
+              <div className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">
+                Maturity Blockers
+              </div>
+              <div className="grid gap-2">
+                {blockers.map((blocker) => (
+                  <a
+                    key={`${blocker.title}-${blocker.route}`}
+                    href={blocker.route}
+                    className="flex items-center justify-between gap-3 rounded border border-border px-3 py-2 hover:bg-muted/10"
+                  >
+                    <div>
+                      <div className="text-sm font-medium">{blocker.title}</div>
+                      <div className="text-xs text-muted">{blocker.detail}</div>
+                    </div>
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                        blocker.severity === "critical"
+                          ? "bg-red-100 text-red-800"
+                          : blocker.severity === "warning"
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-blue-100 text-blue-800"
+                      }`}
+                    >
+                      {blocker.severity}
+                    </span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

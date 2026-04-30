@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from headwater.core.classification import is_metric_column
-from headwater.core.models import ColumnInfo, DiscoveryResult, GeneratedModel
+from headwater.core.models import ColumnInfo, DiscoveryResult, GeneratedModel, Relationship
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,8 @@ class MartCandidate:
     proposed_name: str
     assumptions: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
+    join_from_column: str | None = None
+    join_to_column: str | None = None
 
 
 class PatternMatcher:
@@ -86,10 +88,6 @@ class PatternMatcher:
         min_rels, min_metrics, min_rows_entity, min_rows_agg = _get_thresholds()
 
         # Build FK set: (from_table, to_table) pairs
-        fk_pairs = {(r.from_table, r.to_table) for r in discovery.relationships}
-        fk_pairs_reverse = {(r.to_table, r.from_table) for r in discovery.relationships}
-        all_fk_pairs = fk_pairs | fk_pairs_reverse
-
         # Count relationships per table
         rel_count: dict[str, int] = {}
         for r in discovery.relationships:
@@ -99,7 +97,8 @@ class PatternMatcher:
         for table in discovery.tables:
             temporal_cols = self._get_temporal_cols(table.columns)
             metric_cols = self._get_metric_cols(table.columns)
-            dimension_tables = self._get_dimension_tables(table.name, all_fk_pairs, discovery)
+            dimension_relationships = self._get_dimension_relationships(table.name, discovery)
+            dimension_tables = [r.to_table for r in dimension_relationships]
             table_rels = rel_count.get(table.name, 0)
 
             # Archetype 1: period_comparison
@@ -118,7 +117,12 @@ class PatternMatcher:
                     table_rels >= min_rels or len(metric_cols) >= min_metrics
                 ) and table.row_count >= min_rows_entity
                 if passes_gate:
-                    candidate = self._build_entity_summary(table, metric_cols, dimension_tables)
+                    candidate = self._build_entity_summary(
+                        table,
+                        metric_cols,
+                        dimension_tables,
+                        dimension_relationships[0] if dimension_relationships else None,
+                    )
                     candidates.append(candidate)
                     logger.debug(
                         "entity_summary candidate: %s (metrics=%s, dims=%s)",
@@ -160,20 +164,17 @@ class PatternMatcher:
     def _get_metric_cols(self, columns: list[ColumnInfo]) -> list[str]:
         return [col.name for col in columns if is_metric_column(col)]
 
-    def _get_dimension_tables(
+    def _get_dimension_relationships(
         self,
         table_name: str,
-        fk_pairs: set[tuple[str, str]],
         discovery: DiscoveryResult,
-    ) -> list[str]:
-        """Return tables that this table is related to (potential dimension tables)."""
-        result = []
+    ) -> list[Relationship]:
+        """Return outgoing many-to-one relationships from this table."""
+        result: list[Relationship] = []
         for r in discovery.relationships:
-            if r.from_table == table_name:
-                result.append(r.to_table)
-            elif r.to_table == table_name:
-                result.append(r.from_table)
-        return list(set(result))
+            if r.from_table == table_name and r.type in {"many_to_one", "one_to_one"}:
+                result.append(r)
+        return result
 
     def _build_period_comparison(
         self,
@@ -204,8 +205,11 @@ class PatternMatcher:
         table,  # TableInfo
         metric_cols: list[str],
         dimension_tables: list[str],
+        relationship: Relationship | None = None,
     ) -> MartCandidate:
         dim_table = dimension_tables[0]
+        join_from_column = relationship.from_column if relationship else None
+        join_to_column = relationship.to_column if relationship else None
         return MartCandidate(
             archetype="entity_summary",
             candidate_tables=[table.name, dim_table],
@@ -221,6 +225,8 @@ class PatternMatcher:
                 "Should any metrics be summed vs averaged?",
                 "Are there additional dimension tables that should be joined?",
             ],
+            join_from_column=join_from_column,
+            join_to_column=join_to_column,
         )
 
     def _build_aggregation(
@@ -258,10 +264,31 @@ def _render_period_comparison(
     ]
     metric_cols = [c for c in candidate.candidate_columns if c not in time_cols]
     time_col = time_cols[0] if time_cols else "created_at"
+    time_ref = f'"{_sql_identifier(time_col)}"'
+    period_expr = _period_expression(time_ref)
 
-    metric_lines = "\n".join(f'    AVG("{c}") AS avg_{c},' for c in metric_cols[:5])
-    if not metric_lines:
-        metric_lines = "    COUNT(*) AS record_count,"
+    inner_metrics = [
+        f'AVG("{_sql_identifier(c)}") AS avg_{_sql_identifier(c)}'
+        for c in metric_cols[:5]
+    ]
+    if not inner_metrics:
+        inner_metrics = ["COUNT(*) AS record_count"]
+    inner_select = _format_select_items(inner_metrics + ["COUNT(*) AS row_count"], indent=8)
+    outer_metrics = [
+        f"avg_{_sql_identifier(c)} AS current_avg_{_sql_identifier(c)}"
+        for c in metric_cols[:5]
+    ]
+    if not outer_metrics:
+        outer_metrics = ["record_count"]
+    outer_select = _format_select_items(
+        [
+            "period",
+            "row_count",
+            *outer_metrics,
+            "LAG(row_count) OVER (ORDER BY period) AS prev_period_row_count",
+        ],
+        indent=4,
+    )
 
     sql = f"""-- Mart: {candidate.proposed_name}
 -- Archetype: period_comparison
@@ -270,17 +297,13 @@ def _render_period_comparison(
 CREATE OR REPLACE TABLE {target_schema}.{candidate.proposed_name} AS
 WITH by_period AS (
     SELECT
-        DATE_TRUNC('month', CAST("{time_col}" AS DATE)) AS period,
-{metric_lines}
-        COUNT(*) AS row_count
+        DATE_TRUNC('month', {period_expr}) AS period,
+{inner_select}
     FROM staging.stg_{table_name}
     GROUP BY 1
 )
 SELECT
-    period,
-    row_count,
-{metric_lines.replace("AVG(", "    ").replace(" AS avg_", " AS current_avg_")},
-    LAG(row_count) OVER (ORDER BY period) AS prev_period_row_count
+{outer_select}
 FROM by_period
 ORDER BY period"""
 
@@ -300,6 +323,26 @@ ORDER BY period"""
     )
 
 
+def _format_select_items(items: list[str], *, indent: int = 4) -> str:
+    """Format SQL select items with commas between items only."""
+    pad = " " * indent
+    return ",\n".join(f"{pad}{item}" for item in items)
+
+
+def _period_expression(column_ref: str) -> str:
+    """Build a DuckDB date expression that tolerates common source formats."""
+    return (
+        "COALESCE("
+        f"TRY_CAST(CAST({column_ref} AS VARCHAR) AS DATE), "
+        "CAST(TRY_STRPTIME(CAST("
+        f"{column_ref}"
+        " AS VARCHAR), "
+        "['%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%m/%d/%Y', '%m/%d/%Y %H:%M:%S', "
+        "'%m/%d/%Y %I:%M:%S %p']) AS DATE)"
+        ")"
+    )
+
+
 def _render_entity_summary(
     candidate: MartCandidate,
     target_schema: str,
@@ -310,15 +353,25 @@ def _render_entity_summary(
     metric_cols = candidate.candidate_columns
 
     metric_lines = "\n".join(
-        f'    AVG(f."{c}") AS avg_{c},\n    SUM(f."{c}") AS total_{c},' for c in metric_cols[:3]
+        f'    AVG(f."{_sql_identifier(c)}") AS avg_{_sql_identifier(c)},\n'
+        f'    SUM(f."{_sql_identifier(c)}") AS total_{_sql_identifier(c)},'
+        for c in metric_cols[:3]
     )
     if not metric_lines:
         metric_lines = "    COUNT(*) AS record_count,"
 
-    dim_key = dim_table[:-1] if dim_table.endswith("s") else dim_table
-    join_clause = (
-        f"JOIN staging.stg_{dim_table} d ON f.{dim_key}_id = d.{dim_key}_id" if dim_table else ""
-    )
+    join_clause = ""
+    if dim_table:
+        if candidate.join_from_column and candidate.join_to_column:
+            join_clause = (
+                f'JOIN staging.stg_{dim_table} d '
+                f'ON f."{_sql_identifier(candidate.join_from_column)}" '
+                f'= d."{_sql_identifier(candidate.join_to_column)}"'
+            )
+        else:
+            dim_key = dim_table[:-1] if dim_table.endswith("s") else dim_table
+            dim_key_ref = _sql_identifier(f"{dim_key}_id")
+            join_clause = f'JOIN staging.stg_{dim_table} d ON f."{dim_key_ref}" = d."{dim_key_ref}"'
 
     sql = f"""-- Mart: {candidate.proposed_name}
 -- Archetype: entity_summary
@@ -358,7 +411,9 @@ def _render_aggregation(
     metric_cols = candidate.candidate_columns
 
     metric_lines = "\n".join(
-        f'    AVG("{c}") AS avg_{c},\n    MIN("{c}") AS min_{c},\n    MAX("{c}") AS max_{c},'
+        f'    AVG("{_sql_identifier(c)}") AS avg_{_sql_identifier(c)},\n'
+        f'    MIN("{_sql_identifier(c)}") AS min_{_sql_identifier(c)},\n'
+        f'    MAX("{_sql_identifier(c)}") AS max_{_sql_identifier(c)},'
         for c in metric_cols[:5]
     )
 
@@ -388,6 +443,19 @@ FROM staging.stg_{table_name}"""
 def _humanize_name(name: str) -> str:
     """Convert snake_case to Title Case."""
     return name.replace("_", " ").title()
+
+
+def _sql_identifier(name: str) -> str:
+    """Return a safe SQL identifier matching staging aliases."""
+    import re
+
+    safe = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    if not safe:
+        return "_col"
+    if safe[0].isdigit():
+        safe = f"_{safe}"
+    return safe
 
 
 _ARCHETYPE_RENDERERS = {

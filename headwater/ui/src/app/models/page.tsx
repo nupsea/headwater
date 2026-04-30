@@ -5,6 +5,7 @@ import {
   api,
   type ModelSummary,
   type ModelDetail,
+  type ModelImpactResponse,
   type InsightsResponse,
   type GraphData,
   type GraphPatterns,
@@ -14,17 +15,18 @@ import { StatusBadge } from "@/components/status-badge";
 import { SqlViewer } from "@/components/sql-viewer";
 import { StatCard } from "@/components/stat-card";
 import { SuggestionsList } from "@/components/suggestions-list";
-import { RelationshipGraph } from "@/components/relationship-graph";
+import { ModelERD } from "@/components/model-erd";
 import { QuestionResolver } from "@/components/question-resolver";
 
 export default function ModelsPage() {
   const { toast } = useToast();
   const [models, setModels] = useState<ModelSummary[]>([]);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
+  const [impact, setImpact] = useState<ModelImpactResponse | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<ModelDetail | null>(null);
   const [message, setMessage] = useState("");
-  const [showSection, setShowSection] = useState<string>("overview");
+  const [showSection, setShowSection] = useState<string>("graph");
   // Map of model name -> ModelDetail for the Review Queue tab
   const [reviewDetails, setReviewDetails] = useState<Record<string, ModelDetail>>({});
   const [reviewDetailErrors, setReviewDetailErrors] = useState<Record<string, string>>({});
@@ -35,7 +37,10 @@ export default function ModelsPage() {
   const refresh = () =>
     api
       .models()
-      .then(setModels)
+      .then((nextModels) => {
+        setModels(nextModels);
+        return api.modelImpact().then(setImpact);
+      })
       .catch(() => setMessage("Generate models from the Dashboard first."));
 
   useEffect(() => {
@@ -43,6 +48,10 @@ export default function ModelsPage() {
     api
       .insights()
       .then(setInsights)
+      .catch(() => {});
+    api
+      .modelImpact()
+      .then(setImpact)
       .catch(() => {});
   }, []);
 
@@ -154,12 +163,10 @@ export default function ModelsPage() {
   );
 
   const sections = [
-    { id: "overview", label: "Overview" },
-    { id: "lineage", label: "Lineage & Coverage" },
-    { id: "graph", label: "Relationships" },
+    { id: "graph", label: "Overview" },
+    { id: "lineage", label: "Lineage" },
     { id: "review", label: `Review Queue (${proposed.length})` },
     { id: "browse", label: "Browse All" },
-    { id: "suggestions", label: "Suggestions" },
   ];
 
   return (
@@ -370,9 +377,118 @@ export default function ModelsPage() {
         />
       )}
 
-      {/* Relationships (Graph) */}
+      {/* Overview (Relationship Graph + Summary) */}
       {showSection === "graph" && (
         <div className="space-y-6">
+          {/* Compact model summary strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <StatCard
+              label="Total Models"
+              value={models.length}
+              sub={`${staging.length} staging, ${marts.length} marts`}
+            />
+            <StatCard
+              label="Approved"
+              value={approved.length}
+              sub={`of ${models.length} total`}
+            />
+            <StatCard
+              label="Pending Review"
+              value={proposed.length}
+              sub={proposed.length > 0 ? "mart models need decisions" : "all reviewed"}
+            />
+            <StatCard
+              label="Executed"
+              value={executed.length}
+              sub={`${rejected.length} rejected`}
+            />
+          </div>
+
+          {impact && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <div className="bg-card border border-border rounded-lg p-5">
+                <div className="text-xs text-muted uppercase tracking-wide mb-1">
+                  Model Maturity
+                </div>
+                <div className="text-3xl font-bold">
+                  {Math.round(impact.summary.maturity_score)}%
+                </div>
+                <div className="text-xs text-muted mt-2">
+                  {impact.summary.reviewed_marts}/{impact.summary.mart_models} marts reviewed ·{" "}
+                  {impact.summary.materialized_models} materialized ·{" "}
+                  {impact.summary.monitored_models} monitored
+                </div>
+              </div>
+              <div className="bg-card border border-border rounded-lg p-5">
+                <div className="text-xs text-muted uppercase tracking-wide mb-1">
+                  Impacted Models
+                </div>
+                <div className="text-3xl font-bold">
+                  {impact.summary.impacted_models}
+                </div>
+                <div className="text-xs text-muted mt-2">
+                  {impact.summary.invalidated_models} invalidated by drift or quality failures
+                </div>
+              </div>
+              <div className="bg-card border border-border rounded-lg p-5">
+                <div className="text-xs text-muted uppercase tracking-wide mb-3">
+                  Top Blockers
+                </div>
+                {impact.summary.top_blockers.length > 0 ? (
+                  <div className="space-y-2">
+                    {impact.summary.top_blockers.map((blocker) => (
+                      <div key={blocker.title} className="flex justify-between text-sm">
+                        <span>{blocker.title}</span>
+                        <span className="text-muted">{blocker.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-sm text-muted">No model maturity blockers.</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {impact && impact.models.some((m) => m.blockers.length > 0) && (
+            <div className="bg-card border border-border rounded-lg overflow-hidden">
+              <div className="px-5 py-3 border-b border-border">
+                <h3 className="text-sm font-semibold">Model Impact Queue</h3>
+                <p className="text-xs text-muted">
+                  Models blocked by review, materialization, drift, or quality failures.
+                </p>
+              </div>
+              <div className="divide-y divide-border">
+                {impact.models
+                  .filter((m) => m.blockers.length > 0)
+                  .slice(0, 8)
+                  .map((model) => (
+                    <button
+                      key={model.name}
+                      onClick={() => {
+                        setSelected(model.name);
+                        setShowSection("browse");
+                      }}
+                      className="w-full px-5 py-3 text-left hover:bg-background transition-colors"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="font-mono text-sm">{model.name}</div>
+                          <div className="text-xs text-muted">
+                            {model.maturity_state} · downstream{" "}
+                            {model.downstream_models.length} · contracts {model.contracts}
+                          </div>
+                        </div>
+                        <div className="text-xs text-warning text-right">
+                          {model.blockers.join(", ")}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+              </div>
+            </div>
+          )}
+
           {!graphData ? (
             <div className="bg-card border border-border rounded-lg p-8 text-center">
               <p className="text-sm text-muted">
@@ -406,10 +522,87 @@ export default function ModelsPage() {
                 )}
               </div>
 
-              {/* Interactive force-directed graph */}
-              <div className="bg-card border border-border rounded-lg overflow-hidden" style={{ height: 500 }}>
-                <RelationshipGraph graphData={graphData} />
-              </div>
+              {/* Adaptive ERD: clustered table cards, pannable + zoomable, drill-down to columns */}
+              <ModelERD
+                graphData={graphData}
+                tableHealth={insights?.table_health || []}
+                height={620}
+              />
+
+              {/* Edges table beneath -- tabular reference for scanning all FKs */}
+              {graphData.edges.length > 0 && (
+                <div className="bg-card border border-border rounded-lg overflow-hidden">
+                  <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+                    <h3 className="text-sm font-semibold">Foreign Key Relationships</h3>
+                    <span className="text-xs text-muted">{graphData.edges.length} total</span>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-background/50 sticky top-0">
+                        <tr className="border-b border-border">
+                          {["From", "Via FK", "To", "Integrity", "Type"].map((h) => (
+                            <th
+                              key={h}
+                              className="px-4 py-2 text-left text-[10px] font-semibold text-muted uppercase tracking-wider"
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {graphData.edges.map((e, i) => {
+                          const integrity = Math.round(e.ref_integrity * 100);
+                          const strong = e.ref_integrity >= 0.95 && !e.nullable;
+                          return (
+                            <tr
+                              key={i}
+                              className="border-b border-border/40 last:border-0 hover:bg-background/40"
+                            >
+                              <td className="px-4 py-2 font-mono text-xs">
+                                {e.source}
+                                <span className="text-muted">.{e.from_column}</span>
+                              </td>
+                              <td className="px-4 py-2 font-mono text-xs text-muted">
+                                {e.from_column} → {e.to_column}
+                              </td>
+                              <td className="px-4 py-2 font-mono text-xs">
+                                {e.target}
+                                <span className="text-muted">.{e.to_column}</span>
+                              </td>
+                              <td className="px-4 py-2">
+                                <div className="flex items-center gap-2">
+                                  <div className="w-16 h-1.5 bg-border rounded-full overflow-hidden">
+                                    <div
+                                      className="h-full rounded-full"
+                                      style={{
+                                        width: `${integrity}%`,
+                                        background: strong ? "var(--success)" : "var(--warning)",
+                                      }}
+                                    />
+                                  </div>
+                                  <span
+                                    className="text-xs font-mono"
+                                    style={{ color: strong ? "var(--success)" : "var(--warning)" }}
+                                  >
+                                    {integrity}%
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="px-4 py-2 text-xs text-muted">
+                                {e.rel_type}
+                                {e.nullable && (
+                                  <span className="ml-1 text-amber-600">·nullable</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               {/* Patterns */}
               {graphPatterns && (

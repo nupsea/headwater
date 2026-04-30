@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from headwater.core.models import ColumnInfo
 from headwater.profiler.key_detection import (
     detect_composite_keys,
     suggest_foreign_keys,
@@ -121,6 +122,18 @@ class TestSuggestForeignKeys:
         assert len(result) >= 1
         assert result[0].to_table == "customers"
 
+    def test_key_suffix_matching(self):
+        tables = {
+            "transactions": [_profile("account_key", "TEXT", 500, 100, 0)],
+            "accounts": [_profile("account_key", "TEXT", 100, 100, 0)],
+        }
+        result = suggest_foreign_keys(tables, {"accounts": ["account_key"]})
+        assert len(result) >= 1
+        assert result[0].from_table == "transactions"
+        assert result[0].from_column == "account_key"
+        assert result[0].to_table == "accounts"
+        assert result[0].to_column == "account_key"
+
     def test_skips_own_pk(self):
         tables = {
             "zones": [_profile("zone_id", "INTEGER", 50, 50, 0)],
@@ -176,6 +189,45 @@ class TestCompositeKeys:
         # zone_id is fully unique (95%+), so it's excluded as single-column PK candidate
         # With only 2 columns and zone_id excluded, no composite key possible
         assert len(result) == 0
+        con.close()
+
+    def test_prefers_state_county_over_metric_measure(self):
+        import duckdb
+
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE SCHEMA IF NOT EXISTS main")
+        con.execute("""
+            CREATE TABLE main.aqi_by_county (
+                state VARCHAR,
+                county VARCHAR,
+                good_days INTEGER
+            )
+        """)
+        con.execute("""
+            INSERT INTO main.aqi_by_county VALUES
+                ('CA', 'Albany', 10),
+                ('CA', 'Erie', 20),
+                ('NY', 'Albany', 10),
+                ('NY', 'Erie', 20)
+        """)
+        profiles = [
+            _profile("state", "TEXT", 4, 2, 0),
+            _profile("county", "TEXT", 4, 2, 0),
+            _profile("good_days", "INTEGER", 4, 2, 0),
+        ]
+        columns = [
+            ColumnInfo(name="state", dtype="varchar", role="dimension"),
+            ColumnInfo(name="county", dtype="varchar", role="dimension"),
+            ColumnInfo(name="good_days", dtype="int64", role="metric"),
+        ]
+
+        result = detect_composite_keys(
+            con, "aqi_by_county", "main", profiles, columns=columns
+        )
+
+        assert result
+        assert result[0].columns == ["state", "county"]
+        assert "good_days" not in result[0].columns
         con.close()
 
     def test_empty_profiles(self):

@@ -7,6 +7,7 @@ import {
   type StatisticalInsight,
   type ExplorationResult,
   type ExploreSuggestionsResponse,
+  type ExploreInsightsResponse,
   type DimensionOption,
 } from "@/lib/api";
 import { ResultChart } from "@/components/result-chart";
@@ -40,13 +41,15 @@ export default function ExplorePage() {
   const [showSql, setShowSql] = useState(false);
   const [showRepairHistory, setShowRepairHistory] = useState(false);
   const [showTable, setShowTable] = useState(false);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsLoaded, setInsightsLoaded] = useState(false);
   const [activeTab, setActiveTab] = useState<"questions" | "insights">(
     "questions"
   );
 
   const [reviewPct, setReviewPct] = useState(100);
 
-  useEffect(() => {
+  const loadSuggestions = () => {
     api
       .exploreSuggestions()
       .then((res: ExploreSuggestionsResponse) => {
@@ -54,8 +57,39 @@ export default function ExplorePage() {
         setInsights(res.insights || []);
         if (typeof res.review_pct === "number") setReviewPct(res.review_pct);
       })
-      .catch(() => setError("Run the pipeline from the Dashboard first."));
+      .catch((e: Error) => {
+        const msg = String(e.message || e);
+        if (msg.includes("400") || msg.toLowerCase().includes("no discovery")) {
+          setError(
+            "No data to ask about yet. Connect a source on the Sources page and run the pipeline first."
+          );
+        } else {
+          setError(msg);
+        }
+      });
+  };
+
+  useEffect(() => {
+    loadSuggestions();
   }, []);
+
+  const loadInsights = () => {
+    if (insightsLoaded || insightsLoading) {
+      return;
+    }
+    setInsightsLoading(true);
+    api
+      .exploreInsights()
+      .then((res: ExploreInsightsResponse) => {
+        setInsights(res.insights || []);
+        setInsightsLoaded(true);
+      })
+      .catch((e: Error) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setInsightsLoaded(true);
+      })
+      .finally(() => setInsightsLoading(false));
+  };
 
   const askQuestion = async (q: string) => {
     setLoading(true);
@@ -86,20 +120,26 @@ export default function ExplorePage() {
   if (error && !suggestions.length) {
     return (
       <div>
-        <h1 className="text-2xl font-bold mb-4">Explore Data</h1>
-        <div className="bg-card border border-border rounded-lg p-8 max-w-xl mx-auto text-center">
-          <h2 className="text-lg font-semibold mb-2">No Data to Explore Yet</h2>
-          <p className="text-sm text-muted mb-4">
-            Ask natural language questions about your data and get instant answers
-            with visualizations. The explorer works on top of your materialized
-            staging and mart models.
-          </p>
-          <p className="text-sm text-muted mb-4">
-            Run the full pipeline from the Dashboard first, or use the CLI:
-          </p>
-          <div className="bg-background border border-border rounded p-4 text-left text-sm font-mono text-muted">
-            <p className="mb-1">headwater demo</p>
-            <p>headwater discover --source /path/to/data</p>
+        <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">
+          Analyze
+        </div>
+        <h1 className="text-2xl font-bold mb-4">Ask a question</h1>
+        <div className="bg-card border border-border rounded-lg p-8 max-w-xl">
+          <h2 className="text-lg font-semibold mb-2">Nothing to ask about yet</h2>
+          <p className="text-sm text-muted mb-4">{error}</p>
+          <div className="flex gap-2">
+            <a
+              href="/sources"
+              className="px-4 py-2 bg-accent text-white rounded-md text-sm font-medium"
+            >
+              Connect a source →
+            </a>
+            <button
+              onClick={loadSuggestions}
+              className="px-4 py-2 border border-border rounded-md text-sm font-medium hover:bg-background"
+            >
+              Retry
+            </button>
           </div>
         </div>
       </div>
@@ -125,10 +165,10 @@ export default function ExplorePage() {
             </span>
           </div>
           <a
-            href="/dictionary"
+            href="/discovery"
             className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 transition-colors shrink-0 ml-4"
           >
-            Review Dictionary
+            Review Discovery
           </a>
         </div>
       )}
@@ -414,7 +454,10 @@ export default function ExplorePage() {
           Suggested Questions ({suggestions.length})
         </button>
         <button
-          onClick={() => setActiveTab("insights")}
+          onClick={() => {
+            setActiveTab("insights");
+            loadInsights();
+          }}
           className={`pb-2 text-sm font-medium transition-colors ${
             activeTab === "insights"
               ? "border-b-2 border-foreground text-foreground"
@@ -479,7 +522,11 @@ export default function ExplorePage() {
       {/* Statistical Insights tab */}
       {activeTab === "insights" && (
         <div className="space-y-3">
-          {insights.length === 0 ? (
+          {insightsLoading ? (
+            <p className="text-muted text-sm">
+              Looking for statistically significant patterns...
+            </p>
+          ) : insights.length === 0 ? (
             <p className="text-muted text-sm">
               No statistically significant patterns detected yet. Run the
               pipeline to materialize models and surface insights.

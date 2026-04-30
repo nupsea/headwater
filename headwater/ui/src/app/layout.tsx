@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import Link from "next/link";
-import { ProjectSidebar } from "@/components/project-sidebar";
+import { AppSidebar } from "@/components/app-sidebar";
+import { AppTopbar } from "@/components/app-topbar";
+import { RerunBanner } from "@/components/rerun-banner";
 import { ClientLayout } from "@/components/client-layout";
 import "./globals.css";
 
@@ -20,17 +21,6 @@ export const metadata: Metadata = {
   description: "Advisory data platform for data professionals",
 };
 
-const navItems = [
-  { href: "/", label: "Dashboard" },
-  { href: "/discovery", label: "Discovery" },
-  { href: "/dictionary", label: "Dictionary" },
-  { href: "/models", label: "Models" },
-  { href: "/quality", label: "Quality" },
-  { href: "/data", label: "Data" },
-  { href: "/explore", label: "Explore" },
-  { href: "/settings", label: "Settings" },
-];
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -41,31 +31,19 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">
-        <nav className="border-b border-border bg-card px-6 py-3 flex items-center gap-8">
-          <Link href="/" className="font-bold text-lg tracking-tight">
-            Headwater
-          </Link>
-          <div className="flex gap-6 text-sm">
-            {navItems.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className="text-muted hover:text-foreground transition-colors"
-              >
-                {item.label}
-              </Link>
-            ))}
+      <body className="min-h-full flex flex-col bg-background text-foreground">
+        <ClientLayout>
+          <AppTopbar />
+          <div className="flex flex-1 overflow-hidden">
+            <AppSidebar />
+            <main className="flex-1 overflow-y-auto">
+              <div className="mx-auto w-full max-w-[min(1800px,100vw)] px-6 py-6">
+                <RerunBanner />
+                {children}
+              </div>
+            </main>
           </div>
-        </nav>
-        <div className="flex flex-1 overflow-hidden">
-          <ProjectSidebar />
-          <main className="flex-1 px-6 py-6 overflow-y-auto">
-            <div className="max-w-7xl mx-auto w-full">
-              <ClientLayout>{children}</ClientLayout>
-            </div>
-          </main>
-        </div>
+        </ClientLayout>
       </body>
     </html>
   );

@@ -9,6 +9,8 @@ const statusStyles: Record<string, string> = {
   executed: "bg-accent/15 text-accent",
   observing: "bg-accent/15 text-accent",
   enforced: "bg-success/15 text-success",
+  failing: "bg-danger/15 text-danger",
+  recovered: "bg-success/15 text-success",
   disabled: "bg-muted/15 text-muted",
 };
 

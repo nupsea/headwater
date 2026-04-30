@@ -27,6 +27,21 @@ async def execute_models(request: Request):
 
     results = run_models(backend, all_models, only_approved=True)
     pipeline["execution_results"] = results
+    store = getattr(request.app.state, "metadata_store", None)
+    model_by_name = {m.name: m for m in all_models}
+    for result in results:
+        if result.success and result.model_name in model_by_name:
+            model_by_name[result.model_name].status = "executed"
+        if store is not None:
+            store.save_execution_result(
+                model_name=result.model_name,
+                success=result.success,
+                row_count=result.row_count,
+                execution_time_ms=result.execution_time_ms,
+                error=result.error,
+            )
+            if result.success:
+                store.update_model_status(result.model_name, "executed")
 
     return [
         {

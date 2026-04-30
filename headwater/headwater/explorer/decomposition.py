@@ -671,6 +671,7 @@ class QueryDecomposer:
         # Resolve raw table names to schema-qualified references
         # (e.g. "complaints" -> "staging.stg_complaints")
         table_refs = self._resolve_tables(all_tables)
+        table_aliases = {name: f'"{name}"' for name in all_tables}
 
         # Collect all tables involved
         tables_needed: dict[str, str] = {primary_table: table_refs[primary_table]}
@@ -686,7 +687,7 @@ class QueryDecomposer:
         for d in dimensions:
             if d.is_filter:
                 continue
-            tref = table_refs[d.table]
+            tref = table_aliases[d.table]
             col_ref = f'{tref}."{d.column}"'
             alias = d.display_name.lower().replace(" ", "_")
             select_parts.append(f'{col_ref} AS "{alias}"')
@@ -702,7 +703,7 @@ class QueryDecomposer:
             return None, warnings
 
         # Build FROM + JOINs
-        from_clause = table_refs[primary_table]
+        from_clause = f"{table_refs[primary_table]} AS {table_aliases[primary_table]}"
         join_clauses: list[str] = []
 
         for d in dimensions:
@@ -712,12 +713,14 @@ class QueryDecomposer:
                 join_info = _parse_join_path(d.join_path)
                 if join_info:
                     from_t, from_c, to_t, to_c = join_info
-                    from_ref = table_refs.get(from_t, f'"{from_t}"')
+                    from_ref = table_aliases.get(from_t, f'"{from_t}"')
                     to_ref = table_refs.get(to_t, f'"{to_t}"')
+                    to_alias = table_aliases.get(to_t, f'"{to_t}"')
                     dim_def = self._get_dimension(d.dimension_name)
                     join_type = "LEFT JOIN" if (dim_def and dim_def.join_nullable) else "JOIN"
                     join_clause = (
-                        f'{join_type} {to_ref} ON {from_ref}."{from_c}" = {to_ref}."{to_c}"'
+                        f'{join_type} {to_ref} AS {to_alias} '
+                        f'ON {from_ref}."{from_c}" = {to_alias}."{to_c}"'
                     )
                     if join_clause not in join_clauses:
                         join_clauses.append(join_clause)
@@ -731,7 +734,7 @@ class QueryDecomposer:
         where_parts: list[str] = []
         for d in dimensions:
             if d.is_filter and d.filter_value:
-                tref = table_refs[d.table]
+                tref = table_aliases[d.table]
                 col_ref = f'{tref}."{d.column}"'
                 where_parts.append(f"{col_ref} = '{d.filter_value}'")
 

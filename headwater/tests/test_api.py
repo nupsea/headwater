@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,171 @@ class TestStatus:
         data = resp.json()
         assert data["discovered"] is True
         assert data["tables"] == 8
+
+
+class TestSourcesCatalog:
+    def test_connector_catalog_exposes_support_status(self, client):
+        resp = client.get("/api/connector-catalog")
+        assert resp.status_code == 200
+        connectors = {c["id"]: c for c in resp.json()["connectors"]}
+
+        assert connectors["postgres"]["status"] == "supported"
+        assert connectors["json"]["status"] == "supported"
+        assert connectors["csv"]["status"] == "supported"
+        assert connectors["duckdb"]["status"] == "supported"
+        assert connectors["sqlite"]["status"] == "supported"
+        assert connectors["mysql"]["status"] == "preview"
+        assert connectors["mysql"]["supported"] is False
+        assert connectors["json"]["capabilities"]["list_tables"] is True
+        assert connectors["duckdb"]["capabilities"]["load_to_duckdb"] is True
+        assert connectors["sqlite"]["capabilities"]["load_to_duckdb"] is True
+        assert connectors["postgres"]["capabilities"]["execute_readonly"] is True
+        assert connectors["mysql"]["capabilities"]["test"] is True
+        assert connectors["mysql"]["capabilities"]["load_to_duckdb"] is False
+
+    def test_create_source_rejects_preview_connector(self, client):
+        resp = client.post(
+            "/api/sources",
+            json={
+                "name": "future_mysql",
+                "type": "mysql",
+                "uri": "mysql://user:pass@localhost/db",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "preview" in resp.json()["detail"]
+
+    def test_source_test_endpoint_verifies_supported_source(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+
+        resp = client.post("/api/sources/sample_json/test")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+        detail = client.get("/api/sources/sample_json").json()
+        assert any(e["event_type"] == "connection_tested" for e in detail["events"])
+        assert any("invalidates" in e for e in detail["events"])
+
+        events = client.get("/api/events").json()["events"]
+        assert any(e["event_type"] == "connection_tested" for e in events)
+
+    def test_source_sync_runs_full_pipeline_for_json_source(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+
+        resp = client.post("/api/sources/sample_json/sync")
+        assert resp.status_code == 200
+        result = resp.json()
+        expected_status = "warning" if result["quality_failed"] else "healthy"
+        assert result["status"] == expected_status
+        assert result["tables_discovered"] == 8
+        assert result["profiles"] > 0
+        assert result["quality_total"] > 0
+
+        detail = client.get("/api/sources/sample_json").json()
+        assert detail["status"] == expected_status
+        assert detail["tables"] == 8
+        assert detail["runs"][0]["status"] == "succeeded"
+        assert detail["latest_run_status"] == "succeeded"
+        assert detail["latest_run_duration_ms"] is not None
+        assert detail["quality_failed"] == result["quality_failed"]
+        assert detail["quality_score"] == result["quality_score"]
+        assert any(e["event_type"] == "sync_completed" for e in detail["events"])
+
+        latest_quality = client.app.state.metadata_store.get_latest_quality_report("sample_json")
+        assert latest_quality is not None
+        assert latest_quality["total_contracts"] == result["quality_total"]
+        assert latest_quality["score"] == result["quality_score"]
+        assert latest_quality["sync_run_id"] == result["run_id"]
+
+    def test_delete_source_resets_active_source_state(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+        sync = client.post("/api/sources/sample_json/sync")
+        assert sync.status_code == 200
+        assert client.app.state.pipeline["discovery"] is not None
+
+        delete = client.delete("/api/sources/sample_json")
+        assert delete.status_code == 200
+
+        assert client.app.state.pipeline["discovery"] is None
+        assert client.app.state.pipeline["staging_models"] == []
+        assert client.app.state.metadata_store.get_source("sample_json") is None
+        assert client.app.state.metadata_store.get_tables("sample_json") == []
+
+    def test_duckdb_source_can_be_registered_and_synced(self, client, tmp_path):
+        import duckdb
+
+        db_path = tmp_path / "source.duckdb"
+        con = duckdb.connect(str(db_path))
+        try:
+            con.execute("CREATE TABLE users (user_id INTEGER, email VARCHAR)")
+            con.execute("INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com')")
+            con.execute("CREATE TABLE orders (order_id INTEGER, user_id INTEGER, amount DOUBLE)")
+            con.execute("INSERT INTO orders VALUES (10, 1, 20.5), (11, 2, 31.0)")
+        finally:
+            con.close()
+
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_duckdb", "type": "duckdb", "path": str(db_path)},
+        )
+        assert create.status_code == 201
+
+        test = client.post("/api/sources/sample_duckdb/test")
+        assert test.status_code == 200
+        assert test.json()["tables"] == 2
+
+        sync = client.post("/api/sources/sample_duckdb/sync")
+        assert sync.status_code == 200
+        result = sync.json()
+        assert result["tables_discovered"] == 2
+
+        detail = client.get("/api/sources/sample_duckdb").json()
+        assert detail["tables"] == 2
+        assert detail["latest_run_status"] == "succeeded"
+
+    def test_sqlite_source_can_be_registered_and_synced(self, client, tmp_path):
+        db_path = tmp_path / "source.sqlite"
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute("CREATE TABLE users (user_id INTEGER, email TEXT)")
+            con.execute("INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com')")
+            con.execute("CREATE TABLE orders (order_id INTEGER, user_id INTEGER, amount REAL)")
+            con.execute("INSERT INTO orders VALUES (10, 1, 20.5), (11, 2, 31.0)")
+            con.commit()
+        finally:
+            con.close()
+
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_sqlite", "type": "sqlite", "path": str(db_path)},
+        )
+        assert create.status_code == 201
+
+        test = client.post("/api/sources/sample_sqlite/test")
+        assert test.status_code == 200
+        assert test.json()["tables"] == 2
+
+        sync = client.post("/api/sources/sample_sqlite/sync")
+        assert sync.status_code == 200
+        result = sync.json()
+        assert result["tables_discovered"] == 2
+
+        detail = client.get("/api/sources/sample_sqlite").json()
+        assert detail["tables"] == 2
+        assert detail["latest_run_status"] == "succeeded"
 
 
 class TestDiscovery:
@@ -89,6 +255,34 @@ class TestDiscovery:
         rels = resp.json()
         assert len(rels) > 0
 
+    def test_insights_include_ranked_statistical_cards(self, client):
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        resp = client.get("/api/insights")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        top_insights = data["top_insights"]
+
+        assert top_insights
+        business_prefixes = (
+            "temporal_peak:",
+            "metric_peak:",
+            "segment_concentration:",
+            "metric_driver:",
+            "value_distribution:",
+        )
+        assert any(i["id"].startswith(business_prefixes) for i in top_insights)
+        assert sum(1 for i in top_insights[:5] if i["chart_type"] == "line") <= 2
+        assert len({i["table"] for i in top_insights}) >= 2
+        for insight in top_insights:
+            assert insight["category"] == "Did You Know"
+            assert insight["title"]
+            assert insight["detail"]
+            assert insight["metric"]
+            assert insight["chart_type"] in {"bar", "line", "pie", "histogram"}
+            assert insight["chart"]
+            assert {"label", "value"} <= set(insight["chart"][0])
+
 
 class TestModels:
     def _setup(self, client):
@@ -110,6 +304,13 @@ class TestModels:
         # 8 staging + at least 1 mart (pattern-matched)
         assert len(models) >= 9
 
+    def test_generate_persists_models_for_maturity(self, client):
+        self._setup(client)
+        store = client.app.state.metadata_store
+        models = store.get_models("source")
+        assert len(models) >= 9
+        assert any(m["model_type"] == "mart" for m in models)
+
     def test_get_model(self, client):
         self._setup(client)
         resp = client.get("/api/models/stg_zones")
@@ -124,9 +325,25 @@ class TestModels:
         mart = next(
             m for m in models_resp.json() if m["model_type"] == "mart" and m["status"] == "proposed"
         )
-        resp = client.post(f"/api/models/{mart['name']}/approve")
+        resp = client.post(
+            f"/api/models/{mart['name']}/approve",
+            json={
+                "reviewer": "analyst@example.com",
+                "reason": "Looks aligned with the source grain",
+                "diff_summary": "No SQL edits",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["status"] == "approved"
+        persisted = {
+            model["name"]: model
+            for model in client.app.state.metadata_store.get_models("source")
+        }
+        assert persisted[mart["name"]]["status"] == "approved"
+        reviews = client.get(f"/api/models/{mart['name']}/reviews").json()["reviews"]
+        assert reviews[0]["decision"] == "approved"
+        assert reviews[0]["reviewer"] == "analyst@example.com"
+        assert reviews[0]["reason"] == "Looks aligned with the source grain"
 
     def test_reject_model(self, client):
         self._setup(client)
@@ -134,9 +351,30 @@ class TestModels:
         mart = next(
             m for m in models_resp.json() if m["model_type"] == "mart" and m["status"] == "proposed"
         )
-        resp = client.post(f"/api/models/{mart['name']}/reject")
+        resp = client.post(
+            f"/api/models/{mart['name']}/reject",
+            json={"reason": "The aggregation grain is ambiguous"},
+        )
         assert resp.status_code == 200
         assert resp.json()["status"] == "rejected"
+        store = client.app.state.metadata_store
+        reviews = store.list_model_reviews(mart["name"])
+        assert reviews[0]["decision"] == "rejected"
+        assert reviews[0]["reason"] == "The aggregation grain is ambiguous"
+
+    def test_model_impact_report(self, client):
+        self._setup(client)
+        resp = client.get("/api/models/impact")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["summary"]["total_models"] >= 9
+        assert data["summary"]["mart_models"] >= 1
+        assert data["summary"]["impacted_models"] >= 1
+        assert any(
+            blocker["title"] == "Needs human review"
+            for blocker in data["summary"]["top_blockers"]
+        )
+        assert any(m["maturity_state"] == "review_pending" for m in data["models"])
 
     def test_approve_non_proposed(self, client):
         self._setup(client)
@@ -155,6 +393,8 @@ class TestExecution:
         # Only staging models are approved by default
         assert len(results) == 8
         assert all(r["success"] for r in results)
+        impact = client.get("/api/models/impact").json()
+        assert impact["summary"]["materialized_models"] == 8
 
     def test_execute_no_models(self, client):
         resp = client.post("/api/execute")
@@ -171,6 +411,11 @@ class TestQuality:
         data = resp.json()
         assert data["total"] > 0
         assert data["passed"] + data["failed"] == data["total"]
+        assert data["quality_run_id"] > 0
+
+        latest_quality = client.app.state.metadata_store.get_latest_quality_report("source")
+        assert latest_quality is not None
+        assert latest_quality["total_contracts"] == data["total"]
 
     def test_quality_report(self, client):
         resp = client.get("/api/quality")
@@ -364,6 +609,62 @@ class TestDriftAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["reports"]) == 2
+
+    def test_rerun_plan_for_drift_report(self, client):
+        """GET /api/rerun-plan returns targeted actions from drift and impacts."""
+        store = client.app.state.metadata_store
+        store.upsert_source("src", "json", "/data", None)
+        run1 = store.start_run("src")
+        store.finish_run(run1, table_count=1)
+        run2 = store.start_run("src")
+        store.finish_run(run2, table_count=1)
+        diff = {
+            "source_name": "src",
+            "run_id_from": run1,
+            "run_id_to": run2,
+            "no_changes": False,
+            "tables_added": [],
+            "tables_removed": [],
+            "tables_changed": [
+                {
+                    "table_name": "orders",
+                    "change_type": "columns_changed",
+                    "column_changes": [
+                        {
+                            "column_name": "amount",
+                            "change_type": "type_changed",
+                            "before": "float64",
+                            "after": "varchar",
+                        }
+                    ],
+                }
+            ],
+            "detected_at": "2026-01-01T00:00:00Z",
+        }
+        report_id = store.save_drift_report("src", run1, run2, diff)
+        store.save_model_impacts(
+            [
+                {
+                    "source_name": "src",
+                    "drift_report_id": report_id,
+                    "model_name": "stg_orders",
+                    "impact_type": "source_column_type_changed",
+                    "severity": "error",
+                    "source_table": "orders",
+                    "source_column": "amount",
+                    "reason": "Referenced source column changed type",
+                }
+            ]
+        )
+
+        resp = client.get(f"/api/rerun-plan?source=src&drift_report_id={report_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["drift_report_id"] == report_id
+        assert data["regenerate_models"] is True
+        assert data["rerun_contracts"] is True
+        assert data["human_review_required"] is True
+        assert data["impacted_models"] == ["stg_orders"]
 
 
 class TestProjectCreation:

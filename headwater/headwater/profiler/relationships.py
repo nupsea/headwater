@@ -6,8 +6,16 @@ import duckdb
 
 from headwater.core.models import Relationship, TableInfo
 
-# Common FK suffixes to strip when matching table names
-_ID_SUFFIX = "_id"
+# Common FK suffixes to strip when matching table names.
+_KEY_SUFFIXES = ("_id", "_key", "_code")
+
+
+def _key_stem(column_name: str) -> str | None:
+    lower = column_name.lower()
+    for suffix in _KEY_SUFFIXES:
+        if lower.endswith(suffix):
+            return column_name[: -len(suffix)]
+    return None
 
 
 def detect_relationships(
@@ -71,11 +79,9 @@ def _find_candidates(
         for col in table.columns:
             if col.is_primary_key:
                 continue
-            if not col.name.endswith(_ID_SUFFIX):
+            prefix = _key_stem(col.name)
+            if prefix is None:
                 continue
-
-            # Extract the reference target from column name
-            prefix = col.name[: -len(_ID_SUFFIX)]
 
             # Try matching against table names
             # e.g. zone_id -> zones, site_id -> sites

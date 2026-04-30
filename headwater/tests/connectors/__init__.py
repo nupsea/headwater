@@ -1,0 +1,1 @@
+"""Reusable connector contract tests."""

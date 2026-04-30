@@ -18,6 +18,14 @@ def check_contract(
     rule: ContractRule,
 ) -> ContractCheckResult:
     """Evaluate a single contract rule against its target table."""
+    if not _relation_exists(con, rule.model_name):
+        return ContractCheckResult(
+            rule_id=rule.id or "",
+            model_name=rule.model_name,
+            passed=False,
+            skipped=True,
+            message=f"Skipped: model table '{rule.model_name}' is not materialized",
+        )
     try:
         if rule.rule_type == "not_null":
             return _check_not_null(con, rule)
@@ -47,10 +55,15 @@ def check_contracts(
     *,
     only_active: bool = True,
 ) -> list[ContractCheckResult]:
-    """Evaluate all contract rules. By default only checks observing/enforced rules."""
+    """Evaluate all active contract rules."""
     results: list[ContractCheckResult] = []
     for rule in rules:
-        if only_active and rule.status not in ("observing", "enforced"):
+        if only_active and rule.status not in (
+            "observing",
+            "enforced",
+            "failing",
+            "recovered",
+        ):
             continue
         results.append(check_contract(con, rule))
     return results
@@ -70,6 +83,35 @@ def _check_not_null(
         observed_value=null_count,
         message=f"{null_count} null values found" if null_count > 0 else "No nulls",
     )
+
+
+def _relation_exists(con: duckdb.DuckDBPyConnection, model_name: str) -> bool:
+    """Return True when a model relation exists in DuckDB."""
+    name = model_name.replace('"', "")
+    if "." in name:
+        schema_name, table_name = name.rsplit(".", 1)
+        row = con.execute(
+            """
+            SELECT 1
+              FROM information_schema.tables
+             WHERE table_schema = ?
+               AND table_name = ?
+             LIMIT 1
+            """,
+            (schema_name, table_name),
+        ).fetchone()
+        return row is not None
+
+    row = con.execute(
+        """
+        SELECT 1
+          FROM information_schema.tables
+         WHERE table_name = ?
+         LIMIT 1
+        """,
+        (name,),
+    ).fetchone()
+    return row is not None
 
 
 def _check_unique(

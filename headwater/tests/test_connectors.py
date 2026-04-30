@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import duckdb
 import pytest
 
 from headwater.connectors.csv_loader import CsvLoader
+from headwater.connectors.duckdb_loader import DuckDBConnector
 from headwater.connectors.json_loader import JsonLoader
-from headwater.connectors.registry import get_connector
+from headwater.connectors.mysql_loader import MySQLConnector, _parse_mysql_uri
+from headwater.connectors.registry import (
+    connector_status,
+    get_connector,
+    get_connector_capabilities,
+    list_connector_catalog,
+)
+from headwater.connectors.sqlite_loader import SQLiteConnector
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 from headwater.profiler.schema import extract_schema
@@ -77,9 +86,63 @@ class TestRegistry:
         c = get_connector("csv")
         assert isinstance(c, CsvLoader)
 
+    def test_get_duckdb(self):
+        c = get_connector("duckdb")
+        assert isinstance(c, DuckDBConnector)
+
+    def test_get_sqlite(self):
+        c = get_connector("sqlite")
+        assert isinstance(c, SQLiteConnector)
+
     def test_get_unknown(self):
         with pytest.raises(ConnectorError):
             get_connector("mongo")
+
+    def test_catalog_exposes_support_status(self):
+        catalog = {c["id"]: c for c in list_connector_catalog()}
+        assert catalog["json"]["status"] == "supported"
+        assert catalog["csv"]["status"] == "supported"
+        assert catalog["duckdb"]["status"] == "supported"
+        assert catalog["sqlite"]["status"] == "supported"
+        assert catalog["postgres"]["status"] == "supported"
+        assert catalog["mysql"]["status"] == "preview"
+        assert catalog["json"]["supported"] is True
+        assert catalog["mysql"]["supported"] is False
+        assert catalog["json"]["capabilities"]["list_tables"] is True
+        assert catalog["duckdb"]["capabilities"]["execute_readonly"] is True
+        assert catalog["sqlite"]["capabilities"]["execute_readonly"] is True
+        assert catalog["json"]["capabilities"]["sample_arrow"] is True
+        assert catalog["mysql"]["capabilities"]["test"] is True
+        assert catalog["mysql"]["capabilities"]["load_to_duckdb"] is False
+
+    def test_connector_status_helper(self):
+        assert connector_status("postgres") == "supported"
+        assert connector_status("duckdb") == "supported"
+        assert connector_status("sqlite") == "supported"
+        assert connector_status("mysql") == "preview"
+        assert connector_status("mongo") is None
+
+    def test_connector_capabilities_helper(self):
+        json_caps = get_connector_capabilities("json")
+        duckdb_caps = get_connector_capabilities("duckdb")
+        sqlite_caps = get_connector_capabilities("sqlite")
+        postgres_caps = get_connector_capabilities("postgres")
+        mysql_caps = get_connector_capabilities("mysql")
+
+        assert json_caps.load_to_duckdb is True
+        assert duckdb_caps.load_to_duckdb is True
+        assert duckdb_caps.execute_readonly is True
+        assert sqlite_caps.load_to_duckdb is True
+        assert sqlite_caps.execute_readonly is True
+        assert postgres_caps.execute_readonly is True
+        assert postgres_caps.load_to_duckdb is False
+        assert mysql_caps.test is True
+        assert mysql_caps.execute_readonly is True
+        assert mysql_caps.load_to_duckdb is False
+
+    def test_get_planned_connector_explains_status(self):
+        with pytest.raises(ConnectorError, match="preview"):
+            get_connector("mysql")
 
 
 # -- Schema extraction -----------------------------------------------------
@@ -134,6 +197,123 @@ class TestSchemaExtraction:
         assert readings.row_count == 49302
 
 
+class TestDuckDBConnector:
+    def test_duckdb_load_to_duckdb_copies_source_tables(self, tmp_path: Path):
+        db_path = tmp_path / "source.duckdb"
+        source = duckdb.connect(str(db_path))
+        try:
+            source.execute("CREATE TABLE users (user_id INTEGER, email VARCHAR)")
+            source.execute("INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com')")
+        finally:
+            source.close()
+
+        loader = DuckDBConnector()
+        loader.connect(SourceConfig(name="sample_duckdb", type="duckdb", path=str(db_path)))
+        target = duckdb.connect(":memory:")
+        try:
+            tables = loader.load_to_duckdb(target, "env_health")
+            count = target.execute('SELECT COUNT(*) FROM "env_health"."users"').fetchone()[0]
+        finally:
+            target.close()
+            loader.close()
+
+        assert tables == ["users"]
+        assert count == 2
+
+    def test_duckdb_connect_missing_path(self, tmp_path: Path):
+        loader = DuckDBConnector()
+        with pytest.raises(ConnectorError):
+            loader.connect(
+                SourceConfig(
+                    name="missing_duckdb",
+                    type="duckdb",
+                    path=str(tmp_path / "missing.duckdb"),
+                )
+            )
+
+
+class TestSQLiteConnector:
+    def test_sqlite_load_to_duckdb_copies_source_tables(self, tmp_path: Path):
+        db_path = tmp_path / "source.sqlite"
+        source = sqlite3.connect(db_path)
+        try:
+            source.execute("CREATE TABLE users (user_id INTEGER, email TEXT)")
+            source.execute("INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com')")
+            source.commit()
+        finally:
+            source.close()
+
+        loader = SQLiteConnector()
+        loader.connect(SourceConfig(name="sample_sqlite", type="sqlite", path=str(db_path)))
+        target = duckdb.connect(":memory:")
+        try:
+            tables = loader.load_to_duckdb(target, "env_health")
+            count = target.execute('SELECT COUNT(*) FROM "env_health"."users"').fetchone()[0]
+        finally:
+            target.close()
+            loader.close()
+
+        assert tables == ["users"]
+        assert count == 2
+
+    def test_sqlite_connect_missing_path(self, tmp_path: Path):
+        loader = SQLiteConnector()
+        with pytest.raises(ConnectorError):
+            loader.connect(
+                SourceConfig(
+                    name="missing_sqlite",
+                    type="sqlite",
+                    path=str(tmp_path / "missing.sqlite"),
+                )
+            )
+
+
+class TestMySQLConnector:
+    def test_mysql_preview_capabilities_are_declared(self):
+        caps = MySQLConnector().capabilities()
+        assert caps.test is True
+        assert caps.list_tables is True
+        assert caps.profile_table is True
+        assert caps.execute_readonly is True
+        assert caps.load_to_duckdb is False
+        assert caps.modes == ["generate", "observe"]
+
+    def test_mysql_requires_uri(self):
+        loader = MySQLConnector()
+        with pytest.raises(ConnectorError, match="requires a URI"):
+            loader.connect(SourceConfig(name="mysql", type="mysql"))
+
+    def test_mysql_missing_driver_error_is_actionable(self, monkeypatch):
+        import headwater.connectors.mysql_loader as mysql_loader
+
+        def missing_driver(name: str):
+            if name == "pymysql":
+                raise ImportError("missing")
+            return None
+
+        monkeypatch.setattr(mysql_loader.importlib, "import_module", missing_driver)
+
+        loader = MySQLConnector()
+        with pytest.raises(ConnectorError, match="uv add pymysql"):
+            loader.connect(
+                SourceConfig(
+                    name="mysql",
+                    type="mysql",
+                    uri="mysql://user:pass@localhost:3306/analytics",
+                )
+            )
+
+    def test_mysql_uri_parsing(self):
+        parts = _parse_mysql_uri("mysql://user:p%40ss@example.com:3307/analytics")
+        assert parts == {
+            "host": "example.com",
+            "port": 3307,
+            "user": "user",
+            "password": "p@ss",
+            "database": "analytics",
+        }
+
+
 # -- BaseConnector new methods (US-100) ------------------------------------
 
 
@@ -182,6 +362,17 @@ class TestJsonLoaderProfile:
         loader.load_to_duckdb(ddb, "env_health")
         stats = loader.profile("zones")
         assert stats["zone_id"]["count"] == 25
+
+    def test_capabilities_and_listing(self):
+        loader = JsonLoader()
+        loader.connect(SourceConfig(name="sample", type="json", path=str(SAMPLE_DIR)))
+
+        caps = loader.capabilities()
+        columns = loader.list_columns("zones")
+
+        assert caps.list_tables is True
+        assert "zones" in loader.list_tables()
+        assert columns[0]["name"] == "zone_id"
 
 
 class TestSourceConfigMode:

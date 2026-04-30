@@ -215,6 +215,7 @@ async def get_insights(request: Request):
     data_profile = _compute_data_profile(
         tables, profiles, relationships, completeness_pct, quality_report
     )
+    top_insights = _compute_top_insights(request.app.state.duckdb_con, tables, profiles)
 
     # --- Workflow state ---
     workflow = _compute_workflow_state(
@@ -278,6 +279,7 @@ async def get_insights(request: Request):
 
     return {
         "data_profile": data_profile,
+        "top_insights": top_insights,
         "workflow": workflow,
         "advisory_actions": advisory_actions,
         "overview": {
@@ -366,6 +368,505 @@ def _compute_data_profile(tables, profiles, relationships, completeness_pct, qua
         "constant_columns": constant_cols,
         "total_columns_profiled": len(profiles),
     }
+
+
+# ---------------------------------------------------------------------------
+# Top Insights -- business-readable patterns from actual data values
+# ---------------------------------------------------------------------------
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+
+
+def _chart_rows(items, *, label_key: str, value_key: str, limit: int = 6):
+    rows = []
+    for item in items[:limit]:
+        rows.append(
+            {
+                "label": str(item[label_key]),
+                "value": round(float(item[value_key]), 2),
+            }
+        )
+    return rows
+
+
+def _quote_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _table_ref(table) -> str:
+    if table.schema_name:
+        return f"{_quote_ident(table.schema_name)}.{_quote_ident(table.name)}"
+    return _quote_ident(table.name)
+
+
+def _humanize_name(name: str) -> str:
+    return name.replace("stg_", "").replace("_", " ").strip().title()
+
+
+def _column_profile(profiles, table_name: str, column_name: str):
+    return next(
+        (p for p in profiles if p.table_name == table_name and p.column_name == column_name),
+        None,
+    )
+
+
+def _is_temporal_column(column, profile) -> bool:
+    name = column.name.lower()
+    dtype = column.dtype.lower()
+    return (
+        column.role == "temporal"
+        or column.semantic_type == "temporal"
+        or "date" in dtype
+        or "time" in dtype
+        or name in {"year", "month", "quarter"}
+        or name.endswith("_year")
+        or name.endswith("_date")
+        or name.endswith("_at")
+        or (profile and profile.detected_pattern == "iso_date")
+    )
+
+
+def _is_metric_column(column, profile) -> bool:
+    name = column.name.lower()
+    dtype = column.dtype.lower()
+    if column.is_primary_key or name == "id" or name.endswith("_id") or name.endswith("_code"):
+        return False
+    if column.role == "metric" or column.semantic_type == "metric":
+        return True
+    if not any(token in dtype for token in ("int", "float", "double", "decimal", "numeric")):
+        return False
+    return bool(profile and profile.distinct_count > 5 and profile.uniqueness_ratio < 0.9)
+
+
+def _is_dimension_column(column, profile) -> bool:
+    name = column.name.lower()
+    if column.is_primary_key or name == "id" or name.endswith("_id"):
+        return False
+    if column.role == "dimension" or column.semantic_type in {"dimension", "geographic"}:
+        return True
+    if not profile or not profile.top_values:
+        return False
+    return 2 <= profile.distinct_count <= 40
+
+
+def _period_expression(column) -> str | None:
+    quoted = _quote_ident(column.name)
+    name = column.name.lower()
+    dtype = column.dtype.lower()
+    if name in {"year"} or name.endswith("_year"):
+        return f"CAST({quoted} AS VARCHAR)"
+    if "date" in dtype or "time" in dtype or "date" in name or name.endswith("_at"):
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y')"
+    return None
+
+
+def _query_rows(con, sql: str, params: list | None = None):
+    try:
+        return con.execute(sql, params or []).fetchall()
+    except Exception:
+        logger.debug("Business insight query failed: %s", sql, exc_info=True)
+        return []
+
+
+def _compute_temporal_peak_insights(con, table, temporal_cols, metric_cols) -> list[dict]:
+    insights = []
+    ref = _table_ref(table)
+    table_label = _humanize_name(table.name)
+
+    for temporal in temporal_cols[:2]:
+        period_expr = _period_expression(temporal)
+        if not period_expr:
+            continue
+
+        rows = _query_rows(
+            con,
+            f"""
+            SELECT {period_expr} AS period, COUNT(*) AS value
+            FROM {ref}
+            WHERE {_quote_ident(temporal.name)} IS NOT NULL
+            GROUP BY 1
+            ORDER BY 1
+            """,
+        )
+        chart = [
+            {"label": str(period), "value": float(value)}
+            for period, value in rows
+            if period is not None and value is not None
+        ]
+        if len(chart) >= 2:
+            peak = max(chart, key=lambda row: row["value"])
+            avg = sum(row["value"] for row in chart) / len(chart)
+            lift = _safe_ratio(peak["value"], avg)
+            if lift >= 1.15 or len(chart) <= 4:
+                insights.append(
+                    {
+                        "id": f"temporal_peak:{table.name}:{temporal.name}",
+                        "category": "Did You Know",
+                        "severity": "info",
+                        "title": f"{table_label} peaked in {peak['label']}",
+                        "detail": (
+                            f"{peak['label']} had {peak['value']:,.0f} records, "
+                            f"{(lift - 1) * 100:.0f}% above the period average."
+                        ),
+                        "table": table.name,
+                        "column": temporal.name,
+                        "metric": "record_volume",
+                        "value": round(lift, 2),
+                        "unit": "x",
+                        "chart_type": "line",
+                        "chart": chart,
+                        "score": lift,
+                    }
+                )
+
+        for metric in metric_cols[:3]:
+            metric_label = _humanize_name(metric.name)
+            rows = _query_rows(
+                con,
+                f"""
+                SELECT {period_expr} AS period, SUM({_quote_ident(metric.name)}) AS value
+                FROM {ref}
+                WHERE {_quote_ident(temporal.name)} IS NOT NULL
+                  AND {_quote_ident(metric.name)} IS NOT NULL
+                GROUP BY 1
+                ORDER BY 1
+                """,
+            )
+            chart = [
+                {"label": str(period), "value": float(value)}
+                for period, value in rows
+                if period is not None and value is not None
+            ]
+            if len(chart) < 2:
+                continue
+            peak = max(chart, key=lambda row: row["value"])
+            avg = sum(row["value"] for row in chart) / len(chart)
+            lift = _safe_ratio(peak["value"], avg)
+            if lift >= 1.2:
+                insights.append(
+                    {
+                        "id": f"metric_peak:{table.name}:{temporal.name}:{metric.name}",
+                        "category": "Did You Know",
+                        "severity": "warning" if lift >= 1.5 else "info",
+                        "title": f"{metric_label} peaked in {peak['label']}",
+                        "detail": (
+                            f"{table_label} recorded {peak['value']:,.0f} total "
+                            f"{metric_label.lower()} in {peak['label']}, "
+                            f"{(lift - 1) * 100:.0f}% above its typical period."
+                        ),
+                        "table": table.name,
+                        "column": metric.name,
+                        "metric": "period_total",
+                        "value": round(lift, 2),
+                        "unit": "x",
+                        "chart_type": "line",
+                        "chart": chart,
+                        "score": lift,
+                    }
+                )
+
+    return insights
+
+
+def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[dict]:
+    insights = []
+    ref = _table_ref(table)
+    table_label = _humanize_name(table.name)
+
+    for dimension in dimension_cols[:4]:
+        dim_label = _humanize_name(dimension.name)
+        rows = _query_rows(
+            con,
+            f"""
+            SELECT CAST({_quote_ident(dimension.name)} AS VARCHAR) AS segment, COUNT(*) AS value
+            FROM {ref}
+            WHERE {_quote_ident(dimension.name)} IS NOT NULL
+            GROUP BY 1
+            ORDER BY value DESC
+            LIMIT 8
+            """,
+        )
+        chart = [
+            {"label": str(segment), "value": float(value)}
+            for segment, value in rows
+            if segment is not None and value is not None
+        ]
+        total = sum(row["value"] for row in chart)
+        if chart and total > 0:
+            leader = chart[0]
+            share = _safe_ratio(leader["value"], total)
+            if share >= 0.25:
+                insights.append(
+                    {
+                        "id": f"segment_concentration:{table.name}:{dimension.name}",
+                        "category": "Did You Know",
+                        "severity": "info",
+                        "title": (
+                            f"{leader['label']} leads {table_label.lower()} "
+                            f"by {dim_label.lower()}"
+                        ),
+                        "detail": (
+                            f"{leader['label']} represents {share * 100:.1f}% of the top "
+                            f"{dim_label.lower()} groups in {table_label.lower()}."
+                        ),
+                        "table": table.name,
+                        "column": dimension.name,
+                        "metric": "segment_share",
+                        "value": round(share * 100, 1),
+                        "unit": "%",
+                        "chart_type": "pie",
+                        "chart": chart,
+                        "score": share,
+                    }
+                )
+
+        for metric in metric_cols[:3]:
+            metric_label = _humanize_name(metric.name)
+            rows = _query_rows(
+                con,
+                f"""
+                SELECT CAST({_quote_ident(dimension.name)} AS VARCHAR) AS segment,
+                       SUM({_quote_ident(metric.name)}) AS value
+                FROM {ref}
+                WHERE {_quote_ident(dimension.name)} IS NOT NULL
+                  AND {_quote_ident(metric.name)} IS NOT NULL
+                GROUP BY 1
+                ORDER BY value DESC
+                LIMIT 8
+                """,
+            )
+            chart = [
+                {"label": str(segment), "value": float(value)}
+                for segment, value in rows
+                if segment is not None and value is not None
+            ]
+            total = sum(row["value"] for row in chart)
+            if not chart or total <= 0:
+                continue
+            leader = chart[0]
+            share = _safe_ratio(leader["value"], total)
+            if share >= 0.3:
+                insights.append(
+                    {
+                        "id": f"metric_driver:{table.name}:{dimension.name}:{metric.name}",
+                        "category": "Did You Know",
+                        "severity": "warning" if share >= 0.5 else "info",
+                        "title": f"{leader['label']} drives {metric_label.lower()}",
+                        "detail": (
+                            f"{leader['label']} accounts for {share * 100:.1f}% of "
+                            f"top-group {metric_label.lower()} in {table_label.lower()}."
+                        ),
+                        "table": table.name,
+                        "column": dimension.name,
+                        "metric": metric.name,
+                        "value": round(share * 100, 1),
+                        "unit": "%",
+                        "chart_type": "bar",
+                        "chart": chart,
+                        "score": share,
+                    }
+                )
+
+    return insights
+
+
+def _compute_distribution_insights(con, table, metric_cols, column_profiles) -> list[dict]:
+    insights = []
+    ref = _table_ref(table)
+    table_label = _humanize_name(table.name)
+
+    for metric in metric_cols[:4]:
+        profile = column_profiles.get(metric.name)
+        if not profile or profile.min_value is None or profile.max_value is None:
+            continue
+        min_value = float(profile.min_value)
+        max_value = float(profile.max_value)
+        if min_value == max_value:
+            continue
+
+        metric_label = _humanize_name(metric.name)
+        width = (max_value - min_value) / 5
+        bins = []
+        case_parts = []
+        for index in range(5):
+            low = min_value + width * index
+            high = max_value if index == 4 else min_value + width * (index + 1)
+            label = f"{low:,.0f}-{high:,.0f}"
+            bins.append(label)
+            comparator = "<=" if index == 4 else "<"
+            case_parts.append(
+                f"WHEN {_quote_ident(metric.name)} {comparator} {high} THEN '{label}'"
+            )
+
+        rows = _query_rows(
+            con,
+            f"""
+            SELECT bucket, COUNT(*) AS value
+            FROM (
+              SELECT CASE {' '.join(case_parts)} END AS bucket
+              FROM {ref}
+              WHERE {_quote_ident(metric.name)} IS NOT NULL
+            )
+            WHERE bucket IS NOT NULL
+            GROUP BY bucket
+            """,
+        )
+        counts = {str(bucket): float(value) for bucket, value in rows if bucket is not None}
+        chart = [{"label": label, "value": counts.get(label, 0)} for label in bins]
+        total = sum(row["value"] for row in chart)
+        if total <= 0:
+            continue
+
+        leader = max(chart, key=lambda row: row["value"])
+        share = _safe_ratio(leader["value"], total)
+        if share < 0.35:
+            continue
+
+        insights.append(
+            {
+                "id": f"value_distribution:{table.name}:{metric.name}",
+                "category": "Did You Know",
+                "severity": "info",
+                "title": f"{metric_label} clusters around {leader['label']}",
+                "detail": (
+                    f"{share * 100:.1f}% of {table_label.lower()} records fall in the "
+                    f"{leader['label']} {metric_label.lower()} range."
+                ),
+                "table": table.name,
+                "column": metric.name,
+                "metric": "value_distribution",
+                "value": round(share * 100, 1),
+                "unit": "%",
+                "chart_type": "histogram",
+                "chart": chart,
+                "score": share,
+            }
+        )
+
+    return insights
+
+
+def _select_diverse_insights(insights: list[dict], limit: int = 10) -> list[dict]:
+    """Keep the final set mixed across tables and visual patterns."""
+    selected: list[dict] = []
+    selected_ids: set[str] = set()
+    table_counts: dict[str, int] = {}
+    chart_counts: dict[str, int] = {}
+    max_by_chart = {"line": 4}
+    max_by_table = 3
+    initial_line_cap = 2
+    preferred_chart_order = ("bar", "pie", "histogram")
+
+    def can_add(insight: dict) -> bool:
+        chart_type = insight["chart_type"]
+        table = insight["table"]
+        if insight["id"] in selected_ids:
+            return False
+        if chart_counts.get(chart_type, 0) >= max_by_chart.get(chart_type, limit):
+            return False
+        return table_counts.get(table, 0) < max_by_table
+
+    def add(insight: dict) -> None:
+        selected.append(insight)
+        selected_ids.add(insight["id"])
+        chart_type = insight["chart_type"]
+        table = insight["table"]
+        chart_counts[chart_type] = chart_counts.get(chart_type, 0) + 1
+        table_counts[table] = table_counts.get(table, 0) + 1
+
+    ranked = sorted(insights, key=lambda item: item.get("score", item["value"]), reverse=True)
+
+    lead_trend = next((insight for insight in ranked if insight["chart_type"] == "line"), None)
+    if lead_trend:
+        add(lead_trend)
+
+    for chart_type in preferred_chart_order:
+        best = next(
+            (
+                insight
+                for insight in ranked
+                if insight["chart_type"] == chart_type and can_add(insight)
+            ),
+            None,
+        )
+        if best:
+            add(best)
+        if len(selected) >= limit:
+            break
+
+    while len(selected) < min(5, limit):
+        next_line = next(
+            (
+                insight
+                for insight in ranked
+                if insight["chart_type"] == "line"
+                and chart_counts.get("line", 0) < initial_line_cap
+                and can_add(insight)
+            ),
+            None,
+        )
+        if not next_line:
+            break
+        add(next_line)
+
+    for insight in ranked:
+        if len(selected) >= limit:
+            break
+        if can_add(insight):
+            add(insight)
+
+    if len(selected) < limit:
+        for insight in ranked:
+            if len(selected) >= limit:
+                break
+            if (
+                insight["id"] not in selected_ids
+                and chart_counts.get(insight["chart_type"], 0)
+                < max_by_chart.get(insight["chart_type"], limit)
+            ):
+                add(insight)
+
+    cleaned = []
+    for insight in selected[:limit]:
+        cleaned.append({key: value for key, value in insight.items() if key != "score"})
+    return cleaned
+
+
+def _compute_top_insights(con, tables, profiles) -> list[dict]:
+    """Find CXO-readable patterns from actual records.
+
+    The output avoids schema-quality commentary and favors business outcome
+    statements: when activity peaked, which segment dominates, and what groups
+    drive measurable totals.
+    """
+    insights: list[dict] = []
+    for table in sorted(tables, key=lambda t: t.row_count, reverse=True):
+        column_profiles = {
+            c.name: _column_profile(profiles, table.name, c.name)
+            for c in table.columns
+        }
+        temporal_cols = [
+            c for c in table.columns
+            if _is_temporal_column(c, column_profiles.get(c.name))
+        ]
+        metric_cols = [
+            c for c in table.columns
+            if _is_metric_column(c, column_profiles.get(c.name))
+        ]
+        dimension_cols = [
+            c for c in table.columns
+            if _is_dimension_column(c, column_profiles.get(c.name))
+        ]
+
+        insights.extend(_compute_temporal_peak_insights(con, table, temporal_cols, metric_cols))
+        insights.extend(_compute_segment_insights(con, table, dimension_cols, metric_cols))
+        insights.extend(_compute_distribution_insights(con, table, metric_cols, column_profiles))
+
+    return _select_diverse_insights(insights)
 
 
 # ---------------------------------------------------------------------------

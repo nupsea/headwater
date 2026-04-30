@@ -8,6 +8,7 @@ import duckdb
 import polars as pl
 import pyarrow as pa
 
+from headwater.connectors.capabilities import FILE_GENERATE_CAPABILITIES, ConnectorCapabilities
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 
@@ -37,6 +38,26 @@ class JsonLoader:
         self._files = sorted(self._path.glob("*.json"))
         if not self._files:
             raise ConnectorError(f"No .json files found in {self._path}")
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return FILE_GENERATE_CAPABILITIES
+
+    def list_tables(self) -> list[str]:
+        if not self._files:
+            raise ConnectorError("Not connected -- call connect() first")
+        return [fp.stem for fp in self._files if fp.stem != "generate_sample"]
+
+    def list_columns(self, table_name: str) -> list[dict]:
+        df = self._get_frame(table_name)
+        return [
+            {
+                "name": name,
+                "data_type": str(df[name].dtype),
+                "is_nullable": df[name].null_count() > 0,
+                "ordinal_position": index + 1,
+            }
+            for index, name in enumerate(df.columns)
+        ]
 
     def _get_frame(self, table_name: str) -> pl.DataFrame:
         """Load or return cached DataFrame for the given table name."""

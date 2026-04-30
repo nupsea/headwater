@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from headwater.core.metadata import MetadataStore
+from headwater.core.models import ContractCheckResult, QualityReport
 
 
 def test_init_creates_tables(meta: MetadataStore):
@@ -19,6 +20,10 @@ def test_init_creates_tables(meta: MetadataStore):
     assert "relationships" in names
     assert "models" in names
     assert "contracts" in names
+    assert "model_reviews" in names
+    assert "model_impacts" in names
+    assert "quality_runs" in names
+    assert "quality_results" in names
     assert "decisions" in names
     assert "llm_audit_log" in names
 
@@ -48,6 +53,61 @@ def test_upsert_source_idempotent(meta: MetadataStore):
     src = meta.get_source("s")
     assert src is not None
     assert src["path"] == "/new"
+
+
+def test_delete_source_clears_source_scoped_state(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    run_id = meta.start_run("src")
+    meta.upsert_table("readings", "src", run_id=run_id)
+    meta.upsert_column("readings", "src", "reading_id", "INTEGER", is_primary_key=True)
+    meta.upsert_profile("readings", "reading_id", "src", "INTEGER", {"distinct_count": 3}, run_id)
+    meta.insert_relationship(
+        "src",
+        "readings",
+        "site_id",
+        "sites",
+        "site_id",
+        "many_to_one",
+        1.0,
+        1.0,
+        "declared",
+        run_id=run_id,
+    )
+    meta.save_snapshot(run_id, "src", {"tables": {}})
+    meta.persist_pk_fk("readings", "src", reject_pks=["reading_id"])
+    meta.upsert_model(
+        "mart_readings",
+        "src",
+        "mart",
+        "select 1",
+        "Readings mart",
+        source_tables=["readings"],
+    )
+    meta.record_model_review(
+        "mart_readings",
+        "approved",
+        source_name="src",
+        reviewer="tester",
+    )
+    meta.con.execute(
+        "INSERT INTO contracts (id, model_name, rule_type, expression) "
+        "VALUES ('rule_1', 'mart_readings', 'row_count', 'count(*) > 0')"
+    )
+    meta.con.commit()
+
+    assert meta.delete_source("src") is True
+
+    assert meta.get_source("src") is None
+    assert meta.get_tables("src") == []
+    assert meta.get_columns("readings", "src") == []
+    assert meta.get_profiles("src") == []
+    assert meta.get_relationships("src") == []
+    assert meta.get_decisions("pk_candidate", "src.readings.reading_id") == []
+    assert meta.get_models("src") == []
+    contract = meta.con.execute(
+        "SELECT * FROM contracts WHERE model_name='mart_readings'"
+    ).fetchone()
+    assert contract is None
 
 
 def test_discovery_run_lifecycle(meta: MetadataStore):
@@ -101,6 +161,22 @@ def test_relationship_roundtrip(meta: MetadataStore):
     assert rels[0]["from_table"] == "sites"
 
 
+def test_persist_pk_fk_stores_reload_safe_relationship_values(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    result = meta.persist_pk_fk(
+        "transactions",
+        "src",
+        confirm_fks=[
+            {"from_col": "account_key", "to_table": "accounts", "to_col": "account_key"}
+        ],
+    )
+
+    assert result["fks_confirmed"] == 1
+    rel = meta.get_relationships("src")[0]
+    assert rel["rel_type"] == "many_to_one"
+    assert rel["detection_source"] == "declared"
+
+
 def test_model_roundtrip(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     meta.upsert_model(
@@ -124,6 +200,50 @@ def test_model_status_update(meta: MetadataStore):
     assert m[0]["status"] == "approved"
 
 
+def test_model_review_roundtrip(meta: MetadataStore):
+    review_id = meta.record_model_review(
+        "mart_x",
+        "rejected",
+        source_name="src",
+        reviewer="analyst@example.com",
+        reason="Grain needs clarification",
+        diff_summary="No SQL edits",
+        payload={"previous_status": "proposed"},
+    )
+
+    reviews = meta.list_model_reviews("mart_x")
+    assert review_id > 0
+    assert len(reviews) == 1
+    assert reviews[0]["decision"] == "rejected"
+    assert reviews[0]["reason"] == "Grain needs clarification"
+    assert reviews[0]["payload"]["previous_status"] == "proposed"
+
+
+def test_model_impact_roundtrip(meta: MetadataStore):
+    ids = meta.save_model_impacts(
+        [
+            {
+                "source_name": "src",
+                "drift_report_id": 7,
+                "model_name": "stg_orders",
+                "impact_type": "source_column_type_changed",
+                "severity": "error",
+                "source_table": "orders",
+                "source_column": "amount",
+                "reason": "Referenced source column changed type",
+                "payload": {"before": "float64", "after": "varchar"},
+            }
+        ]
+    )
+
+    impacts = meta.list_model_impacts(source_name="src")
+    assert ids[0] > 0
+    assert len(impacts) == 1
+    assert impacts[0]["model_name"] == "stg_orders"
+    assert impacts[0]["severity"] == "error"
+    assert impacts[0]["payload"]["after"] == "varchar"
+
+
 def test_contract_roundtrip(meta: MetadataStore):
     meta.upsert_contract(
         "c1",
@@ -136,6 +256,82 @@ def test_contract_roundtrip(meta: MetadataStore):
     contracts = meta.get_contracts("stg_sites")
     assert len(contracts) == 1
     assert contracts[0]["severity"] == "error"
+
+
+def test_quality_report_roundtrip(meta: MetadataStore):
+    report = QualityReport(
+        total_contracts=2,
+        passed=1,
+        failed=1,
+        results=[
+            ContractCheckResult(
+                rule_id="c1",
+                model_name="stg_sites",
+                passed=True,
+                observed_value=0,
+                message="No nulls",
+            ),
+            ContractCheckResult(
+                rule_id="c2",
+                model_name="stg_sites",
+                passed=False,
+                observed_value=3,
+                message="3 null values found",
+            ),
+        ],
+    )
+
+    run_id = meta.save_quality_report("src", report)
+    latest = meta.get_latest_quality_report("src")
+
+    assert run_id > 0
+    assert latest is not None
+    assert latest["status"] == "failing"
+    assert latest["score"] == 50.0
+    assert len(latest["results"]) == 2
+    assert latest["results"][1]["observed_value"] == 3
+
+
+def test_quality_report_updates_contract_lifecycle(meta: MetadataStore):
+    meta.upsert_contract("c1", "stg_sites", "not_null", "site_id IS NOT NULL")
+    failing = QualityReport(
+        total_contracts=1,
+        passed=0,
+        failed=1,
+        results=[
+            ContractCheckResult(
+                rule_id="c1",
+                model_name="stg_sites",
+                passed=False,
+                observed_value=2,
+                message="2 null values found",
+            )
+        ],
+    )
+    meta.save_quality_report("src", failing)
+
+    assert meta.get_contracts("stg_sites")[0]["status"] == "failing"
+    assert failing.contract_status_transitions["failing"] == ["c1"]
+
+    recovered = QualityReport(
+        total_contracts=1,
+        passed=1,
+        failed=0,
+        results=[
+            ContractCheckResult(
+                rule_id="c1",
+                model_name="stg_sites",
+                passed=True,
+                observed_value=0,
+                message="No nulls",
+            )
+        ],
+    )
+    meta.save_quality_report("src", recovered)
+
+    assert meta.get_contracts("stg_sites")[0]["status"] == "recovered"
+    assert recovered.contract_status_transitions["recovered"] == ["c1"]
+    assert recovered.previous_failed == 1
 
 
 # -- Decisions (US-301) ----------------------------------------------------
@@ -325,6 +521,8 @@ def test_persist_reject_pk(meta: MetadataStore):
         "SELECT is_primary_key FROM columns WHERE table_name='zones' AND name='zone_id'"
     ).fetchone()
     assert col["is_primary_key"] == 0
+    decisions = meta.get_decisions("pk_candidate", "src.zones.zone_id")
+    assert decisions[0]["action"] == "rejected"
 
 
 def test_persist_confirm_fk(meta: MetadataStore):
@@ -336,7 +534,8 @@ def test_persist_confirm_fk(meta: MetadataStore):
     rel = meta.con.execute("SELECT * FROM relationships WHERE from_table='inspections'").fetchone()
     assert rel is not None
     assert rel["to_table"] == "zones"
-    assert rel["detection_source"] == "confirmed"
+    assert rel["rel_type"] == "many_to_one"
+    assert rel["detection_source"] == "declared"
 
 
 def test_persist_reject_fk(meta: MetadataStore):
@@ -354,6 +553,21 @@ def test_persist_reject_fk(meta: MetadataStore):
     assert (
         meta.con.execute("SELECT * FROM relationships WHERE id = ?", (rel_id,)).fetchone() is None
     )
+
+
+def test_bulk_column_pk_review_records_replayable_decision(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_table("readings", "src")
+    meta.upsert_column("readings", "src", "reading_date", "DATE", is_primary_key=True)
+
+    meta.bulk_update_columns(
+        "readings",
+        "src",
+        [{"name": "reading_date", "is_primary_key": False}],
+        lock=True,
+    )
+
+    assert meta.get_pk_decision("src", "readings", "reading_date") == "rejected"
 
 
 # -- v3: Settings file persistence -------------------------------------------

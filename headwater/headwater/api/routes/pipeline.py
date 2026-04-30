@@ -15,6 +15,7 @@ from headwater.analyzer.llm import get_provider
 from headwater.analyzer.semantic import analyze
 from headwater.connectors.registry import get_connector
 from headwater.core.config import get_settings
+from headwater.core.events import EventType
 from headwater.core.models import SourceConfig
 from headwater.executor.duckdb_backend import DuckDBBackend
 from headwater.executor.runner import run_models
@@ -24,6 +25,7 @@ from headwater.generator.staging import generate_staging_models
 from headwater.profiler.engine import discover
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
+from headwater.services.contract_lifecycle import apply_contract_statuses
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +211,8 @@ def _run_pipeline_inner(
     # Semantic analysis (heuristic enrichment + deep descriptions)
     store = getattr(request.app.state, "metadata_store", None)
     analyze(discovery_result, store=store, source_name=source_name)
+    if store is not None:
+        store.apply_key_decisions_to_discovery(discovery_result)
     pipeline["discovery"] = discovery_result
 
     # Step 1b: Build semantic catalog (v2)
@@ -290,8 +294,12 @@ def _run_pipeline_inner(
         if c.status == "proposed":
             c.status = "observing"
     check_results = check_contracts(con, contracts, only_active=True)
+    apply_contract_statuses(contracts, check_results)
     report = build_report(check_results)
     pipeline["quality_report"] = report
+    quality_run_id = None
+    if store is not None:
+        quality_run_id = _persist_quality_report(store, source_name, report)
 
     return {
         "tables_loaded": len(tables_loaded),
@@ -306,6 +314,10 @@ def _run_pipeline_inner(
         "quality_total": report.total_contracts,
         "quality_passed": report.passed,
         "quality_failed": report.failed,
+        "quality_score": round((report.passed / report.total_contracts) * 100, 2)
+        if report.total_contracts
+        else 100.0,
+        "quality_run_id": quality_run_id,
         "catalog_metrics": len(catalog.metrics),
         "catalog_dimensions": len(catalog.dimensions),
         "catalog_entities": len(catalog.entities),
@@ -680,3 +692,58 @@ def _persist_execution_results(store: object, results: list) -> None:
         except Exception:
             logger.exception("Failed to persist exec result for %s", r.model_name)
     logger.info("Persisted %d execution results", len(results))
+
+
+def _persist_quality_report(
+    store: object,
+    source_name: str,
+    report,
+    sync_run_id: int | None = None,
+):
+    """Persist quality report and emit an event when contracts fail."""
+    run_id = store.save_quality_report(  # type: ignore[union-attr]
+        source_name,
+        report,
+        sync_run_id=sync_run_id,
+    )
+    if report.failed:
+        try:
+            store.insert_event(  # type: ignore[union-attr]
+                EventType.QUALITY_CHECKS_FAILED,
+                f"{report.failed} quality contract(s) failed",
+                source_name=source_name,
+                severity="warning",
+                artifact_type="quality_run",
+                artifact_id=str(run_id),
+                payload={
+                    "quality_run_id": run_id,
+                    "total": report.total_contracts,
+                    "passed": report.passed,
+                    "failed": report.failed,
+                },
+                invalidates=["sources", "briefing", "health", "insights", "quality"],
+            )
+        except Exception:
+            logger.exception("Failed to emit quality event for '%s'", source_name)
+    elif getattr(report, "previous_failed", 0):
+        try:
+            store.insert_event(  # type: ignore[union-attr]
+                EventType.QUALITY_CHECKS_RECOVERED,
+                "Quality contracts recovered",
+                source_name=source_name,
+                severity="info",
+                artifact_type="quality_run",
+                artifact_id=str(run_id),
+                payload={
+                    "quality_run_id": run_id,
+                    "total": report.total_contracts,
+                    "passed": report.passed,
+                    "failed": report.failed,
+                    "previous_failed": getattr(report, "previous_failed", 0),
+                },
+                invalidates=["sources", "briefing", "health", "insights", "quality"],
+            )
+        except Exception:
+            logger.exception("Failed to emit quality recovery event for '%s'", source_name)
+    logger.info("Persisted quality run %s for source '%s'", run_id, source_name)
+    return run_id

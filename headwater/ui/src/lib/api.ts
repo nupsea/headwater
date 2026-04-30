@@ -74,6 +74,66 @@ export interface ModelDetail extends ModelSummary {
   depends_on: string[];
 }
 
+export interface ModelImpactRow {
+  name: string;
+  model_type: string;
+  status: string;
+  maturity_state: string;
+  source_tables: string[];
+  source_names: string[];
+  depends_on: string[];
+  downstream_models: string[];
+  contracts: number;
+  quality_failures: number;
+  source_drift_count: number;
+  blockers: string[];
+}
+
+export interface ModelImpactSummary {
+  total_models: number;
+  mart_models: number;
+  reviewed_marts: number;
+  materialized_models: number;
+  monitored_models: number;
+  invalidated_models: number;
+  contracts: number;
+  review_pct: number;
+  materialized_pct: number;
+  monitored_pct: number;
+  contract_coverage_pct: number;
+  quality_score: number;
+  maturity_score: number;
+  impacted_models: number;
+  top_blockers: { title: string; count: number }[];
+}
+
+export interface ModelImpactResponse {
+  summary: ModelImpactSummary;
+  models: ModelImpactRow[];
+}
+
+export interface RerunPlanAction {
+  action: string;
+  priority: "required" | "recommended" | "info";
+  reason: string;
+  scope: Record<string, unknown>;
+}
+
+export interface RerunPlan {
+  source_name: string | null;
+  drift_report_id: number | null;
+  regenerate_descriptions: boolean;
+  regenerate_models: boolean;
+  rerun_contracts: boolean;
+  human_review_required: boolean;
+  no_action_needed: boolean;
+  actions: RerunPlanAction[];
+  impacted_models: string[];
+  impacted_contracts: string[];
+  capability_notes: string[];
+  summary: string;
+}
+
 export interface ContractSummary {
   id: string;
   model_name: string;
@@ -212,8 +272,29 @@ export interface ModelSuggestion {
   detail: string;
 }
 
+export interface DataInsightChartPoint {
+  label: string;
+  value: number;
+}
+
+export interface DataInsight {
+  id: string;
+  category: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  detail: string;
+  table: string;
+  column?: string;
+  metric: string;
+  value: number;
+  unit: string;
+  chart_type: "bar" | "line" | "pie" | "histogram";
+  chart: DataInsightChartPoint[];
+}
+
 export interface InsightsResponse {
   data_profile: DataProfile;
+  top_insights: DataInsight[];
   workflow: Workflow;
   advisory_actions: AdvisoryAction[];
   overview: {
@@ -327,6 +408,11 @@ export interface ExploreSuggestionsResponse {
   suggestions: SuggestedQuestion[];
   insights: StatisticalInsight[];
   review_pct: number;
+}
+
+export interface ExploreInsightsResponse {
+  insights: StatisticalInsight[];
+  total: number;
 }
 
 // ---------- Drift types (US-402, US-403) ----------
@@ -499,6 +585,10 @@ export interface ProjectProgress {
   tables_reviewed: number;
   tables_modeled: number;
   tables_mart_ready: number;
+  mart_models_review_pending?: number;
+  materialized_models?: number;
+  invalidated_models?: number;
+  impacted_models?: number;
   columns_total: number;
   columns_described: number;
   columns_confirmed: number;
@@ -510,7 +600,28 @@ export interface ProjectProgress {
   dimensions_confirmed: number;
   quality_contracts: number;
   contracts_enforcing: number;
+  contracts_observing?: number;
+  contracts_failing?: number;
+  contracts_recovered?: number;
+  quality_failed?: number;
+  quality_score?: number;
+  source_drift_count?: number;
   catalog_coverage: number;
+  maturity_blockers?: MaturityBlocker[];
+  next_actions?: MaturityNextAction[];
+}
+
+export interface MaturityBlocker {
+  title: string;
+  detail: string;
+  severity: "critical" | "warning" | "info";
+  route: string;
+}
+
+export interface MaturityNextAction {
+  title: string;
+  priority: "critical" | "warning" | "info";
+  route: string;
 }
 
 export interface Project {
@@ -803,6 +914,13 @@ export const api = {
 
   model: (name: string) => fetchJSON<ModelDetail>(`/models/${name}`),
 
+  modelImpact: () => fetchJSON<ModelImpactResponse>("/models/impact"),
+
+  rerunPlan: (source?: string) =>
+    fetchJSON<RerunPlan>(
+      `/rerun-plan${source ? `?source=${encodeURIComponent(source)}` : ""}`
+    ),
+
   approveModel: (name: string) =>
     fetchJSON<{ name: string; status: string }>(`/models/${name}/approve`, {
       method: "POST",
@@ -863,6 +981,9 @@ export const api = {
 
   exploreSuggestions: () =>
     fetchJSON<ExploreSuggestionsResponse>("/explore/suggestions"),
+
+  exploreInsights: () =>
+    fetchJSON<ExploreInsightsResponse>("/explore/insights"),
 
   exploreAsk: (question: string) =>
     fetchJSON<ExplorationResult>("/explore/ask", {
@@ -1053,4 +1174,176 @@ export const api = {
       `/pipeline/re-enrich?force=${force}`,
       { method: "POST" }
     ),
+
+  // Sources (multi-source)
+  sources: () => fetchJSON<{ sources: SourceSummary[] }>("/sources"),
+  source: (name: string) => fetchJSON<SourceDetail>(`/sources/${name}`),
+  createSource: (body: SourceCreatePayload) =>
+    fetchJSON<SourceSummary>("/sources", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  syncSource: (name: string) =>
+    fetchJSON<{
+      name: string;
+      status: string;
+      health: number;
+      run_id: number;
+      quality_total?: number;
+      quality_failed?: number;
+      quality_score?: number;
+    }>(
+      `/sources/${name}/sync`,
+      { method: "POST" }
+    ),
+  deleteSource: (name: string) =>
+    fetchJSON<{ name: string; deleted: boolean }>(
+      `/sources/${name}`,
+      { method: "DELETE" }
+    ),
+  sourceEvents: (name: string, limit = 50) =>
+    fetchJSON<{ events: SystemEvent[] }>(`/sources/${name}/events?limit=${limit}`),
+  events: (limit = 50, source?: string) =>
+    fetchJSON<{ events: SystemEvent[] }>(
+      `/events?limit=${limit}${source ? `&source=${encodeURIComponent(source)}` : ""}`
+    ),
+  syncEvents: (limit = 50) =>
+    fetchJSON<{ events: SyncEvent[] }>(`/sync-events?limit=${limit}`),
+  connectorCatalog: () =>
+    fetchJSON<{ connectors: ConnectorType[] }>("/connector-catalog"),
+
+  // Briefing (homepage)
+  briefingToday: () => fetchJSON<BriefingResponse>("/briefing/today"),
 };
+
+// ---------- Multi-source types ----------
+
+export interface SourceSummary {
+  name: string;
+  display_name: string | null;
+  type: string;
+  host: string | null;
+  status: "healthy" | "warning" | "error" | "idle" | "syncing";
+  health: number | null;
+  last_sync_at: string | null;
+  drift_count: number;
+  quality_failed: number;
+  quality_score: number | null;
+  latest_run_status: string | null;
+  latest_run_duration_ms: number | null;
+  latest_error: string | null;
+  auto_sync: boolean;
+  tables: number;
+  rows: number;
+  schemas: number;
+}
+
+export interface SyncEvent {
+  id: number;
+  source_name: string;
+  event_type: string;
+  severity: "info" | "warning" | "error" | "success";
+  detail: string;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface SystemEvent {
+  id: number;
+  source_name: string | null;
+  event_type: string;
+  severity: "info" | "warning" | "error" | "success";
+  artifact_type: string | null;
+  artifact_id: string | null;
+  summary: string;
+  detail: string | null;
+  payload: Record<string, unknown> | null;
+  invalidates: string[];
+  created_at: string;
+  acknowledged_at: string | null;
+}
+
+export interface SourceDetail extends SourceSummary {
+  events: SystemEvent[];
+  runs: SyncRun[];
+}
+
+export interface SyncRun {
+  id: number;
+  source_name: string;
+  mode: string;
+  status: "running" | "succeeded" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  tables_seen: number;
+  profiles_written: number;
+  contracts_checked: number;
+  error: string | null;
+  payload?: Record<string, unknown> | null;
+}
+
+export interface SourceCreatePayload {
+  name: string;
+  type: string;
+  host?: string;
+  uri?: string;
+  path?: string;
+  display_name?: string;
+  auto_sync?: boolean;
+  config?: Record<string, unknown>;
+}
+
+export interface ConnectorType {
+  id: string;
+  name: string;
+  category: string;
+  color: string;
+  glyph: string;
+  status: "supported" | "preview" | "planned";
+  supported: boolean;
+  capabilities: ConnectorCapabilities;
+  lightGlyph?: boolean;
+}
+
+export interface ConnectorCapabilities {
+  test: boolean;
+  list_schemas: boolean;
+  list_tables: boolean;
+  list_columns: boolean;
+  list_constraints: boolean;
+  estimate_row_count: boolean;
+  profile_table: boolean;
+  sample_arrow: boolean;
+  execute_readonly: boolean;
+  load_to_duckdb: boolean;
+  modes: string[];
+}
+
+export interface BriefingPriority {
+  urgency: "high" | "medium" | "low";
+  headline: string;
+  detail: string;
+  action: string;
+  route: string;
+  deeplink: string | null;
+}
+
+export interface BriefingResponse {
+  generated_at: string;
+  summary: {
+    attention_count: number;
+    wait_count: number;
+    all_clear: boolean;
+    no_data?: boolean;
+  };
+  priorities: BriefingPriority[];
+  wins: string[];
+  stats: {
+    sources: number;
+    tables: number;
+    quality_checks: number;
+    health_pct: number;
+  };
+}

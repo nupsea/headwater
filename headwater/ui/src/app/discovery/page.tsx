@@ -7,9 +7,44 @@ import {
   type TableDetail,
   type ColumnProfile,
   type DictColumn,
+  type DictTable,
+  type ColumnReviewPayload,
 } from "@/lib/api";
 import { ProfileTable } from "@/components/profile-table";
 import { KeyColumnsView } from "@/components/key-columns-view";
+import { PKFKManager } from "@/components/pk-fk-manager";
+
+const ROLE_OPTIONS = [
+  "metric",
+  "dimension",
+  "temporal",
+  "identifier",
+  "geographic",
+  "text",
+];
+
+const SEMANTIC_TYPE_OPTIONS = [
+  "id",
+  "primary_key",
+  "foreign_key",
+  "dimension",
+  "metric",
+  "temporal",
+  "geographic",
+  "text",
+  "pii",
+];
+
+function reviewBreakdown(table: DictTable | null) {
+  if (!table) return null;
+  const columns = table.columns.filter(
+    (c) => c.review_signal === "needs_review" || c.review_signal === "conflict"
+  ).length;
+  const catalog = table.catalog_items.filter(
+    (c) => c.review_signal === "needs_review" || c.review_signal === "conflict"
+  ).length;
+  return { columns, catalog };
+}
 
 export default function DiscoveryPage() {
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
@@ -18,6 +53,13 @@ export default function DiscoveryPage() {
   const [profiles, setProfiles] = useState<ColumnProfile[]>([]);
   const [error, setError] = useState("");
   const [schemaTab, setSchemaTab] = useState<"key" | "full">("key");
+  // Dictionary editing state
+  const [dictTable, setDictTable] = useState<DictTable | null>(null);
+  const [editDescs, setEditDescs] = useState<Record<string, string>>({});
+  const [editedCols, setEditedCols] = useState<Record<string, Partial<DictColumn>>>({});
+  const [editTableDesc, setEditTableDesc] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
 
   useEffect(() => {
     api
@@ -33,7 +75,111 @@ export default function DiscoveryPage() {
     if (!selected) return;
     api.table(selected).then(setDetail);
     api.tableProfile(selected).then(setProfiles).catch(() => setProfiles([]));
+    api.dictionaryTable(selected).then((dt) => {
+      setDictTable(dt);
+      setEditTableDesc(null);
+      setEditDescs({});
+      setEditedCols({});
+      setSaveMsg("");
+    }).catch(() => setDictTable(null));
   }, [selected]);
+
+  const refreshSelected = async () => {
+    if (!selected) return;
+    const [td, dt, profileData] = await Promise.all([
+      api.table(selected),
+      api.dictionaryTable(selected).catch(() => null),
+      api.tableProfile(selected).catch(() => [] as ColumnProfile[]),
+    ]);
+    setDetail(td);
+    setDictTable(dt);
+    setProfiles(profileData);
+  };
+
+  const refreshAll = async () => {
+    const ins = await api.insights();
+    setInsights(ins);
+    await refreshSelected();
+  };
+
+  const handleColEdit = (colName: string, field: keyof DictColumn, value: unknown) => {
+    setEditedCols((prev) => ({
+      ...prev,
+      [colName]: { ...prev[colName], [field]: value },
+    }));
+  };
+
+  const getColValue = (col: DictColumn, field: keyof DictColumn) => {
+    const edit = editedCols[col.name];
+    if (edit && field in edit) return edit[field as keyof typeof edit];
+    return col[field];
+  };
+
+  const handleSaveEdits = async () => {
+    if (!selected) return;
+    setSaving(true);
+    try {
+      const merged = new Map<string, ColumnReviewPayload>();
+      for (const [name, description] of Object.entries(editDescs)) {
+        merged.set(name, { name, description });
+      }
+      for (const [name, edits] of Object.entries(editedCols)) {
+        merged.set(name, { ...(merged.get(name) ?? { name }), ...edits });
+      }
+      const columns = Array.from(merged.values());
+      const payload = {
+        columns,
+        table_description: editTableDesc ?? undefined,
+        confirm: false,
+      };
+      await api.reviewTable(selected, payload);
+      await refreshAll();
+      setEditDescs({});
+      setEditedCols({});
+      setEditTableDesc(null);
+      setSaveMsg("Changes saved.");
+      setTimeout(() => setSaveMsg(""), 3000);
+    } catch (e) {
+      setSaveMsg(e instanceof Error ? e.message : "Save failed");
+    }
+    setSaving(false);
+  };
+
+  const handleConfirmReview = async () => {
+    if (!selected) return;
+    setSaving(true);
+    setSaveMsg("");
+    try {
+      const columns = dictTable
+        ? dictTable.columns.map((col) => ({
+            name: col.name,
+            ...(editedCols[col.name] ?? {}),
+            ...(editDescs[col.name] !== undefined
+              ? { description: editDescs[col.name] }
+              : {}),
+          }))
+        : [];
+      await api.reviewTable(selected, {
+        columns,
+        table_description: editTableDesc ?? undefined,
+        confirm: true,
+      });
+      await refreshAll();
+      setEditedCols({});
+      setEditDescs({});
+      setEditTableDesc(null);
+      setSaveMsg("Table reviewed.");
+      setTimeout(() => setSaveMsg(""), 3000);
+    } catch (e) {
+      setSaveMsg(e instanceof Error ? e.message : "Review failed");
+    }
+    setSaving(false);
+  };
+
+  const hasEdits =
+    Object.keys(editDescs).length > 0 ||
+    Object.keys(editedCols).length > 0 ||
+    editTableDesc !== null;
 
   if (error) {
     return (
@@ -66,14 +212,15 @@ export default function DiscoveryPage() {
   const selectedIssues = insights.column_issues.filter(
     (i) => i.table === selected
   );
+  const reviewTodo = reviewBreakdown(dictTable);
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Discovery Explorer</h1>
+      <h1 className="text-2xl font-bold mb-6">Discover & Access</h1>
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-[280px_minmax(0,1fr)] gap-6">
         {/* Table list sidebar */}
-        <div className="lg:col-span-1">
+        <div>
           <div className="text-xs font-semibold text-muted uppercase tracking-wide mb-2">
             Tables ({insights.table_health.length})
           </div>
@@ -128,21 +275,43 @@ export default function DiscoveryPage() {
         </div>
 
         {/* Detail panel */}
-        <div className="lg:col-span-3 space-y-5">
+        <div className="min-w-0 space-y-5">
           {selected && detail && selectedHealth ? (
             <>
               {/* Table header */}
               <div className="bg-card border border-border rounded-lg p-5">
                 <div className="flex items-start justify-between">
-                  <div>
+                  <div className="flex-1">
                     <h2 className="text-xl font-semibold font-mono">
                       {detail.name}
                     </h2>
-                    <p className="text-sm text-muted mt-1">
-                      {detail.description}
-                    </p>
+                    {editTableDesc !== null ? (
+                      <input
+                        type="text"
+                        value={editTableDesc}
+                        onChange={(e) => setEditTableDesc(e.target.value)}
+                        className="mt-1 w-full text-sm border border-border rounded px-2 py-1 bg-background"
+                        placeholder="Table description..."
+                      />
+                    ) : (
+                      <p
+                        className="text-sm text-muted mt-1 cursor-pointer hover:text-foreground transition-colors"
+                        onClick={() => setEditTableDesc(detail.description || "")}
+                        title="Click to edit description"
+                      >
+                        {detail.description || "No description — click to add"}
+                        <span className="text-[10px] ml-1 text-accent">✎</span>
+                      </p>
+                    )}
                   </div>
                   <div className="text-right">
+                    {dictTable && (
+                      <div className="mb-2">
+                        <span className="inline-flex px-2 py-0.5 rounded border border-border text-[10px] uppercase tracking-wide text-muted">
+                          {dictTable.review_status.replace("_", " ")}
+                        </span>
+                      </div>
+                    )}
                     <div
                       className={`text-2xl font-bold ${
                         selectedHealth.completeness >= 99
@@ -156,6 +325,36 @@ export default function DiscoveryPage() {
                     </div>
                     <div className="text-xs text-muted">completeness</div>
                   </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={handleConfirmReview}
+                    disabled={saving}
+                    className="px-3 py-1.5 bg-foreground text-background rounded text-xs font-medium hover:opacity-90 disabled:opacity-50"
+                  >
+                    {saving ? "Saving..." : "Confirm Table Review"}
+                  </button>
+                  {hasEdits && (
+                    <button
+                      onClick={handleSaveEdits}
+                      disabled={saving}
+                      className="px-3 py-1.5 border border-border rounded text-xs font-medium hover:border-foreground disabled:opacity-50"
+                    >
+                      Save Edits
+                    </button>
+                  )}
+                  {dictTable && (
+                    <span className="text-xs text-muted">
+                      {dictTable.review_status === "reviewed"
+                        ? "Review complete"
+                        : `${dictTable.needs_review_count} item(s) need review${
+                            reviewTodo
+                              ? `: ${reviewTodo.columns} column metadata, ${reviewTodo.catalog} catalog terms`
+                              : ""
+                          }`}
+                    </span>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
@@ -341,6 +540,8 @@ export default function DiscoveryPage() {
                         confidence: 0.7,
                         locked: false,
                         needs_review: false,
+                        review_signal: "auto_confirmed",
+                        review_reason: null,
                       })
                     )}
                     profiles={profiles}
@@ -349,12 +550,23 @@ export default function DiscoveryPage() {
 
                 {schemaTab === "full" && (
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
+                    <table className="w-full min-w-[1180px] table-fixed text-sm">
+                      <colgroup>
+                        <col className="w-[180px]" />
+                        <col className="w-[95px]" />
+                        <col className="w-[95px]" />
+                        <col className="w-[130px]" />
+                        <col className="w-[80px]" />
+                        <col className="w-[145px]" />
+                        <col className="w-[135px]" />
+                        <col />
+                      </colgroup>
                       <thead>
                         <tr className="border-b border-border text-left text-muted">
                           <th className="py-2 pr-4">Name</th>
                           <th className="py-2 pr-4">Type</th>
                           <th className="py-2 pr-4">Key</th>
+                          <th className="py-2 pr-4">Role</th>
                           <th className="py-2 pr-4">Nullable</th>
                           <th className="py-2 pr-4">Semantic Type</th>
                           <th className="py-2 pr-4">Profile</th>
@@ -362,44 +574,121 @@ export default function DiscoveryPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {detail.columns.map((c) => {
+                        {(dictTable?.columns ??
+                          detail.columns.map(
+                            (col): DictColumn => ({
+                              ...col,
+                              is_foreign_key: selectedHealth.fk_columns.some(
+                                (fk) => fk.column === col.name
+                              ),
+                              fk_references:
+                                selectedHealth.fk_columns.find(
+                                  (fk) => fk.column === col.name
+                                )?.references || null,
+                              role: null,
+                              confidence: 0.7,
+                              locked: false,
+                              needs_review: false,
+                              review_signal: "auto_confirmed",
+                              review_reason: null,
+                            })
+                          )).map((c) => {
                           const prof = profiles.find(
                             (p) => p.column_name === c.name
                           );
+                          const isPk = Boolean(
+                            getColValue(c, "is_primary_key")
+                          );
+                          const isFk = Boolean(c.is_foreign_key);
+                          const fkRef = c.fk_references;
                           return (
                             <tr
                               key={c.name}
                               className="border-b border-border/50"
                             >
-                              <td className="py-2 pr-4 font-mono font-medium">
+                              <td className="py-2 pr-4 font-mono font-medium break-words">
                                 {c.name}
                               </td>
                               <td className="py-2 pr-4 text-muted">
                                 {c.dtype}
                               </td>
                               <td className="py-2 pr-4">
-                                {c.is_primary_key && (
-                                  <span className="text-xs text-warning font-semibold">
+                                <label className="inline-flex items-center gap-1 text-xs">
+                                  <input
+                                    type="checkbox"
+                                    checked={isPk}
+                                    onChange={(e) =>
+                                      handleColEdit(
+                                        c.name,
+                                        "is_primary_key",
+                                        e.target.checked
+                                      )
+                                    }
+                                    className="h-3.5 w-3.5"
+                                  />
+                                  <span className="text-warning font-semibold">
                                     PK
                                   </span>
-                                )}
-                                {selectedHealth.fk_columns.some(
-                                  (fk) => fk.column === c.name
-                                ) && (
-                                  <span className="text-xs text-accent font-semibold ml-1">
+                                </label>
+                                {isFk && (
+                                  <span
+                                    className="text-xs text-accent font-semibold ml-2"
+                                    title={fkRef || ""}
+                                  >
                                     FK
                                   </span>
                                 )}
+                              </td>
+                              <td className="py-2 pr-4">
+                                <select
+                                  value={
+                                    (getColValue(c, "role") as string | null) ||
+                                    ""
+                                  }
+                                  onChange={(e) =>
+                                    handleColEdit(
+                                      c.name,
+                                      "role",
+                                      e.target.value || null
+                                    )
+                                  }
+                                  className="text-xs border border-border rounded px-1.5 py-0.5 bg-background"
+                                >
+                                  <option value="">-</option>
+                                  {ROLE_OPTIONS.map((role) => (
+                                    <option key={role} value={role}>
+                                      {role}
+                                    </option>
+                                  ))}
+                                </select>
                               </td>
                               <td className="py-2 pr-4 text-muted text-xs">
                                 {c.nullable ? "yes" : "no"}
                               </td>
                               <td className="py-2 pr-4">
-                                {c.semantic_type && (
-                                  <span className="px-1.5 py-0.5 bg-accent/10 text-accent rounded text-xs">
-                                    {c.semantic_type}
-                                  </span>
-                                )}
+                                <select
+                                  value={
+                                    (getColValue(
+                                      c,
+                                      "semantic_type"
+                                    ) as string | null) || ""
+                                  }
+                                  onChange={(e) =>
+                                    handleColEdit(
+                                      c.name,
+                                      "semantic_type",
+                                      e.target.value || null
+                                    )
+                                  }
+                                  className="text-xs border border-border rounded px-1.5 py-0.5 bg-background"
+                                >
+                                  <option value="">-</option>
+                                  {SEMANTIC_TYPE_OPTIONS.map((type) => (
+                                    <option key={type} value={type}>
+                                      {type}
+                                    </option>
+                                  ))}
+                                </select>
                               </td>
                               <td className="py-2 pr-4">
                                 {prof ? (
@@ -414,7 +703,7 @@ export default function DiscoveryPage() {
                                       }`}
                                       title={`${(prof.null_rate * 100).toFixed(1)}% null`}
                                     />
-                                    <span className="text-[10px] text-muted">
+                                    <span className="text-[10px] text-muted whitespace-nowrap">
                                       {prof.distinct_count} distinct
                                       {prof.null_rate > 0.01 &&
                                         ` | ${(prof.null_rate * 100).toFixed(0)}% null`}
@@ -426,8 +715,23 @@ export default function DiscoveryPage() {
                                   </span>
                                 )}
                               </td>
-                              <td className="py-2 text-xs text-muted">
-                                {c.description || "-"}
+                              <td className="py-2">
+                                <input
+                                  type="text"
+                                  value={
+                                    editDescs[c.name] ??
+                                    c.description ??
+                                    ""
+                                  }
+                                  onChange={(e) =>
+                                    setEditDescs((prev) => ({
+                                      ...prev,
+                                      [c.name]: e.target.value,
+                                    }))
+                                  }
+                                  className="min-h-8 text-xs border border-border rounded px-2 py-1 bg-background w-full"
+                                  placeholder="Add description..."
+                                />
                               </td>
                             </tr>
                           );
@@ -437,6 +741,31 @@ export default function DiscoveryPage() {
                   </div>
                 )}
               </div>
+
+              {/* PK/FK Manager */}
+              <div className="bg-card border border-border rounded-lg p-5">
+                <PKFKManager tableName={selected} onChanged={refreshAll} />
+              </div>
+
+              {/* Save bar */}
+              {hasEdits && (
+                <div className="flex items-center gap-3 p-3 bg-accent/5 border border-accent/20 rounded-lg">
+                  <button
+                    onClick={handleSaveEdits}
+                    disabled={saving}
+                    className="px-4 py-1.5 bg-accent text-white rounded text-sm font-medium hover:bg-accent/90 disabled:opacity-50"
+                  >
+                    {saving ? "Saving..." : "Save Changes"}
+                  </button>
+                  <span className="text-xs text-muted">
+                    {Object.keys(editDescs).length} column(s) edited
+                    {editTableDesc !== null ? " + table description" : ""}
+                  </span>
+                </div>
+              )}
+              {saveMsg && (
+                <div className="text-sm text-success">{saveMsg}</div>
+              )}
 
               {/* Statistical profiles */}
               {profiles.length > 0 && (

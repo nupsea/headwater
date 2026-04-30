@@ -58,7 +58,7 @@ def _build_column_mappings(table: TableInfo) -> list[dict]:
     """Build column mappings for the staging template."""
     columns = []
     for col in table.columns:
-        target_name = _to_snake_case(col.name)
+        target_name = _to_sql_identifier(_to_snake_case(col.name))
         expression = f'"{col.name}"'
 
         # Add explicit casts for clarity
@@ -90,3 +90,14 @@ def _to_snake_case(name: str) -> str:
     # Insert underscore before uppercase letters
     s = re.sub(r"([a-z])([A-Z])", r"\1_\2", name)
     return s.lower()
+
+
+def _to_sql_identifier(name: str) -> str:
+    """Return a safe SQL identifier for generated aliases."""
+    safe = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    if not safe:
+        return "_col"
+    if safe[0].isdigit():
+        safe = f"_{safe}"
+    return safe

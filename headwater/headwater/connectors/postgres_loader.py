@@ -7,8 +7,13 @@ from urllib.parse import urlparse
 
 import pyarrow as pa
 
+from headwater.connectors.capabilities import (
+    POSTGRES_GENERATE_CAPABILITIES,
+    ConnectorCapabilities,
+)
 from headwater.core.exceptions import ConnectorError, HeadwaterConnectionError
 from headwater.core.models import SourceConfig
+from headwater.core.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +69,7 @@ def _wrap_operational_error(exc: Exception, dsn: str) -> HeadwaterConnectionErro
             f"Database '{parts['dbname']}' does not exist on {parts['host']}."
         )
     # General fallback
-    return HeadwaterConnectionError(str(exc))
+    return HeadwaterConnectionError(redact_secrets(str(exc)))
 
 
 class PostgresConnector:
@@ -99,6 +104,9 @@ class PostgresConnector:
             )
         except psycopg2.OperationalError as exc:
             raise _wrap_operational_error(exc, self._dsn) from exc
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return POSTGRES_GENERATE_CAPABILITIES
 
     def list_tables(self) -> list[str]:
         """Return all user tables as 'schema.table' (or just 'table' for public schema).

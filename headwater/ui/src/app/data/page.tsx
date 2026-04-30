@@ -87,7 +87,6 @@ export default function DataPage() {
 
   // Load catalog from DuckDB on mount
   useEffect(() => {
-    setCatalogLoading(true);
     api
       .dataCatalog()
       .then((res: CatalogResponse) => {
@@ -117,10 +116,10 @@ export default function DataPage() {
     setExpandedTable((prev) => (prev === qualifiedName ? null : qualifiedName));
   };
 
-  const selectTableFromCatalog = (qualifiedName: string, tableName: string) => {
+  const selectTableFromCatalog = (qualifiedName: string) => {
     setSelectedTable(qualifiedName);
     setActiveTab("preview");
-    loadPreviewFor(tableName);
+    loadPreviewFor(qualifiedName);
   };
 
   const insertTableRef = (qualifiedName: string) => {
@@ -146,7 +145,7 @@ export default function DataPage() {
 
   const loadPreview = () => {
     const entry = catalog.find((t) => t.qualified_name === selectedTable);
-    if (entry) loadPreviewFor(entry.table_name);
+    if (entry) loadPreviewFor(entry.qualified_name);
   };
 
   const runQuery = async () => {
@@ -234,10 +233,7 @@ export default function DataPage() {
                         <div className="flex-1 min-w-0">
                           <button
                             onClick={() =>
-                              selectTableFromCatalog(
-                                table.qualified_name,
-                                table.table_name
-                              )
+                              selectTableFromCatalog(table.qualified_name)
                             }
                             className="block text-xs font-medium truncate text-left w-full hover:text-blue-600 transition-colors"
                             title={table.qualified_name}

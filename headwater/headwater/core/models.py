@@ -16,7 +16,7 @@ class SourceConfig(BaseModel):
     """Describes a data source to discover."""
 
     name: str
-    type: Literal["json", "csv", "parquet", "postgres", "mysql"]
+    type: Literal["json", "csv", "duckdb", "sqlite", "parquet", "postgres", "mysql"]
     path: str | None = None  # For file-based sources
     uri: str | None = None  # For database sources
     mode: Literal["generate", "observe"] = "generate"
@@ -195,7 +195,9 @@ class ContractRule(BaseModel):
     severity: Literal["error", "warning", "info"] = "warning"
     description: str = ""
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
-    status: Literal["proposed", "observing", "enforced", "disabled"] = "proposed"
+    status: Literal[
+        "proposed", "observing", "enforced", "failing", "recovered", "disabled"
+    ] = "proposed"
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +221,7 @@ class ContractCheckResult(BaseModel):
     rule_id: str
     model_name: str
     passed: bool
+    skipped: bool = False
     observed_value: Any = None
     message: str = ""
 
@@ -231,6 +234,8 @@ class QualityReport(BaseModel):
     failed: int = 0
     skipped: int = 0
     results: list[ContractCheckResult] = Field(default_factory=list)
+    contract_status_transitions: dict[str, list[str]] = Field(default_factory=dict)
+    previous_failed: int = 0
 
 
 # ---------------------------------------------------------------------------

@@ -80,7 +80,7 @@ uv run headwater discover --source postgresql://headwater:headwater@localhost:54
 
 ## What It Does
 
-1. **Discover** -- Connect to a source (Postgres, JSON, CSV), extract schema via `information_schema`, profile every column (null rates, cardinality, min/max, top-N distinct values, pattern detection), detect foreign key relationships
+1. **Discover** -- Connect to a source (Postgres, JSON, CSV, DuckDB, SQLite), extract schema and profiles, detect foreign key relationships, and persist source-scoped sync history
 2. **Analyze** -- Classify tables by domain, assign semantic types to columns, generate descriptions (heuristic or LLM-assisted). Approved descriptions are locked and preserved across re-runs.
 3. **Generate** -- Create staging SQL models (auto-approved), propose mart SQL models (individual human review required), generate quality contracts from observed statistics
 4. **Execute** -- Materialize approved models in dependency order
@@ -94,7 +94,7 @@ uv run headwater discover --source postgresql://headwater:headwater@localhost:54
 ### Data Flow
 
 ```
-Source (Postgres / JSON / CSV)
+Source (Postgres / JSON / CSV / DuckDB / SQLite)
   -> Connector: profile() -- aggregate SQL runs in-place, stats only
   -> Connector: sample()  -- small Arrow batch (10k rows) for local validation
     -> Profiler (Polars expressions for stats, FK detection)
@@ -111,14 +111,16 @@ Source (Postgres / JSON / CSV)
 DuckDB's single-writer lock causes contention between the background pipeline and the API. Metadata (sources, discovery runs, table/column info, profiles, models, decisions, audit log) lives in SQLite. DuckDB holds only the actual data tables and materialized models.
 
 **Pushdown profiling — no bulk data copy**
-For database sources (Postgres), profiling queries run directly in the source via aggregate SQL (`COUNT`, `MIN`, `MAX`, `COUNT(DISTINCT)`). Only a small sample (default 10k rows) is fetched locally for validating generated SQL. Large OLTP tables are never bulk-loaded into Headwater.
+For database sources such as Postgres, profiling queries run directly in the source via aggregate SQL (`COUNT`, `MIN`, `MAX`, `COUNT(DISTINCT)`). Only a small sample (default 10k rows) is fetched locally for validating generated SQL. Large OLTP tables are never bulk-loaded into Headwater.
 
 **Arrow-native flow**
 Data moves between Polars and DuckDB as Apache Arrow. No Pandas, no CSV intermediaries, zero-copy.
 
-**Two-mode connector architecture**
-- `generate` mode (Postgres, CSV, JSON): profile in-place, generate deployable staging + mart SQL
-- `observe` mode (Snowflake, BigQuery, Redshift): profile in-place, govern what's already there — zero data movement. *(Phase 2)*
+**Capability-aware connector direction**
+Headwater currently supports Postgres, CSV, JSON, DuckDB, and SQLite. Each connector declares
+whether it can sample, profile in-place, execute read-only SQL, materialize models, or operate
+in observe-only mode. MySQL is preview capability work until live integration validation is in place.
+Warehouse and catalog connectors are planned after source-scoped sync, drift, and quality history are hardened.
 
 **LLM is optional**
 Three tiers: `none` (heuristics only), `anthropic` (Claude via API). Everything works without a network call. The LLM receives only column names, data types, and statistical summaries -- never raw data rows.
@@ -133,12 +135,16 @@ Every approve, reject, and edit is recorded. Headwater computes description acce
 
 ## Source Connectors
 
-| Type | Mode | Command |
+| Type | Status | Current behavior |
 |---|---|---|
-| Postgres | generate | `--source postgresql://user:pass@host:5432/db` |
-| JSON (NDJSON) | generate | `--source /path/to/dir --type json` |
-| CSV | generate | `--source /path/to/dir --type csv` |
-| Snowflake / BigQuery / Redshift | observe | Phase 2 |
+| Postgres | Supported | Discover schemas/tables, sample bounded Arrow batches, profile locally after sampling |
+| JSON / NDJSON | Supported | Load local directory files into DuckDB for discovery, profiling, models, and contracts |
+| CSV | Supported | Load local directory files into DuckDB for discovery, profiling, models, and contracts |
+| DuckDB | Supported | Read an existing local DuckDB database file without mutating it |
+| SQLite | Supported | Read an existing local SQLite database file without mutating it |
+| MySQL | Preview | Capability-aware connector with optional driver, blocked from registration until integration validation |
+| Snowflake / BigQuery | Planned | Observe-mode warehouse connectors after source sync, drift, and quality history are reliable |
+| Glue / Unity Catalog / Iceberg REST | Planned | Metadata-first catalog connectors after source lifecycle is mature |
 
 ---
 
@@ -203,6 +209,7 @@ make ui                    # UI only
 |---|---|---|
 | POST | `/api/generate` | Generate models and contracts |
 | GET | `/api/models` | List all models (staging + mart) |
+| GET | `/api/models/impact` | Model maturity, blockers, downstream impact, and contract coverage |
 | GET | `/api/models/{name}` | Model detail with SQL, assumptions, questions |
 | POST | `/api/models/{name}/approve` | Approve a proposed mart model |
 | POST | `/api/models/{name}/reject` | Reject a proposed mart model |
@@ -292,7 +299,7 @@ adm/
   headwater/                  # Python project root (pyproject.toml)
     headwater/
       core/                   # Pydantic models, config, SQLite metadata, exceptions
-      connectors/             # Source connectors: JSON, CSV, Postgres (two-mode: generate/observe)
+      connectors/             # Source connectors: JSON, CSV, Postgres, DuckDB, SQLite, MySQL preview
       profiler/               # Schema extraction, statistical profiling, FK detection
       analyzer/               # Heuristic + LLM semantic enrichment, semantic locks
       generator/              # Staging/mart SQL (domain-agnostic pattern matching), contracts

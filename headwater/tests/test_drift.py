@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from headwater.api.routes.discovery import _persist_discovery_data
 from headwater.core.metadata import MetadataStore
+from headwater.core.models import ColumnInfo, DiscoveryResult, SourceConfig, TableInfo
 from headwater.drift.schema import compare_schemas
 
 # ---------------------------------------------------------------------------
@@ -22,6 +26,25 @@ def meta() -> MetadataStore:
 def _make_snapshot(tables: dict) -> dict:
     """Build a minimal snapshot dict for testing."""
     return tables
+
+
+def _metadata_request(store: MetadataStore) -> SimpleNamespace:
+    """Build a minimal request object with app.state.metadata_store."""
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(metadata_store=store)))
+
+
+def _discovery_with_orders(columns: list[ColumnInfo]) -> DiscoveryResult:
+    """Build a minimal discovery result for persistence tests."""
+    return DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data/orders.json"),
+        tables=[
+            TableInfo(
+                name="orders",
+                row_count=10,
+                columns=columns,
+            )
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +294,20 @@ def test_get_latest_snapshot_returns_most_recent(meta: MetadataStore):
     assert snap == {"v": 2}
 
 
+def test_get_latest_snapshot_record_returns_run_id(meta: MetadataStore):
+    """get_latest_snapshot_record returns both the prior run id and snapshot."""
+    meta.upsert_source("src", "json", "/data", None)
+    run1 = meta.start_run("src")
+    meta.finish_run(run1, table_count=1)
+    meta.save_snapshot(run1, "src", {"v": 1})
+
+    run2 = meta.start_run("src")
+    meta.finish_run(run2, table_count=1)
+
+    record = meta.get_latest_snapshot_record("src", before_run_id=run2)
+    assert record == {"run_id": run1, "snapshot": {"v": 1}}
+
+
 def test_drift_report_save_and_retrieve(meta: MetadataStore):
     """Drift report saved is retrieved by get_latest_drift_report."""
     meta.upsert_source("src", "json", "/data", None)
@@ -441,6 +478,107 @@ def test_first_run_no_previous_snapshot(meta: MetadataStore):
     diff = compare_schemas(prev, snap1, "src", run_id_from=None, run_id_to=run1)
     assert diff.no_changes is False
     assert "orders" in diff.tables_added
+
+
+def test_persist_discovery_saves_baseline_snapshot_without_drift(meta: MetadataStore):
+    """Persisting the first discovery run creates a baseline without noisy drift."""
+    discovery = _discovery_with_orders(
+        [ColumnInfo(name="id", dtype="int64", nullable=False)]
+    )
+
+    _persist_discovery_data(_metadata_request(meta), discovery, "src")
+
+    source = meta.get_source("src")
+    assert source is not None
+    assert source["drift_count"] == 0
+    assert meta.get_drift_reports("src") == []
+    snapshot = meta.get_latest_snapshot("src", before_run_id=999)
+    assert snapshot is not None
+    assert list(snapshot) == ["orders"]
+
+
+def test_persist_discovery_detects_schema_drift(meta: MetadataStore):
+    """Persisting a changed discovery run stores drift and emits a normalized event."""
+    request = _metadata_request(meta)
+    _persist_discovery_data(
+        request,
+        _discovery_with_orders([ColumnInfo(name="id", dtype="int64", nullable=False)]),
+        "src",
+    )
+    _persist_discovery_data(
+        request,
+        _discovery_with_orders(
+            [
+                ColumnInfo(name="id", dtype="int64", nullable=False),
+                ColumnInfo(name="amount", dtype="float64", nullable=True),
+            ]
+        ),
+        "src",
+    )
+
+    reports = meta.get_drift_reports("src")
+    assert len(reports) == 1
+    diff = reports[0]["diff"]
+    assert diff["no_changes"] is False
+    assert diff["tables_changed"][0]["table_name"] == "orders"
+    assert diff["tables_changed"][0]["column_changes"][0]["column_name"] == "amount"
+
+    source = meta.get_source("src")
+    assert source is not None
+    assert source["status"] == "warning"
+    assert source["drift_count"] == 1
+
+    events = meta.list_events("src")
+    assert [event["event_type"] for event in events] == ["schema_drift_detected"]
+    assert events[0]["payload"]["report_id"] == reports[0]["id"]
+
+
+def test_schema_drift_persists_model_impacts(meta: MetadataStore):
+    """Breaking drift against a referenced column invalidates affected models."""
+    request = _metadata_request(meta)
+    _persist_discovery_data(
+        request,
+        _discovery_with_orders(
+            [
+                ColumnInfo(name="id", dtype="int64", nullable=False),
+                ColumnInfo(name="amount", dtype="float64", nullable=True),
+            ]
+        ),
+        "src",
+    )
+    meta.upsert_model(
+        "stg_orders",
+        "src",
+        "staging",
+        'SELECT "id", "amount" FROM orders',
+        source_tables=["orders"],
+        status="approved",
+    )
+
+    _persist_discovery_data(
+        request,
+        _discovery_with_orders(
+            [
+                ColumnInfo(name="id", dtype="int64", nullable=False),
+                ColumnInfo(name="amount", dtype="varchar", nullable=True),
+            ]
+        ),
+        "src",
+    )
+
+    report = meta.get_latest_drift_report("src")
+    assert report is not None
+    impacts = meta.list_model_impacts(source_name="src")
+    assert len(impacts) == 1
+    assert impacts[0]["drift_report_id"] == report["id"]
+    assert impacts[0]["model_name"] == "stg_orders"
+    assert impacts[0]["impact_type"] == "source_column_type_changed"
+    assert impacts[0]["severity"] == "error"
+
+    models = {model["name"]: model for model in meta.get_models("src")}
+    assert models["stg_orders"]["status"] == "invalidated"
+    events = meta.list_events("src")
+    assert any(event["event_type"] == "model_impacted" for event in events)
 
 
 # ---------------------------------------------------------------------------

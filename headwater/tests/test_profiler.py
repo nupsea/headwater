@@ -159,3 +159,54 @@ class TestProfilerEngine:
 
         for table in result.tables:
             assert len(table.columns) > 0, f"Table {table.name} has no columns"
+
+    def test_profile_inferred_primary_keys_feed_relationship_detection(self):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA src")
+            con.execute("""
+                CREATE TABLE src.accounts (
+                    account_key VARCHAR,
+                    account_name VARCHAR
+                )
+            """)
+            con.execute("""
+                INSERT INTO src.accounts VALUES
+                    ('acct_1', 'One'),
+                    ('acct_2', 'Two'),
+                    ('acct_3', 'Three')
+            """)
+            con.execute("""
+                CREATE TABLE src.transactions (
+                    transaction_id INTEGER,
+                    account_key VARCHAR,
+                    amount INTEGER
+                )
+            """)
+            con.execute("""
+                INSERT INTO src.transactions VALUES
+                    (1, 'acct_1', 10),
+                    (2, 'acct_1', 20),
+                    (3, 'acct_2', 30)
+            """)
+
+            source = SourceConfig(name="synthetic", type="duckdb", path=":memory:")
+            result = discover(con, "src", source)
+
+            accounts = next(t for t in result.tables if t.name == "accounts")
+            account_key = next(c for c in accounts.columns if c.name == "account_key")
+            assert account_key.is_primary_key is True
+
+            rel = next(
+                (
+                    r
+                    for r in result.relationships
+                    if r.from_table == "transactions" and r.to_table == "accounts"
+                ),
+                None,
+            )
+            assert rel is not None
+            assert rel.from_column == "account_key"
+            assert rel.to_column == "account_key"
+        finally:
+            con.close()
