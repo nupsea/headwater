@@ -267,7 +267,10 @@ def _render_period_comparison(
     time_ref = f'"{_sql_identifier(time_col)}"'
     period_expr = _period_expression(time_ref)
 
-    inner_metrics = [f'AVG("{_sql_identifier(c)}") AS avg_{_sql_identifier(c)}' for c in metric_cols[:5]]
+    inner_metrics = [
+        f'AVG("{_sql_identifier(c)}") AS avg_{_sql_identifier(c)}'
+        for c in metric_cols[:5]
+    ]
     if not inner_metrics:
         inner_metrics = ["COUNT(*) AS record_count"]
     inner_select = _format_select_items(inner_metrics + ["COUNT(*) AS row_count"], indent=8)
@@ -330,7 +333,7 @@ def _period_expression(column_ref: str) -> str:
     """Build a DuckDB date expression that tolerates common source formats."""
     return (
         "COALESCE("
-        f"TRY_CAST({column_ref} AS DATE), "
+        f"TRY_CAST(CAST({column_ref} AS VARCHAR) AS DATE), "
         "CAST(TRY_STRPTIME(CAST("
         f"{column_ref}"
         " AS VARCHAR), "
@@ -361,7 +364,8 @@ def _render_entity_summary(
     if dim_table:
         if candidate.join_from_column and candidate.join_to_column:
             join_clause = (
-                f'JOIN staging.stg_{dim_table} d ON f."{_sql_identifier(candidate.join_from_column)}" '
+                f'JOIN staging.stg_{dim_table} d '
+                f'ON f."{_sql_identifier(candidate.join_from_column)}" '
                 f'= d."{_sql_identifier(candidate.join_to_column)}"'
             )
         else:
