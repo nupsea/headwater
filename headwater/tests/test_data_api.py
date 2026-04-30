@@ -39,6 +39,14 @@ def client():
             (3, 150.0, 'unhealthy', '2024-01-02'),
             (1, 35.0, 'good', '2024-01-02'),
             (2, 95.0, 'moderate', '2024-01-03');
+        CREATE TABLE sites (
+            site_id INTEGER,
+            name VARCHAR
+        );
+        INSERT INTO sites VALUES
+            (1, 'North'),
+            (2, 'South'),
+            (3, 'West');
     """)
 
     app.state.duckdb_con = con
@@ -167,6 +175,20 @@ class TestDataPreview:
         data = resp.json()
         assert data["row_count"] == 5
         assert data["sql"] == "SELECT * FROM \"staging\".\"stg_readings\" LIMIT 100"
+
+    def test_preview_falls_back_from_missing_staging_model_to_source_table(self, client):
+        resp = client.get("/api/data/stg_sites/preview")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["row_count"] == 3
+        assert data["sql"] == "SELECT * FROM \"main\".\"sites\" LIMIT 100"
+
+    def test_preview_falls_back_from_missing_qualified_staging_model(self, client):
+        resp = client.get("/api/data/staging.stg_sites/preview")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["row_count"] == 3
+        assert data["sql"] == "SELECT * FROM \"main\".\"sites\" LIMIT 100"
 
     def test_preview_respects_limit(self, client):
         resp = client.get("/api/data/readings/preview?limit=2")

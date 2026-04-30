@@ -23,6 +23,7 @@ _MUTATING_PATTERN = re.compile(
 
 # Schemas that DuckDB uses internally; hide from the catalog.
 _INTERNAL_SCHEMAS = {"information_schema", "pg_catalog"}
+_SOURCE_SCHEMAS = ("public", "main")
 
 
 def _serialize_value(val):
@@ -50,6 +51,15 @@ def _get_schemas(con) -> list[str]:
     """Return all user-created schemas in DuckDB (excludes internal ones)."""
     rows = con.execute("SELECT schema_name FROM information_schema.schemata").fetchall()
     return [r[0] for r in rows if r[0] not in _INTERNAL_SCHEMAS]
+
+
+def _find_source_table_ref(con, table_names: list[str]) -> str | None:
+    """Return a quoted ref for the first matching loaded source table."""
+    for schema in _SOURCE_SCHEMAS:
+        for table_name in table_names:
+            if table_exists(con, schema, table_name):
+                return f'"{schema}"."{table_name}"'
+    return None
 
 
 class QueryRequest(BaseModel):
@@ -88,9 +98,19 @@ def _find_table(table_name: str, request: Request) -> str | None:
         schema, tbl = table_name.split(".", 1)
         if table_exists(con, schema, tbl):
             return f'"{schema}"."{tbl}"'
+        if schema == "staging" and tbl.startswith("stg_"):
+            source_tbl = tbl.removeprefix("stg_")
+            source_ref = _find_source_table_ref(con, [source_tbl, tbl])
+            if source_ref:
+                return source_ref
 
     if table_name.startswith("stg_") and table_exists(con, "staging", table_name):
         return f'"staging"."{table_name}"'
+    if table_name.startswith("stg_"):
+        source_tbl = table_name.removeprefix("stg_")
+        source_ref = _find_source_table_ref(con, [source_tbl, table_name])
+        if source_ref:
+            return source_ref
 
     ref = resolve_table_ref(table_name, con, models)
 
