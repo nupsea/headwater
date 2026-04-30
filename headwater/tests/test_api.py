@@ -83,6 +83,10 @@ class TestSourcesCatalog:
 
         detail = client.get("/api/sources/sample_json").json()
         assert any(e["event_type"] == "connection_tested" for e in detail["events"])
+        assert any("invalidates" in e for e in detail["events"])
+
+        events = client.get("/api/events").json()["events"]
+        assert any(e["event_type"] == "connection_tested" for e in events)
 
     def test_source_sync_runs_full_pipeline_for_json_source(self, client):
         create = client.post(

@@ -1203,7 +1203,11 @@ export const api = {
       { method: "DELETE" }
     ),
   sourceEvents: (name: string, limit = 50) =>
-    fetchJSON<{ events: SyncEvent[] }>(`/sources/${name}/events?limit=${limit}`),
+    fetchJSON<{ events: SystemEvent[] }>(`/sources/${name}/events?limit=${limit}`),
+  events: (limit = 50, source?: string) =>
+    fetchJSON<{ events: SystemEvent[] }>(
+      `/events?limit=${limit}${source ? `&source=${encodeURIComponent(source)}` : ""}`
+    ),
   syncEvents: (limit = 50) =>
     fetchJSON<{ events: SyncEvent[] }>(`/sync-events?limit=${limit}`),
   connectorCatalog: () =>
@@ -1245,8 +1249,23 @@ export interface SyncEvent {
   created_at: string;
 }
 
+export interface SystemEvent {
+  id: number;
+  source_name: string | null;
+  event_type: string;
+  severity: "info" | "warning" | "error" | "success";
+  artifact_type: string | null;
+  artifact_id: string | null;
+  summary: string;
+  detail: string | null;
+  payload: Record<string, unknown> | null;
+  invalidates: string[];
+  created_at: string;
+  acknowledged_at: string | null;
+}
+
 export interface SourceDetail extends SourceSummary {
-  events: SyncEvent[];
+  events: SystemEvent[];
   runs: SyncRun[];
 }
 

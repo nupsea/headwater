@@ -123,7 +123,7 @@ async def get_source_route(request: Request, name: str):
     if not row:
         raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
     summary = _row_to_summary(store, row)
-    summary["events"] = store.list_sync_events(source_name=name, limit=20)
+    summary["events"] = store.list_events(source_name=name, limit=20)
     summary["runs"] = store.list_sync_runs(source_name=name, limit=10)
     return summary
 
@@ -232,7 +232,16 @@ async def list_source_events(request: Request, name: str, limit: int = 50):
     store = request.app.state.metadata_store
     if not store.get_source(name):
         raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
-    return {"events": store.list_sync_events(source_name=name, limit=limit)}
+    return {"events": store.list_events(source_name=name, limit=limit)}
+
+
+@router.get("/events")
+async def list_events(request: Request, source: str | None = None, limit: int = 50):
+    """Return normalized operational events across sources."""
+    store = request.app.state.metadata_store
+    if source and not store.get_source(source):
+        raise HTTPException(status_code=404, detail=f"Source '{source}' not found.")
+    return {"events": store.list_events(source_name=source, limit=limit)}
 
 
 @router.get("/sync-events")

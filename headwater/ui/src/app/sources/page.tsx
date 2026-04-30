@@ -5,7 +5,7 @@ import {
   api,
   type ConnectorType,
   type SourceSummary,
-  type SyncEvent,
+  type SystemEvent,
 } from "@/lib/api";
 import { useToast } from "@/components/toast";
 import { ConnectorWizard } from "@/components/connector-wizard";
@@ -62,7 +62,7 @@ const FILTER_LABEL: Record<string, string> = {
 export default function SourcesPage() {
   const { toast } = useToast();
   const [sources, setSources] = useState<SourceSummary[]>([]);
-  const [events, setEvents] = useState<SyncEvent[]>([]);
+  const [events, setEvents] = useState<SystemEvent[]>([]);
   const [connectors, setConnectors] = useState<ConnectorType[]>([]);
   const [filter, setFilter] = useState<(typeof FILTER_ORDER)[number]>("all");
   const [selected, setSelected] = useState<string | null>(null);
@@ -76,7 +76,7 @@ export default function SourcesPage() {
       .then((r) => setSources(r.sources))
       .catch((e: Error) => setError(e.message));
     api
-      .syncEvents(20)
+      .events(20)
       .then((r) => setEvents(r.events))
       .catch(() => {});
   };
@@ -385,7 +385,7 @@ export default function SourcesPage() {
                     className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${tone}`}
                   />
                   <div className="flex-1 min-w-0">
-                    <div className="text-[12px] truncate">{e.detail}</div>
+                    <div className="text-[12px] truncate">{e.summary}</div>
                     <div className="text-[10px] text-muted font-mono mt-0.5">
                       {e.source_name}
                     </div>
