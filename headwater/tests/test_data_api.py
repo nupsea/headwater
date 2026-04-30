@@ -304,6 +304,20 @@ class TestDataQuery:
 
 
 class TestKeyPersistence:
+    def test_dictionary_pk_save_is_visible_in_insights(self, client):
+        resp = client.post(
+            "/api/dictionary/sites/review",
+            json={
+                "columns": [{"name": "site_id", "is_primary_key": True}],
+                "confirm": False,
+            },
+        )
+        assert resp.status_code == 200
+
+        insights = client.get("/api/insights").json()
+        sites = next(t for t in insights["table_health"] if t["name"] == "sites")
+        assert sites["pk_columns"] == ["site_id"]
+
     def test_confirmed_keys_update_active_discovery(self, client):
         pk_resp = client.patch(
             "/api/tables/sites/keys",

@@ -133,11 +133,7 @@ export default function DiscoveryPage() {
         confirm: false,
       };
       await api.reviewTable(selected, payload);
-      // Reload
-      const dt = await api.dictionaryTable(selected);
-      setDictTable(dt);
-      const td = await api.table(selected);
-      setDetail(td);
+      await refreshAll();
       setEditDescs({});
       setEditedCols({});
       setEditTableDesc(null);
