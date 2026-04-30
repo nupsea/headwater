@@ -35,6 +35,17 @@ const SEMANTIC_TYPE_OPTIONS = [
   "pii",
 ];
 
+function reviewBreakdown(table: DictTable | null) {
+  if (!table) return null;
+  const columns = table.columns.filter(
+    (c) => c.review_signal === "needs_review" || c.review_signal === "conflict"
+  ).length;
+  const catalog = table.catalog_items.filter(
+    (c) => c.review_signal === "needs_review" || c.review_signal === "conflict"
+  ).length;
+  return { columns, catalog };
+}
+
 export default function DiscoveryPage() {
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -205,6 +216,7 @@ export default function DiscoveryPage() {
   const selectedIssues = insights.column_issues.filter(
     (i) => i.table === selected
   );
+  const reviewTodo = reviewBreakdown(dictTable);
 
   return (
     <div>
@@ -340,7 +352,11 @@ export default function DiscoveryPage() {
                     <span className="text-xs text-muted">
                       {dictTable.review_status === "reviewed"
                         ? "Review complete"
-                        : `${dictTable.needs_review_count} item(s) need review`}
+                        : `${dictTable.needs_review_count} item(s) need review${
+                            reviewTodo
+                              ? `: ${reviewTodo.columns} column metadata, ${reviewTodo.catalog} catalog terms`
+                              : ""
+                          }`}
                     </span>
                   )}
                 </div>

@@ -91,7 +91,9 @@ export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
   if (
     !suggestions ||
     (suggestions.pk_candidates.length === 0 &&
-      suggestions.fk_candidates.length === 0)
+      suggestions.fk_candidates.length === 0 &&
+      !message &&
+      !error)
   ) {
     return null;
   }
@@ -103,7 +105,7 @@ export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
       </h3>
 
       {message && (
-        <div className="mb-3 p-2 bg-green-50 border border-green-200 rounded text-xs text-green-800">
+        <div className="mb-3 rounded border border-success/25 bg-success/10 p-2 text-xs text-foreground">
           {message}
           <button
             onClick={() => setMessage("")}
@@ -115,10 +117,17 @@ export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
       )}
 
       {error && (
-        <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+        <div className="mb-3 rounded border border-danger/25 bg-danger/10 p-2 text-xs text-foreground">
           {error}
         </div>
       )}
+
+      {suggestions.pk_candidates.length === 0 &&
+        suggestions.fk_candidates.length === 0 && (
+          <p className="text-xs text-muted">
+            No remaining key suggestions for this table.
+          </p>
+        )}
 
       {/* PK candidates */}
       {suggestions.pk_candidates.length > 0 && (
@@ -148,7 +157,7 @@ export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
                 <div className="flex gap-1 shrink-0 ml-2">
                   <button
                     onClick={() => handleConfirmPK(pk.column)}
-                    className="px-2 py-1 bg-green-600 text-white rounded text-[10px] font-medium hover:bg-green-700 transition-colors"
+                    className="rounded bg-success px-2 py-1 text-[10px] font-medium text-background transition-opacity hover:opacity-90"
                   >
                     Confirm
                   </button>
@@ -200,7 +209,7 @@ export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
                     onClick={() =>
                       handleConfirmFK(fk.from_column, fk.to_table, fk.to_column)
                     }
-                    className="px-2 py-1 bg-green-600 text-white rounded text-[10px] font-medium hover:bg-green-700 transition-colors"
+                    className="rounded bg-success px-2 py-1 text-[10px] font-medium text-background transition-opacity hover:opacity-90"
                   >
                     Confirm
                   </button>
