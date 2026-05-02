@@ -31,7 +31,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_DB_SCHEMES = {"postgresql", "postgres", "mysql", "sqlite"}
+_DB_SCHEMES = {"postgresql", "postgres", "mysql", "mysql+pymysql", "sqlite", "snowflake"}
+_DEFAULT_MAX_TABLES = 50
+_DEFAULT_SAMPLE_ROWS = 10_000
+_MAX_TABLES_CAP = 500
+_SAMPLE_ROWS_CAP = 50_000
 
 
 def _is_db_uri(source: str) -> bool:
@@ -43,7 +47,21 @@ def _connector_type_from_uri(uri: str) -> str:
     """Infer connector type from URI scheme."""
     if uri.startswith("postgresql://") or uri.startswith("postgres://"):
         return "postgres"
+    if uri.startswith("mysql://") or uri.startswith("mysql+pymysql://"):
+        return "mysql"
+    if uri.startswith("sqlite://"):
+        return "sqlite"
+    if uri.startswith("snowflake://"):
+        return "snowflake"
     return "json"
+
+
+def _bounded_int(value: int | str | None, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
 
 
 @router.post("/pipeline/test-connection")
@@ -57,8 +75,8 @@ def test_connection(source_path: str, source_type: str = "auto"):
             source_type if source_type != "auto" else _connector_type_from_uri(source_path)
         )
         source = SourceConfig(name="__test__", type=resolved_type, uri=source_path)
-        connector = get_connector(resolved_type)
         try:
+            connector = get_connector(resolved_type)
             connector.connect(source)
             tables = connector.list_tables()
             connector.close()
@@ -104,6 +122,8 @@ def run_full_pipeline(
     source_name: str = "source",
     source_schema: str = "public",
     target_schema: str = "staging",
+    max_tables: int = _DEFAULT_MAX_TABLES,
+    sample_rows: int = _DEFAULT_SAMPLE_ROWS,
 ):
     """Run the entire pipeline: discover -> generate -> execute -> quality check.
 
@@ -121,7 +141,7 @@ def run_full_pipeline(
         con = request.app.state.duckdb_con
         return _run_pipeline_inner(
             con, request, pipeline, source_path, source_type,
-            source_name, source_schema, target_schema,
+            source_name, source_schema, target_schema, max_tables, sample_rows,
         )
 
     # Production: use a DEDICATED DuckDB connection for the pipeline run.
@@ -133,7 +153,7 @@ def run_full_pipeline(
     try:
         return _run_pipeline_inner(
             con, request, pipeline, source_path, source_type,
-            source_name, source_schema, target_schema,
+            source_name, source_schema, target_schema, max_tables, sample_rows,
         )
     finally:
         con.close()
@@ -148,8 +168,24 @@ def _run_pipeline_inner(
     source_name: str,
     source_schema: str,
     target_schema: str,
+    max_tables: int = _DEFAULT_MAX_TABLES,
+    sample_rows: int = _DEFAULT_SAMPLE_ROWS,
 ):
     """Inner pipeline logic using a dedicated DuckDB connection."""
+    max_tables = _bounded_int(max_tables, _DEFAULT_MAX_TABLES, minimum=1, maximum=_MAX_TABLES_CAP)
+    sample_rows = _bounded_int(
+        sample_rows,
+        _DEFAULT_SAMPLE_ROWS,
+        minimum=100,
+        maximum=_SAMPLE_ROWS_CAP,
+    )
+    profiling_policy = {
+        "max_tables": max_tables,
+        "sample_rows": sample_rows,
+        "mode": "bounded_sample" if _is_db_uri(source_path) else "load_to_duckdb",
+    }
+    skipped_tables: list[str] = []
+
     # --- Resolve source type and build SourceConfig ---
     if _is_db_uri(source_path):
         resolved_type = (
@@ -163,16 +199,23 @@ def _run_pipeline_inner(
         import polars as _pl
 
         try:
-            table_names = connector.list_tables()
-            if not table_names:
+            all_table_names = connector.list_tables()
+            if not all_table_names:
                 raise HTTPException(status_code=400, detail="No tables found in the database.")
+            table_names = all_table_names[:max_tables]
+            skipped_tables = all_table_names[max_tables:]
 
             _duckdb_schema = source_schema.replace(".", "_")
             con.execute(f'CREATE SCHEMA IF NOT EXISTS "{_duckdb_schema}"')
 
             for tname in table_names:
-                logger.info("Sampling table '%s' from Postgres...", tname)
-                arrow_batch = connector.sample(tname, n=10_000)
+                logger.info(
+                    "Sampling table '%s' from %s with row limit %d...",
+                    tname,
+                    resolved_type,
+                    sample_rows,
+                )
+                arrow_batch = connector.sample(tname, n=sample_rows)
                 df = _pl.from_arrow(arrow_batch)
                 safe_name = tname.replace(".", "_")
                 con.register(f"_arrow_{safe_name}", df)
@@ -186,6 +229,12 @@ def _run_pipeline_inner(
             connector.close()
 
         tables_loaded = [t.replace(".", "_") for t in table_names]
+        if skipped_tables:
+            logger.info(
+                "Skipped %d table(s) due to max_tables=%d policy",
+                len(skipped_tables),
+                max_tables,
+            )
 
     else:
         # File-based source (JSON / CSV)
@@ -323,6 +372,9 @@ def _run_pipeline_inner(
         "catalog_entities": len(catalog.entities),
         "catalog_confidence": catalog.confidence,
         "auto_confirmed": auto_stats,
+        "profiling_policy": profiling_policy,
+        "tables_skipped": skipped_tables,
+        "tables_skipped_count": len(skipped_tables),
     }
 
 

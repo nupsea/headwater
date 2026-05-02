@@ -37,6 +37,8 @@ Known gaps:
   catalogs. PK/FK state currently comes from profiling, heuristics, and user
   review decisions.
 - Redshift and Athena are planned, not implemented.
+- Snowflake is available as a preview connector with bounded metadata,
+  profiling, and sampling. Install `snowflake-connector-python` before use.
 - Large-table profiling needs a first-class aggregate/fetch policy per connector.
 
 ## Connector Matrix
@@ -51,7 +53,7 @@ Known gaps:
 | MySQL | OLTP | Preview | Connector exists with bounded introspection, not default production path. |
 | Redshift | AWS OLAP | Planned | Warehouse observe mode and aggregate profiling planned. |
 | Athena | AWS OLAP/Lake | Planned | Glue catalog plus query-result profiling planned. |
-| Snowflake | Warehouse | Planned | Observe mode planned. |
+| Snowflake | Warehouse | Preview | Lists schemas/tables/columns, row estimates, bounded profiles and samples. Requires optional `snowflake-connector-python`. |
 | BigQuery | Warehouse | Planned | Observe mode planned. |
 | Databricks | Lakehouse | Planned | Observe mode planned. |
 | SQL Server | OLTP | Planned | Catalog/constraint import planned. |

@@ -30,6 +30,7 @@ from headwater.api.routes import (
     quality,
     settings,
     sources,
+    warehouse,
 )
 from headwater.core.config import get_settings
 from headwater.core.metadata import MetadataStore
@@ -340,6 +341,7 @@ def create_app(*, in_memory: bool = False) -> FastAPI:
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(sources.router, prefix="/api", tags=["sources"])
     app.include_router(briefing.router, prefix="/api", tags=["briefing"])
+    app.include_router(warehouse.router, prefix="/api", tags=["warehouse"])
 
     @app.get("/api/status")
     async def api_status():

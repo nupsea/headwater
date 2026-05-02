@@ -886,6 +886,97 @@ export interface ConnectionTestResult {
   detail: string;
 }
 
+// ---------- Warehouse insight planning types ----------
+
+export interface WarehouseInsightCandidate {
+  evidence_type: string;
+  artifact_type?: string;
+  artifact_id?: string;
+  table_name?: string;
+  query_purpose: string;
+  sql?: string | null;
+  status: "planned" | "skipped" | "succeeded" | "failed";
+  skipped_reason?: string | null;
+  confidence: number;
+  confidence_reason?: string | null;
+  coverage?: Record<string, unknown>;
+  sample?: Record<string, unknown>;
+  cost?: Record<string, unknown>;
+}
+
+export interface WarehouseInsightPlan {
+  source_name: string;
+  source_type: string;
+  mode: "dry_run";
+  plan_id: number;
+  budget: Record<string, unknown>;
+  tables_considered: number;
+  tables_available: number;
+  planned_queries: number;
+  skipped_queries: number;
+  policy: Record<string, unknown>;
+  candidates: WarehouseInsightCandidate[];
+  last_execution?: WarehouseInsightExecution;
+}
+
+export interface WarehouseInsightPlanRecord {
+  id: number;
+  source_name: string;
+  mode: string;
+  status: string;
+  budget: Record<string, unknown>;
+  plan: WarehouseInsightPlan;
+  created_at: string;
+}
+
+export interface EvidenceRecord {
+  id: number;
+  source_name: string;
+  plan_id: number | null;
+  evidence_type: string;
+  artifact_type: string | null;
+  artifact_id: string | null;
+  table_name: string | null;
+  model_name: string | null;
+  metric_name: string | null;
+  query_purpose: string | null;
+  sql_text: string | null;
+  coverage: Record<string, unknown>;
+  sample: Record<string, unknown>;
+  cost: Record<string, unknown>;
+  confidence: number;
+  confidence_reason: string | null;
+  status: string;
+  skipped_reason: string | null;
+  query_id: string | null;
+  statement_timeout_seconds: number | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface WarehouseInsightExecution {
+  plan_id: number;
+  source_name: string;
+  approved: boolean;
+  status: "succeeded" | "failed";
+  query_tag: string;
+  statement_timeout_seconds: number;
+  planned_queries: number;
+  executed_queries: number;
+  duration_ms: number;
+  results: {
+    status: "succeeded" | "failed";
+    table_name?: string;
+    query_purpose?: string;
+    sql: string;
+    row_count: number;
+    rows: Record<string, unknown>[];
+    duration_ms: number;
+    error?: string;
+    confidence_reason?: string;
+  }[];
+}
+
 // ---------- API calls ----------
 
 export const api = {
@@ -1197,6 +1288,10 @@ export const api = {
       `/sources/${name}/sync`,
       { method: "POST" }
     ),
+  testSource: (name: string) =>
+    fetchJSON<ConnectionTestResult>(`/sources/${name}/test`, {
+      method: "POST",
+    }),
   deleteSource: (name: string) =>
     fetchJSON<{ name: string; deleted: boolean }>(
       `/sources/${name}`,
@@ -1212,6 +1307,45 @@ export const api = {
     fetchJSON<{ events: SyncEvent[] }>(`/sync-events?limit=${limit}`),
   connectorCatalog: () =>
     fetchJSON<{ connectors: ConnectorType[] }>("/connector-catalog"),
+  sourceEvaluations: () =>
+    fetchJSON<{ evaluations: SourceEvaluation[] }>("/source-evaluations"),
+  sourceEvaluation: (name: string) =>
+    fetchJSON<SourceEvaluation>(`/sources/${name}/evaluation`),
+
+  dryRunWarehouseInsightPlan: (sourceName: string, body: Record<string, unknown> = {}) =>
+    fetchJSON<WarehouseInsightPlan>(
+      `/sources/${encodeURIComponent(sourceName)}/insight-plan/dry-run`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    ),
+  executeWarehouseInsightPlan: (
+    planId: number,
+    body: {
+      approved: boolean;
+      max_queries?: number;
+      query_tag?: string;
+      statement_timeout_seconds?: number;
+    }
+  ) =>
+    fetchJSON<WarehouseInsightExecution>(`/warehouse-insight-plans/${planId}/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  warehouseInsightPlans: (source?: string) =>
+    fetchJSON<{ plans: WarehouseInsightPlanRecord[] }>(
+      `/warehouse-insight-plans${source ? `?source=${encodeURIComponent(source)}` : ""}`
+    ),
+  evidence: (source?: string, planId?: number) =>
+    fetchJSON<{ records: EvidenceRecord[] }>(
+      `/evidence?${new URLSearchParams({
+        ...(source ? { source } : {}),
+        ...(planId ? { plan_id: String(planId) } : {}),
+      }).toString()}`
+    ),
 
   // Briefing (homepage)
   briefingToday: () => fetchJSON<BriefingResponse>("/briefing/today"),
@@ -1237,6 +1371,37 @@ export interface SourceSummary {
   tables: number;
   rows: number;
   schemas: number;
+  evaluation: SourceEvaluation;
+}
+
+export interface SourceEvaluationEvidence {
+  key: string;
+  label: string;
+  status: "ok" | "warning" | "gap";
+  detail: string;
+}
+
+export interface SourceEvaluationAction {
+  priority: "blocking" | "recommended" | "informational";
+  title: string;
+  detail: string;
+}
+
+export interface SourceEvaluation {
+  source_type: string;
+  source_name?: string;
+  workload: "files" | "oltp" | "olap" | "unknown";
+  readiness: "ready" | "needs_sync" | "needs_review" | "limited" | "preview" | "planned";
+  score: number;
+  maturity_mode: string;
+  status: string;
+  supported: boolean;
+  capabilities: ConnectorCapabilities;
+  evidence: SourceEvaluationEvidence[];
+  gaps: string[];
+  warnings: string[];
+  recommended_actions: SourceEvaluationAction[];
+  profiling_policy: Record<string, unknown>;
 }
 
 export interface SyncEvent {

@@ -16,7 +16,16 @@ class SourceConfig(BaseModel):
     """Describes a data source to discover."""
 
     name: str
-    type: Literal["json", "csv", "duckdb", "sqlite", "parquet", "postgres", "mysql"]
+    type: Literal[
+        "json",
+        "csv",
+        "duckdb",
+        "sqlite",
+        "parquet",
+        "postgres",
+        "mysql",
+        "snowflake",
+    ]
     path: str | None = None  # For file-based sources
     uri: str | None = None  # For database sources
     mode: Literal["generate", "observe"] = "generate"

@@ -23,9 +23,11 @@ import { DomainMap } from "@/components/domain-map";
 import { RelationshipDiagram } from "@/components/relationship-diagram";
 import { DriftBanner } from "@/components/drift-banner";
 import { ConfidenceDot } from "@/components/confidence-dot";
+import { useProjects } from "@/lib/project-context";
 
 export default function HealthPage() {
   const { toast } = useToast();
+  const { activeProject } = useProjects();
   const [, setStatus] = useState<StatusResponse | null>(null);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [driftReport, setDriftReport] = useState<DriftReport | null>(null);
@@ -75,26 +77,19 @@ export default function HealthPage() {
       if (s.discovered) {
         const ins = await api.insights();
         setInsights(ins);
-        // Fetch project info
-        try {
-          const projRes = await api.projects();
-          if (projRes.projects && projRes.projects.length > 0) {
-            const proj = projRes.projects[0];
-            setProject(proj);
-            try {
-              const progRes = await api.projectProgress(proj.id);
-              setProgress(progRes.progress);
-              setProject({
-                ...proj,
-                maturity: progRes.maturity as Project["maturity"],
-                maturity_score: progRes.maturity_score,
-              });
-            } catch {
-              /* progress endpoint may not return data yet */
-            }
+        if (activeProject) {
+          setProject(activeProject);
+          try {
+            const progRes = await api.projectProgress(activeProject.id);
+            setProgress(progRes.progress);
+            setProject({
+              ...activeProject,
+              maturity: progRes.maturity as Project["maturity"],
+              maturity_score: progRes.maturity_score,
+            });
+          } catch {
+            /* progress endpoint may not return data yet */
           }
-        } catch {
-          /* projects endpoint may not be available */
         }
         // Fetch activity feed
         try {
@@ -125,7 +120,7 @@ export default function HealthPage() {
       refresh();
       testConnection();
     });
-  }, []);
+  }, [activeProject]);
 
   const runFullPipeline = async () => {
     setLoading(true);

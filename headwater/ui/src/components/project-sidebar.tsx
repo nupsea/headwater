@@ -82,9 +82,9 @@ export function ProjectSidebar() {
           <button
             onClick={() => setShowCreate(true)}
             className="text-accent hover:text-accent/80 text-xs font-medium"
-            title="New project"
+            title="Start setup"
           >
-            [+ New]
+            Start setup
           </button>
           <button
             onClick={() => setCollapsed(true)}
@@ -109,7 +109,7 @@ export function ProjectSidebar() {
         <div className="px-3 py-6 text-center">
           <p className="text-xs text-muted">No projects yet.</p>
           <p className="text-xs text-muted mt-1">
-            Click [+ New] or run a pipeline to create one.
+            Click Start setup or run a pipeline to create one.
           </p>
         </div>
       )}

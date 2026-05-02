@@ -30,6 +30,10 @@ export function ConnectorWizard({ open, onClose, onCreated }: Props) {
     uri: "",
     path: "",
     auto_sync: true,
+    config: {
+      max_tables: 50,
+      sample_rows: 10000,
+    },
   });
 
   useEffect(() => {
@@ -64,7 +68,7 @@ export function ConnectorWizard({ open, onClose, onCreated }: Props) {
     if (!chosen) return;
     setSubmitting(true);
     try {
-      await api.createSource({
+      const source = await api.createSource({
         name: form.name,
         type: chosen.id,
         display_name: form.display_name || form.name,
@@ -72,8 +76,15 @@ export function ConnectorWizard({ open, onClose, onCreated }: Props) {
         uri: form.uri || undefined,
         path: form.path || undefined,
         auto_sync: form.auto_sync,
+        config: form.config,
       });
-      toast(`Connected ${chosen.name}`, "success");
+      if (form.auto_sync) {
+        toast(`Connected ${chosen.name}; starting sync`, "info");
+        await api.syncSource(source.name);
+        toast(`Synced ${source.display_name || source.name}`, "success");
+      } else {
+        toast(`Connected ${chosen.name}`, "success");
+      }
       onCreated();
       onClose();
     } catch (e) {
@@ -189,10 +200,16 @@ export function ConnectorWizard({ open, onClose, onCreated }: Props) {
                 value={form.name}
                 onChange={(v) => setForm((f) => ({ ...f, name: v }))}
               />
-              {chosen.id === "postgres" || chosen.id === "mysql" ? (
+              {chosen.id === "postgres" ||
+              chosen.id === "mysql" ||
+              chosen.id === "snowflake" ? (
                 <Field
                   label="Connection URI"
-                  hint="postgresql://user:pass@host:port/db"
+                  hint={
+                    chosen.id === "snowflake"
+                      ? "snowflake://user:pass@account/db/schema?warehouse=WH"
+                      : "postgresql://user:pass@host:port/db"
+                  }
                   value={form.uri ?? ""}
                   onChange={(v) => setForm((f) => ({ ...f, uri: v }))}
                 />
@@ -225,8 +242,38 @@ export function ConnectorWizard({ open, onClose, onCreated }: Props) {
                     setForm((f) => ({ ...f, auto_sync: e.target.checked }))
                   }
                 />
-                Auto-sync periodically
+                Sync after connect
               </label>
+              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-border">
+                <Field
+                  label="Max tables"
+                  hint="sync limit"
+                  value={String(form.config?.max_tables ?? 50)}
+                  onChange={(v) =>
+                    setForm((f) => ({
+                      ...f,
+                      config: {
+                        ...(f.config ?? {}),
+                        max_tables: Number(v) || 50,
+                      },
+                    }))
+                  }
+                />
+                <Field
+                  label="Sample rows"
+                  hint="per table"
+                  value={String(form.config?.sample_rows ?? 10000)}
+                  onChange={(v) =>
+                    setForm((f) => ({
+                      ...f,
+                      config: {
+                        ...(f.config ?? {}),
+                        sample_rows: Number(v) || 10000,
+                      },
+                    }))
+                  }
+                />
+              </div>
             </div>
           )}
         </div>
@@ -244,7 +291,13 @@ export function ConnectorWizard({ open, onClose, onCreated }: Props) {
               disabled={submitting}
               className="px-4 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:opacity-90 disabled:opacity-50"
             >
-              {submitting ? "Connecting…" : "Test & Connect"}
+              {submitting
+                ? form.auto_sync
+                  ? "Syncing..."
+                  : "Connecting..."
+                : form.auto_sync
+                  ? "Connect & sync"
+                  : "Connect"}
             </button>
           )}
         </div>

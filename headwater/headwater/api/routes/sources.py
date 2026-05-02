@@ -18,6 +18,7 @@ from headwater.connectors.registry import (
 )
 from headwater.core.events import EventType
 from headwater.core.exceptions import ConnectorError
+from headwater.services.source_evaluation import evaluate_all_connectors, evaluate_source
 from headwater.services.source_sync import SourceNotFoundError, SourceSyncService
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class SourceSummary(BaseModel):
     tables: int
     rows: int
     schemas: int
+    evaluation: dict
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -79,6 +81,12 @@ def _row_to_summary(store, row: dict) -> dict:
     schemas, tables, rows_count = _aggregate_counts(store, row["name"])
     latest_run = store.get_latest_sync_run(row["name"])
     latest_quality = store.get_latest_quality_report(row["name"])
+    evaluation_row = {
+        **row,
+        "latest_run_status": latest_run["status"] if latest_run else None,
+        "quality_failed": latest_quality["failed"] if latest_quality else 0,
+        "quality_score": latest_quality["score"] if latest_quality else None,
+    }
     return {
         "name": row["name"],
         "display_name": row.get("display_name") or row["name"],
@@ -97,6 +105,12 @@ def _row_to_summary(store, row: dict) -> dict:
         "tables": tables,
         "rows": rows_count,
         "schemas": schemas,
+        "evaluation": evaluate_source(
+            evaluation_row,
+            schemas=schemas,
+            tables=tables,
+            rows=rows_count,
+        ),
     }
 
 
@@ -107,6 +121,12 @@ def _row_to_summary(store, row: dict) -> dict:
 async def connector_catalog():
     """Return the catalog of connector types shown in the UI picker."""
     return {"connectors": list_connector_catalog()}
+
+
+@router.get("/source-evaluations")
+async def source_evaluations():
+    """Return OLTP/OLAP evaluation templates for available connector types."""
+    return {"evaluations": evaluate_all_connectors()}
 
 
 @router.get("/sources")
@@ -128,6 +148,16 @@ async def get_source_route(request: Request, name: str):
     return summary
 
 
+@router.get("/sources/{name}/evaluation")
+async def get_source_evaluation(request: Request, name: str):
+    store = request.app.state.metadata_store
+    row = store.get_source(name)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
+    summary = _row_to_summary(store, row)
+    return summary["evaluation"]
+
+
 @router.post("/sources", status_code=201)
 async def create_source(request: Request, body: SourceCreate):
     """Register a new data source. Does not run discovery -- call /sources/{name}/sync."""
@@ -137,8 +167,9 @@ async def create_source(request: Request, body: SourceCreate):
     catalog = {c["id"] for c in list_connector_catalog()}
     if body.type not in catalog:
         raise HTTPException(status_code=400, detail=f"Unknown connector type: {body.type}")
+    connector = next((c for c in list_connector_catalog() if c["id"] == body.type), None)
     status = connector_status(body.type)
-    if status != "supported":
+    if not connector or not connector.get("supported"):
         raise HTTPException(
             status_code=400,
             detail=f"Connector '{body.type}' is {status}, not supported in this build.",

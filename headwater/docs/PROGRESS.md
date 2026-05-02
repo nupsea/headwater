@@ -17,6 +17,19 @@
 - Explore initial load performance was fixed.
 - Insights now produce more business-oriented statistical observations with
   diversified visual patterns.
+- Source evaluation now classifies registered and catalogued sources as files,
+  OLTP, or OLAP, reports readiness, maturity mode, capability gaps, and safe
+  profiling policy recommendations.
+- Snowflake is now a preview connector with safe metadata introspection,
+  bounded profiling, row-limited sampling, and read-only validation.
+- Warehouse insight planning now has persisted evidence records and a dry-run
+  API that proposes cost-gated pushdown queries without executing them.
+- Approved warehouse insight plans can now execute read-only aggregate queries,
+  apply query tags when the connector supports them, persist execution
+  evidence/results, and capture query IDs plus statement timeouts.
+- Project start now uses a guided connection workflow that collects source
+  inputs, tests the connection, and can create and ingest the source in one
+  path.
 
 ## Current Supported Workflow
 
@@ -35,18 +48,36 @@
 - Postgres declared PK/FK/unique/check constraints are not imported yet.
 - Constraint/comment import is missing for MySQL and SQLite as well.
 - Redshift and Athena are not implemented.
-- Large table profiling policy is not first-class yet.
-- Insight evidence coverage does not yet distinguish full profile vs sample vs
-  aggregate sketch clearly enough.
+- Snowflake preview requires the optional `snowflake-connector-python`
+  dependency and still needs live integration coverage before production status.
+- Large table profiling policy is partially first-class through sync limits,
+  dry-run insight budgets, and approved read-only execution limits, but observed
+  bytes/credits are not captured yet.
+- Insight evidence coverage is now persisted for planned warehouse work, but
+  existing generated insights still need to consume those evidence records.
+- Snowflake insights have a cost-aware dry-run evidence planner and an approved
+  read-only execution path, but live Snowflake validation and warehouse-side
+  cost capture are still pending.
+- Source evaluation is capability-based today; connector-specific import of
+  constraints, warehouse comments, lineage, and table statistics still needs
+  deeper implementations.
 
 ## Next Recommended Work
 
-1. Add manual FK editor in Discover & Access.
-2. Add Postgres constraint/comment import.
-3. Add connector-level large-table profiling policy.
-4. Add Redshift preview connector in observe mode.
-5. Add Athena/Glue preview connector in observe mode.
-6. Add maturity-aware onboarding and evidence reporting.
+1. Add live Snowflake execution validation with statement timeouts and observed
+   cost/query-history capture.
+2. Connect generated insights to persisted evidence records and confidence
+   coverage labels.
+3. Add Snowflake live integration coverage and warehouse comments/import hints.
+4. Add cost-aware Snowflake aggregate execution with direct aggregate pushdown,
+   confidence/coverage labels, and scan-budget enforcement.
+5. Add dbt artifact import and trusted-model ranking for mature warehouses.
+6. Add data product recommendations for grain, fanout, duplicate metrics,
+   missing tests, stale assets, and expensive low-use models.
+7. Add manual FK editor in Discover & Access.
+8. Add Postgres constraint/comment import.
+9. Add Redshift preview connector in observe mode.
+10. Add Athena/Glue preview connector in observe mode.
 
 ## Useful Recent Commits
 

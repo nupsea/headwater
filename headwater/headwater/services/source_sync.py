@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 
@@ -177,6 +178,9 @@ class SourceSyncService:
         pipeline = self.request.app.state.pipeline
         source_schema = _default_source_schema(row)
         target_schema = "staging"
+        config = _source_config(row)
+        max_tables = config.get("max_tables")
+        sample_rows = config.get("sample_rows")
 
         if getattr(self.request.app.state, "_in_memory", False):
             return _run_pipeline_inner(
@@ -188,6 +192,8 @@ class SourceSyncService:
                 name,
                 source_schema,
                 target_schema,
+                max_tables,
+                sample_rows,
             )
 
         settings = get_settings()
@@ -202,6 +208,8 @@ class SourceSyncService:
                 name,
                 source_schema,
                 target_schema,
+                max_tables,
+                sample_rows,
             )
         finally:
             con.close()
@@ -232,3 +240,16 @@ def _source_value(row: dict) -> str:
 
 def _default_source_schema(row: dict) -> str:
     return "public" if row.get("uri") else "env_health"
+
+
+def _source_config(row: dict) -> dict:
+    raw = row.get("config_json")
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}

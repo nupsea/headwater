@@ -166,6 +166,47 @@ CREATE TABLE IF NOT EXISTS llm_audit_log (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS warehouse_insight_plans (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL REFERENCES sources(name),
+    mode        TEXT NOT NULL DEFAULT 'dry_run',
+    status      TEXT NOT NULL DEFAULT 'planned',
+    budget_json TEXT NOT NULL,
+    plan_json   TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS evidence_records (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL REFERENCES sources(name),
+    plan_id     INTEGER REFERENCES warehouse_insight_plans(id),
+    evidence_type TEXT NOT NULL,
+    artifact_type TEXT,
+    artifact_id TEXT,
+    table_name  TEXT,
+    model_name  TEXT,
+    metric_name TEXT,
+    query_purpose TEXT,
+    sql_text    TEXT,
+    coverage_json TEXT DEFAULT '{}',
+    sample_json TEXT DEFAULT '{}',
+    cost_json   TEXT DEFAULT '{}',
+    confidence  REAL DEFAULT 0.0,
+    confidence_reason TEXT,
+    status      TEXT NOT NULL DEFAULT 'planned',
+    skipped_reason TEXT,
+    query_id    TEXT,
+    statement_timeout_seconds INTEGER,
+    payload_json TEXT DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_warehouse_insight_plans_source
+    ON warehouse_insight_plans(source_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_evidence_records_source
+    ON evidence_records(source_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_evidence_records_plan
+    ON evidence_records(plan_id);
+
 CREATE TABLE IF NOT EXISTS schema_snapshots (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id      INTEGER NOT NULL,
@@ -381,6 +422,9 @@ class MetadataStore:
             "ALTER TABLE sources ADD COLUMN last_sync_at TEXT",
             "ALTER TABLE sources ADD COLUMN drift_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sources ADD COLUMN auto_sync INTEGER NOT NULL DEFAULT 0",
+            # Warehouse evidence metadata
+            "ALTER TABLE evidence_records ADD COLUMN query_id TEXT",
+            "ALTER TABLE evidence_records ADD COLUMN statement_timeout_seconds INTEGER",
         ]
         # sync_events table for source activity history (briefing + sources page)
         self.con.executescript(
@@ -432,6 +476,45 @@ CREATE INDEX IF NOT EXISTS idx_events_source
     ON events(source_name, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_type
     ON events(event_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS warehouse_insight_plans (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL REFERENCES sources(name),
+    mode        TEXT NOT NULL DEFAULT 'dry_run',
+    status      TEXT NOT NULL DEFAULT 'planned',
+    budget_json TEXT NOT NULL,
+    plan_json   TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_warehouse_insight_plans_source
+    ON warehouse_insight_plans(source_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS evidence_records (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL REFERENCES sources(name),
+    plan_id     INTEGER REFERENCES warehouse_insight_plans(id),
+    evidence_type TEXT NOT NULL,
+    artifact_type TEXT,
+    artifact_id TEXT,
+    table_name  TEXT,
+    model_name  TEXT,
+    metric_name TEXT,
+    query_purpose TEXT,
+    sql_text    TEXT,
+    coverage_json TEXT DEFAULT '{}',
+    sample_json TEXT DEFAULT '{}',
+    cost_json   TEXT DEFAULT '{}',
+    confidence  REAL DEFAULT 0.0,
+    confidence_reason TEXT,
+    status      TEXT NOT NULL DEFAULT 'planned',
+    skipped_reason TEXT,
+    payload_json TEXT DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_records_source
+    ON evidence_records(source_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_evidence_records_plan
+    ON evidence_records(plan_id);
 
 CREATE TABLE IF NOT EXISTS quality_runs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -645,6 +728,8 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         self.con.execute("DELETE FROM sync_runs WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM sync_events WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM events WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM evidence_records WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM warehouse_insight_plans WHERE source_name = ?", (name,))
 
         self.con.execute(
             "DELETE FROM decisions WHERE artifact_id = ? OR artifact_id LIKE ?",
@@ -665,6 +750,174 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
 
     def list_sources(self) -> list[dict]:
         return [dict(r) for r in self.con.execute("SELECT * FROM sources").fetchall()]
+
+    # -- Warehouse evidence and insight plans -----------------------------
+
+    def insert_warehouse_insight_plan(
+        self,
+        source_name: str,
+        *,
+        budget: dict,
+        plan: dict,
+        mode: str = "dry_run",
+        status: str = "planned",
+    ) -> int:
+        """Persist a warehouse insight plan and return its id."""
+        cur = self.con.execute(
+            """
+            INSERT INTO warehouse_insight_plans
+                (source_name, mode, status, budget_json, plan_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (source_name, mode, status, json.dumps(budget), json.dumps(plan)),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_warehouse_insight_plans(
+        self,
+        source_name: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        if source_name:
+            rows = self.con.execute(
+                "SELECT * FROM warehouse_insight_plans WHERE source_name = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (source_name, limit),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM warehouse_insight_plans ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._decode_warehouse_insight_plan(dict(row)) for row in rows]
+
+    def get_warehouse_insight_plan(self, plan_id: int) -> dict | None:
+        row = self.con.execute(
+            "SELECT * FROM warehouse_insight_plans WHERE id = ?", (plan_id,)
+        ).fetchone()
+        return self._decode_warehouse_insight_plan(dict(row)) if row else None
+
+    def update_warehouse_insight_plan(
+        self,
+        plan_id: int,
+        *,
+        status: str,
+        plan: dict | None = None,
+    ) -> None:
+        if plan is None:
+            self.con.execute(
+                "UPDATE warehouse_insight_plans SET status = ? WHERE id = ?",
+                (status, plan_id),
+            )
+        else:
+            self.con.execute(
+                "UPDATE warehouse_insight_plans SET status = ?, plan_json = ? WHERE id = ?",
+                (status, json.dumps(plan), plan_id),
+            )
+        self.con.commit()
+
+    def insert_evidence_record(
+        self,
+        source_name: str,
+        evidence_type: str,
+        *,
+        plan_id: int | None = None,
+        artifact_type: str | None = None,
+        artifact_id: str | None = None,
+        table_name: str | None = None,
+        model_name: str | None = None,
+        metric_name: str | None = None,
+        query_purpose: str | None = None,
+        sql_text: str | None = None,
+        coverage: dict | None = None,
+        sample: dict | None = None,
+        cost: dict | None = None,
+        confidence: float = 0.0,
+        confidence_reason: str | None = None,
+        status: str = "planned",
+        skipped_reason: str | None = None,
+        query_id: str | None = None,
+        statement_timeout_seconds: int | None = None,
+        payload: dict | None = None,
+    ) -> int:
+        cur = self.con.execute(
+            """
+            INSERT INTO evidence_records
+                (source_name, plan_id, evidence_type, artifact_type, artifact_id,
+                 table_name, model_name, metric_name, query_purpose, sql_text,
+                 coverage_json, sample_json, cost_json, confidence, confidence_reason,
+                 status, skipped_reason, query_id, statement_timeout_seconds, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_name,
+                plan_id,
+                evidence_type,
+                artifact_type,
+                artifact_id,
+                table_name,
+                model_name,
+                metric_name,
+                query_purpose,
+                sql_text,
+                json.dumps(coverage or {}),
+                json.dumps(sample or {}),
+                json.dumps(cost or {}),
+                confidence,
+                confidence_reason,
+                status,
+                skipped_reason,
+                query_id,
+                statement_timeout_seconds,
+                json.dumps(payload or {}),
+            ),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_evidence_records(
+        self,
+        source_name: str | None = None,
+        *,
+        plan_id: int | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list = []
+        if source_name:
+            clauses.append("source_name = ?")
+            params.append(source_name)
+        if plan_id is not None:
+            clauses.append("plan_id = ?")
+            params.append(plan_id)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self.con.execute(
+            f"SELECT * FROM evidence_records {where}ORDER BY created_at DESC, id DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
+        return [self._decode_evidence_record(dict(row)) for row in rows]
+
+    def _decode_warehouse_insight_plan(self, row: dict) -> dict:
+        for db_key, out_key in (("budget_json", "budget"), ("plan_json", "plan")):
+            try:
+                row[out_key] = json.loads(row.get(db_key) or "{}")
+            except (TypeError, ValueError):
+                row[out_key] = {}
+        return row
+
+    def _decode_evidence_record(self, row: dict) -> dict:
+        for db_key, out_key in (
+            ("coverage_json", "coverage"),
+            ("sample_json", "sample"),
+            ("cost_json", "cost"),
+            ("payload_json", "payload"),
+        ):
+            try:
+                row[out_key] = json.loads(row.get(db_key) or "{}")
+            except (TypeError, ValueError):
+                row[out_key] = {}
+        return row
 
     # -- Sync events -------------------------------------------------------
 

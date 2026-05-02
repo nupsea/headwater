@@ -129,3 +129,16 @@ MYSQL_PREVIEW_CAPABILITIES = ConnectorCapabilities(
     load_to_duckdb=False,
     modes=["generate", "observe"],
 )
+
+SNOWFLAKE_PREVIEW_CAPABILITIES = ConnectorCapabilities(
+    list_schemas=True,
+    list_tables=True,
+    list_columns=True,
+    list_constraints=False,
+    estimate_row_count=True,
+    profile_table=True,
+    sample_arrow=True,
+    execute_readonly=True,
+    load_to_duckdb=False,
+    modes=["generate", "observe"],
+)
