@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from headwater.api.routes.project import _compute_maturity, _maturity_blockers
+from types import SimpleNamespace
+
+from headwater.api.routes.project import (
+    _compute_maturity,
+    _compute_progress,
+    _maturity_blockers,
+)
+from headwater.core.models import ColumnInfo, SourceConfig, TableInfo
 
 
 def _progress(**overrides):
@@ -62,3 +69,71 @@ def test_maturity_blocks_on_drift_and_failing_quality():
     assert score < 0.8
     assert any(blocker["title"] == "Schema drift needs review" for blocker in blockers)
     assert any(blocker["title"] == "Quality contracts failing" for blocker in blockers)
+
+
+class _ProjectStore:
+    def list_sources(self):
+        return [{"name": "ny-taxi-postgres", "display_name": "NY Taxi"}]
+
+    def get_project(self, project_id):
+        return {
+            "id": project_id,
+            "slug": "ny-taxi",
+            "display_name": "NY Taxi",
+            "sources": [],
+        }
+
+    def get_catalog_metrics(self, project_id):
+        if project_id != "ny-taxi-postgres":
+            return []
+        return [
+            {
+                "table_name": "trips",
+                "column_name": "fare_amount",
+                "status": "confirmed",
+            }
+        ]
+
+    def get_catalog_dimensions(self, project_id):
+        if project_id != "ny-taxi-postgres":
+            return []
+        return [
+            {
+                "table_name": "trips",
+                "column_name": "pickup_datetime",
+                "status": "confirmed",
+            }
+        ]
+
+    def get_latest_quality_report(self, source_name):
+        return {"failed": 0, "score": 100.0}
+
+    def get_source(self, source_name):
+        return {"name": source_name, "drift_count": 0}
+
+    def list_model_impacts(self, source_name, limit):
+        return []
+
+
+def test_project_progress_uses_matching_source_catalog_for_legacy_project():
+    discovery = SimpleNamespace(
+        source=SourceConfig(name="ny-taxi-postgres", type="postgres", uri="postgresql://db"),
+        tables=[
+            TableInfo(
+                name="trips",
+                columns=[
+                    ColumnInfo(name="fare_amount", dtype="float", locked=True),
+                    ColumnInfo(name="pickup_datetime", dtype="timestamp", locked=True),
+                ],
+                review_status="reviewed",
+            )
+        ],
+        profiles=[object()],
+        relationships=[],
+    )
+
+    progress = _compute_progress(discovery, {}, _ProjectStore(), "project-uuid")
+
+    assert progress["metrics_defined"] == 1
+    assert progress["dimensions_defined"] == 1
+    assert progress["catalog_coverage"] == 1.0

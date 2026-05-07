@@ -8,6 +8,7 @@ import {
   type DataPreviewResponse,
   type DataQueryResponse,
 } from "@/lib/api";
+import { useProjects } from "@/lib/project-context";
 
 type ActiveTab = "preview" | "query";
 
@@ -61,6 +62,7 @@ function ResultTable({
 }
 
 export default function DataPage() {
+  const { activeProjectId } = useProjects();
   const [activeTab, setActiveTab] = useState<ActiveTab>("preview");
   const [catalogOpen, setCatalogOpen] = useState(true);
 
@@ -87,18 +89,41 @@ export default function DataPage() {
 
   // Load catalog from DuckDB on mount
   useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setSchemas([]);
+      setCatalog([]);
+      setExpandedTable(null);
+      setCatalogLoading(Boolean(activeProjectId));
+      setCatalogError("");
+      setSelectedTable("");
+      setPreviewResult(null);
+      setPreviewError("");
+      setQueryResult(null);
+      setQueryError("");
+    });
+    if (!activeProjectId) return;
     api
-      .dataCatalog()
+      .dataCatalog(activeProjectId)
       .then((res: CatalogResponse) => {
+        if (cancelled) return;
         setSchemas(res.schemas);
         setCatalog(res.tables);
         if (res.tables.length > 0) {
           setSelectedTable(res.tables[0].qualified_name);
         }
       })
-      .catch(() => setCatalogError("Run the pipeline from the Dashboard first."))
-      .finally(() => setCatalogLoading(false));
-  }, []);
+      .catch(() => {
+        if (!cancelled) setCatalogError("Run the pipeline from the Dashboard first.");
+      })
+      .finally(() => {
+        if (!cancelled) setCatalogLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId]);
 
   const toggleSchema = (schema: string) => {
     setCollapsedSchemas((prev) => {
@@ -135,7 +160,7 @@ export default function DataPage() {
     setPreviewError("");
     setPreviewResult(null);
     try {
-      const res = await api.dataPreview(tableName, rowLimit);
+      const res = await api.dataPreview(tableName, rowLimit, activeProjectId);
       setPreviewResult(res);
     } catch (e) {
       setPreviewError(e instanceof Error ? e.message : String(e));
@@ -154,7 +179,7 @@ export default function DataPage() {
     setQueryError("");
     setQueryResult(null);
     try {
-      const res = await api.dataQuery(sql);
+      const res = await api.dataQuery(sql, activeProjectId);
       if (res.error) {
         setQueryError(res.error);
       }

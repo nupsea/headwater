@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from headwater.api.project_scope import scoped_pipeline
 from headwater.core.events import EventType
 from headwater.generator.contracts import generate_contracts
 from headwater.generator.marts import generate_mart_models
@@ -63,9 +64,9 @@ async def generate_models(
 
 
 @router.get("/models")
-async def list_models(request: Request):
+async def list_models(request: Request, project_id: str | None = None):
     """List all generated models."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     return [
         {
@@ -82,12 +83,17 @@ async def list_models(request: Request):
 
 
 @router.get("/models/impact")
-async def model_impact(request: Request):
+async def model_impact(request: Request, project_id: str | None = None):
     """Return model maturity and impact analysis for the current pipeline."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     store = getattr(request.app.state, "metadata_store", None)
-    latest_quality = store.get_latest_quality_report() if store is not None else None
+    source_names = pipeline.get("source_names") or []
+    latest_quality = (
+        store.get_latest_quality_report(source_names[0])
+        if store is not None and source_names
+        else store.get_latest_quality_report() if store is not None else None
+    )
     sources = store.list_sources() if store is not None else []
     discovery = pipeline.get("discovery")
     table_sources = {}
@@ -104,9 +110,9 @@ async def model_impact(request: Request):
 
 
 @router.get("/models/{model_name}")
-async def get_model(request: Request, model_name: str):
+async def get_model(request: Request, model_name: str, project_id: str | None = None):
     """Get a specific model with full SQL."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     model = next((m for m in all_models if m.name == model_name), None)
     if not model:
@@ -115,9 +121,14 @@ async def get_model(request: Request, model_name: str):
 
 
 @router.post("/models/{model_name}/approve")
-async def approve_model(request: Request, model_name: str, body: ReviewPayload | None = None):
+async def approve_model(
+    request: Request,
+    model_name: str,
+    body: ReviewPayload | None = None,
+    project_id: str | None = None,
+):
     """Approve a proposed model for execution."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     model = next((m for m in all_models if m.name == model_name), None)
     if not model:
@@ -132,7 +143,7 @@ async def approve_model(request: Request, model_name: str, body: ReviewPayload |
     store = getattr(request.app.state, "metadata_store", None)
     if store is not None:
         review = body or ReviewPayload()
-        source_name = _current_source_name(request)
+        source_name = _current_source_name(request, pipeline)
         payload = {"previous_status": prev_status, **(review.payload or {})}
         store.update_model_status(model_name, "approved")
         review_id = store.record_model_review(
@@ -166,9 +177,14 @@ async def approve_model(request: Request, model_name: str, body: ReviewPayload |
 
 
 @router.post("/models/{model_name}/reject")
-async def reject_model(request: Request, model_name: str, body: ReviewPayload | None = None):
+async def reject_model(
+    request: Request,
+    model_name: str,
+    body: ReviewPayload | None = None,
+    project_id: str | None = None,
+):
     """Reject a proposed model."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     model = next((m for m in all_models if m.name == model_name), None)
     if not model:
@@ -178,7 +194,7 @@ async def reject_model(request: Request, model_name: str, body: ReviewPayload | 
     store = getattr(request.app.state, "metadata_store", None)
     if store is not None:
         review = body or ReviewPayload()
-        source_name = _current_source_name(request)
+        source_name = _current_source_name(request, pipeline)
         payload = {"previous_status": prev_status, **(review.payload or {})}
         store.update_model_status(model_name, "rejected")
         review_id = store.record_model_review(
@@ -211,8 +227,9 @@ async def reject_model(request: Request, model_name: str, body: ReviewPayload | 
     return {"name": model.name, "status": model.status}
 
 
-def _current_source_name(request: Request) -> str:
-    discovery = request.app.state.pipeline.get("discovery")
+def _current_source_name(request: Request, pipeline: dict | None = None) -> str:
+    pipeline = pipeline or request.app.state.pipeline
+    discovery = pipeline.get("discovery")
     if discovery is not None:
         return discovery.source.name
     store = getattr(request.app.state, "metadata_store", None)
@@ -239,9 +256,14 @@ class AnswersPayload(BaseModel):
 
 
 @router.post("/models/{model_name}/answers")
-async def save_model_answers(request: Request, model_name: str, body: AnswersPayload):
+async def save_model_answers(
+    request: Request,
+    model_name: str,
+    body: AnswersPayload,
+    project_id: str | None = None,
+):
     """Save answers to a model's clarifying questions."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     model = next((m for m in all_models if m.name == model_name), None)
     if not model:
@@ -251,7 +273,8 @@ async def save_model_answers(request: Request, model_name: str, body: AnswersPay
     answers_dicts = [a.model_dump() for a in body.answers]
     saved = 0
     if store is not None:
-        saved = store.save_model_answers(model_name, answers_dicts)
+        answer_key = _answer_key(pipeline, model_name)
+        saved = store.save_model_answers(answer_key, answers_dicts)
         store.log_activity(
             "question_answered",
             f"Answered {len(body.answers)} questions for {model_name}",
@@ -262,13 +285,22 @@ async def save_model_answers(request: Request, model_name: str, body: AnswersPay
 
 
 @router.get("/models/{model_name}/answers")
-async def get_model_answers(request: Request, model_name: str):
+async def get_model_answers(request: Request, model_name: str, project_id: str | None = None):
     """Retrieve saved answers for a model's clarifying questions."""
     store = getattr(request.app.state, "metadata_store", None)
     answers = []
     if store is not None:
-        answers = store.get_model_answers(model_name)
+        pipeline = scoped_pipeline(request, project_id)
+        all_models = pipeline["staging_models"] + pipeline["mart_models"]
+        if not any(m.name == model_name for m in all_models):
+            raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found.")
+        answers = store.get_model_answers(_answer_key(pipeline, model_name))
     return {"model_name": model_name, "answers": answers}
+
+
+def _answer_key(pipeline: dict, model_name: str) -> str:
+    source_names = pipeline.get("source_names") or []
+    return f"{source_names[0]}:{model_name}" if source_names else model_name
 
 
 def _persist_models_and_contracts(

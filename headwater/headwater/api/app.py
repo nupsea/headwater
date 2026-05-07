@@ -34,6 +34,7 @@ from headwater.api.routes import (
 )
 from headwater.core.config import get_settings
 from headwater.core.metadata import MetadataStore
+from headwater.api.project_scope import scoped_pipeline
 
 # Ensure headwater loggers are visible at INFO level
 logging.basicConfig(
@@ -115,7 +116,11 @@ async def lifespan(app: FastAPI):
     restored_catalog = None
     if restored_discovery and not in_memory:
         try:
-            source_name = sources[0]["name"]
+            source_name = (
+                restored_discovery.source.name
+                if getattr(restored_discovery, "source", None)
+                else sources[0]["name"]
+            )
             metrics_raw = store.get_catalog_metrics(source_name)
             dims_raw = store.get_catalog_dimensions(source_name)
             ents_raw = store.get_catalog_entities(source_name)
@@ -344,8 +349,8 @@ def create_app(*, in_memory: bool = False) -> FastAPI:
     app.include_router(warehouse.router, prefix="/api", tags=["warehouse"])
 
     @app.get("/api/status")
-    async def api_status():
-        pipeline = app.state.pipeline
+    async def api_status(request: Request, project_id: str | None = None):
+        pipeline = scoped_pipeline(request, project_id)
         has_discovery = pipeline["discovery"] is not None
         tables = pipeline["discovery"].tables if has_discovery else []
         reviewed = sum(1 for t in tables if t.review_status == "reviewed")

@@ -12,6 +12,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from headwater.api.project_scope import project_sources
 from headwater.connectors.registry import (
     connector_status,
     list_connector_catalog,
@@ -130,10 +131,17 @@ async def source_evaluations():
 
 
 @router.get("/sources")
-async def list_sources_route(request: Request):
+async def list_sources_route(request: Request, project_id: str | None = None):
     """List all registered sources with health, drift, and table summaries."""
     store = request.app.state.metadata_store
-    return {"sources": [_row_to_summary(store, r) for r in store.list_sources()]}
+    rows = store.list_sources()
+    if project_id:
+        project = store.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+        allowed = set(project_sources(project, store))
+        rows = [row for row in rows if row["name"] in allowed]
+    return {"sources": [_row_to_summary(store, r) for r in rows]}
 
 
 @router.get("/sources/{name}")

@@ -6,6 +6,7 @@ import {
   type DataInsight,
   type InsightsResponse,
 } from "@/lib/api";
+import { useProjects } from "@/lib/project-context";
 
 const SEVERITY_STYLE: Record<
   DataInsight["severity"],
@@ -236,16 +237,34 @@ function SummaryTile({
 }
 
 export default function InsightsPage() {
+  const { activeProjectId } = useProjects();
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [error, setError] = useState("");
   const [moreGenerated, setMoreGenerated] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setInsights(null);
+      setError("");
+      setMoreGenerated(false);
+    });
+    if (!activeProjectId) return;
     api
-      .insights()
-      .then(setInsights)
-      .catch(() => setError("Run the pipeline from the Dashboard first."));
-  }, []);
+      .insights(activeProjectId)
+      .then((nextInsights) => {
+        if (cancelled) return;
+        setError("");
+        setInsights(nextInsights);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Run the pipeline from the Dashboard first.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId]);
 
   if (error) {
     return (

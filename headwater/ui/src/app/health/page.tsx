@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   api,
   type StatusResponse,
   type InsightsResponse,
-  type PipelineRunResponse,
   type DriftReport,
   type Project,
   type ProjectProgress,
@@ -36,9 +35,8 @@ export default function HealthPage() {
   const [activities, setActivities] = useState<ActivityEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [phase, setPhase] = useState("");
-  const [sourcePath, setSourcePath] = useState(
-    "postgresql://headwater:headwater@localhost:5434/headwater_dev"
-  );
+  const sourceName = activeProject?.sources?.[0] ?? "";
+  const [sourcePath, setSourcePath] = useState("");
   const [error, setError] = useState("");
   const [connStatus, setConnStatus] = useState<ConnectionTestResult | null>(null);
   const [connTesting, setConnTesting] = useState(false);
@@ -48,8 +46,31 @@ export default function HealthPage() {
       s.startsWith(p)
     );
 
-  const testConnection = async (source?: string) => {
-    const uri = source ?? sourcePath;
+  const testConnection = useCallback(async (source?: string) => {
+    const uri = source ?? sourceName;
+    if (sourceName) {
+      setConnTesting(true);
+      try {
+        const result = await api.testSource(sourceName);
+        setConnStatus({
+          status: result.status,
+          source_type: "registered",
+          tables: result.tables ?? 0,
+          table_names: [],
+          detail: result.status === "ok" ? "Registered source reachable." : "Source test failed.",
+        });
+      } catch (e) {
+        setConnStatus({
+          status: "error",
+          source_type: "registered",
+          tables: 0,
+          table_names: [],
+          detail: e instanceof Error ? e.message : "Source test failed.",
+        });
+      }
+      setConnTesting(false);
+      return;
+    }
     if (!isDbUri(uri)) {
       setConnStatus(null);
       return;
@@ -68,14 +89,14 @@ export default function HealthPage() {
       });
     }
     setConnTesting(false);
-  };
+  }, [sourceName]);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
-      const s = await api.status();
+      const s = await api.status(activeProject?.id);
       setStatus(s);
       if (s.discovered) {
-        const ins = await api.insights();
+        const ins = await api.insights(activeProject?.id);
         setInsights(ins);
         if (activeProject) {
           setProject(activeProject);
@@ -100,7 +121,7 @@ export default function HealthPage() {
         }
         // Fetch latest drift report
         try {
-          const dr = await api.driftLatest();
+          const dr = await api.driftLatest(sourceName || undefined);
           if ("id" in dr && !dr.acknowledged) {
             setDriftReport(dr as DriftReport);
           } else {
@@ -113,25 +134,34 @@ export default function HealthPage() {
     } catch {
       /* server not ready */
     }
-  };
+  }, [activeProject, sourceName]);
 
   useEffect(() => {
-    queueMicrotask(() => {
-      refresh();
-      testConnection();
-    });
-  }, [activeProject]);
+    setStatus(null);
+    setInsights(null);
+    setDriftReport(null);
+    setProject(activeProject ?? null);
+    setProgress(null);
+    setActivities([]);
+    setError("");
+    setConnStatus(null);
+    setSourcePath(sourceName);
+    void refresh();
+    void testConnection();
+  }, [activeProject, sourceName, refresh, testConnection]);
 
   const runFullPipeline = async () => {
     setLoading(true);
     setError("");
     setPhase("Discovering, profiling, modeling, and validating...");
     try {
-      const result: PipelineRunResponse = await api.pipelineRun(sourcePath);
+      if (!sourceName) {
+        throw new Error("The selected project has no linked source.");
+      }
+      const result = await api.syncSource(sourceName);
       const summary =
-        `Done: ${result.tables_discovered} tables, ` +
-        `${result.profiles} profiles, ${result.relationships} relationships, ` +
-        `${result.quality_passed}/${result.quality_total} quality checks passed.`;
+        `Done: ${result.quality_total ?? 0} quality checks, ` +
+        `${result.quality_failed ?? 0} issue(s) need review.`;
       setPhase(summary);
       toast("Pipeline complete", "success");
       await refresh();
@@ -154,9 +184,6 @@ export default function HealthPage() {
   }[] = [];
 
   if (insights) {
-    // Proposed mart models
-    const proposedMarts =
-      insights.model_suggestions?.length ?? 0;
     // Check from workflow if models phase has pending items
     const modelsPhase = insights.workflow?.phases?.find(
       (p) => p.key === "models" || p.key === "model"

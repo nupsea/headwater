@@ -14,6 +14,8 @@ from typing import Literal
 
 from fastapi import APIRouter, Request
 
+from headwater.api.project_scope import project_sources, scoped_pipeline
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -41,16 +43,21 @@ def _priority(
 
 
 @router.get("/briefing/today")
-async def briefing_today(request: Request):
+async def briefing_today(request: Request, project_id: str | None = None):
     """Return today's briefing -- priorities and wins -- aggregated from system state."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     store = request.app.state.metadata_store
 
     discovery = pipeline.get("discovery")
     mart_models = pipeline.get("mart_models") or []
     contracts = pipeline.get("contracts") or []
     exec_results = pipeline.get("execution_results") or []
-    latest_quality = store.get_latest_quality_report()
+    source_names = pipeline.get("source_names") or []
+    latest_quality = (
+        store.get_latest_quality_report(source_names[0])
+        if source_names
+        else store.get_latest_quality_report()
+    )
 
     priorities: list[dict] = []
     wins: list[str] = []
@@ -74,6 +81,10 @@ async def briefing_today(request: Request):
 
     # 2. Failed source syncs
     sources = store.list_sources()
+    project = pipeline.get("project")
+    if project:
+        allowed_sources = set(project_sources(project, store))
+        sources = [source for source in sources if source.get("name") in allowed_sources]
     failed_sources = [s for s in sources if s.get("status") == "error"]
     drifting_sources = [
         s for s in sources if s.get("status") == "warning" or (s.get("drift_count") or 0) > 0

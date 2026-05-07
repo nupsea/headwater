@@ -17,7 +17,6 @@ const NAV_GROUPS: {
   {
     label: "Today",
     items: [
-      { href: "/", label: "Briefing" },
       { href: "/projects", label: "Projects" },
       { href: "/health", label: "Project Health" },
     ],
@@ -65,10 +64,6 @@ export function AppSidebar() {
   } | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const { activeProject } = useProjects();
-  const [briefingCounts, setBriefingCounts] = useState<{
-    high: number;
-    total: number;
-  }>({ high: 0, total: 0 });
 
   useEffect(() => {
     if (activeProject) {
@@ -82,18 +77,7 @@ export function AppSidebar() {
         )
         .catch(() => {});
     }
-    api.status().then(setStatus).catch(() => {});
-    fetch("/api/briefing/today")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((b) => {
-        if (b) {
-          setBriefingCounts({
-            high: b.summary.attention_count,
-            total: b.priorities.length,
-          });
-        }
-      })
-      .catch(() => {});
+    api.status(activeProject?.id).then(setStatus).catch(() => {});
   }, [activeProject, pathname]);
 
   const martsPending = status
@@ -141,16 +125,6 @@ export function AppSidebar() {
           tone="success"
           active={pathname === "/quality"}
         />
-        {briefingCounts.high > 0 && (
-          <QueueRow
-            href="/"
-            label="Briefing priorities"
-            sub={`${briefingCounts.high} high · ${briefingCounts.total} total`}
-            count={briefingCounts.high}
-            tone="danger"
-            active={pathname === "/"}
-          />
-        )}
       </div>
 
       <nav className="px-2 py-3 flex-1 overflow-y-auto">

@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.project import _compute_maturity, _compute_progress
 
 router = APIRouter()
@@ -13,9 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/insights")
-async def get_insights(request: Request):
+async def get_insights(request: Request, project_id: str | None = None):
     """Compute aggregated data insights from the discovery and quality pipeline."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -262,7 +263,7 @@ async def get_insights(request: Request):
 
     # --- Catalog health (v2) ---
     try:
-        catalog_health = _compute_catalog_health(request, discovery)
+        catalog_health = _compute_catalog_health(request, discovery, pipeline)
     except Exception:
         logger.exception("Failed to compute catalog health")
         catalog_health = {
@@ -1334,10 +1335,10 @@ def _compute_model_suggestions(tables, profiles, relationships, pipeline):
 # ---------------------------------------------------------------------------
 
 
-def _compute_catalog_health(request: Request, discovery) -> dict:
+def _compute_catalog_health(request: Request, discovery, pipeline: dict | None = None) -> dict:
     """Return catalog health metrics for the insights dashboard."""
     store = request.app.state.metadata_store
-    pipeline = request.app.state.pipeline
+    pipeline = pipeline or request.app.state.pipeline
     source = getattr(discovery, "source", None)
     if source is None:
         logger.warning("Discovery has no source attribute -- cannot compute catalog health")
@@ -1350,11 +1351,11 @@ def _compute_catalog_health(request: Request, discovery) -> dict:
     entities = store.get_catalog_entities(source_name)
 
     # Progress and maturity
-    progress = _compute_progress(discovery, pipeline, store, source_name)
+    progress = _compute_progress(discovery, pipeline, store, pipeline.get("project") or source_name)
     maturity, maturity_score = _compute_maturity(progress)
 
     # Project info
-    project = store.get_project(source_name)
+    project = pipeline.get("project") or store.get_project(source_name)
     catalog_confidence = project.get("catalog_confidence", 0.0) if project else 0.0
 
     return {

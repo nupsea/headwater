@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   api,
@@ -10,6 +10,7 @@ import {
 } from "@/lib/api";
 import { useToast } from "@/components/toast";
 import { ConnectorWizard } from "@/components/connector-wizard";
+import { useProjects } from "@/lib/project-context";
 
 const STATUS_STYLES: Record<
   string,
@@ -78,6 +79,7 @@ const READINESS_LABEL: Record<string, string> = {
 
 export default function SourcesPage() {
   const { toast } = useToast();
+  const { activeProject } = useProjects();
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [events, setEvents] = useState<SystemEvent[]>([]);
   const [connectors, setConnectors] = useState<ConnectorType[]>([]);
@@ -87,16 +89,19 @@ export default function SourcesPage() {
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState<Set<string>>(new Set());
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
+    setSources([]);
+    setSelected(null);
+    setError(null);
     api
-      .sources()
+      .sources(activeProject?.id)
       .then((r) => setSources(r.sources))
       .catch((e: Error) => setError(e.message));
     api
       .events(20)
       .then((r) => setEvents(r.events))
       .catch(() => {});
-  };
+  }, [activeProject?.id]);
 
   useEffect(() => {
     refresh();
@@ -104,7 +109,7 @@ export default function SourcesPage() {
       .connectorCatalog()
       .then((r) => setConnectors(r.connectors))
       .catch(() => {});
-  }, []);
+  }, [refresh]);
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: sources.length };

@@ -12,6 +12,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from headwater.api.project_scope import scoped_pipeline
 from headwater.analyzer.llm import NoLLMProvider, get_provider
 from headwater.core.config import get_settings
 from headwater.core.models import Relationship
@@ -41,7 +42,7 @@ def _serialize_statistical_insights(insights, limit: int) -> list[dict]:
     return [i.model_dump() for i in _rank_statistical_insights(insights)[:limit]]
 
 
-def _load_confirmed_relationships(request: Request) -> list[Relationship]:
+def _load_confirmed_relationships(request: Request, source_names: list[str] | None = None) -> list[Relationship]:
     """Load human-confirmed FK relationships from metadata store.
 
     These supplement auto-detected relationships for richer cross-table
@@ -51,10 +52,18 @@ def _load_confirmed_relationships(request: Request) -> list[Relationship]:
     if store is None:
         return []
     try:
-        rows = store._exec(
-            "SELECT from_table, from_column, to_table, to_column "
-            "FROM relationships WHERE detection_source = 'confirmed'"
-        )
+        if source_names:
+            placeholders = ", ".join("?" for _ in source_names)
+            rows = store.con.execute(
+                "SELECT from_table, from_column, to_table, to_column "
+                f"FROM relationships WHERE detection_source = 'confirmed' AND source_name IN ({placeholders})",
+                tuple(source_names),
+            ).fetchall()
+        else:
+            rows = store.con.execute(
+                "SELECT from_table, from_column, to_table, to_column "
+                "FROM relationships WHERE detection_source = 'confirmed'"
+            ).fetchall()
         rels: list[Relationship] = []
         for row in rows:
             rels.append(
@@ -80,13 +89,13 @@ class AskRequest(BaseModel):
 
 
 @router.get("/explore/suggestions")
-async def get_suggestions(request: Request):
+async def get_suggestions(request: Request, project_id: str | None = None):
     """Return auto-generated suggested questions and statistical insights.
 
     v2: No review gate. Suggestions are always returned. If few tables
     are reviewed, a soft signal is included but exploration is not blocked.
     """
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -100,7 +109,7 @@ async def get_suggestions(request: Request):
     quality_results = quality_report.results if quality_report else []
 
     catalog = pipeline.get("catalog")
-    extra_rels = _load_confirmed_relationships(request)
+    extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
     suggestions = generate_suggestions(
         discovery=discovery,
         models=all_models,
@@ -119,13 +128,13 @@ async def get_suggestions(request: Request):
 
 
 @router.post("/explore/ask")
-async def ask_question(request: Request, body: AskRequest):
+async def ask_question(request: Request, body: AskRequest, project_id: str | None = None):
     """Answer a natural language question by generating and executing SQL.
 
     v2: No review gate. Questions are always processed. Low-confidence
     answers show warnings rather than errors.
     """
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -137,7 +146,7 @@ async def ask_question(request: Request, body: AskRequest):
     quality_results = quality_report.results if quality_report else []
 
     # Load confirmed relationships and merge into discovery for richer suggestions
-    extra_rels = _load_confirmed_relationships(request)
+    extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
 
     # Generate suggestions for matching (with confirmed relationships)
     suggestions = generate_suggestions(
@@ -190,9 +199,9 @@ async def ask_question(request: Request, body: AskRequest):
 
 
 @router.get("/explore/insights")
-async def get_statistical_insights(request: Request):
+async def get_statistical_insights(request: Request, project_id: str | None = None):
     """Return only statistical insights from materialized data."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     if not pipeline["discovery"]:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
 

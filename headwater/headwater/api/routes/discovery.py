@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -14,6 +15,7 @@ from headwater.analyzer.companion import (
 )
 from headwater.analyzer.eval import evaluate_catalog
 from headwater.analyzer.semantic import analyze
+from headwater.api.project_scope import project_for_source, scoped_pipeline
 from headwater.connectors.registry import get_connector
 from headwater.core.events import EventType
 from headwater.core.models import SourceConfig
@@ -141,9 +143,9 @@ async def run_discovery(
 
 
 @router.get("/tables")
-async def list_tables(request: Request):
+async def list_tables(request: Request, project_id: str | None = None):
     """List discovered tables."""
-    discovery = request.app.state.pipeline["discovery"]
+    discovery = scoped_pipeline(request, project_id)["discovery"]
     if not discovery:
         raise HTTPException(
             status_code=400, detail="No discovery run yet. POST /api/discover first."
@@ -162,9 +164,9 @@ async def list_tables(request: Request):
 
 
 @router.get("/tables/{table_name}")
-async def get_table(request: Request, table_name: str):
+async def get_table(request: Request, table_name: str, project_id: str | None = None):
     """Get table detail including columns."""
-    discovery = request.app.state.pipeline["discovery"]
+    discovery = scoped_pipeline(request, project_id)["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
     table = next((t for t in discovery.tables if t.name == table_name), None)
@@ -174,9 +176,13 @@ async def get_table(request: Request, table_name: str):
 
 
 @router.get("/tables/{table_name}/semantic-detail")
-async def get_table_semantic_detail(request: Request, table_name: str):
+async def get_table_semantic_detail(
+    request: Request,
+    table_name: str,
+    project_id: str | None = None,
+):
     """Get deep semantic detail for a table."""
-    discovery = request.app.state.pipeline.get("discovery")
+    discovery = scoped_pipeline(request, project_id).get("discovery")
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
     table = next((t for t in discovery.tables if t.name == table_name), None)
@@ -191,9 +197,9 @@ async def get_table_semantic_detail(request: Request, table_name: str):
 
 
 @router.get("/tables/{table_name}/profile")
-async def get_table_profile(request: Request, table_name: str):
+async def get_table_profile(request: Request, table_name: str, project_id: str | None = None):
     """Get column profiles for a table."""
-    discovery = request.app.state.pipeline["discovery"]
+    discovery = scoped_pipeline(request, project_id)["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
     profiles = [p for p in discovery.profiles if p.table_name == table_name]
@@ -203,9 +209,9 @@ async def get_table_profile(request: Request, table_name: str):
 
 
 @router.get("/relationships")
-async def list_relationships(request: Request):
+async def list_relationships(request: Request, project_id: str | None = None):
     """List all detected relationships."""
-    discovery = request.app.state.pipeline["discovery"]
+    discovery = scoped_pipeline(request, project_id)["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
     return [r.model_dump() for r in discovery.relationships]
@@ -588,17 +594,29 @@ def _persist_catalog_data(request: Request, catalog, evaluation, source_name: st
     if store is None:
         return
 
-    # Use source_name as project_id for now (project entity comes in Phase 4)
-    project_id = source_name
+    linked_project = project_for_source(store, source_name)
+    project_id = linked_project["id"] if linked_project else source_name
 
-    # Ensure project record exists (FK constraint)
-    store.upsert_project(
-        id_=project_id,
-        slug=project_id,
-        display_name=project_id,
-        maturity="profiled",
-        catalog_confidence=evaluation.confidence,
-    )
+    # Ensure project record exists for direct source runs. Source syncs launched
+    # from a real project persist catalog rows under that project id.
+    if linked_project:
+        store.upsert_project(
+            id_=project_id,
+            slug=linked_project["slug"],
+            display_name=linked_project["display_name"],
+            description=linked_project.get("description", ""),
+            sources_json=json.dumps(linked_project.get("sources") or []),
+            maturity="profiled",
+            catalog_confidence=evaluation.confidence,
+        )
+    else:
+        store.upsert_project(
+            id_=project_id,
+            slug=project_id,
+            display_name=project_id,
+            maturity="profiled",
+            catalog_confidence=evaluation.confidence,
+        )
 
     # Clear previous catalog for this project before re-inserting
     store.clear_catalog(project_id)

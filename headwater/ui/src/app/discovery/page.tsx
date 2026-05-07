@@ -10,6 +10,7 @@ import {
   type DictTable,
   type ColumnReviewPayload,
 } from "@/lib/api";
+import { useProjects } from "@/lib/project-context";
 import { ProfileTable } from "@/components/profile-table";
 import { KeyColumnsView } from "@/components/key-columns-view";
 import { PKFKManager } from "@/components/pk-fk-manager";
@@ -47,6 +48,7 @@ function reviewBreakdown(table: DictTable | null) {
 }
 
 export default function DiscoveryPage() {
+  const { activeProjectId } = useProjects();
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<TableDetail | null>(null);
@@ -62,34 +64,76 @@ export default function DiscoveryPage() {
   const [saveMsg, setSaveMsg] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setInsights(null);
+      setSelected(null);
+      setDetail(null);
+      setProfiles([]);
+      setDictTable(null);
+      setEditTableDesc(null);
+      setEditDescs({});
+      setEditedCols({});
+      setSaveMsg("");
+      setError("");
+    });
+    if (!activeProjectId) return;
     api
-      .insights()
+      .insights(activeProjectId)
       .then((ins) => {
+        if (cancelled) return;
+        setError("");
         setInsights(ins);
         if (ins.table_health.length > 0) setSelected(ins.table_health[0].name);
+        else setSelected(null);
       })
-      .catch(() => setError("Run the pipeline from the Dashboard first."));
-  }, []);
+      .catch(() => {
+        if (!cancelled) setError("Run the pipeline from the Dashboard first.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId]);
 
   useEffect(() => {
-    if (!selected) return;
-    api.table(selected).then(setDetail);
-    api.tableProfile(selected).then(setProfiles).catch(() => setProfiles([]));
-    api.dictionaryTable(selected).then((dt) => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setDetail(null);
+      setProfiles([]);
+      setDictTable(null);
+    });
+    if (!selected || !activeProjectId) return;
+    api.table(selected, activeProjectId).then((td) => {
+      if (!cancelled) setDetail(td);
+    });
+    api.tableProfile(selected, activeProjectId).then((profileData) => {
+      if (!cancelled) setProfiles(profileData);
+    }).catch(() => {
+      if (!cancelled) setProfiles([]);
+    });
+    api.dictionaryTable(selected, activeProjectId).then((dt) => {
+      if (cancelled) return;
       setDictTable(dt);
       setEditTableDesc(null);
       setEditDescs({});
       setEditedCols({});
       setSaveMsg("");
-    }).catch(() => setDictTable(null));
-  }, [selected]);
+    }).catch(() => {
+      if (!cancelled) setDictTable(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, activeProjectId]);
 
   const refreshSelected = async () => {
     if (!selected) return;
     const [td, dt, profileData] = await Promise.all([
-      api.table(selected),
-      api.dictionaryTable(selected).catch(() => null),
-      api.tableProfile(selected).catch(() => [] as ColumnProfile[]),
+      api.table(selected, activeProjectId),
+      api.dictionaryTable(selected, activeProjectId).catch(() => null),
+      api.tableProfile(selected, activeProjectId).catch(() => [] as ColumnProfile[]),
     ]);
     setDetail(td);
     setDictTable(dt);
@@ -97,7 +141,7 @@ export default function DiscoveryPage() {
   };
 
   const refreshAll = async () => {
-    const ins = await api.insights();
+    const ins = await api.insights(activeProjectId);
     setInsights(ins);
     await refreshSelected();
   };
@@ -132,7 +176,7 @@ export default function DiscoveryPage() {
         table_description: editTableDesc ?? undefined,
         confirm: false,
       };
-      await api.reviewTable(selected, payload);
+      await api.reviewTable(selected, payload, activeProjectId);
       await refreshAll();
       setEditDescs({});
       setEditedCols({});
@@ -163,7 +207,7 @@ export default function DiscoveryPage() {
         columns,
         table_description: editTableDesc ?? undefined,
         confirm: true,
-      });
+      }, activeProjectId);
       await refreshAll();
       setEditedCols({});
       setEditDescs({});
@@ -744,7 +788,7 @@ export default function DiscoveryPage() {
 
               {/* PK/FK Manager */}
               <div className="bg-card border border-border rounded-lg p-5">
-                <PKFKManager tableName={selected} onChanged={refreshAll} />
+                <PKFKManager tableName={selected} projectId={activeProjectId} onChanged={refreshAll} />
               </div>
 
               {/* Save bar */}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type ModelSummary,
@@ -10,6 +10,7 @@ import {
   type GraphData,
   type GraphPatterns,
 } from "@/lib/api";
+import { useProjects } from "@/lib/project-context";
 import { useToast } from "@/components/toast";
 import { StatusBadge } from "@/components/status-badge";
 import { SqlViewer } from "@/components/sql-viewer";
@@ -20,6 +21,8 @@ import { QuestionResolver } from "@/components/question-resolver";
 
 export default function ModelsPage() {
   const { toast } = useToast();
+  const { activeProjectId } = useProjects();
+  const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const [models, setModels] = useState<ModelSummary[]>([]);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [impact, setImpact] = useState<ModelImpactResponse | null>(null);
@@ -33,50 +36,93 @@ export default function ModelsPage() {
   // Graph data for Relationships tab
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [graphPatterns, setGraphPatterns] = useState<GraphPatterns | null>(null);
-
-  const refresh = () =>
-    api
-      .models()
-      .then((nextModels) => {
-        setModels(nextModels);
-        return api.modelImpact().then(setImpact);
-      })
-      .catch(() => setMessage("Generate models from the Dashboard first."));
+  const [graphProjectId, setGraphProjectId] = useState<string | null>(null);
 
   useEffect(() => {
+    activeProjectIdRef.current = activeProjectId;
+  }, [activeProjectId]);
+
+  const refresh = useCallback(() => {
+    if (!activeProjectId) return Promise.resolve();
+    const projectId = activeProjectId;
+    setMessage("");
+    return api
+      .models(projectId)
+      .then((nextModels) => {
+        if (activeProjectIdRef.current !== projectId) return;
+        setModels(nextModels);
+        setSelected((current) =>
+          current && nextModels.some((model) => model.name === current)
+            ? current
+            : nextModels[0]?.name ?? null
+        );
+        return api.modelImpact(projectId).then((nextImpact) => {
+          if (activeProjectIdRef.current === projectId) setImpact(nextImpact);
+        });
+      })
+      .catch(() => {
+        if (activeProjectIdRef.current === projectId) {
+          setMessage("Generate models from the Dashboard first.");
+        }
+      });
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    setModels([]);
+    setInsights(null);
+    setImpact(null);
+    setSelected(null);
+    setDetail(null);
+    setMessage("");
+    setReviewDetails({});
+    setReviewDetailErrors({});
+    setGraphData(null);
+    setGraphPatterns(null);
+    setGraphProjectId(null);
+    if (!activeProjectId) return;
     refresh();
     api
-      .insights()
+      .insights(activeProjectId)
       .then(setInsights)
       .catch(() => {});
     api
-      .modelImpact()
+      .modelImpact(activeProjectId)
       .then(setImpact)
       .catch(() => {});
-  }, []);
+  }, [activeProjectId, refresh]);
 
   useEffect(() => {
-    if (!selected) return;
-    api.model(selected).then(setDetail);
-  }, [selected]);
+    setDetail(null);
+    if (!selected || !activeProjectId) return;
+    const projectId = activeProjectId;
+    api.model(selected, projectId).then((nextDetail) => {
+      if (activeProjectIdRef.current === projectId) setDetail(nextDetail);
+    });
+  }, [selected, activeProjectId]);
 
   // Load graph data when Relationships tab is shown
   useEffect(() => {
-    if (showSection !== "graph") return;
-    if (graphData) return;
-    api.graphData().then(setGraphData).catch(() => {});
-    api.graphPatterns().then(setGraphPatterns).catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showSection]);
+    if (showSection !== "graph" || !activeProjectId) return;
+    if (graphData && graphProjectId === activeProjectId) return;
+    const projectId = activeProjectId;
+    api.graphData(projectId).then((data) => {
+      if (activeProjectIdRef.current !== projectId) return;
+      setGraphData(data);
+      setGraphProjectId(projectId);
+    }).catch(() => {});
+    api.graphPatterns(projectId).then((patterns) => {
+      if (activeProjectIdRef.current === projectId) setGraphPatterns(patterns);
+    }).catch(() => {});
+  }, [showSection, activeProjectId, graphData, graphProjectId]);
 
   // Fetch full model detail (including SQL) for each proposed model when Review Queue opens
   useEffect(() => {
-    if (showSection !== "review") return;
+    if (showSection !== "review" || !activeProjectId) return;
     const proposed = models.filter((m) => m.status === "proposed");
     proposed.forEach((m) => {
       if (reviewDetails[m.name] || reviewDetailErrors[m.name]) return;
       api
-        .model(m.name)
+        .model(m.name, activeProjectId)
         .then((d) => setReviewDetails((prev) => ({ ...prev, [m.name]: d })))
         .catch((e) =>
           setReviewDetailErrors((prev) => ({
@@ -86,15 +132,15 @@ export default function ModelsPage() {
         );
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showSection, models]);
+  }, [showSection, models, activeProjectId]);
 
   const handleApprove = async (name: string) => {
     try {
-      await api.approveModel(name);
+      await api.approveModel(name, activeProjectId);
       setMessage(`Approved: ${name}`);
       toast(`Approved: ${name}`, "success");
       refresh();
-      if (selected === name) api.model(name).then(setDetail);
+      if (selected === name) api.model(name, activeProjectId).then(setDetail);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setMessage(`Error: ${msg}`);
@@ -104,11 +150,11 @@ export default function ModelsPage() {
 
   const handleReject = async (name: string) => {
     try {
-      await api.rejectModel(name);
+      await api.rejectModel(name, activeProjectId);
       setMessage(`Rejected: ${name}`);
       toast(`Rejected: ${name}`, "info");
       refresh();
-      if (selected === name) api.model(name).then(setDetail);
+      if (selected === name) api.model(name, activeProjectId).then(setDetail);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setMessage(`Error: ${msg}`);
@@ -370,8 +416,8 @@ export default function ModelsPage() {
             setShowSection("browse");
           }}
           onLoadGraph={() => {
-            if (!graphData) {
-              api.graphData().then(setGraphData).catch(() => {});
+            if (!graphData && activeProjectId) {
+              api.graphData(activeProjectId).then(setGraphData).catch(() => {});
             }
           }}
         />
@@ -771,7 +817,7 @@ export default function ModelsPage() {
                       <QuestionResolver
                         questions={m.questions}
                         onAnswer={async (answers) => {
-                          await api.submitModelAnswers(m.name, answers);
+                          await api.submitModelAnswers(m.name, answers, activeProjectId);
                         }}
                       />
                     </div>
@@ -975,7 +1021,7 @@ export default function ModelsPage() {
                   <QuestionResolver
                     questions={detail.questions}
                     onAnswer={async (answers) => {
-                      await api.submitModelAnswers(detail.name, answers);
+                      await api.submitModelAnswers(detail.name, answers, activeProjectId);
                     }}
                   />
                 )}

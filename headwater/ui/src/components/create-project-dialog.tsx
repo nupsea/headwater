@@ -303,12 +303,15 @@ export function CreateProjectDialog({
     setCreating(true);
     setError("");
     try {
+      const sourceName =
+        form.source_name.trim() || slugify(`${projectName.trim()}-${selectedConnector.id}`);
       const project = await api.createProject({
         display_name: projectName.trim(),
         description: projectDescription.trim() || undefined,
+        sources: [sourceName],
       });
       const sourcePayload: SourceCreatePayload = {
-        name: form.source_name.trim() || slugify(`${project.display_name}-${selectedConnector.id}`),
+        name: sourceName,
         type: selectedConnector.id,
         display_name: form.display_name.trim() || `${project.display_name} ${selectedConnector.name}`,
         auto_sync: form.auto_sync,

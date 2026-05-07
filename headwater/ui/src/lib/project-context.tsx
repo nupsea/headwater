@@ -64,6 +64,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   }, [refreshProjects]);
 
   const selectProject = useCallback((projectId: string) => {
+    if (!projectId) return;
     setActiveProjectId(projectId);
     window.localStorage.setItem(STORAGE_KEY, projectId);
   }, []);

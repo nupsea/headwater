@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
+
+from headwater.api.project_scope import (
+    catalog_ids_for_project,
+    project_sources,
+    scoped_pipeline,
+    visible_projects,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -17,6 +25,7 @@ class CreateProjectRequest(BaseModel):
     display_name: str
     source_path: str | None = None
     description: str | None = None
+    sources: list[str] | None = None
 
 
 class RenameProjectRequest(BaseModel):
@@ -33,13 +42,21 @@ def _slugify(name: str) -> str:
     return slug
 
 
+def _source_ids_for_project(project: dict, store) -> list[str]:
+    return catalog_ids_for_project(project, store)
+
+
 def _compute_progress(
     discovery,
     pipeline: dict,
     store,
-    project_id: str,
+    project: dict | str,
 ) -> dict:
     """Compute live progress counters for a project."""
+    if isinstance(project, str):
+        project = store.get_project(project) or {"id": project, "sources": []}
+    project_id = project["id"]
+    catalog_ids = _source_ids_for_project(project, store) or [project_id]
     tables = discovery.tables if discovery else []
     profiles = discovery.profiles if discovery else []
     relationships = discovery.relationships if discovery else []
@@ -70,8 +87,22 @@ def _compute_progress(
     )
 
     # Catalog counts from metadata store
-    metrics = store.get_catalog_metrics(project_id)
-    dimensions = store.get_catalog_dimensions(project_id)
+    metrics = [
+        metric
+        for catalog_id in catalog_ids
+        for metric in store.get_catalog_metrics(catalog_id)
+    ]
+    dimensions = [
+        dimension
+        for catalog_id in catalog_ids
+        for dimension in store.get_catalog_dimensions(catalog_id)
+    ]
+    table_names = set(pipeline.get("table_names") or [])
+    if table_names:
+        metrics = [metric for metric in metrics if metric.get("table_name") in table_names]
+        dimensions = [
+            dimension for dimension in dimensions if dimension.get("table_name") in table_names
+        ]
     metrics_defined = len(metrics)
     metrics_confirmed = sum(1 for m in metrics if m.get("status") == "confirmed")
     dimensions_defined = len(dimensions)
@@ -83,9 +114,16 @@ def _compute_progress(
     contracts_observing = sum(1 for c in contracts if c.status == "observing")
     contracts_failing = sum(1 for c in contracts if c.status == "failing")
     contracts_recovered = sum(1 for c in contracts if c.status == "recovered")
-    latest_quality = store.get_latest_quality_report(source_name)
-    quality_failed = int((latest_quality or {}).get("failed") or 0)
-    quality_score = float((latest_quality or {}).get("score") or 100.0)
+    latest_quality = pipeline.get("quality_report")
+    if latest_quality:
+        quality_failed = int(getattr(latest_quality, "failed", 0) or 0)
+        total_contracts = int(getattr(latest_quality, "total_contracts", 0) or 0)
+        passed_contracts = int(getattr(latest_quality, "passed", 0) or 0)
+        quality_score = (passed_contracts / total_contracts) * 100 if total_contracts else 100.0
+    else:
+        latest_quality_row = store.get_latest_quality_report(source_name)
+        quality_failed = int((latest_quality_row or {}).get("failed") or 0)
+        quality_score = float((latest_quality_row or {}).get("score") or 100.0)
     source_row = store.get_source(source_name)
     source_drift_count = int((source_row or {}).get("drift_count") or 0)
     persisted_impacts = store.list_model_impacts(source_name=source_name, limit=200)
@@ -290,7 +328,13 @@ async def create_project(body: CreateProjectRequest, request: Request):
     store = request.app.state.metadata_store
     id_ = str(uuid.uuid4())
     slug = _slugify(body.display_name)
-    store.upsert_project(id_, slug, body.display_name, description=body.description)
+    store.upsert_project(
+        id_,
+        slug,
+        body.display_name,
+        description=body.description or "",
+        sources_json=json.dumps(body.sources or []),
+    )
     store.log_activity(
         "project_created",
         f"Created project '{body.display_name}'",
@@ -307,7 +351,7 @@ async def list_projects(request: Request):
     """List all projects with summary info."""
     store = request.app.state.metadata_store
     try:
-        projects = store.list_projects()
+        projects = [_hydrate_project(project, store) for project in visible_projects(store)]
     except Exception:
         logger.exception("Failed to list projects from metadata store")
         raise
@@ -322,11 +366,12 @@ async def get_project(project_id: str, request: Request):
     project = store.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    project = _hydrate_project(project, store)
 
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline.get("discovery")
 
-    progress = _compute_progress(discovery, pipeline, store, project_id)
+    progress = _compute_progress(discovery, pipeline, store, project)
     maturity, maturity_score = _compute_maturity(progress)
 
     # Update maturity if changed
@@ -345,6 +390,12 @@ async def get_project(project_id: str, request: Request):
     }
 
 
+def _hydrate_project(project: dict, store) -> dict:
+    hydrated = dict(project)
+    hydrated["sources"] = project_sources(project, store)
+    return hydrated
+
+
 @router.get("/projects/{project_id}/progress")
 async def get_project_progress(project_id: str, request: Request):
     """Get live progress counters for a project."""
@@ -353,11 +404,11 @@ async def get_project_progress(project_id: str, request: Request):
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
 
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline.get("discovery")
 
     try:
-        progress = _compute_progress(discovery, pipeline, store, project_id)
+        progress = _compute_progress(discovery, pipeline, store, project)
         maturity, maturity_score = _compute_maturity(progress)
     except Exception:
         logger.exception("Failed to compute progress for project '%s'", project_id)
@@ -379,9 +430,30 @@ async def get_project_catalog(project_id: str, request: Request):
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
 
-    metrics = store.get_catalog_metrics(project_id)
-    dimensions = store.get_catalog_dimensions(project_id)
-    entities = store.get_catalog_entities(project_id)
+    catalog_ids = _source_ids_for_project(project, store) or [project_id]
+    pipeline = scoped_pipeline(request, project_id)
+    table_names = set(pipeline.get("table_names") or [])
+    metrics = [
+        metric
+        for catalog_id in catalog_ids
+        for metric in store.get_catalog_metrics(catalog_id)
+    ]
+    dimensions = [
+        dimension
+        for catalog_id in catalog_ids
+        for dimension in store.get_catalog_dimensions(catalog_id)
+    ]
+    entities = [
+        entity
+        for catalog_id in catalog_ids
+        for entity in store.get_catalog_entities(catalog_id)
+    ]
+    if table_names:
+        metrics = [metric for metric in metrics if metric.get("table_name") in table_names]
+        dimensions = [
+            dimension for dimension in dimensions if dimension.get("table_name") in table_names
+        ]
+        entities = [entity for entity in entities if entity.get("table_name") in table_names]
 
     return {
         "project_id": project_id,

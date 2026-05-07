@@ -9,6 +9,15 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+function projectQuery(projectId?: string | null): string {
+  return projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+}
+
+function appendProjectQuery(url: string, projectId?: string | null): string {
+  if (!projectId) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}project_id=${encodeURIComponent(projectId)}`;
+}
+
 // ---------- Types ----------
 
 export interface StatusResponse {
@@ -634,6 +643,7 @@ export interface Project {
   catalog_confidence: number;
   created_at: string;
   updated_at: string;
+  sources: string[];
   progress?: ProjectProgress;
 }
 
@@ -874,6 +884,7 @@ export interface CreateProjectPayload {
   display_name: string;
   source_path?: string;
   description?: string;
+  sources?: string[];
 }
 
 // ---------- Connection test types ----------
@@ -980,7 +991,8 @@ export interface WarehouseInsightExecution {
 // ---------- API calls ----------
 
 export const api = {
-  status: () => fetchJSON<StatusResponse>("/status"),
+  status: (projectId?: string | null) =>
+    fetchJSON<StatusResponse>(`/status${projectQuery(projectId)}`),
 
   testConnection: (sourcePath: string, sourceType = "auto") =>
     fetchJSON<ConnectionTestResult>(
@@ -994,49 +1006,55 @@ export const api = {
       { method: "POST" }
     ),
 
-  insights: () => fetchJSON<InsightsResponse>("/insights"),
+  insights: (projectId?: string | null) =>
+    fetchJSON<InsightsResponse>(`/insights${projectQuery(projectId)}`),
 
-  table: (name: string) => fetchJSON<TableDetail>(`/tables/${name}`),
+  table: (name: string, projectId?: string | null) =>
+    fetchJSON<TableDetail>(appendProjectQuery(`/tables/${name}`, projectId)),
 
-  tableProfile: (name: string) =>
-    fetchJSON<ColumnProfile[]>(`/tables/${name}/profile`),
+  tableProfile: (name: string, projectId?: string | null) =>
+    fetchJSON<ColumnProfile[]>(appendProjectQuery(`/tables/${name}/profile`, projectId)),
 
-  models: () => fetchJSON<ModelSummary[]>("/models"),
+  models: (projectId?: string | null) =>
+    fetchJSON<ModelSummary[]>(`/models${projectQuery(projectId)}`),
 
-  model: (name: string) => fetchJSON<ModelDetail>(`/models/${name}`),
+  model: (name: string, projectId?: string | null) =>
+    fetchJSON<ModelDetail>(appendProjectQuery(`/models/${name}`, projectId)),
 
-  modelImpact: () => fetchJSON<ModelImpactResponse>("/models/impact"),
+  modelImpact: (projectId?: string | null) =>
+    fetchJSON<ModelImpactResponse>(`/models/impact${projectQuery(projectId)}`),
 
   rerunPlan: (source?: string) =>
     fetchJSON<RerunPlan>(
       `/rerun-plan${source ? `?source=${encodeURIComponent(source)}` : ""}`
     ),
 
-  approveModel: (name: string) =>
-    fetchJSON<{ name: string; status: string }>(`/models/${name}/approve`, {
+  approveModel: (name: string, projectId?: string | null) =>
+    fetchJSON<{ name: string; status: string }>(appendProjectQuery(`/models/${name}/approve`, projectId), {
       method: "POST",
     }),
 
-  rejectModel: (name: string) =>
-    fetchJSON<{ name: string; status: string }>(`/models/${name}/reject`, {
+  rejectModel: (name: string, projectId?: string | null) =>
+    fetchJSON<{ name: string; status: string }>(appendProjectQuery(`/models/${name}/reject`, projectId), {
       method: "POST",
     }),
 
-  contracts: () => fetchJSON<ContractSummary[]>("/contracts"),
+  contracts: (projectId?: string | null) =>
+    fetchJSON<ContractSummary[]>(`/contracts${projectQuery(projectId)}`),
 
   // Data Dictionary
-  dictionary: () =>
-    fetchJSON<{ tables: DictTable[] }>("/dictionary"),
+  dictionary: (projectId?: string | null) =>
+    fetchJSON<{ tables: DictTable[] }>(`/dictionary${projectQuery(projectId)}`),
 
-  dictionaryTable: (name: string) =>
-    fetchJSON<DictTable>(`/dictionary/${name}`),
+  dictionaryTable: (name: string, projectId?: string | null) =>
+    fetchJSON<DictTable>(appendProjectQuery(`/dictionary/${name}`, projectId)),
 
-  dictionarySummary: () =>
-    fetchJSON<DictReviewSummary>("/dictionary/summary"),
+  dictionarySummary: (projectId?: string | null) =>
+    fetchJSON<DictReviewSummary>(`/dictionary/summary${projectQuery(projectId)}`),
 
-  reviewTable: (name: string, body: TableReviewPayload) =>
+  reviewTable: (name: string, body: TableReviewPayload, projectId?: string | null) =>
     fetchJSON<{ table: string; review_status: string; columns_updated: number }>(
-      `/dictionary/${name}/review`,
+      appendProjectQuery(`/dictionary/${name}/review`, projectId),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1056,28 +1074,29 @@ export const api = {
     }),
 
   // Data Viewer
-  dataCatalog: () => fetchJSON<CatalogResponse>("/data/catalog"),
+  dataCatalog: (projectId?: string | null) =>
+    fetchJSON<CatalogResponse>(`/data/catalog${projectQuery(projectId)}`),
 
-  dataPreview: (tableName: string, limit = 100) =>
+  dataPreview: (tableName: string, limit = 100, projectId?: string | null) =>
     fetchJSON<DataPreviewResponse>(
-      `/data/${tableName}/preview?limit=${limit}`
+      appendProjectQuery(`/data/${tableName}/preview?limit=${limit}`, projectId)
     ),
 
-  dataQuery: (sql: string) =>
-    fetchJSON<DataQueryResponse>("/data/query", {
+  dataQuery: (sql: string, projectId?: string | null) =>
+    fetchJSON<DataQueryResponse>(appendProjectQuery("/data/query", projectId), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sql }),
     }),
 
-  exploreSuggestions: () =>
-    fetchJSON<ExploreSuggestionsResponse>("/explore/suggestions"),
+  exploreSuggestions: (projectId?: string | null) =>
+    fetchJSON<ExploreSuggestionsResponse>(`/explore/suggestions${projectQuery(projectId)}`),
 
-  exploreInsights: () =>
-    fetchJSON<ExploreInsightsResponse>("/explore/insights"),
+  exploreInsights: (projectId?: string | null) =>
+    fetchJSON<ExploreInsightsResponse>(`/explore/insights${projectQuery(projectId)}`),
 
-  exploreAsk: (question: string) =>
-    fetchJSON<ExplorationResult>("/explore/ask", {
+  exploreAsk: (question: string, projectId?: string | null) =>
+    fetchJSON<ExplorationResult>(appendProjectQuery("/explore/ask", projectId), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
@@ -1125,11 +1144,12 @@ export const api = {
     fetchJSON<{ deleted: string }>(`/projects/${id}`, { method: "DELETE" }),
 
   // v2: Catalog review
-  catalogReview: () => fetchJSON<CatalogReviewResponse>("/dictionary/catalog"),
+  catalogReview: (projectId?: string | null) =>
+    fetchJSON<CatalogReviewResponse>(`/dictionary/catalog${projectQuery(projectId)}`),
 
-  reviewMetric: (name: string, action: "confirmed" | "rejected") =>
+  reviewMetric: (name: string, action: "confirmed" | "rejected", projectId?: string | null) =>
     fetchJSON<{ metric: string; status: string; confidence: number }>(
-      `/dictionary/catalog/metrics/${name}`,
+      appendProjectQuery(`/dictionary/catalog/metrics/${name}`, projectId),
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1137,9 +1157,9 @@ export const api = {
       }
     ),
 
-  reviewDimension: (name: string, action: "confirmed" | "rejected", synonyms?: string[]) =>
+  reviewDimension: (name: string, action: "confirmed" | "rejected", synonyms?: string[], projectId?: string | null) =>
     fetchJSON<{ dimension: string; status: string; confidence: number }>(
-      `/dictionary/catalog/dimensions/${name}`,
+      appendProjectQuery(`/dictionary/catalog/dimensions/${name}`, projectId),
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1148,9 +1168,11 @@ export const api = {
     ),
 
   // v2: Graph
-  graphData: () => fetchJSON<GraphData>("/graph/data"),
+  graphData: (projectId?: string | null) =>
+    fetchJSON<GraphData>(`/graph/data${projectQuery(projectId)}`),
 
-  graphPatterns: () => fetchJSON<GraphPatterns>("/graph/patterns"),
+  graphPatterns: (projectId?: string | null) =>
+    fetchJSON<GraphPatterns>(`/graph/patterns${projectQuery(projectId)}`),
 
   graphJoinPath: (from: string, to: string) =>
     fetchJSON<{ from_table: string; to_table: string; path: unknown[] | null; hop_count?: number }>(
@@ -1197,8 +1219,10 @@ export const api = {
     fetchJSON<{ activities: ActivityEntry[] }>(`/activity?limit=${limit}`),
 
   // v3: PK/FK suggestions
-  pkfkSuggestions: (table: string) =>
-    fetchJSON<PKFKSuggestions>(`/tables/${table}/pk-fk-suggestions`),
+  pkfkSuggestions: (table: string, projectId?: string | null) =>
+    fetchJSON<PKFKSuggestions>(
+      appendProjectQuery(`/tables/${table}/pk-fk-suggestions`, projectId)
+    ),
 
   // v3: Confirm/reject PK/FK
   persistKeys: (table: string, body: {
@@ -1206,9 +1230,9 @@ export const api = {
     reject_pks?: string[];
     confirm_fks?: { from_col: string; to_table: string; to_col: string }[];
     reject_fk_ids?: number[];
-  }) =>
+  }, projectId?: string | null) =>
     fetchJSON<{ pks_confirmed: number; pks_rejected: number; fks_confirmed: number; fks_rejected: number }>(
-      `/tables/${table}/keys`,
+      appendProjectQuery(`/tables/${table}/keys`, projectId),
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1217,9 +1241,13 @@ export const api = {
     ),
 
   // v3: Model answers
-  submitModelAnswers: (modelName: string, answers: { question_index: number; answer: string }[]) =>
+  submitModelAnswers: (
+    modelName: string,
+    answers: { question_index: number; answer: string }[],
+    projectId?: string | null
+  ) =>
     fetchJSON<{ model_name: string; answers_saved: number }>(
-      `/models/${modelName}/answers`,
+      appendProjectQuery(`/models/${modelName}/answers`, projectId),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1227,9 +1255,9 @@ export const api = {
       }
     ),
 
-  getModelAnswers: (modelName: string) =>
+  getModelAnswers: (modelName: string, projectId?: string | null) =>
     fetchJSON<{ model_name: string; answers: ModelAnswer[] }>(
-      `/models/${modelName}/answers`
+      appendProjectQuery(`/models/${modelName}/answers`, projectId)
     ),
 
   // v3: Dictionary answers (table-scoped)
@@ -1267,7 +1295,8 @@ export const api = {
     ),
 
   // Sources (multi-source)
-  sources: () => fetchJSON<{ sources: SourceSummary[] }>("/sources"),
+  sources: (projectId?: string | null) =>
+    fetchJSON<{ sources: SourceSummary[] }>(`/sources${projectQuery(projectId)}`),
   source: (name: string) => fetchJSON<SourceDetail>(`/sources/${name}`),
   createSource: (body: SourceCreatePayload) =>
     fetchJSON<SourceSummary>("/sources", {
@@ -1348,7 +1377,8 @@ export const api = {
     ),
 
   // Briefing (homepage)
-  briefingToday: () => fetchJSON<BriefingResponse>("/briefing/today"),
+  briefingToday: (projectId?: string | null) =>
+    fetchJSON<BriefingResponse>(`/briefing/today${projectQuery(projectId)}`),
 };
 
 // ---------- Multi-source types ----------

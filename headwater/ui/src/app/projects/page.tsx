@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api, type Project, type ProjectProgress } from "@/lib/api";
 import { useProjects } from "@/lib/project-context";
@@ -203,12 +204,17 @@ export default function ProjectsPage() {
                     </div>
                     <div className="space-y-1">
                       {progress.maturity_blockers.slice(0, 2).map((blocker) => (
-                        <div key={blocker.title} className="text-[11px] text-muted">
+                        <Link
+                          key={blocker.title}
+                          href={blocker.route}
+                          onClick={() => selectProject(project.id)}
+                          className="block rounded border border-transparent px-2 py-1 text-[11px] text-muted hover:border-border hover:bg-background"
+                        >
                           <span className="font-medium text-foreground">
                             {blocker.title}:
                           </span>{" "}
                           {blocker.detail}
-                        </div>
+                        </Link>
                       ))}
                     </div>
                   </div>

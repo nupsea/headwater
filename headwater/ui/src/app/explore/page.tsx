@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   type SuggestedQuestion,
@@ -13,6 +13,7 @@ import {
 import { ResultChart } from "@/components/result-chart";
 import { SqlViewer } from "@/components/sql-viewer";
 import { DisambiguationUI } from "@/components/disambiguation-ui";
+import { useProjects } from "@/lib/project-context";
 
 const SOURCE_COLORS: Record<string, string> = {
   mart: "bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700",
@@ -31,6 +32,8 @@ const SEVERITY_COLORS: Record<string, string> = {
 };
 
 export default function ExplorePage() {
+  const { activeProjectId } = useProjects();
+  const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const [suggestions, setSuggestions] = useState<SuggestedQuestion[]>([]);
   const [insights, setInsights] = useState<StatisticalInsight[]>([]);
   const [question, setQuestion] = useState("");
@@ -49,15 +52,23 @@ export default function ExplorePage() {
 
   const [reviewPct, setReviewPct] = useState(100);
 
+  useEffect(() => {
+    activeProjectIdRef.current = activeProjectId;
+  }, [activeProjectId]);
+
   const loadSuggestions = () => {
+    if (!activeProjectId) return;
+    const projectId = activeProjectId;
     api
-      .exploreSuggestions()
+      .exploreSuggestions(projectId)
       .then((res: ExploreSuggestionsResponse) => {
+        if (activeProjectIdRef.current !== projectId) return;
         setSuggestions(res.suggestions || []);
         setInsights(res.insights || []);
         if (typeof res.review_pct === "number") setReviewPct(res.review_pct);
       })
       .catch((e: Error) => {
+        if (activeProjectIdRef.current !== projectId) return;
         const msg = String(e.message || e);
         if (msg.includes("400") || msg.toLowerCase().includes("no discovery")) {
           setError(
@@ -70,28 +81,57 @@ export default function ExplorePage() {
   };
 
   useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setSuggestions([]);
+      setInsights([]);
+      setQuestion("");
+      setResult(null);
+      setLoading(false);
+      setError("");
+      setFilterCategory("all");
+      setShowSql(false);
+      setShowRepairHistory(false);
+      setShowTable(false);
+      setInsightsLoading(false);
+      setInsightsLoaded(false);
+      setReviewPct(100);
+    });
     loadSuggestions();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProjectId]);
 
   const loadInsights = () => {
+    if (!activeProjectId) return;
     if (insightsLoaded || insightsLoading) {
       return;
     }
     setInsightsLoading(true);
+    const projectId = activeProjectId;
     api
-      .exploreInsights()
+      .exploreInsights(projectId)
       .then((res: ExploreInsightsResponse) => {
+        if (activeProjectIdRef.current !== projectId) return;
         setInsights(res.insights || []);
         setInsightsLoaded(true);
       })
       .catch((e: Error) => {
+        if (activeProjectIdRef.current !== projectId) return;
         setError(e instanceof Error ? e.message : String(e));
         setInsightsLoaded(true);
       })
-      .finally(() => setInsightsLoading(false));
+      .finally(() => {
+        if (activeProjectIdRef.current === projectId) setInsightsLoading(false);
+      });
   };
 
   const askQuestion = async (q: string) => {
+    if (!activeProjectId) return;
+    const projectId = activeProjectId;
     setLoading(true);
     setError("");
     setResult(null);
@@ -100,12 +140,14 @@ export default function ExplorePage() {
     setShowRepairHistory(false);
     setQuestion(q);
     try {
-      const res = await api.exploreAsk(q);
-      setResult(res);
+      const res = await api.exploreAsk(q, projectId);
+      if (activeProjectIdRef.current === projectId) setResult(res);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (activeProjectIdRef.current === projectId) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     }
-    setLoading(false);
+    if (activeProjectIdRef.current === projectId) setLoading(false);
   };
 
   const categories = [

@@ -6,23 +6,44 @@ import { api, type InsightsResponse, type ContractSummary } from "@/lib/api";
 import { NullHeatmap } from "@/components/null-heatmap";
 import { SuggestionsList } from "@/components/suggestions-list";
 import { ConfidenceDot } from "@/components/confidence-dot";
+import { useProjects } from "@/lib/project-context";
 
 export default function QualityPage() {
+  const { activeProjectId } = useProjects();
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [contracts, setContracts] = useState<ContractSummary[]>([]);
   const [showDetails, setShowDetails] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setInsights(null);
+      setContracts([]);
+      setError("");
+    });
+    if (!activeProjectId) return;
     api
-      .insights()
-      .then(setInsights)
-      .catch(() => setError("Run the pipeline from the Dashboard first."));
+      .insights(activeProjectId)
+      .then((nextInsights) => {
+        if (cancelled) return;
+        setError("");
+        setInsights(nextInsights);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Run the pipeline from the Dashboard first.");
+      });
     api
-      .contracts()
-      .then(setContracts)
+      .contracts(activeProjectId)
+      .then((nextContracts) => {
+        if (!cancelled) setContracts(nextContracts);
+      })
       .catch(() => {});
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId]);
 
   if (error) {
     return (
