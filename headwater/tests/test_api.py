@@ -10,6 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from headwater.api.app import create_app
+from headwater.api.routes.explore import (
+    _diversify_statistical_insights,
+    _rank_statistical_insights,
+)
+from headwater.core.models import StatisticalInsight
 
 SAMPLE_DATA = str(Path(__file__).resolve().parent.parent.parent / "data" / "sample")
 
@@ -36,6 +41,77 @@ class TestStatus:
         data = resp.json()
         assert data["discovered"] is True
         assert data["tables"] == 8
+
+
+class TestInsightRanking:
+    def test_semantic_insights_rank_before_generic_anomaly(self):
+        anomaly = StatisticalInsight(
+            metric="row_count",
+            table_name="mart_events_by_period",
+            insight_type="temporal_anomaly",
+            description="Generic row-count anomaly",
+            magnitude=5000,
+            p_value=0.0,
+            severity="critical",
+            support_count=1000,
+        )
+        semantic = StatisticalInsight(
+            metric="duration_min",
+            table_name="events",
+            insight_type="peak_period",
+            description="Weekday events take longer than weekend events",
+            magnitude=2.3,
+            severity="info",
+            support_count=50_000,
+        )
+
+        ranked = _rank_statistical_insights([anomaly, semantic])
+
+        assert ranked[0] is semantic
+
+    def test_insight_surfacing_limits_repetitive_types_and_tables(self):
+        insights = [
+            StatisticalInsight(
+                metric=f"row_count_{idx}",
+                table_name="mart_events_by_period",
+                insight_type="temporal_anomaly",
+                description=f"Anomaly {idx}",
+                magnitude=5000 - idx,
+                p_value=0.0,
+                severity="critical",
+                support_count=1000,
+            )
+            for idx in range(6)
+        ]
+        insights.extend(
+            [
+                StatisticalInsight(
+                    metric="record_count",
+                    table_name="events",
+                    insight_type="volume_distribution",
+                    description="Busiest hour",
+                    magnitude=1200,
+                    severity="info",
+                    support_count=1200,
+                ),
+                StatisticalInsight(
+                    metric="duration_min",
+                    table_name="events",
+                    insight_type="peak_period",
+                    description="Weekday vs weekend",
+                    magnitude=2.3,
+                    severity="info",
+                    support_count=50_000,
+                ),
+            ]
+        )
+
+        surfaced = _diversify_statistical_insights(insights, 10)
+
+        assert sum(i.insight_type == "temporal_anomaly" for i in surfaced) <= 2
+        assert len({(i.table_name, i.insight_type) for i in surfaced}) == len(surfaced)
+        assert any(i.insight_type == "volume_distribution" for i in surfaced)
+        assert any(i.insight_type == "peak_period" for i in surfaced)
 
 
 class TestSourcesCatalog:

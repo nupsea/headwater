@@ -384,6 +384,7 @@ class StatisticalInsight(BaseModel):
     comparison_baseline: str | None = None  # e.g. "90-day rolling average"
     detrended: bool = False  # True if correlation was computed on detrended residuals
     severity: Literal["info", "warning", "critical"] = "info"
+    support_count: int | None = None  # Rows/events behind the pattern, when known
 
 
 class InsightFamilyDiagnostic(BaseModel):

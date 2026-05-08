@@ -24,22 +24,75 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _INSIGHTS_ENDPOINT_LIMIT = 50
+_INSIGHT_TYPE_LIMITS = {
+    "temporal_anomaly": 2,
+    "change_point": 2,
+    "correlation": 2,
+    "coverage_period": 2,
+    "volume_distribution": 3,
+    "peak_period": 3,
+    "duration_distribution": 3,
+    "geographic_hotspot": 3,
+    "route_pair": 3,
+    "congestion_proxy": 2,
+    "data_quality": 3,
+}
 
 
 def _rank_statistical_insights(insights):
-    severity_rank = {"critical": 0, "warning": 1, "info": 2}
+    severity_weight = {"critical": 3, "warning": 2, "info": 1}
+    type_weight = {
+        "data_quality": 9,
+        "volume_distribution": 8,
+        "peak_period": 8,
+        "duration_distribution": 7,
+        "geographic_hotspot": 7,
+        "route_pair": 7,
+        "congestion_proxy": 6,
+        "coverage_period": 5,
+        "period_comparison": 3,
+        "change_point": 2,
+        "correlation": 2,
+        "temporal_anomaly": 1,
+        "distribution_shift": 1,
+    }
     return sorted(
         insights,
         key=lambda insight: (
-            severity_rank.get(insight.severity, 3),
-            insight.p_value if insight.p_value is not None else 1.0,
+            -type_weight.get(insight.insight_type, 0),
+            -severity_weight.get(insight.severity, 0),
+            -(insight.support_count or 0),
             -abs(insight.magnitude),
+            insight.p_value if insight.p_value is not None else 1.0,
+            insight.table_name,
+            insight.metric,
         ),
     )
 
 
 def _serialize_statistical_insights(insights, limit: int) -> list[dict]:
-    return [i.model_dump() for i in _rank_statistical_insights(insights)[:limit]]
+    return [i.model_dump() for i in _diversify_statistical_insights(insights, limit)]
+
+
+def _diversify_statistical_insights(insights, limit: int):
+    result = []
+    type_counts: dict[str, int] = {}
+    seen_table_type: set[tuple[str, str]] = set()
+
+    for insight in _rank_statistical_insights(insights):
+        table_type = (insight.table_name, insight.insight_type)
+        if table_type in seen_table_type:
+            continue
+        type_limit = _INSIGHT_TYPE_LIMITS.get(insight.insight_type, 3)
+        if type_counts.get(insight.insight_type, 0) >= type_limit:
+            continue
+        result.append(insight)
+        seen_table_type.add(table_type)
+        type_counts[insight.insight_type] = type_counts.get(insight.insight_type, 0) + 1
+        if len(result) >= limit:
+            break
+
+    return result
 
 
 def _serialize_diagnostics(diagnostics) -> list[dict]:

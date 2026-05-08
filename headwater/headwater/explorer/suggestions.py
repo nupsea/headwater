@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 
 MAX_TOTAL_SUGGESTIONS = 15
 MAX_QUALITY_SUGGESTIONS = 3
+MAX_TREND_SUGGESTIONS = 3
+MAX_AVERAGE_SUGGESTIONS = 5
+MAX_COUNT_SUGGESTIONS = 5
 
 # Numeric dtypes that represent measurable quantities
 _NUMERIC_DTYPES = ("int", "float", "double", "decimal", "numeric", "real", "bigint", "hugeint")
@@ -132,12 +135,16 @@ def generate_suggestions(
     result: list[SuggestedQuestion] = []
     seen: set[str] = set()
 
-    for source in ("catalog", "mart", "cross_table", "relationship", "semantic", "quality"):
+    shape_counts: dict[str, int] = {}
+    for source in ("catalog", "mart", "cross_table", "semantic", "relationship", "quality"):
         for q in buckets[source]:
             key = " ".join(q.question.lower().split())
-            if key not in seen:
-                seen.add(key)
-                result.append(q)
+            if key in seen:
+                continue
+            if not _shape_allowed(q, shape_counts):
+                continue
+            seen.add(key)
+            result.append(q)
 
     logger.info(
         "Generated %d suggestions: catalog=%d, mart=%d, cross_table=%d, "
@@ -151,6 +158,40 @@ def generate_suggestions(
         len(buckets["quality"]),
     )
     return result[:MAX_TOTAL_SUGGESTIONS]
+
+
+def _shape_allowed(
+    question: SuggestedQuestion,
+    shape_counts: dict[str, int],
+) -> bool:
+    shape = _question_shape(question.question)
+    limits = {
+        "trend": MAX_TREND_SUGGESTIONS,
+        "average": MAX_AVERAGE_SUGGESTIONS,
+        "count": MAX_COUNT_SUGGESTIONS,
+    }
+    limit = limits.get(shape)
+    if limit is not None and shape_counts.get(shape, 0) >= limit:
+        return False
+    shape_counts[shape] = shape_counts.get(shape, 0) + 1
+    return True
+
+
+def _question_shape(question: str) -> str:
+    q = " ".join(question.lower().split())
+    if "changed over time" in q or q.startswith("how has "):
+        return "trend"
+    if q.startswith("what is the average "):
+        return "average"
+    if q.startswith("how many "):
+        return "count"
+    if q.startswith("which ") and " highest " in q:
+        return "ranking"
+    if "distribution of" in q:
+        return "distribution"
+    if "missing values" in q or "duplicates" in q or "unexpected" in q:
+        return "quality"
+    return "other"
 
 
 def _from_catalog(
@@ -217,10 +258,10 @@ def _from_schema_graph(
 ) -> list[SuggestedQuestion]:
     """Generate cross-table analytical questions using SchemaGraph join paths.
 
-    Finds pairs of tables that can be joined (even indirectly) and generates
-    questions combining metrics from one table with dimensions from another.
-    This produces multi-table questions that _from_relationships misses when
-    the join is indirect (2+ hops) or when relationships are sparse.
+    Finds directly related table pairs and generates questions combining
+    metrics from one table with dimensions from another. Deeper join paths are
+    left to NL-to-SQL planning; surfacing them as suggested questions is too
+    noisy without stronger semantic confirmation.
     """
     suggestions: list[SuggestedQuestion] = []
     if len(graph.tables) < 2:
@@ -232,8 +273,8 @@ def _from_schema_graph(
         if not fact_node.metrics:
             continue
 
-        metric_col = fact_node.metrics[0]
-        metric_label = _humanize(metric_col)
+        metric_col = _pick_cross_table_metric(fact_node)
+        metric_label = _humanize(metric_col) if metric_col else None
 
         for dim_name, dim_node in graph.tables.items():
             if dim_name == fact_name:
@@ -244,6 +285,8 @@ def _from_schema_graph(
             # Find join path between fact and dim tables
             path = graph.find_join_path(fact_name, dim_name)
             if path is None:
+                continue
+            if len(path) > 1:
                 continue
 
             dim_col_name = dim_node.dimensions[0]
@@ -280,22 +323,38 @@ def _from_schema_graph(
             dim_alias = aliases.get(dim_name, "t0")
             fact_alias = aliases.get(fact_name, "t0")
 
-            sql = (
-                f'SELECT {dim_alias}."{dim_col_name}", '
-                f'COUNT(*) AS {_humanize(fact_name).replace(" ", "_")}_count, '
-                f'ROUND(AVG({fact_alias}."{metric_col}"), 2) AS avg_{metric_col} '
-                f"FROM {fact_ref} t0 "
-                + " ".join(join_clauses)
-                + f' GROUP BY {dim_alias}."{dim_col_name}" '
-                f"ORDER BY avg_{metric_col} DESC LIMIT 20"
-            )
+            count_alias = f'{_humanize(fact_name).replace(" ", "_")}_count'
+            if metric_col:
+                sql = (
+                    f'SELECT {dim_alias}."{dim_col_name}", '
+                    f"COUNT(*) AS {count_alias}, "
+                    f'ROUND(AVG({fact_alias}."{metric_col}"), 2) AS avg_{metric_col} '
+                    f"FROM {fact_ref} t0 "
+                    + " ".join(join_clauses)
+                    + f' GROUP BY {dim_alias}."{dim_col_name}" '
+                    f"ORDER BY avg_{metric_col} DESC LIMIT 20"
+                )
+                question = (
+                    f"What is the average {metric_label} in {fact_label} "
+                    f"by {dim_label} ({dim_table_label})?"
+                )
+            else:
+                sql = (
+                    f'SELECT {dim_alias}."{dim_col_name}", '
+                    f"COUNT(*) AS {count_alias} "
+                    f"FROM {fact_ref} t0 "
+                    + " ".join(join_clauses)
+                    + f' GROUP BY {dim_alias}."{dim_col_name}" '
+                    f"ORDER BY {count_alias} DESC LIMIT 20"
+                )
+                question = (
+                    f"How many {fact_label} records are there by "
+                    f"{dim_label} ({dim_table_label})?"
+                )
 
             suggestions.append(
                 SuggestedQuestion(
-                    question=(
-                        f"What is the average {metric_label} in {fact_label} "
-                        f"by {dim_label} ({dim_table_label})?"
-                    ),
+                    question=question,
                     source="cross_table",
                     category="Cross-Table Analysis",
                     relevant_tables=[fact_name, dim_name],
@@ -307,6 +366,37 @@ def _from_schema_graph(
                 return suggestions
 
     return suggestions
+
+
+def _pick_cross_table_metric(fact_node) -> str | None:
+    scored: list[tuple[int, str]] = []
+    for metric in fact_node.metrics:
+        score = _metric_question_score(metric)
+        if score > 0:
+            scored.append((score, metric))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][1]
+
+
+def _metric_question_score(column_name: str) -> int:
+    lower = column_name.lower()
+    if any(token in lower for token in ("age", "birth", "year_of_birth", "lat", "lon")):
+        return -5
+    score = 0
+    strong_tokens = (
+        "amount", "total", "cost", "price", "fare", "revenue", "sales", "value",
+        "score", "severity", "duration", "elapsed", "distance", "miles", "rate",
+        "percent", "ratio", "count", "qty", "quantity", "avg", "mean", "p90", "p95",
+    )
+    if any(token in lower for token in strong_tokens):
+        score += 10
+    if any(token in lower for token in ("current", "valid", "net", "gross")):
+        score += 2
+    if lower.endswith("_id") or lower.endswith("_code"):
+        score -= 10
+    return score
 
 
 def _build_catalog_sql(metric, dimension, ref_fn=None) -> str:
@@ -370,19 +460,130 @@ def _from_mart_models(
 
         label = _humanize(model.name)
         ref = f"marts.{model.name}"
+        cols = _mart_columns(con, model.name) if con is not None else []
+        temporal = _pick_mart_temporal(cols)
+        metric = _pick_mart_metric(cols)
+        dimension = _pick_mart_dimension(cols, temporal, metric)
 
-        # One clean question per mart -- no description leakage
+        if temporal and metric:
+            question = f"How has {_humanize(metric)} in {label} changed over time?"
+            sql_hint = (
+                f'SELECT "{temporal}", '
+                f'ROUND(AVG("{metric}"), 2) AS avg_{metric}, '
+                f"COUNT(*) AS records "
+                f"FROM {ref} "
+                f'GROUP BY "{temporal}" ORDER BY "{temporal}" LIMIT 100'
+            )
+        elif dimension and metric:
+            question = (
+                f"Which {_humanize(dimension)} has the highest "
+                f"{_humanize(metric)} in {label}?"
+            )
+            sql_hint = (
+                f'SELECT "{dimension}", '
+                f"COUNT(*) AS records, "
+                f'ROUND(AVG("{metric}"), 2) AS avg_{metric} '
+                f"FROM {ref} "
+                f'GROUP BY "{dimension}" ORDER BY avg_{metric} DESC LIMIT 20'
+            )
+        elif metric:
+            question = f"What is the distribution of {_humanize(metric)} in {label}?"
+            sql_hint = (
+                f'SELECT MIN("{metric}") AS min, MAX("{metric}") AS max, '
+                f'ROUND(AVG("{metric}"), 2) AS mean, COUNT(*) AS records '
+                f"FROM {ref}"
+            )
+        else:
+            question = _fallback_mart_question(model.name, label)
+            sql_hint = f"SELECT * FROM {ref} LIMIT 50"
+
         questions.append(
             SuggestedQuestion(
-                question=f"What are the key metrics in {label}?",
+                question=question,
                 source="mart",
                 category=label.title(),
                 relevant_tables=model.source_tables,
-                sql_hint=f"SELECT * FROM {ref} LIMIT 50",
+                sql_hint=sql_hint,
             )
         )
 
     return questions
+
+
+def _mart_columns(
+    con: duckdb.DuckDBPyConnection,
+    model_name: str,
+) -> list[tuple[str, str]]:
+    try:
+        rows = con.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'marts' AND table_name = ?
+            ORDER BY ordinal_position
+            """,
+            (model_name,),
+        ).fetchall()
+    except Exception:
+        return []
+    return [(str(row[0]), str(row[1])) for row in rows]
+
+
+def _pick_mart_temporal(cols: list[tuple[str, str]]) -> str | None:
+    for name, dtype in cols:
+        lower = name.lower()
+        if lower == "period" or any(
+            token in lower for token in ("date", "time", "month", "year")
+        ):
+            return name
+        if any(token in dtype.lower() for token in _TEMPORAL_DTYPES):
+            return name
+    return None
+
+
+def _pick_mart_metric(cols: list[tuple[str, str]]) -> str | None:
+    preferred = []
+    fallback = []
+    for name, dtype in cols:
+        lower = name.lower()
+        if _ID_NAME_RE.search(name) or lower in {"period"}:
+            continue
+        if not any(token in dtype.lower() for token in _NUMERIC_DTYPES):
+            continue
+        if any(token in lower for token in ("avg", "p90", "p95", "count", "total", "sum", "rate")):
+            preferred.append(name)
+        else:
+            fallback.append(name)
+    return (preferred or fallback or [None])[0]
+
+
+def _pick_mart_dimension(
+    cols: list[tuple[str, str]],
+    temporal: str | None,
+    metric: str | None,
+) -> str | None:
+    for name, dtype in cols:
+        if name in {temporal, metric}:
+            continue
+        lower = name.lower()
+        if _ID_NAME_RE.search(name) and not any(
+            token in lower for token in ("zone", "location", "site")
+        ):
+            continue
+        if any(token in dtype.lower() for token in _NUMERIC_DTYPES):
+            continue
+        return name
+    return None
+
+
+def _fallback_mart_question(model_name: str, label: str) -> str:
+    lower = model_name.lower()
+    if "_by_period" in lower or lower.endswith("by_period"):
+        return f"How has {label.replace(' by period', '')} changed over time?"
+    if "_by_" in lower:
+        dim = lower.rsplit("_by_", 1)[-1]
+        return f"Which {_humanize(dim)} stand out in {label}?"
+    return f"What values stand out in {label}?"
 
 
 # ---------------------------------------------------------------------------

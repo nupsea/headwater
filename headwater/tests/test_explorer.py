@@ -249,6 +249,7 @@ class TestSuggestions:
         assert len(mart_qs) > 0
         assert all(q.sql_hint is not None for q in mart_qs)
         assert all(q.category for q in mart_qs)
+        assert not any("key metrics" in q.question.lower() for q in mart_qs)
 
     def test_mart_suggestions_available_when_proposed(self, sample_discovery):
         """Mart questions should appear even when mart status is proposed."""
@@ -268,6 +269,79 @@ class TestSuggestions:
         mart_qs = [q for q in questions if q.source == "mart"]
         assert len(mart_qs) > 0
         assert any("air quality" in q.question.lower() for q in mart_qs)
+        assert not any("key metrics" in q.question.lower() for q in mart_qs)
+
+    def test_mart_suggestions_use_materialized_columns(self, sample_discovery, sample_models):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_air_quality_daily AS "
+                "SELECT * FROM (VALUES "
+                "(DATE '2026-01-01', 10.0), "
+                "(DATE '2026-01-02', 12.0)"
+                ") AS t(period, avg_value)"
+            )
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=sample_models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        mart_qs = [q for q in questions if q.source == "mart"]
+        assert any("changed over time" in q.question.lower() for q in mart_qs)
+        assert not any("key metrics" in q.question.lower() for q in mart_qs)
+
+    def test_suggestions_diversify_repetitive_trends(self):
+        tables = []
+        profiles = []
+        for idx in range(8):
+            table_name = f"events_{idx}"
+            tables.append(
+                TableInfo(
+                    name=table_name,
+                    row_count=100,
+                    columns=[
+                        ColumnInfo(name="event_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                        ColumnInfo(name="category", dtype="varchar", semantic_type="dimension"),
+                    ],
+                )
+            )
+            profiles.extend(
+                [
+                    ColumnProfile(
+                        table_name=table_name,
+                        column_name="value",
+                        dtype="float64",
+                        null_count=0,
+                        distinct_count=80,
+                    ),
+                    ColumnProfile(
+                        table_name=table_name,
+                        column_name="category",
+                        dtype="varchar",
+                        null_count=0,
+                        distinct_count=5,
+                    ),
+                ]
+            )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=tables,
+            profiles=profiles,
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        trend_questions = [
+            q for q in questions if "changed over time" in q.question.lower()
+        ]
+
+        assert len(trend_questions) <= 3
+        assert any("highest value" in q.question.lower() for q in questions)
 
     def test_generates_domain_questions(self, sample_discovery):
         questions = generate_suggestions(discovery=sample_discovery)
@@ -470,6 +544,226 @@ class TestCrossTableSuggestions:
         assert len(cross_qs) > 0, "Should generate cross-table suggestions when join paths exist"
         assert all(q.sql_hint is not None for q in cross_qs)
         assert all(len(q.relevant_tables) == 2 for q in cross_qs)
+
+    def test_cross_table_uses_count_when_only_weak_numeric_attribute_exists(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="incidents",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(name="incident_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="patient_age", dtype="int64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="complaints",
+                    row_count=200,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="category", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="patient_age",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=90,
+                    min_value=1,
+                    max_value=95,
+                    mean=42,
+                ),
+                ColumnProfile(
+                    table_name="complaints",
+                    column_name="category",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=8,
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="incidents",
+                    from_column="complaint_id",
+                    to_table="complaints",
+                    to_column="complaint_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+
+        assert cross_qs
+        assert not any("average patient age" in q.question.lower() for q in cross_qs)
+        assert any("how many incidents records" in q.question.lower() for q in cross_qs)
+
+    def test_cross_table_suggestions_require_direct_join(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="incidents",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(name="incident_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="zone_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="patient_age", dtype="int64", semantic_type="metric"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="zones",
+                    row_count=20,
+                    columns=[
+                        ColumnInfo(name="zone_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="site_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="borough", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=200,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="unit", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="patient_age",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=90,
+                ),
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="severity_score",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=400,
+                ),
+                ColumnProfile(
+                    table_name="zones",
+                    column_name="borough",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=5,
+                ),
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="unit",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=20,
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="incidents",
+                    from_column="zone_id",
+                    to_table="zones",
+                    to_column="zone_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+                Relationship(
+                    from_table="zones",
+                    from_column="site_id",
+                    to_table="sites",
+                    to_column="site_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+
+        assert any("by borough" in q.question.lower() for q in cross_qs)
+        assert not any("by unit" in q.question.lower() for q in cross_qs)
+
+    def test_cross_table_prefers_business_metric_over_age(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="incidents",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(name="incident_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="patient_age", dtype="int64", semantic_type="metric"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="complaints",
+                    row_count=200,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="category", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="patient_age",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=90,
+                ),
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="severity_score",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=500,
+                ),
+                ColumnProfile(
+                    table_name="complaints",
+                    column_name="category",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=8,
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="incidents",
+                    from_column="complaint_id",
+                    to_table="complaints",
+                    to_column="complaint_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+
+        assert any("average severity score" in q.question.lower() for q in cross_qs)
+        assert not any("average patient age" in q.question.lower() for q in cross_qs)
 
     def test_cross_table_no_join_path_no_suggestions(self):
         """Cross-table suggestions should not be generated without join paths."""
@@ -802,6 +1096,7 @@ class TestStatistical:
             "SELECT * FROM (VALUES ('2026-01-01'), ('2026-01-02')) AS t(event_date)"
         )
         duckdb_con.execute("CREATE TABLE staging.stg_stale_table AS SELECT 1 AS id")
+        duckdb_con.execute("CREATE TABLE staging.stg_other AS SELECT 1 AS id")
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="csv"),
             tables=[
@@ -827,7 +1122,15 @@ class TestStatistical:
                 description="Events staging",
                 source_tables=["events"],
                 status="executed",
-            )
+            ),
+            GeneratedModel(
+                name="stg_other",
+                model_type="staging",
+                sql="SELECT id FROM other",
+                description="Other stale model",
+                source_tables=["other"],
+                status="executed",
+            ),
         ]
 
         result = detect_insights_with_diagnostics(
@@ -838,6 +1141,76 @@ class TestStatistical:
         )
 
         assert "stg_stale_table" not in {d.physical_table for d in result.diagnostics}
+        assert "stg_other" not in {d.physical_table for d in result.diagnostics}
+
+    def test_semantic_families_generate_actionable_lifecycle_insights(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 140 THEN TIMESTAMP '2026-01-05 18:00:00'
+                        WHEN i < 220 THEN TIMESTAMP '2026-01-06 04:00:00'
+                        ELSE TIMESTAMP '2026-01-04 10:00:00'
+                    END AS pickup_datetime,
+                    CASE WHEN i < 220 THEN 24 ELSE 12 END AS duration_min,
+                    CASE WHEN i < 140 THEN 4 WHEN i < 220 THEN 12 ELSE 2 END AS wait_min,
+                    CASE
+                        WHEN i < 160 THEN 'JFK'
+                        WHEN i < 220 THEN 'Downtown'
+                        ELSE NULL
+                    END AS pu_location_id
+                FROM range(300) AS t(i)
+            )
+            SELECT
+                pickup_datetime,
+                pickup_datetime + duration_min * INTERVAL 1 MINUTE AS dropoff_datetime,
+                pickup_datetime - wait_min * INTERVAL 1 MINUTE AS request_datetime,
+                pu_location_id,
+                'Manhattan' AS do_location_id,
+                10.0 AS trip_miles
+            FROM base
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=300,
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="request_datetime", dtype="timestamp"),
+                        ColumnInfo(name="pu_location_id", dtype="varchar"),
+                        ColumnInfo(name="do_location_id", dtype="varchar"),
+                        ColumnInfo(name="trip_miles", dtype="double"),
+                    ],
+                )
+            ],
+        )
+
+        insights = detect_insights(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+        )
+        descriptions = " ".join(i.description for i in insights)
+        types = {i.insight_type for i in insights}
+
+        assert "volume_distribution" in types
+        assert "peak_period" in types
+        assert "geographic_hotspot" in types
+        assert "duration_distribution" in types
+        assert "data_quality" in types
+        assert "6 PM is the busiest" in descriptions
+        assert "Weekday trips average" in descriptions
+        assert "JFK has the longest high-volume" in descriptions
+        assert "Wait time is highest around 4 AM" in descriptions
+        assert "location analysis is unreliable" in descriptions
+        assert all(i.support_count is not None for i in insights)
 
 
 # ---------------------------------------------------------------------------

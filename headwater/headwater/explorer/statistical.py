@@ -89,12 +89,13 @@ def detect_insights_with_diagnostics(
     """Detect insights and return per-table/family execution diagnostics."""
     insights: list[StatisticalInsight] = []
     diagnostics: list[InsightFamilyDiagnostic] = []
-    tables = _filter_tables_for_models(_list_tables(con, schema), schema, models)
+    scoped_models = _models_for_discovery(models, discovery)
+    tables = _filter_tables_for_models(_list_tables(con, schema), schema, scoped_models)
 
     if discovery is not None:
         semantic_schema = infer_semantic_schema(discovery, dataset_context)
         for table_name in tables:
-            source_table = _source_table_for_physical_table(table_name, discovery, models)
+            source_table = _source_table_for_physical_table(table_name, discovery, scoped_models)
             if source_table is None:
                 diagnostics.append(
                     InsightFamilyDiagnostic(
@@ -470,13 +471,15 @@ def _coverage_family(
             insight_type="coverage_period",
             description=(
                 f"{_humanize(source_table)} covers {_format_date(row[0])} to "
-                f"{_format_date(row[1])} across {int(row[2]):,} records; avoid claims "
+                f"{_format_date(row[1])} across {int(row[2]):,} "
+                f"{_record_label(source_table)}; avoid claims "
                 "outside this observed period."
             ),
             magnitude=float(days),
             confidence_level="99%",
             comparison_baseline="observed timestamp range",
             severity="info",
+            support_count=int(row[2]),
         )
     ]
 
@@ -563,7 +566,7 @@ def _volume_family(
     top_hour, top_n = rows[0]
     desc = (
         f"{_format_hour(top_hour)} is the busiest {_event_label(start.column_name)} "
-        f"with {int(top_n):,} records."
+        f"with {int(top_n):,} {_record_label(source_table)}."
     )
     magnitude = float(top_n)
     if duration_expr:
@@ -602,6 +605,7 @@ def _volume_family(
             confidence_level="99%",
             comparison_baseline="hour-of-day volume",
             severity="info",
+            support_count=int(top_n),
         )
     ]
 
@@ -618,10 +622,12 @@ def _peak_family(
     row = con.execute(
         f"""
         SELECT
+            COUNT(CASE WHEN {weekday_filter} THEN 1 END) AS weekday_n,
             AVG(CASE WHEN {weekday_filter} THEN {duration_expr} END) AS weekday_avg,
             quantile_cont(
                 CASE WHEN {weekday_filter} THEN {duration_expr} END, 0.9
             ) AS weekday_p90,
+            COUNT(CASE WHEN {weekend_filter} THEN 1 END) AS weekend_n,
             AVG(CASE WHEN {weekend_filter} THEN {duration_expr} END) AS weekend_avg,
             quantile_cont(
                 CASE WHEN {weekend_filter} THEN {duration_expr} END, 0.9
@@ -630,9 +636,9 @@ def _peak_family(
         WHERE {start_expr} IS NOT NULL AND {duration_expr} BETWEEN 0 AND 1440
         """
     ).fetchone()
-    if not row or row[0] is None or row[2] is None:
+    if not row or row[1] is None or row[4] is None:
         return []
-    diff = float(row[0]) - float(row[2])
+    diff = float(row[1]) - float(row[4])
     if abs(diff) < 0.5:
         return []
     return [
@@ -641,14 +647,16 @@ def _peak_family(
             table_name=source_table,
             insight_type="peak_period",
             description=(
-                f"Weekday records average {abs(diff):.2f} minutes "
-                f"{'longer' if diff >= 0 else 'shorter'} than weekend records "
-                f"(p90 {float(row[1]):.1f} vs {float(row[3]):.1f} minutes)."
+                f"Weekday {_record_label(source_table)} average {abs(diff):.2f} minutes "
+                f"{'longer' if diff >= 0 else 'shorter'} than weekend "
+                f"{_record_label(source_table)} "
+                f"(p90 {float(row[2]):.1f} vs {float(row[5]):.1f} minutes)."
             ),
             magnitude=round(abs(diff), 2),
             confidence_level="99%",
             comparison_baseline="weekday vs weekend",
             severity="info" if abs(diff) < 5 else "warning",
+            support_count=int(row[0] or 0) + int(row[3] or 0),
         )
     ]
 
@@ -696,12 +704,13 @@ def _duration_family(
             description=(
                 f"The slowest {group_label} is {bucket}: avg {float(row[2]):.1f} min, "
                 f"p50 {float(row[3]):.1f}, p90 {float(row[4]):.1f}, p95 {float(row[5]):.1f} "
-                f"across {int(row[1]):,} records."
+                f"across {int(row[1]):,} {_record_label(source_table)}."
             ),
             magnitude=round(float(row[4]), 2),
             confidence_level="99%",
             comparison_baseline=f"p90 duration by {group_label}",
             severity="info",
+            support_count=int(row[1]),
         )
     ]
 
@@ -743,12 +752,13 @@ def _geo_family(
             description=(
                 f"{label} has the longest high-volume {_humanize(origin.column_name)} durations: "
                 f"avg {float(row[2]):.1f} min, p90 {float(row[3]):.1f} min across "
-                f"{int(row[1]):,} records."
+                f"{int(row[1]):,} {_record_label(source_table)}."
             ),
             magnitude=round(float(row[3]), 2),
             confidence_level="99%",
             comparison_baseline=f"p90 duration by {origin.column_name}",
             severity="warning",
+            support_count=int(row[1]),
         )
     ]
 
@@ -791,12 +801,14 @@ def _route_family(
             insight_type="route_pair",
             description=(
                 f"The slowest high-volume route is {route}: avg {float(row[3]):.1f} min, "
-                f"p90 {float(row[4]):.1f} min across {int(row[2]):,} records."
+                f"p90 {float(row[4]):.1f} min across {int(row[2]):,} "
+                f"{_record_label(source_table)}."
             ),
             magnitude=round(float(row[4]), 2),
             confidence_level="99%",
             comparison_baseline="p90 duration by origin/destination pair",
             severity="warning",
+            support_count=int(row[2]),
         )
     ]
 
@@ -829,12 +841,14 @@ def _congestion_family(
             description=(
                 f"Low-speed records flag potential congestion: p10 speed is "
                 f"{float(row[1]):.1f} distance-units/hour and average speed is "
-                f"{float(row[2]):.1f} across {int(row[0]):,} valid records."
+                f"{float(row[2]):.1f} across {int(row[0]):,} valid "
+                f"{_record_label(source_table)}."
             ),
             magnitude=round(float(row[1]), 2),
             confidence_level="95%",
             comparison_baseline="distance divided by lifecycle duration",
             severity="info",
+            support_count=int(row[0]),
         )
     ]
 
@@ -874,6 +888,7 @@ def _quality_family(
                     confidence_level="99%",
                     comparison_baseline="null-rate threshold 20%",
                     severity="critical" if rate >= 50 else "warning",
+                    support_count=int(row[0]),
                 )
             )
     if distance:
@@ -898,6 +913,7 @@ def _quality_family(
                     confidence_level="99%",
                     comparison_baseline="non-positive distance rate",
                     severity="warning",
+                    support_count=int(row[0]),
                 )
             )
     if duration_expr:
@@ -921,6 +937,7 @@ def _quality_family(
                     confidence_level="99%",
                     comparison_baseline="duration outside 0-1440 minutes",
                     severity="warning",
+                    support_count=int(row[0]),
                 )
             )
     return insights
@@ -949,6 +966,7 @@ def _wait_family(
     if not rows:
         return []
     hours = " and ".join(_format_hour(row[0]) for row in rows)
+    support = sum(int(row[1]) for row in rows)
     return [
         StatisticalInsight(
             metric="wait_min",
@@ -962,6 +980,7 @@ def _wait_family(
             confidence_level="99%",
             comparison_baseline="p90 wait by hour",
             severity="info",
+            support_count=support,
         )
     ]
 
@@ -980,6 +999,7 @@ def _rank_family_insights(insights: list[StatisticalInsight]) -> list[Statistica
         key=lambda i: (
             -(
                 abs(i.magnitude)
+                * math.log10((i.support_count or 0) + 10)
                 * severity_weight.get(i.severity, 1.0)
                 * type_weight.get(i.insight_type, 1.0)
             ),
@@ -1353,6 +1373,7 @@ def _emit_anomaly(
             time_period=date_str,
             comparison_baseline=f"{window}-point rolling average",
             severity=severity,
+            support_count=len(values),
         )
     )
 
@@ -1463,6 +1484,7 @@ def _detect_change_points_for_column(
                     time_period=cp_date,
                     comparison_baseline=f"Before {cp_date}",
                     severity=severity,
+                    support_count=len(before) + len(after),
                 )
             )
 
@@ -1569,6 +1591,7 @@ def _detect_correlations(
                             confidence_level=_p_to_confidence(p_value),
                             detrended=detrended,
                             severity="info",
+                            support_count=paired.height,
                         )
                     )
 
@@ -1622,10 +1645,11 @@ def _source_table_for_physical_table(
         if model.name != physical_table and model.name.lower() != lowered:
             continue
         for source in model.source_tables:
-            if source in tables_by_name:
-                return tables_by_name[source]
-            if source.lower() in tables_by_lower:
-                return tables_by_lower[source.lower()]
+            for candidate in _table_name_candidates(source):
+                if candidate in tables_by_name:
+                    return tables_by_name[candidate]
+                if candidate.lower() in tables_by_lower:
+                    return tables_by_lower[candidate.lower()]
     return None
 
 
@@ -1634,18 +1658,58 @@ def _filter_tables_for_models(
     schema: str,
     models: list[GeneratedModel] | None,
 ) -> list[str]:
-    if not models:
+    if models is None:
         return tables
     expected_type = "staging" if schema == "staging" else "mart" if schema == "marts" else None
     relevant = {
         model.name
         for model in models
-        if model.status == "executed"
-        and (expected_type is None or model.model_type == expected_type)
+        if expected_type is None or model.model_type == expected_type
     }
     if not relevant:
-        return tables
+        return []
     return [table for table in tables if table in relevant]
+
+
+def _models_for_discovery(
+    models: list[GeneratedModel] | None,
+    discovery: DiscoveryResult | None,
+) -> list[GeneratedModel] | None:
+    if models is None or discovery is None:
+        return models
+    table_names = {table.name for table in discovery.tables}
+    table_names_lower = {table.lower() for table in table_names}
+    scoped: list[GeneratedModel] = []
+    for model in models:
+        if model.source_tables:
+            if any(
+                candidate in table_names_lower
+                for source in model.source_tables
+                for candidate in _table_name_candidates(source)
+            ):
+                scoped.append(model)
+            continue
+        lowered = model.name.lower()
+        if (
+            model.name in table_names
+            or lowered in table_names_lower
+            or (lowered.startswith("stg_") and lowered[4:] in table_names_lower)
+        ):
+            scoped.append(model)
+    return scoped
+
+
+def _table_name_candidates(value: str) -> set[str]:
+    lowered = value.lower()
+    candidates = {value, lowered}
+    if "." in lowered:
+        tail = lowered.rsplit(".", 1)[-1]
+        candidates.add(tail)
+    else:
+        tail = lowered
+    if tail.startswith("stg_"):
+        candidates.add(tail[4:])
+    return candidates
 
 
 def _roles_for_physical_table(
@@ -1785,6 +1849,15 @@ def _format_dimension_value(value: object) -> str:
     if value is None:
         return "missing"
     return _humanize(str(value))
+
+
+def _record_label(source_table: str) -> str:
+    lowered = source_table.lower()
+    if "trip" in lowered:
+        return "trips"
+    if any(token in lowered for token in ("event", "incident", "complaint", "inspection")):
+        return "records"
+    return "records"
 
 
 def _service_label(source_table: str, service: SemanticColumnRole | None) -> str:
