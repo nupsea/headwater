@@ -3,11 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
   api,
+  type InsightFamilyDiagnostic,
   type SuggestedQuestion,
   type StatisticalInsight,
   type ExplorationResult,
-  type ExploreSuggestionsResponse,
-  type ExploreInsightsResponse,
   type DimensionOption,
 } from "@/lib/api";
 import { ResultChart } from "@/components/result-chart";
@@ -31,11 +30,39 @@ const SEVERITY_COLORS: Record<string, string> = {
   critical: "border-l-[var(--danger)] bg-[color-mix(in_srgb,var(--danger)_10%,var(--card))]",
 };
 
+function summarizeDiagnostics(diagnostics: InsightFamilyDiagnostic[]) {
+  const counts = { generated: 0, skipped: 0, failed: 0 };
+  const reasons = new Map<string, number>();
+  const families = new Set<string>();
+
+  for (const diagnostic of diagnostics) {
+    counts[diagnostic.status] += 1;
+    families.add(diagnostic.family);
+    if (diagnostic.reason) {
+      reasons.set(diagnostic.reason, (reasons.get(diagnostic.reason) || 0) + 1);
+    }
+  }
+
+  return {
+    counts,
+    families: families.size,
+    topReasons: Array.from(reasons.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4),
+  };
+}
+
 export default function ExplorePage() {
   const { activeProjectId } = useProjects();
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const [suggestions, setSuggestions] = useState<SuggestedQuestion[]>([]);
   const [insights, setInsights] = useState<StatisticalInsight[]>([]);
+  const [suggestionDiagnostics, setSuggestionDiagnostics] = useState<
+    InsightFamilyDiagnostic[]
+  >([]);
+  const [insightDiagnostics, setInsightDiagnostics] = useState<
+    InsightFamilyDiagnostic[]
+  >([]);
   const [question, setQuestion] = useState("");
   const [result, setResult] = useState<ExplorationResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -44,6 +71,7 @@ export default function ExplorePage() {
   const [showSql, setShowSql] = useState(false);
   const [showRepairHistory, setShowRepairHistory] = useState(false);
   const [showTable, setShowTable] = useState(false);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [insightsLoaded, setInsightsLoaded] = useState(false);
   const [activeTab, setActiveTab] = useState<"questions" | "insights">(
@@ -56,28 +84,34 @@ export default function ExplorePage() {
     activeProjectIdRef.current = activeProjectId;
   }, [activeProjectId]);
 
-  const loadSuggestions = () => {
+  const loadSuggestions = async (force = false) => {
     if (!activeProjectId) return;
+    if (suggestionsLoading && !force) return;
+    setSuggestionsLoading(true);
     const projectId = activeProjectId;
-    api
-      .exploreSuggestions(projectId)
-      .then((res: ExploreSuggestionsResponse) => {
-        if (activeProjectIdRef.current !== projectId) return;
-        setSuggestions(res.suggestions || []);
-        setInsights(res.insights || []);
-        if (typeof res.review_pct === "number") setReviewPct(res.review_pct);
-      })
-      .catch((e: Error) => {
-        if (activeProjectIdRef.current !== projectId) return;
-        const msg = String(e.message || e);
-        if (msg.includes("400") || msg.toLowerCase().includes("no discovery")) {
-          setError(
-            "No data to ask about yet. Connect a source on the Sources page and run the pipeline first."
-          );
-        } else {
-          setError(msg);
-        }
-      });
+    try {
+      const res = await api.exploreSuggestions(projectId);
+      if (activeProjectIdRef.current !== projectId) return;
+      setSuggestions(res.suggestions || []);
+      setInsights(res.insights || []);
+      setSuggestionDiagnostics(res.diagnostics || []);
+      if (typeof res.review_pct === "number") setReviewPct(res.review_pct);
+      setError("");
+    } catch (e) {
+      if (activeProjectIdRef.current !== projectId) return;
+      const msg = String(e instanceof Error ? e.message : e);
+      if (msg.includes("400") || msg.toLowerCase().includes("no discovery")) {
+        setError(
+          "No data to ask about yet. Connect a source on the Sources page and run the pipeline first."
+        );
+      } else {
+        setError(msg);
+      }
+    } finally {
+      if (activeProjectIdRef.current === projectId) {
+        setSuggestionsLoading(false);
+      }
+    }
   };
 
   useEffect(() => {
@@ -86,6 +120,8 @@ export default function ExplorePage() {
       if (cancelled) return;
       setSuggestions([]);
       setInsights([]);
+      setSuggestionDiagnostics([]);
+      setInsightDiagnostics([]);
       setQuestion("");
       setResult(null);
       setLoading(false);
@@ -94,39 +130,42 @@ export default function ExplorePage() {
       setShowSql(false);
       setShowRepairHistory(false);
       setShowTable(false);
+      setSuggestionsLoading(false);
       setInsightsLoading(false);
       setInsightsLoaded(false);
       setReviewPct(100);
     });
-    loadSuggestions();
+    void loadSuggestions();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProjectId]);
 
-  const loadInsights = () => {
+  const loadInsights = async (force = false) => {
     if (!activeProjectId) return;
-    if (insightsLoaded || insightsLoading) {
+    if ((insightsLoaded || insightsLoading) && !force) {
       return;
     }
     setInsightsLoading(true);
     const projectId = activeProjectId;
-    api
-      .exploreInsights(projectId)
-      .then((res: ExploreInsightsResponse) => {
-        if (activeProjectIdRef.current !== projectId) return;
-        setInsights(res.insights || []);
-        setInsightsLoaded(true);
-      })
-      .catch((e: Error) => {
-        if (activeProjectIdRef.current !== projectId) return;
-        setError(e instanceof Error ? e.message : String(e));
-        setInsightsLoaded(true);
-      })
-      .finally(() => {
-        if (activeProjectIdRef.current === projectId) setInsightsLoading(false);
-      });
+    try {
+      const res = await api.exploreInsights(projectId);
+      if (activeProjectIdRef.current !== projectId) return;
+      setInsights(res.insights || []);
+      setInsightDiagnostics(res.diagnostics || []);
+      setInsightsLoaded(true);
+    } catch (e) {
+      if (activeProjectIdRef.current !== projectId) return;
+      setError(e instanceof Error ? e.message : String(e));
+      setInsightsLoaded(true);
+    } finally {
+      if (activeProjectIdRef.current === projectId) setInsightsLoading(false);
+    }
+  };
+
+  const refreshAll = async () => {
+    await Promise.all([loadSuggestions(true), loadInsights(true)]);
   };
 
   const askQuestion = async (q: string) => {
@@ -177,7 +216,7 @@ export default function ExplorePage() {
               Connect a source →
             </a>
             <button
-              onClick={loadSuggestions}
+              onClick={() => void loadSuggestions()}
               className="px-4 py-2 border border-border rounded-md text-sm font-medium hover:bg-background"
             >
               Retry
@@ -188,14 +227,117 @@ export default function ExplorePage() {
     );
   }
 
+  const suggestionSummary = summarizeDiagnostics(suggestionDiagnostics);
+  const insightSummary = summarizeDiagnostics(insightDiagnostics);
+  const validationSummary = summarizeDiagnostics([
+    ...suggestionDiagnostics,
+    ...insightDiagnostics,
+  ]);
+
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-2">Explore Data</h1>
-      <p className="text-muted text-sm mb-6">
-        Ask natural language questions about your data. The system decomposes
-        questions into metrics and dimensions from the semantic catalog, then
-        generates deterministic SQL.
-      </p>
+      <div className="mb-6 flex flex-col gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Explore Data</h1>
+            <p className="text-muted text-sm max-w-2xl">
+              Ask natural language questions about your data. The system decomposes
+              questions into metrics and dimensions from the semantic catalog, then
+              generates deterministic SQL.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => void loadSuggestions(true)}
+              disabled={suggestionsLoading}
+              className="px-3 py-1.5 border border-border rounded text-xs font-medium bg-card hover:border-foreground disabled:opacity-50"
+            >
+              {suggestionsLoading ? "Refreshing questions..." : "Refresh questions"}
+            </button>
+            <button
+              onClick={() => void loadInsights(true)}
+              disabled={insightsLoading}
+              className="px-3 py-1.5 border border-border rounded text-xs font-medium bg-card hover:border-foreground disabled:opacity-50"
+            >
+              {insightsLoading ? "Refreshing insights..." : "Refresh insights"}
+            </button>
+            <button
+              onClick={() => void refreshAll()}
+              disabled={suggestionsLoading || insightsLoading}
+              className="px-3 py-1.5 bg-foreground text-background rounded text-xs font-medium disabled:opacity-50"
+            >
+              {suggestionsLoading || insightsLoading ? "Refreshing all..." : "Refresh all"}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-muted">
+                Validation
+              </h2>
+              <span className="text-xs text-muted">
+                {validationSummary.families} family types observed
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <span className="px-2.5 py-1 rounded-full text-xs border border-border bg-background">
+                {validationSummary.counts.generated} generated
+              </span>
+              <span className="px-2.5 py-1 rounded-full text-xs border border-border bg-background">
+                {validationSummary.counts.skipped} skipped
+              </span>
+              <span className="px-2.5 py-1 rounded-full text-xs border border-border bg-background">
+                {validationSummary.counts.failed} failed
+              </span>
+              <span className="px-2.5 py-1 rounded-full text-xs border border-border bg-background">
+                {suggestions.length} questions
+              </span>
+              <span className="px-2.5 py-1 rounded-full text-xs border border-border bg-background">
+                {insights.length} insights
+              </span>
+            </div>
+            <div className="mt-3 space-y-1 text-xs text-muted">
+              {validationSummary.topReasons.length === 0 ? (
+                <p>No diagnostic reasons reported for the current scope.</p>
+              ) : (
+                validationSummary.topReasons.map(([reason, count]) => (
+                  <div key={reason} className="flex items-start justify-between gap-4">
+                    <span className="min-w-0 flex-1">{reason}</span>
+                    <span className="shrink-0 font-mono">{count}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border bg-card p-4">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-muted mb-3">
+              Current Run
+            </h2>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="rounded border border-border bg-background p-2">
+                <div className="text-muted uppercase tracking-wider">Questions</div>
+                <div className="mt-1 font-semibold">{suggestions.length}</div>
+              </div>
+              <div className="rounded border border-border bg-background p-2">
+                <div className="text-muted uppercase tracking-wider">Insights</div>
+                <div className="mt-1 font-semibold">{insights.length}</div>
+              </div>
+              <div className="rounded border border-border bg-background p-2">
+                <div className="text-muted uppercase tracking-wider">Warnings</div>
+                <div className="mt-1 font-semibold">
+                  {suggestionSummary.counts.skipped + insightSummary.counts.skipped}
+                </div>
+              </div>
+            </div>
+            <p className="mt-3 text-xs text-muted">
+              Refresh questions after framing or model changes. Refresh insights after
+              re-running the pipeline or updating source data.
+            </p>
+          </div>
+        </div>
+      </div>
 
       {/* Soft review indicator (non-blocking) */}
       {reviewPct < 100 && (
@@ -498,7 +640,7 @@ export default function ExplorePage() {
         <button
           onClick={() => {
             setActiveTab("insights");
-            loadInsights();
+            void loadInsights();
           }}
           className={`pb-2 text-sm font-medium transition-colors ${
             activeTab === "insights"
@@ -574,46 +716,91 @@ export default function ExplorePage() {
               pipeline to materialize models and surface insights.
             </p>
           ) : (
-            insights.map((insight, i) => (
-              <div
-                key={i}
-                className={`border-l-4 rounded-r-lg p-4 ${
-                  SEVERITY_COLORS[insight.severity] || SEVERITY_COLORS.info
-                }`}
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex-1">
-                    <div className="text-sm font-medium mb-1">
-                      {insight.description}
-                    </div>
-                    <div className="flex gap-3 text-xs text-muted flex-wrap">
-                      <span>Table: {insight.table_name}</span>
-                      <span>Type: {insight.insight_type.replace(/_/g, " ")}</span>
-                      {insight.p_value !== null && (
-                        <span>p-value: {insight.p_value.toFixed(4)}</span>
-                      )}
-                      {insight.confidence_level && (
-                        <span>Confidence: {insight.confidence_level}</span>
-                      )}
-                      {insight.time_period && (
-                        <span>Period: {insight.time_period}</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <div className="text-lg font-bold">
-                      {insight.magnitude > 0 ? "+" : ""}
-                      {insight.magnitude.toFixed(1)}%
-                    </div>
-                    {insight.z_score !== null && (
-                      <div className="text-xs text-muted">
-                        z={insight.z_score.toFixed(1)}
+            <div className="space-y-3">
+              {insights.map((insight, i) => (
+                <div
+                  key={i}
+                  className={`border-l-4 rounded-r-lg p-4 ${
+                    SEVERITY_COLORS[insight.severity] || SEVERITY_COLORS.info
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1">
+                      <div className="text-sm font-medium mb-1">
+                        {insight.description}
                       </div>
-                    )}
+                      <div className="flex gap-3 text-xs text-muted flex-wrap">
+                        <span>Table: {insight.table_name}</span>
+                        <span>Type: {insight.insight_type.replace(/_/g, " ")}</span>
+                        {insight.p_value !== null && (
+                          <span>p-value: {insight.p_value.toFixed(4)}</span>
+                        )}
+                        {insight.confidence_level && (
+                          <span>Confidence: {insight.confidence_level}</span>
+                        )}
+                        {insight.time_period && (
+                          <span>Period: {insight.time_period}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-lg font-bold">
+                        {insight.magnitude > 0 ? "+" : ""}
+                        {insight.magnitude.toFixed(1)}%
+                      </div>
+                      {insight.z_score !== null && (
+                        <div className="text-xs text-muted">
+                          z={insight.z_score.toFixed(1)}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
+              ))}
+            </div>
+          )}
+          {(suggestionDiagnostics.length > 0 || insightDiagnostics.length > 0) && (
+            <div className="mt-6 rounded-lg border border-border bg-card p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
+                    Execution Diagnostics
+                  </h3>
+                  <p className="text-xs text-muted mt-1">
+                    Why each insight family generated, skipped, or failed in this scope.
+                  </p>
+                </div>
+                <span className="text-xs text-muted">
+                  {suggestionDiagnostics.length + insightDiagnostics.length} entries
+                </span>
               </div>
-            ))
+              <div className="space-y-2">
+                {[...suggestionDiagnostics, ...insightDiagnostics]
+                  .slice(0, 8)
+                  .map((diag, idx) => (
+                    <div
+                      key={`${diag.schema_name}:${diag.physical_table}:${diag.family}:${idx}`}
+                      className="rounded border border-border bg-background p-3 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-foreground">
+                          {diag.physical_table}
+                        </span>
+                        <span className="text-muted">{diag.family}</span>
+                        <span className="text-muted">• {diag.status}</span>
+                        {diag.generated_count > 0 && (
+                          <span className="text-muted">
+                            • {diag.generated_count} generated
+                          </span>
+                        )}
+                      </div>
+                      {diag.reason && (
+                        <div className="mt-1 text-muted">{diag.reason}</div>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            </div>
           )}
         </div>
       )}
