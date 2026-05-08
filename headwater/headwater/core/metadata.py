@@ -247,6 +247,12 @@ CREATE TABLE IF NOT EXISTS companion_docs (
     UNIQUE(source_name, filename)
 );
 
+CREATE TABLE IF NOT EXISTS dataset_contexts (
+    source_name TEXT PRIMARY KEY REFERENCES sources(name),
+    context_json TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS projects (
     id              TEXT PRIMARY KEY,
     slug            TEXT NOT NULL UNIQUE,
@@ -545,6 +551,12 @@ CREATE TABLE IF NOT EXISTS quality_results (
 CREATE INDEX IF NOT EXISTS idx_quality_results_run
     ON quality_results(run_id);
 
+CREATE TABLE IF NOT EXISTS dataset_contexts (
+    source_name TEXT PRIMARY KEY REFERENCES sources(name),
+    context_json TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS model_reviews (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     model_name  TEXT NOT NULL,
@@ -717,6 +729,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
 
         self.con.execute("DELETE FROM table_semantic_details WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM companion_docs WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM dataset_contexts WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM relationships WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM profiles WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM columns WHERE source_name = ?", (name,))
@@ -750,6 +763,35 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
 
     def list_sources(self) -> list[dict]:
         return [dict(r) for r in self.con.execute("SELECT * FROM sources").fetchall()]
+
+    def upsert_dataset_context(self, source_name: str, context: dict) -> None:
+        """Persist optional user framing context for a source."""
+        self.con.execute(
+            """
+            INSERT INTO dataset_contexts (source_name, context_json, updated_at)
+                 VALUES (?, ?, datetime('now'))
+            ON CONFLICT(source_name) DO UPDATE SET
+                context_json = excluded.context_json,
+                updated_at = datetime('now')
+            """,
+            (source_name, json.dumps(context)),
+        )
+        self.con.commit()
+
+    def get_dataset_context(self, source_name: str) -> dict | None:
+        row = self.con.execute(
+            "SELECT context_json, updated_at FROM dataset_contexts WHERE source_name = ?",
+            (source_name,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row["context_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        payload["source_name"] = source_name
+        payload["updated_at"] = row["updated_at"]
+        return payload
 
     # -- Warehouse evidence and insight plans -----------------------------
 

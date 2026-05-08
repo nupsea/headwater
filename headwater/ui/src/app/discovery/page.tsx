@@ -9,6 +9,8 @@ import {
   type DictColumn,
   type DictTable,
   type ColumnReviewPayload,
+  type DatasetContext,
+  type SemanticSchema,
 } from "@/lib/api";
 import { useProjects } from "@/lib/project-context";
 import { ProfileTable } from "@/components/profile-table";
@@ -62,6 +64,10 @@ export default function DiscoveryPage() {
   const [editTableDesc, setEditTableDesc] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
+  const [datasetContext, setDatasetContext] = useState<DatasetContext | null>(null);
+  const [contextDraft, setContextDraft] = useState<DatasetContext | null>(null);
+  const [semanticSchema, setSemanticSchema] = useState<SemanticSchema | null>(null);
+  const [contextMsg, setContextMsg] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +82,10 @@ export default function DiscoveryPage() {
       setEditDescs({});
       setEditedCols({});
       setSaveMsg("");
+      setDatasetContext(null);
+      setContextDraft(null);
+      setSemanticSchema(null);
+      setContextMsg("");
       setError("");
     });
     if (!activeProjectId) return;
@@ -91,6 +101,17 @@ export default function DiscoveryPage() {
       .catch(() => {
         if (!cancelled) setError("Run the pipeline from the Dashboard first.");
       });
+    Promise.all([
+      api.datasetContext(activeProjectId).catch(() => null),
+      api.semanticSchema(activeProjectId).catch(() => null),
+    ]).then(([ctx, schema]) => {
+      if (cancelled) return;
+      if (ctx) {
+        setDatasetContext(ctx);
+        setContextDraft(ctx);
+      }
+      if (schema) setSemanticSchema(schema);
+    });
     return () => {
       cancelled = true;
     };
@@ -143,7 +164,57 @@ export default function DiscoveryPage() {
   const refreshAll = async () => {
     const ins = await api.insights(activeProjectId);
     setInsights(ins);
+    const schema = await api.semanticSchema(activeProjectId).catch(() => null);
+    if (schema) setSemanticSchema(schema);
     await refreshSelected();
+  };
+
+  const updateContextDraft = (field: keyof DatasetContext, value: string) => {
+    if (!contextDraft) return;
+    setContextDraft({
+      ...contextDraft,
+      [field]:
+        field === "external_references"
+          ? value.split("\n").map((item) => item.trim()).filter(Boolean)
+          : value,
+    });
+  };
+
+  const handleSaveContext = async () => {
+    if (!contextDraft) return;
+    setSaving(true);
+    setContextMsg("");
+    try {
+      const saved = await api.saveDatasetContext(contextDraft, activeProjectId);
+      const schema = await api.semanticSchema(activeProjectId).catch(() => null);
+      setDatasetContext(saved);
+      setContextDraft(saved);
+      if (schema) setSemanticSchema(schema);
+      setContextMsg("Framing saved.");
+      setTimeout(() => setContextMsg(""), 3000);
+    } catch (e) {
+      setContextMsg(e instanceof Error ? e.message : "Save failed");
+    }
+    setSaving(false);
+  };
+
+  const handleConfirmSemanticRoles = async () => {
+    setSaving(true);
+    setContextMsg("");
+    try {
+      const res = await api.confirmSemanticSchema(
+        { min_confidence: 0.8, table_name: selected },
+        activeProjectId
+      );
+      const schema = await api.semanticSchema(activeProjectId).catch(() => null);
+      if (schema) setSemanticSchema(schema);
+      await refreshSelected();
+      setContextMsg(`${res.columns_confirmed} role(s) confirmed.`);
+      setTimeout(() => setContextMsg(""), 3000);
+    } catch (e) {
+      setContextMsg(e instanceof Error ? e.message : "Confirmation failed");
+    }
+    setSaving(false);
   };
 
   const handleColEdit = (colName: string, field: keyof DictColumn, value: unknown) => {
@@ -257,10 +328,105 @@ export default function DiscoveryPage() {
     (i) => i.table === selected
   );
   const reviewTodo = reviewBreakdown(dictTable);
+  const selectedRoles = semanticSchema?.columns.filter((role) => role.table_name === selected) ?? [];
+  const highConfidenceRoles = selectedRoles.filter((role) => !role.locked && role.confidence >= 0.8).length;
+  const ambiguousRoles = selectedRoles.filter((role) => !role.locked && role.confidence < 0.8).length;
 
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Discover & Access</h1>
+
+      {contextDraft && (
+        <div className="mb-6 bg-card border border-border rounded-lg p-5">
+          <div className="flex items-start justify-between gap-4 mb-4">
+            <div>
+              <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">
+                Dataset Framing
+              </h2>
+              <div className="text-xs text-muted mt-1">
+                Optional context for semantic roles and insight families.
+                {datasetContext?.updated_at ? ` Last saved ${datasetContext.updated_at}.` : ""}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {contextMsg && <span className="text-xs text-muted">{contextMsg}</span>}
+              <button
+                onClick={handleSaveContext}
+                disabled={saving}
+                className="px-3 py-1.5 bg-foreground text-background rounded text-xs font-medium disabled:opacity-50"
+              >
+                Save Framing
+              </button>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            <label className="text-xs text-muted">
+              Row represents
+              <input
+                value={contextDraft.row_represents ?? ""}
+                onChange={(e) => updateContextDraft("row_represents", e.target.value)}
+                placeholder="trip, transaction, event, snapshot"
+                className="mt-1 w-full px-2 py-1.5 border border-border rounded bg-background text-sm text-foreground"
+              />
+            </label>
+            <label className="text-xs text-muted">
+              Time grain and period
+              <input
+                value={contextDraft.time_grain ?? ""}
+                onChange={(e) => updateContextDraft("time_grain", e.target.value)}
+                placeholder="event-time, daily, monthly"
+                className="mt-1 w-full px-2 py-1.5 border border-border rounded bg-background text-sm text-foreground"
+              />
+            </label>
+            <label className="text-xs text-muted">
+              Period covered
+              <input
+                value={contextDraft.period_covered ?? ""}
+                onChange={(e) => updateContextDraft("period_covered", e.target.value)}
+                placeholder="Jan-Feb 2026"
+                className="mt-1 w-full px-2 py-1.5 border border-border rounded bg-background text-sm text-foreground"
+              />
+            </label>
+            <label className="text-xs text-muted">
+              Entity lifecycle
+              <input
+                value={contextDraft.lifecycle ?? ""}
+                onChange={(e) => updateContextDraft("lifecycle", e.target.value)}
+                placeholder="pickup -> dropoff, order -> deliver"
+                className="mt-1 w-full px-2 py-1.5 border border-border rounded bg-background text-sm text-foreground"
+              />
+            </label>
+            <label className="text-xs text-muted">
+              Decisions supported
+              <input
+                value={contextDraft.decisions ?? ""}
+                onChange={(e) => updateContextDraft("decisions", e.target.value)}
+                placeholder="operations, pricing, compliance"
+                className="mt-1 w-full px-2 py-1.5 border border-border rounded bg-background text-sm text-foreground"
+              />
+            </label>
+            <label className="text-xs text-muted">
+              Known caveats
+              <input
+                value={contextDraft.quality_caveats ?? ""}
+                onChange={(e) => updateContextDraft("quality_caveats", e.target.value)}
+                placeholder="sparse location ids, delayed updates"
+                className="mt-1 w-full px-2 py-1.5 border border-border rounded bg-background text-sm text-foreground"
+              />
+            </label>
+          </div>
+          <label className="block text-xs text-muted mt-3">
+            External references
+            <textarea
+              value={(contextDraft.external_references ?? []).join("\n")}
+              onChange={(e) => updateContextDraft("external_references", e.target.value)}
+              placeholder="Data dictionary URL, schema doc URL, glossary notes"
+              rows={2}
+              className="mt-1 w-full px-2 py-1.5 border border-border rounded bg-background text-sm text-foreground"
+            />
+          </label>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-[280px_minmax(0,1fr)] gap-6">
         {/* Table list sidebar */}
@@ -428,6 +594,62 @@ export default function DiscoveryPage() {
                   </div>
                 </div>
               </div>
+
+              {selectedRoles.length > 0 && (
+                <div className="bg-card border border-border rounded-lg p-5">
+                  <div className="flex items-start justify-between gap-4 mb-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-muted uppercase tracking-wide">
+                        Semantic Roles
+                      </h3>
+                      <div className="text-xs text-muted mt-1">
+                        {highConfidenceRoles} high-confidence role(s), {ambiguousRoles} ambiguous.
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleConfirmSemanticRoles}
+                      disabled={saving || highConfidenceRoles === 0}
+                      className="px-3 py-1.5 border border-border rounded text-xs font-medium hover:border-foreground disabled:opacity-50"
+                    >
+                      Confirm High Confidence
+                    </button>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[720px] text-sm">
+                      <thead>
+                        <tr className="border-b border-border text-left text-muted">
+                          <th className="py-2 pr-4">Column</th>
+                          <th className="py-2 pr-4">Canonical Role</th>
+                          <th className="py-2 pr-4">Confidence</th>
+                          <th className="py-2 pr-4">Source</th>
+                          <th className="py-2">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedRoles.slice(0, 10).map((role) => (
+                          <tr key={`${role.table_name}.${role.column_name}.${role.canonical_role}`} className="border-b border-border/50">
+                            <td className="py-2 pr-4 font-mono">{role.column_name}</td>
+                            <td className="py-2 pr-4 font-mono text-accent">{role.canonical_role}</td>
+                            <td className="py-2 pr-4">{Math.round(role.confidence * 100)}%</td>
+                            <td className="py-2 pr-4">{role.source.replace("_", " ")}</td>
+                            <td className="py-2">
+                              <span className={`px-2 py-0.5 rounded text-xs border ${
+                                role.locked
+                                  ? "border-success/30 text-success bg-success/10"
+                                  : role.confidence >= 0.8
+                                    ? "border-accent/30 text-accent bg-accent/10"
+                                    : "border-warning/30 text-warning bg-warning/10"
+                              }`}>
+                                {role.locked ? "locked" : role.confidence >= 0.8 ? "auto-ready" : "review"}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               {/* Keys & Relationships */}
               <div className="bg-card border border-border rounded-lg p-5">

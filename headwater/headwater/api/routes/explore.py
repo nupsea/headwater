@@ -12,12 +12,12 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from headwater.api.project_scope import scoped_pipeline
 from headwater.analyzer.llm import NoLLMProvider, get_provider
+from headwater.api.project_scope import scoped_pipeline
 from headwater.core.config import get_settings
-from headwater.core.models import Relationship
+from headwater.core.models import DatasetContext, Relationship
 from headwater.explorer.nl_to_sql import ask
-from headwater.explorer.statistical import detect_insights
+from headwater.explorer.statistical import detect_insights_with_diagnostics
 from headwater.explorer.suggestions import generate_suggestions
 
 router = APIRouter()
@@ -42,7 +42,27 @@ def _serialize_statistical_insights(insights, limit: int) -> list[dict]:
     return [i.model_dump() for i in _rank_statistical_insights(insights)[:limit]]
 
 
-def _load_confirmed_relationships(request: Request, source_names: list[str] | None = None) -> list[Relationship]:
+def _serialize_diagnostics(diagnostics) -> list[dict]:
+    return [d.model_dump() for d in diagnostics]
+
+
+def _dataset_context_for_pipeline(request: Request, pipeline: dict) -> DatasetContext | None:
+    store = getattr(request.app.state, "metadata_store", None)
+    discovery = pipeline.get("discovery")
+    if store is None or discovery is None:
+        return None
+    try:
+        row = store.get_dataset_context(discovery.source.name)
+        return DatasetContext(**row) if row else None
+    except Exception:
+        logger.debug("Dataset context unavailable for insights")
+        return None
+
+
+def _load_confirmed_relationships(
+    request: Request,
+    source_names: list[str] | None = None,
+) -> list[Relationship]:
     """Load human-confirmed FK relationships from metadata store.
 
     These supplement auto-detected relationships for richer cross-table
@@ -56,7 +76,8 @@ def _load_confirmed_relationships(request: Request, source_names: list[str] | No
             placeholders = ", ".join("?" for _ in source_names)
             rows = store.con.execute(
                 "SELECT from_table, from_column, to_table, to_column "
-                f"FROM relationships WHERE detection_source = 'confirmed' AND source_name IN ({placeholders})",
+                "FROM relationships WHERE detection_source = 'confirmed' "
+                f"AND source_name IN ({placeholders})",
                 tuple(source_names),
             ).fetchall()
         else:
@@ -119,10 +140,29 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         catalog=catalog,
         extra_relationships=extra_rels,
     )
+    con = request.app.state.duckdb_con
+    context = _dataset_context_for_pipeline(request, pipeline)
+    staging_result = detect_insights_with_diagnostics(
+        con,
+        schema="staging",
+        discovery=discovery,
+        dataset_context=context,
+        models=all_models,
+    )
+    marts_result = detect_insights_with_diagnostics(
+        con,
+        schema="marts",
+        discovery=discovery,
+        dataset_context=context,
+        models=all_models,
+    )
+    statistical_insights = staging_result.insights + marts_result.insights
+    diagnostics = staging_result.diagnostics + marts_result.diagnostics
 
     return {
         "suggestions": [s.model_dump() for s in suggestions],
-        "insights": [],
+        "insights": _serialize_statistical_insights(statistical_insights, 10),
+        "diagnostics": _serialize_diagnostics(diagnostics),
         "review_pct": round(review_pct, 1),
     }
 
@@ -206,10 +246,28 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
         raise HTTPException(status_code=400, detail="No discovery run yet.")
 
     con = request.app.state.duckdb_con
-    insights = detect_insights(con, schema="staging")
-    insights.extend(detect_insights(con, schema="marts"))
+    discovery = pipeline["discovery"]
+    all_models = pipeline["staging_models"] + pipeline["mart_models"]
+    context = _dataset_context_for_pipeline(request, pipeline)
+    staging_result = detect_insights_with_diagnostics(
+        con,
+        schema="staging",
+        discovery=discovery,
+        dataset_context=context,
+        models=all_models,
+    )
+    marts_result = detect_insights_with_diagnostics(
+        con,
+        schema="marts",
+        discovery=discovery,
+        dataset_context=context,
+        models=all_models,
+    )
+    insights = staging_result.insights + marts_result.insights
+    diagnostics = staging_result.diagnostics + marts_result.diagnostics
 
     return {
         "insights": _serialize_statistical_insights(insights, _INSIGHTS_ENDPOINT_LIMIT),
+        "diagnostics": _serialize_diagnostics(diagnostics),
         "total": len(insights),
     }

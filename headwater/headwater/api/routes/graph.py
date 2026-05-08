@@ -41,9 +41,9 @@ async def get_graph_data(request: Request, project_id: str | None = None):
         nodes = [
             {
                 "id": table.name,
-                "label": table.name,
-                "type": "table",
-                "domain": table.domain,
+                "row_count": table.row_count or 0,
+                "domain": table.domain or "Unclassified",
+                "description": table.description or "",
             }
             for table in discovery.tables
         ]
@@ -51,9 +51,12 @@ async def get_graph_data(request: Request, project_id: str | None = None):
             {
                 "source": rel.from_table,
                 "target": rel.to_table,
-                "label": f"{rel.from_column} -> {rel.to_column}",
-                "type": rel.type,
+                "from_column": rel.from_column,
+                "to_column": rel.to_column,
+                "rel_type": rel.type,
                 "confidence": rel.confidence,
+                "ref_integrity": rel.referential_integrity,
+                "nullable": False,
             }
             for rel in discovery.relationships
         ]

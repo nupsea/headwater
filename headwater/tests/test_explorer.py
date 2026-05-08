@@ -41,6 +41,7 @@ from headwater.explorer.statistical import (
     _find_metric_columns,
     _find_temporal_columns,
     detect_insights,
+    detect_insights_with_diagnostics,
 )
 from headwater.explorer.suggestions import generate_suggestions
 from headwater.explorer.visualization import _classify_columns, recommend_visualization
@@ -650,6 +651,193 @@ class TestStatistical:
             assert i.severity in ("info", "warning", "critical")
             if i.p_value is not None:
                 assert 0 <= i.p_value <= 1
+
+    def test_semantic_temporal_roles_cast_string_and_year_columns(self, duckdb_con):
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_string_dates AS "
+            "SELECT * FROM (VALUES "
+            "('2026-01-01', 1.0), ('2026-01-02', 2.0)"
+            ") AS t(date_filed, amount)"
+        )
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_years AS "
+            "SELECT * FROM (VALUES (2025, 10.0), (2026, 11.0)) AS t(year, value)"
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="string_dates",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="date_filed",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="amount", dtype="double"),
+                    ],
+                ),
+                TableInfo(
+                    name="years",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="year",
+                            dtype="bigint",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="value", dtype="double"),
+                    ],
+                ),
+            ],
+        )
+
+        insights = detect_insights(duckdb_con, schema="staging", discovery=discovery)
+
+        coverage_tables = {
+            insight.table_name
+            for insight in insights
+            if insight.insight_type == "coverage_period"
+        }
+        assert {"string_dates", "years"}.issubset(coverage_tables)
+
+    def test_semantic_diagnostics_report_generated_and_skipped_families(self, duckdb_con):
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_events AS "
+            "SELECT * FROM (VALUES "
+            "('2026-01-01', 1.0), ('2026-01-02', 2.0)"
+            ") AS t(event_date, value)"
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="event_date",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="value", dtype="double"),
+                    ],
+                )
+            ],
+        )
+
+        result = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+        )
+
+        statuses = {(d.family, d.status) for d in result.diagnostics}
+        assert ("coverage", "generated") in statuses
+        assert ("duration", "skipped") in statuses
+        duration = next(d for d in result.diagnostics if d.family == "duration")
+        assert duration.required_roles == ["duration_min"]
+        assert duration.reason
+
+    def test_semantic_model_lineage_maps_mart_table(self, duckdb_con):
+        duckdb_con.execute(
+            "CREATE TABLE marts.mart_event_summary AS "
+            "SELECT * FROM (VALUES "
+            "('2026-01-01', 1.0), ('2026-01-02', 2.0)"
+            ") AS t(event_date, value)"
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="event_date",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="value", dtype="double"),
+                    ],
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="mart_event_summary",
+                model_type="mart",
+                sql="SELECT event_date, value FROM staging.stg_events",
+                description="Event summary",
+                source_tables=["events"],
+                status="executed",
+            )
+        ]
+
+        result = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="marts",
+            discovery=discovery,
+            models=models,
+        )
+
+        assert not any(
+            d.reason == "No matching discovered source table for physical table."
+            for d in result.diagnostics
+            if d.physical_table == "mart_event_summary"
+        )
+        assert any(
+            d.physical_table == "mart_event_summary" and d.table_name == "events"
+            for d in result.diagnostics
+        )
+
+    def test_semantic_diagnostics_ignore_tables_outside_model_scope(self, duckdb_con):
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_events AS "
+            "SELECT * FROM (VALUES ('2026-01-01'), ('2026-01-02')) AS t(event_date)"
+        )
+        duckdb_con.execute("CREATE TABLE staging.stg_stale_table AS SELECT 1 AS id")
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="event_date",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                    ],
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_events",
+                model_type="staging",
+                sql="SELECT event_date FROM events",
+                description="Events staging",
+                source_tables=["events"],
+                status="executed",
+            )
+        ]
+
+        result = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+            models=models,
+        )
+
+        assert "stg_stale_table" not in {d.physical_table for d in result.diagnostics}
 
 
 # ---------------------------------------------------------------------------

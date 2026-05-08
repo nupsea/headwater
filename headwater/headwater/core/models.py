@@ -46,6 +46,56 @@ class CompanionDoc(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+class DatasetContext(BaseModel):
+    """User-supplied framing for a dataset.
+
+    This is optional context that improves semantic inference and insight
+    generation. It must never gate baseline profiling or exploration.
+    """
+
+    source_name: str
+    row_represents: str | None = None
+    time_grain: str | None = None
+    period_covered: str | None = None
+    lifecycle: str | None = None
+    decisions: str | None = None
+    quality_caveats: str | None = None
+    external_references: list[str] = Field(default_factory=list)
+    updated_at: datetime | None = None
+
+
+class SemanticColumnRole(BaseModel):
+    """Canonical semantic role inferred for a physical column."""
+
+    table_name: str
+    column_name: str
+    canonical_role: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    source: Literal["name_registry", "profile_stats", "human_lock", "context"] = "name_registry"
+    locked: bool = False
+    reason: str | None = None
+
+
+class SemanticDerivedField(BaseModel):
+    """Derived field the insight layer can compute from semantic roles."""
+
+    table_name: str
+    name: str
+    expression: str
+    role: str
+    required_roles: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class SemanticSchema(BaseModel):
+    """Semantic role map plus canonical derived-field plan."""
+
+    source_name: str
+    columns: list[SemanticColumnRole] = Field(default_factory=list)
+    derived_fields: list[SemanticDerivedField] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=datetime.now)
+
+
 # ---------------------------------------------------------------------------
 # Schema / Discovery
 # ---------------------------------------------------------------------------
@@ -320,7 +370,10 @@ class StatisticalInsight(BaseModel):
     table_name: str
     insight_type: Literal[
         "temporal_anomaly", "period_comparison", "change_point",
-        "correlation", "distribution_shift",
+        "correlation", "distribution_shift", "coverage_period",
+        "volume_distribution", "peak_period", "duration_distribution",
+        "geographic_hotspot", "route_pair", "congestion_proxy",
+        "data_quality",
     ]
     description: str  # Plain-English explanation
     magnitude: float  # % deviation or correlation coefficient
@@ -331,6 +384,27 @@ class StatisticalInsight(BaseModel):
     comparison_baseline: str | None = None  # e.g. "90-day rolling average"
     detrended: bool = False  # True if correlation was computed on detrended residuals
     severity: Literal["info", "warning", "critical"] = "info"
+
+
+class InsightFamilyDiagnostic(BaseModel):
+    """Execution status for one semantic insight family on one table."""
+
+    schema_name: str
+    physical_table: str
+    table_name: str | None = None
+    family: str
+    status: Literal["generated", "skipped", "failed"]
+    required_roles: list[str] = Field(default_factory=list)
+    found_roles: list[str] = Field(default_factory=list)
+    generated_count: int = 0
+    reason: str | None = None
+
+
+class InsightDetectionResult(BaseModel):
+    """Insight output plus family execution diagnostics."""
+
+    insights: list[StatisticalInsight] = Field(default_factory=list)
+    diagnostics: list[InsightFamilyDiagnostic] = Field(default_factory=list)
 
 
 class VisualizationSpec(BaseModel):

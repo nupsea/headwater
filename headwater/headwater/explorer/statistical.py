@@ -16,17 +16,33 @@ Wave E2 improvements:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import statistics
 import warnings
 from datetime import datetime
+from pathlib import Path
 
 import duckdb
 import polars as pl
 from scipy import stats
 
-from headwater.core.models import StatisticalInsight
+from headwater.analyzer.semantic_schema import (
+    infer_semantic_schema,
+    quote_ident,
+    roles_for_table,
+)
+from headwater.core.models import (
+    DatasetContext,
+    DiscoveryResult,
+    GeneratedModel,
+    InsightDetectionResult,
+    InsightFamilyDiagnostic,
+    SemanticColumnRole,
+    StatisticalInsight,
+    TableInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +51,15 @@ _MIN_ROWS = 10
 _MIN_TEMPORAL_POINTS = 7
 _ZSCORE_THRESHOLD = 2.0  # Flag values beyond 2 standard deviations
 _P_VALUE_THRESHOLD = 0.05  # 95% confidence
+_MAX_POLARS_LOAD_ROWS = 1_000_000
 
 
 def detect_insights(
     con: duckdb.DuckDBPyConnection,
     schema: str = "marts",
+    discovery: DiscoveryResult | None = None,
+    dataset_context: DatasetContext | None = None,
+    models: list[GeneratedModel] | None = None,
 ) -> list[StatisticalInsight]:
     """Scan all materialized tables in a schema for statistical patterns.
 
@@ -50,17 +70,83 @@ def detect_insights(
 
     Applies Benjamini-Hochberg FDR correction before returning.
     """
-    insights: list[StatisticalInsight] = []
+    return detect_insights_with_diagnostics(
+        con,
+        schema=schema,
+        discovery=discovery,
+        dataset_context=dataset_context,
+        models=models,
+    ).insights
 
-    tables = _list_tables(con, schema)
+
+def detect_insights_with_diagnostics(
+    con: duckdb.DuckDBPyConnection,
+    schema: str = "marts",
+    discovery: DiscoveryResult | None = None,
+    dataset_context: DatasetContext | None = None,
+    models: list[GeneratedModel] | None = None,
+) -> InsightDetectionResult:
+    """Detect insights and return per-table/family execution diagnostics."""
+    insights: list[StatisticalInsight] = []
+    diagnostics: list[InsightFamilyDiagnostic] = []
+    tables = _filter_tables_for_models(_list_tables(con, schema), schema, models)
+
+    if discovery is not None:
+        semantic_schema = infer_semantic_schema(discovery, dataset_context)
+        for table_name in tables:
+            source_table = _source_table_for_physical_table(table_name, discovery, models)
+            if source_table is None:
+                diagnostics.append(
+                    InsightFamilyDiagnostic(
+                        schema_name=schema,
+                        physical_table=table_name,
+                        family="semantic_schema",
+                        status="skipped",
+                        reason="No matching discovered source table for physical table.",
+                    )
+                )
+                continue
+            result = _detect_family_insights(
+                con,
+                schema,
+                table_name,
+                source_table.name,
+                _roles_for_physical_table(
+                    con,
+                    schema,
+                    table_name,
+                    source_table.name,
+                    roles_for_table(semantic_schema, source_table.name),
+                ),
+            )
+            insights.extend(result.insights)
+            diagnostics.extend(result.diagnostics)
+
+        if insights:
+            return InsightDetectionResult(
+                insights=_rank_family_insights(insights),
+                diagnostics=diagnostics,
+            )
+
     for table_name in tables:
         try:
             df = _load_table(con, schema, table_name)
             if df is None or df.height < _MIN_ROWS:
+                diagnostics.append(
+                    InsightFamilyDiagnostic(
+                        schema_name=schema,
+                        physical_table=table_name,
+                        table_name=table_name,
+                        family="generic_statistical",
+                        status="skipped",
+                        reason="Table is too large for fallback load or has too few rows.",
+                    )
+                )
                 continue
 
             temporal_cols = _find_temporal_columns(df)
             metric_cols = _find_metric_columns(df)
+            before = len(insights)
 
             if temporal_cols and metric_cols:
                 for t_col in temporal_cols:
@@ -73,13 +159,41 @@ def detect_insights(
             if len(metric_cols) >= 2:
                 insights.extend(_detect_correlations(df, table_name, metric_cols))
 
+            generated = len(insights) - before
+            diagnostics.append(
+                InsightFamilyDiagnostic(
+                    schema_name=schema,
+                    physical_table=table_name,
+                    table_name=table_name,
+                    family="generic_statistical",
+                    status="generated" if generated else "skipped",
+                    required_roles=["temporal_column", "metric_column"],
+                    found_roles=[
+                        *(["temporal_column"] if temporal_cols else []),
+                        *(["metric_column"] if metric_cols else []),
+                    ],
+                    generated_count=generated,
+                    reason=None if generated else "No temporal/metric pattern met thresholds.",
+                )
+            )
+
         except Exception as e:
             logger.warning("Statistical analysis failed for %s.%s: %s", schema, table_name, e)
+            diagnostics.append(
+                InsightFamilyDiagnostic(
+                    schema_name=schema,
+                    physical_table=table_name,
+                    table_name=table_name,
+                    family="generic_statistical",
+                    status="failed",
+                    reason=str(e),
+                )
+            )
 
     # Apply FDR correction to control false positives from multiple comparisons
     insights = _apply_fdr_correction(insights)
 
-    return insights
+    return InsightDetectionResult(insights=insights, diagnostics=diagnostics)
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +227,766 @@ def _apply_fdr_correction(
             break  # All subsequent p-values are larger
 
     return corrected + without_p
+
+
+# ---------------------------------------------------------------------------
+# Semantic Insight Families
+# ---------------------------------------------------------------------------
+
+def _detect_family_insights(
+    con: duckdb.DuckDBPyConnection,
+    schema: str,
+    physical_table: str,
+    source_table: str,
+    roles: dict[str, SemanticColumnRole],
+) -> InsightDetectionResult:
+    """Run semantic insight families with DuckDB-side aggregations."""
+    found_roles = sorted(roles)
+    if not roles:
+        return InsightDetectionResult(
+            diagnostics=[
+                InsightFamilyDiagnostic(
+                    schema_name=schema,
+                    physical_table=physical_table,
+                    table_name=source_table,
+                    family="semantic_schema",
+                    status="skipped",
+                    found_roles=[],
+                    reason="No semantic roles inferred for this table.",
+                )
+            ]
+        )
+
+    table_ref = f"{quote_ident(schema)}.{quote_ident(physical_table)}"
+    family_spec = _load_family_spec()
+    enabled = {family["key"] for family in family_spec.get("families", [])}
+
+    insights: list[StatisticalInsight] = []
+    diagnostics: list[InsightFamilyDiagnostic] = []
+    start = roles.get("lifecycle_start_ts") or roles.get("event_ts")
+    end = roles.get("lifecycle_end_ts")
+    request = roles.get("request_ts")
+    origin = roles.get("origin_id") or roles.get("location_id")
+    dest = roles.get("destination_id")
+    distance = roles.get("distance")
+    service = roles.get("service_type")
+
+    try:
+        canonical_ref, derived = _create_canonical_view(
+            con,
+            table_ref,
+            schema,
+            physical_table,
+            start=start,
+            end=end,
+            request=request,
+            distance=distance,
+            origin=origin,
+            dest=dest,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "Semantic canonical view failed for %s.%s: %s",
+            schema,
+            physical_table,
+            exc,
+        )
+        return InsightDetectionResult(
+            diagnostics=[
+                InsightFamilyDiagnostic(
+                    schema_name=schema,
+                    physical_table=physical_table,
+                    table_name=source_table,
+                    family="semantic_schema",
+                    status="failed",
+                    found_roles=found_roles,
+                    reason=str(exc),
+                )
+            ]
+        )
+    table_ref = canonical_ref
+    start_expr = derived.get("start_ts")
+    duration_expr = derived.get("duration_min")
+    wait_expr = derived.get("wait_min")
+
+    def run_family(
+        family: str,
+        required_roles: list[str],
+        can_run: bool,
+        fn,
+        skip_reason: str,
+    ) -> None:
+        if family in {"route", "congestion", "wait"} or family in enabled:
+            if not can_run:
+                diagnostics.append(
+                    InsightFamilyDiagnostic(
+                        schema_name=schema,
+                        physical_table=physical_table,
+                        table_name=source_table,
+                        family=family,
+                        status="skipped",
+                        required_roles=required_roles,
+                        found_roles=found_roles,
+                        reason=skip_reason,
+                    )
+                )
+                return
+            try:
+                before = len(insights)
+                family_insights = fn()
+                insights.extend(family_insights)
+                generated = len(insights) - before
+                diagnostics.append(
+                    InsightFamilyDiagnostic(
+                        schema_name=schema,
+                        physical_table=physical_table,
+                        table_name=source_table,
+                        family=family,
+                        status="generated" if generated else "skipped",
+                        required_roles=required_roles,
+                        found_roles=found_roles,
+                        generated_count=generated,
+                        reason=None if generated else "No rows met family support thresholds.",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Semantic insight family failed for %s.%s family=%s: %s",
+                    schema,
+                    physical_table,
+                    family,
+                    exc,
+                )
+                diagnostics.append(
+                    InsightFamilyDiagnostic(
+                        schema_name=schema,
+                        physical_table=physical_table,
+                        table_name=source_table,
+                        family=family,
+                        status="failed",
+                        required_roles=required_roles,
+                        found_roles=found_roles,
+                        reason=str(exc),
+                    )
+                )
+
+    run_family(
+        "coverage",
+        ["event_ts"],
+        bool(start and start_expr),
+        lambda: _coverage_family(con, table_ref, source_table, start, start_expr),
+        "Requires a temporal role that can be cast to TIMESTAMP.",
+    )
+    run_family(
+        "volume",
+        ["event_ts"],
+        bool(start and start_expr),
+        lambda: _volume_family(con, table_ref, source_table, start, start_expr, duration_expr),
+        "Requires a temporal role that can be cast to TIMESTAMP.",
+    )
+    run_family(
+        "peak",
+        ["event_ts", "duration_min"],
+        bool(start_expr and duration_expr),
+        lambda: _peak_family(con, table_ref, source_table, start_expr, duration_expr),
+        "Requires temporal start and lifecycle end roles to derive duration.",
+    )
+    run_family(
+        "duration",
+        ["duration_min"],
+        bool(duration_expr),
+        lambda: _duration_family(con, table_ref, source_table, start_expr, duration_expr),
+        "Requires lifecycle start and end roles to derive duration.",
+    )
+    run_family(
+        "geo",
+        ["origin_id", "duration_min"],
+        bool(origin and duration_expr),
+        lambda: _geo_family(con, table_ref, source_table, origin, duration_expr),
+        "Requires origin/location and duration roles.",
+    )
+    run_family(
+        "route",
+        ["origin_id", "destination_id", "duration_min"],
+        bool(origin and dest and duration_expr),
+        lambda: _route_family(con, table_ref, source_table, origin, dest, duration_expr),
+        "Requires origin, destination, and duration roles.",
+    )
+    run_family(
+        "congestion",
+        ["distance", "duration_min"],
+        bool(distance and duration_expr),
+        lambda: _congestion_family(con, table_ref, source_table, distance, duration_expr),
+        "Requires distance and duration roles.",
+    )
+    run_family(
+        "quality",
+        [],
+        True,
+        lambda: _quality_family(
+            con,
+            table_ref,
+            source_table,
+            origin,
+            dest,
+            distance,
+            duration_expr,
+            service,
+        ),
+        "Quality family is always eligible.",
+    )
+    run_family(
+        "wait",
+        ["request_ts", "event_ts"],
+        bool(start_expr and wait_expr),
+        lambda: _wait_family(con, table_ref, source_table, start_expr, wait_expr),
+        "Requires request and event/lifecycle start roles.",
+    )
+
+    return InsightDetectionResult(insights=insights, diagnostics=diagnostics)
+
+
+def _coverage_family(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    source_table: str,
+    start: SemanticColumnRole,
+    start_expr: str,
+) -> list[StatisticalInsight]:
+    row = con.execute(
+        f"""
+        SELECT MIN({start_expr}) AS min_ts, MAX({start_expr}) AS max_ts, COUNT(*) AS trips
+        FROM {table_ref}
+        WHERE {start_expr} IS NOT NULL
+        """
+    ).fetchone()
+    if not row or row[0] is None or row[1] is None:
+        return []
+    days = _days_between(row[0], row[1])
+    return [
+        StatisticalInsight(
+            metric=start.column_name,
+            table_name=source_table,
+            insight_type="coverage_period",
+            description=(
+                f"{_humanize(source_table)} covers {_format_date(row[0])} to "
+                f"{_format_date(row[1])} across {int(row[2]):,} records; avoid claims "
+                "outside this observed period."
+            ),
+            magnitude=float(days),
+            confidence_level="99%",
+            comparison_baseline="observed timestamp range",
+            severity="info",
+        )
+    ]
+
+
+def _create_canonical_view(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    schema: str,
+    physical_table: str,
+    *,
+    start: SemanticColumnRole | None,
+    end: SemanticColumnRole | None,
+    request: SemanticColumnRole | None,
+    distance: SemanticColumnRole | None,
+    origin: SemanticColumnRole | None,
+    dest: SemanticColumnRole | None,
+) -> tuple[str, dict[str, str]]:
+    """Define canonical derived fields once in DuckDB and reuse them downstream."""
+    expressions: dict[str, str] = {}
+    start_ts_expr = _temporal_expr(start)
+    end_ts_expr = _temporal_expr(end)
+    request_ts_expr = _temporal_expr(request)
+    if start_ts_expr:
+        expressions["start_ts"] = start_ts_expr
+    if end_ts_expr:
+        expressions["end_ts"] = end_ts_expr
+    if request_ts_expr:
+        expressions["request_ts"] = request_ts_expr
+
+    raw_duration = _duration_expr(start_ts_expr, end_ts_expr)
+    if raw_duration:
+        expressions["duration_min"] = raw_duration
+    raw_wait = _wait_expr(request_ts_expr, start_ts_expr)
+    if raw_wait:
+        expressions["wait_min"] = raw_wait
+    if raw_duration and distance:
+        dist = quote_ident(distance.column_name)
+        expressions["speed_per_hour"] = (
+            f"CASE WHEN ({raw_duration}) > 0 THEN {dist} / (({raw_duration}) / 60.0) END"
+        )
+    if origin and dest:
+        expressions["route_pair"] = (
+            f"CAST({quote_ident(origin.column_name)} AS VARCHAR) || ' -> ' || "
+            f"CAST({quote_ident(dest.column_name)} AS VARCHAR)"
+        )
+    if not expressions:
+        return table_ref, {}
+
+    view_name = quote_ident(f"__hw_insights_{schema}_{_safe_identifier(physical_table)}")
+    select_exprs = [
+        f"{expr} AS {quote_ident(f'__hw_{name}')}" for name, expr in expressions.items()
+    ]
+    con.execute(
+        f"""
+        CREATE OR REPLACE TEMP VIEW {view_name} AS
+        SELECT *, {", ".join(select_exprs)}
+        FROM {table_ref}
+        """
+    )
+    derived = {name: quote_ident(f"__hw_{name}") for name in expressions}
+    return view_name, derived
+
+
+def _volume_family(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    source_table: str,
+    start: SemanticColumnRole,
+    start_expr: str,
+    duration_expr: str | None,
+) -> list[StatisticalInsight]:
+    rows = con.execute(
+        f"""
+        SELECT CAST(EXTRACT(hour FROM {start_expr}) AS INTEGER) AS hour_bucket, COUNT(*) AS n
+        FROM {table_ref}
+        WHERE {start_expr} IS NOT NULL
+        GROUP BY 1
+        ORDER BY n DESC
+        LIMIT 3
+        """
+    ).fetchall()
+    if not rows:
+        return []
+    top_hour, top_n = rows[0]
+    desc = (
+        f"{_format_hour(top_hour)} is the busiest {_event_label(start.column_name)} "
+        f"with {int(top_n):,} records."
+    )
+    magnitude = float(top_n)
+    if duration_expr:
+        peak_avg_expr = (
+            f"AVG(CASE WHEN EXTRACT(hour FROM {start_expr}) BETWEEN 15 AND 18 "
+            f"THEN {duration_expr} END)"
+        )
+        off_avg_expr = (
+            f"AVG(CASE WHEN EXTRACT(hour FROM {start_expr}) NOT BETWEEN 15 AND 18 "
+            f"THEN {duration_expr} END)"
+        )
+        peak = con.execute(
+            f"""
+            SELECT
+                {peak_avg_expr} AS peak_avg,
+                {off_avg_expr} AS off_avg
+            FROM {table_ref}
+            WHERE {start_expr} IS NOT NULL AND {duration_expr} BETWEEN 0 AND 1440
+            """
+        ).fetchone()
+        if peak and peak[0] is not None and peak[1] is not None:
+            diff = float(peak[0]) - float(peak[1])
+            direction = "longer" if diff >= 0 else "shorter"
+            desc += (
+                f" The 3 PM-6 PM period averages {abs(diff):.2f} minutes "
+                f"{direction} than other hours."
+            )
+            magnitude = abs(diff)
+    return [
+        StatisticalInsight(
+            metric="record_count",
+            table_name=source_table,
+            insight_type="volume_distribution",
+            description=desc,
+            magnitude=round(magnitude, 2),
+            confidence_level="99%",
+            comparison_baseline="hour-of-day volume",
+            severity="info",
+        )
+    ]
+
+
+def _peak_family(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    source_table: str,
+    start_expr: str,
+    duration_expr: str,
+) -> list[StatisticalInsight]:
+    weekday_filter = f"EXTRACT(dow FROM {start_expr}) BETWEEN 1 AND 5"
+    weekend_filter = f"EXTRACT(dow FROM {start_expr}) IN (0, 6)"
+    row = con.execute(
+        f"""
+        SELECT
+            AVG(CASE WHEN {weekday_filter} THEN {duration_expr} END) AS weekday_avg,
+            quantile_cont(
+                CASE WHEN {weekday_filter} THEN {duration_expr} END, 0.9
+            ) AS weekday_p90,
+            AVG(CASE WHEN {weekend_filter} THEN {duration_expr} END) AS weekend_avg,
+            quantile_cont(
+                CASE WHEN {weekend_filter} THEN {duration_expr} END, 0.9
+            ) AS weekend_p90
+        FROM {table_ref}
+        WHERE {start_expr} IS NOT NULL AND {duration_expr} BETWEEN 0 AND 1440
+        """
+    ).fetchone()
+    if not row or row[0] is None or row[2] is None:
+        return []
+    diff = float(row[0]) - float(row[2])
+    if abs(diff) < 0.5:
+        return []
+    return [
+        StatisticalInsight(
+            metric="duration_min",
+            table_name=source_table,
+            insight_type="peak_period",
+            description=(
+                f"Weekday records average {abs(diff):.2f} minutes "
+                f"{'longer' if diff >= 0 else 'shorter'} than weekend records "
+                f"(p90 {float(row[1]):.1f} vs {float(row[3]):.1f} minutes)."
+            ),
+            magnitude=round(abs(diff), 2),
+            confidence_level="99%",
+            comparison_baseline="weekday vs weekend",
+            severity="info" if abs(diff) < 5 else "warning",
+        )
+    ]
+
+
+def _duration_family(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    source_table: str,
+    start_expr: str | None,
+    duration_expr: str,
+) -> list[StatisticalInsight]:
+    group_expr = "1"
+    group_label = "overall"
+    if start_expr:
+        group_expr = f"CAST(EXTRACT(hour FROM {start_expr}) AS INTEGER)"
+        group_label = "hour"
+    row = con.execute(
+        f"""
+        WITH grouped AS (
+            SELECT {group_expr} AS bucket,
+                   COUNT(*) AS n,
+                   AVG({duration_expr}) AS avg_duration,
+                   quantile_cont({duration_expr}, 0.5) AS p50_duration,
+                   quantile_cont({duration_expr}, 0.9) AS p90_duration,
+                   quantile_cont({duration_expr}, 0.95) AS p95_duration
+            FROM {table_ref}
+            WHERE {duration_expr} BETWEEN 0 AND 1440
+            GROUP BY 1
+            HAVING COUNT(*) >= 30
+        )
+        SELECT bucket, n, avg_duration, p50_duration, p90_duration, p95_duration
+        FROM grouped
+        ORDER BY p90_duration DESC, n DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return []
+    bucket = _format_hour(row[0]) if group_label == "hour" else "overall"
+    return [
+        StatisticalInsight(
+            metric="duration_min",
+            table_name=source_table,
+            insight_type="duration_distribution",
+            description=(
+                f"The slowest {group_label} is {bucket}: avg {float(row[2]):.1f} min, "
+                f"p50 {float(row[3]):.1f}, p90 {float(row[4]):.1f}, p95 {float(row[5]):.1f} "
+                f"across {int(row[1]):,} records."
+            ),
+            magnitude=round(float(row[4]), 2),
+            confidence_level="99%",
+            comparison_baseline=f"p90 duration by {group_label}",
+            severity="info",
+        )
+    ]
+
+
+def _geo_family(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    source_table: str,
+    origin: SemanticColumnRole,
+    duration_expr: str,
+) -> list[StatisticalInsight]:
+    origin_col = quote_ident(origin.column_name)
+    row = con.execute(
+        f"""
+        WITH grouped AS (
+            SELECT {origin_col} AS origin_value,
+                   COUNT(*) AS n,
+                   AVG({duration_expr}) AS avg_duration,
+                   quantile_cont({duration_expr}, 0.9) AS p90_duration
+            FROM {table_ref}
+            WHERE {origin_col} IS NOT NULL AND {duration_expr} BETWEEN 0 AND 1440
+            GROUP BY 1
+            HAVING COUNT(*) >= 30
+        )
+        SELECT origin_value, n, avg_duration, p90_duration
+        FROM grouped
+        ORDER BY p90_duration DESC, n DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return []
+    label = _format_dimension_value(row[0])
+    return [
+        StatisticalInsight(
+            metric="duration_min",
+            table_name=source_table,
+            insight_type="geographic_hotspot",
+            description=(
+                f"{label} has the longest high-volume {_humanize(origin.column_name)} durations: "
+                f"avg {float(row[2]):.1f} min, p90 {float(row[3]):.1f} min across "
+                f"{int(row[1]):,} records."
+            ),
+            magnitude=round(float(row[3]), 2),
+            confidence_level="99%",
+            comparison_baseline=f"p90 duration by {origin.column_name}",
+            severity="warning",
+        )
+    ]
+
+
+def _route_family(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    source_table: str,
+    origin: SemanticColumnRole,
+    dest: SemanticColumnRole,
+    duration_expr: str,
+) -> list[StatisticalInsight]:
+    o_col = quote_ident(origin.column_name)
+    d_col = quote_ident(dest.column_name)
+    row = con.execute(
+        f"""
+        WITH grouped AS (
+            SELECT {o_col} AS origin_value, {d_col} AS destination_value,
+                   COUNT(*) AS n,
+                   AVG({duration_expr}) AS avg_duration,
+                   quantile_cont({duration_expr}, 0.9) AS p90_duration
+            FROM {table_ref}
+            WHERE {o_col} IS NOT NULL AND {d_col} IS NOT NULL AND {duration_expr} BETWEEN 0 AND 1440
+            GROUP BY 1, 2
+            HAVING COUNT(*) >= 30
+        )
+        SELECT origin_value, destination_value, n, avg_duration, p90_duration
+        FROM grouped
+        ORDER BY p90_duration DESC, n DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return []
+    route = f"{_format_dimension_value(row[0])} -> {_format_dimension_value(row[1])}"
+    return [
+        StatisticalInsight(
+            metric="duration_min",
+            table_name=source_table,
+            insight_type="route_pair",
+            description=(
+                f"The slowest high-volume route is {route}: avg {float(row[3]):.1f} min, "
+                f"p90 {float(row[4]):.1f} min across {int(row[2]):,} records."
+            ),
+            magnitude=round(float(row[4]), 2),
+            confidence_level="99%",
+            comparison_baseline="p90 duration by origin/destination pair",
+            severity="warning",
+        )
+    ]
+
+
+def _congestion_family(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    source_table: str,
+    distance: SemanticColumnRole,
+    duration_expr: str,
+) -> list[StatisticalInsight]:
+    dist = quote_ident(distance.column_name)
+    speed_expr = f"CASE WHEN {duration_expr} > 0 THEN {dist} / ({duration_expr} / 60.0) END"
+    row = con.execute(
+        f"""
+        SELECT COUNT(*) AS n,
+               quantile_cont({speed_expr}, 0.1) AS p10_speed,
+               AVG({speed_expr}) AS avg_speed
+        FROM {table_ref}
+        WHERE {dist} > 0 AND {duration_expr} BETWEEN 1 AND 1440 AND {speed_expr} BETWEEN 0 AND 200
+        """
+    ).fetchone()
+    if not row or row[1] is None:
+        return []
+    return [
+        StatisticalInsight(
+            metric="speed_per_hour",
+            table_name=source_table,
+            insight_type="congestion_proxy",
+            description=(
+                f"Low-speed records flag potential congestion: p10 speed is "
+                f"{float(row[1]):.1f} distance-units/hour and average speed is "
+                f"{float(row[2]):.1f} across {int(row[0]):,} valid records."
+            ),
+            magnitude=round(float(row[1]), 2),
+            confidence_level="95%",
+            comparison_baseline="distance divided by lifecycle duration",
+            severity="info",
+        )
+    ]
+
+
+def _quality_family(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    source_table: str,
+    origin: SemanticColumnRole | None,
+    dest: SemanticColumnRole | None,
+    distance: SemanticColumnRole | None,
+    duration_expr: str | None,
+    service: SemanticColumnRole | None,
+) -> list[StatisticalInsight]:
+    insights: list[StatisticalInsight] = []
+    cols = [role for role in (origin, dest) if role]
+    for role in cols:
+        col = quote_ident(role.column_name)
+        row = con.execute(
+            "SELECT COUNT(*) AS n, "
+            f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS nulls "
+            f"FROM {table_ref}"
+        ).fetchone()
+        if row and row[0] and float(row[1]) / float(row[0]) >= 0.2:
+            rate = float(row[1]) / float(row[0]) * 100
+            service_label = _service_label(source_table, service)
+            insights.append(
+                StatisticalInsight(
+                    metric=role.column_name,
+                    table_name=source_table,
+                    insight_type="data_quality",
+                    description=(
+                        f"{service_label} location analysis is unreliable unless null "
+                        f"{role.column_name} values are handled: {rate:.1f}% are missing."
+                    ),
+                    magnitude=round(rate, 2),
+                    confidence_level="99%",
+                    comparison_baseline="null-rate threshold 20%",
+                    severity="critical" if rate >= 50 else "warning",
+                )
+            )
+    if distance:
+        col = quote_ident(distance.column_name)
+        row = con.execute(
+            "SELECT COUNT(*) AS n, "
+            f"SUM(CASE WHEN {col} <= 0 THEN 1 ELSE 0 END) AS bad "
+            f"FROM {table_ref}"
+        ).fetchone()
+        if row and row[0] and float(row[1]) / float(row[0]) >= 0.05:
+            rate = float(row[1]) / float(row[0]) * 100
+            insights.append(
+                StatisticalInsight(
+                    metric=distance.column_name,
+                    table_name=source_table,
+                    insight_type="data_quality",
+                    description=(
+                        f"{rate:.1f}% of records have non-positive "
+                        f"{distance.column_name}; distance-based insights should filter them."
+                    ),
+                    magnitude=round(rate, 2),
+                    confidence_level="99%",
+                    comparison_baseline="non-positive distance rate",
+                    severity="warning",
+                )
+            )
+    if duration_expr:
+        row = con.execute(
+            "SELECT COUNT(*) AS n, "
+            f"SUM(CASE WHEN {duration_expr} <= 0 OR {duration_expr} > 1440 "
+            f"THEN 1 ELSE 0 END) AS bad FROM {table_ref}"
+        ).fetchone()
+        if row and row[0] and float(row[1]) / float(row[0]) >= 0.01:
+            rate = float(row[1]) / float(row[0]) * 100
+            insights.append(
+                StatisticalInsight(
+                    metric="duration_min",
+                    table_name=source_table,
+                    insight_type="data_quality",
+                    description=(
+                        f"{rate:.1f}% of records have impossible or extreme "
+                        "lifecycle duration; duration insights should filter them."
+                    ),
+                    magnitude=round(rate, 2),
+                    confidence_level="99%",
+                    comparison_baseline="duration outside 0-1440 minutes",
+                    severity="warning",
+                )
+            )
+    return insights
+
+
+def _wait_family(
+    con: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    source_table: str,
+    start_expr: str,
+    wait_expr: str,
+) -> list[StatisticalInsight]:
+    rows = con.execute(
+        f"""
+        SELECT CAST(EXTRACT(hour FROM {start_expr}) AS INTEGER) AS hour_bucket,
+               COUNT(*) AS n,
+               quantile_cont({wait_expr}, 0.9) AS p90_wait
+        FROM {table_ref}
+        WHERE {start_expr} IS NOT NULL AND {wait_expr} BETWEEN 0 AND 240
+        GROUP BY 1
+        HAVING COUNT(*) >= 30
+        ORDER BY p90_wait DESC, n DESC
+        LIMIT 2
+        """
+    ).fetchall()
+    if not rows:
+        return []
+    hours = " and ".join(_format_hour(row[0]) for row in rows)
+    return [
+        StatisticalInsight(
+            metric="wait_min",
+            table_name=source_table,
+            insight_type="duration_distribution",
+            description=(
+                f"Wait time is highest around {hours}, with p90 wait near "
+                f"{float(rows[0][2]):.1f} minutes."
+            ),
+            magnitude=round(float(rows[0][2]), 2),
+            confidence_level="99%",
+            comparison_baseline="p90 wait by hour",
+            severity="info",
+        )
+    ]
+
+
+def _rank_family_insights(insights: list[StatisticalInsight]) -> list[StatisticalInsight]:
+    severity_weight = {"critical": 3.0, "warning": 2.0, "info": 1.0}
+    type_weight = {
+        "data_quality": 1.25,
+        "volume_distribution": 1.2,
+        "peak_period": 1.15,
+        "geographic_hotspot": 1.1,
+        "route_pair": 1.05,
+    }
+    return sorted(
+        insights,
+        key=lambda i: (
+            -(
+                abs(i.magnitude)
+                * severity_weight.get(i.severity, 1.0)
+                * type_weight.get(i.insight_type, 1.0)
+            ),
+            i.table_name,
+            i.metric,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +1151,15 @@ def _load_table(con: duckdb.DuckDBPyConnection, schema: str, table: str) -> pl.D
     Casts Decimal columns to Float64 so scipy/numpy can process them.
     """
     try:
+        row_count = _table_row_count(con, schema, table)
+        if row_count is not None and row_count > _MAX_POLARS_LOAD_ROWS:
+            logger.info(
+                "Skipping Polars full-table load for %s.%s (%d rows)",
+                schema,
+                table,
+                row_count,
+            )
+            return None
         arrow = con.execute(f"SELECT * FROM {schema}.{table}").arrow()
         df = pl.from_arrow(arrow)
         # Cast Decimal columns to Float64 for scipy compatibility
@@ -289,6 +1172,20 @@ def _load_table(con: duckdb.DuckDBPyConnection, schema: str, table: str) -> pl.D
         return df
     except Exception as e:
         logger.debug("Could not load %s.%s: %s", schema, table, e)
+        return None
+
+
+def _table_row_count(
+    con: duckdb.DuckDBPyConnection,
+    schema: str,
+    table: str,
+) -> int | None:
+    try:
+        value = con.execute(
+            f"SELECT COUNT(*) FROM {quote_ident(schema)}.{quote_ident(table)}"
+        ).fetchone()[0]
+        return int(value)
+    except Exception:
         return None
 
 
@@ -684,6 +1581,226 @@ def _detect_correlations(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _load_family_spec() -> dict:
+    path = Path(__file__).resolve().parents[1] / "analyzer" / "insight_families.yaml"
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {
+            "families": [
+                {"key": "coverage"},
+                {"key": "volume"},
+                {"key": "peak"},
+                {"key": "duration"},
+                {"key": "geo"},
+                {"key": "quality"},
+            ]
+        }
+
+
+def _source_table_for_physical_table(
+    physical_table: str,
+    discovery: DiscoveryResult,
+    models: list[GeneratedModel] | None = None,
+) -> TableInfo | None:
+    tables_by_name = {table.name: table for table in discovery.tables}
+    tables_by_lower = {table.name.lower(): table for table in discovery.tables}
+    candidates = [physical_table]
+    if physical_table.startswith("stg_"):
+        candidates.append(physical_table[4:])
+    for candidate in candidates:
+        if candidate in tables_by_name:
+            return tables_by_name[candidate]
+    lowered = physical_table.lower()
+    if lowered in tables_by_lower:
+        return tables_by_lower[lowered]
+    if lowered.startswith("stg_") and lowered[4:] in tables_by_lower:
+        return tables_by_lower[lowered[4:]]
+
+    for model in models or []:
+        if model.name != physical_table and model.name.lower() != lowered:
+            continue
+        for source in model.source_tables:
+            if source in tables_by_name:
+                return tables_by_name[source]
+            if source.lower() in tables_by_lower:
+                return tables_by_lower[source.lower()]
+    return None
+
+
+def _filter_tables_for_models(
+    tables: list[str],
+    schema: str,
+    models: list[GeneratedModel] | None,
+) -> list[str]:
+    if not models:
+        return tables
+    expected_type = "staging" if schema == "staging" else "mart" if schema == "marts" else None
+    relevant = {
+        model.name
+        for model in models
+        if model.status == "executed"
+        and (expected_type is None or model.model_type == expected_type)
+    }
+    if not relevant:
+        return tables
+    return [table for table in tables if table in relevant]
+
+
+def _roles_for_physical_table(
+    con: duckdb.DuckDBPyConnection,
+    schema: str,
+    physical_table: str,
+    source_table: str,
+    roles: dict[str, SemanticColumnRole],
+) -> dict[str, SemanticColumnRole]:
+    """Keep only semantic roles whose columns exist on the materialized table."""
+    column_names = _physical_column_names(con, schema, physical_table)
+    if not column_names:
+        return roles
+
+    by_lower = {name.lower(): name for name in column_names}
+    mapped: dict[str, SemanticColumnRole] = {}
+    for canonical_role, role in roles.items():
+        actual = by_lower.get(role.column_name.lower())
+        if actual is None:
+            continue
+        mapped[canonical_role] = role.model_copy(
+            update={"table_name": source_table, "column_name": actual}
+        )
+
+    if "event_ts" not in mapped and "lifecycle_start_ts" not in mapped:
+        for candidate in ("period", "date", "event_date", "timestamp"):
+            actual = by_lower.get(candidate)
+            if actual is None:
+                continue
+            mapped["event_ts"] = SemanticColumnRole(
+                table_name=source_table,
+                column_name=actual,
+                canonical_role="event_ts",
+                confidence=0.7,
+                source="name_registry",
+                reason="Materialized table period column",
+            )
+            break
+
+    return mapped
+
+
+def _physical_column_names(
+    con: duckdb.DuckDBPyConnection,
+    schema: str,
+    physical_table: str,
+) -> list[str]:
+    try:
+        rows = con.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = ? AND table_name = ?
+            ORDER BY ordinal_position
+            """,
+            (schema, physical_table),
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not inspect columns for %s.%s: %s", schema, physical_table, exc)
+        return []
+    return [str(row[0]) for row in rows]
+
+
+def _safe_identifier(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in value)
+
+
+def _temporal_expr(role: SemanticColumnRole | None) -> str | None:
+    if not role:
+        return None
+    col = quote_ident(role.column_name)
+    name = role.column_name.lower()
+    if name == "year" or name.endswith("_year"):
+        year_expr = f"try_cast({col} AS INTEGER)"
+        return (
+            f"CASE WHEN {year_expr} BETWEEN 1 AND 9999 "
+            f"THEN make_timestamp({year_expr}, 1, 1, 0, 0, 0) END"
+        )
+    return f"try_cast({col} AS TIMESTAMP)"
+
+
+def _duration_expr(
+    start_expr: str | None,
+    end_expr: str | None,
+) -> str | None:
+    if not start_expr or not end_expr:
+        return None
+    return f"date_diff('second', {start_expr}, {end_expr}) / 60.0"
+
+
+def _wait_expr(
+    request_expr: str | None,
+    start_expr: str | None,
+) -> str | None:
+    if not request_expr or not start_expr:
+        return None
+    return f"date_diff('second', {request_expr}, {start_expr}) / 60.0"
+
+
+def _days_between(start, end) -> int:
+    try:
+        delta = end - start
+        return max(1, int(getattr(delta, "days", 0)) + 1)
+    except Exception:
+        return 1
+
+
+def _format_hour(hour: object) -> str:
+    try:
+        h = int(hour)
+    except Exception:
+        return str(hour)
+    suffix = "AM" if h < 12 else "PM"
+    display = h % 12
+    if display == 0:
+        display = 12
+    return f"{display} {suffix}"
+
+
+def _humanize(value: str) -> str:
+    text = value.replace("_", " ").replace("-", " ").strip()
+    return " ".join(text.split())
+
+
+def _event_label(column_name: str) -> str:
+    label = _humanize(column_name).lower()
+    if "pickup" in label:
+        return "pickup hour"
+    if "start" in label:
+        return "start hour"
+    if "created" in label:
+        return "created hour"
+    return "event hour"
+
+
+def _format_dimension_value(value: object) -> str:
+    if value is None:
+        return "missing"
+    return _humanize(str(value))
+
+
+def _service_label(source_table: str, service: SemanticColumnRole | None) -> str:
+    name = source_table.lower()
+    if "hvfhv" in name or "fhvhv" in name:
+        return "HVFHV"
+    if "fhv" in name:
+        return "FHV"
+    if "yellow" in name:
+        return "Yellow service"
+    if "green" in name:
+        return "Green service"
+    if service:
+        return _humanize(service.column_name)
+    return _humanize(source_table)
+
 
 def _format_date(val: object) -> str:
     """Format a date/datetime value to a readable string."""

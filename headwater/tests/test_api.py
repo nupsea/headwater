@@ -1017,6 +1017,37 @@ class TestProjectRename:
         assert resp.json()["description"] == "Updated desc"
 
 
+class TestProjectGraph:
+    """Project-scoped graph API payload shape."""
+
+    def test_project_graph_data_includes_erd_fields(self, client):
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        project_resp = client.post(
+            "/api/projects",
+            json={"display_name": "Graph Project", "sources": ["source"]},
+        )
+        project_id = project_resp.json()["id"]
+
+        resp = client.get("/api/graph/data", params={"project_id": project_id})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["nodes"]
+        for node in data["nodes"]:
+            assert set(node) >= {"id", "row_count", "domain", "description"}
+            assert isinstance(node["row_count"], int)
+        for edge in data["edges"]:
+            assert set(edge) >= {
+                "source",
+                "target",
+                "from_column",
+                "to_column",
+                "rel_type",
+                "confidence",
+                "ref_integrity",
+                "nullable",
+            }
+
+
 class TestActivityFeed:
     """GET /api/activity -- recent activity feed."""
 
@@ -1268,6 +1299,25 @@ class TestExplorerE2E:
             assert s.get("sql_hint"), (
                 f"Suggestion missing SQL hint: {s['question']}"
             )
+
+    def test_suggestions_include_insight_diagnostics(self, client):
+        """Explore suggestions should expose family diagnostics for validation."""
+        self._run_pipeline(client)
+        resp = client.get("/api/explore/suggestions")
+        assert resp.status_code == 200
+        diagnostics = resp.json().get("diagnostics")
+        assert isinstance(diagnostics, list)
+        assert diagnostics, "Expected insight family diagnostics"
+        assert {
+            "schema_name",
+            "physical_table",
+            "family",
+            "status",
+            "required_roles",
+            "found_roles",
+            "generated_count",
+            "reason",
+        }.issubset(diagnostics[0])
 
     def test_suggestions_cover_multiple_sources(self, client):
         """Suggestions should come from multiple sources, not just one."""

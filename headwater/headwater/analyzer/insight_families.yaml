@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "families": [
+    {
+      "key": "coverage",
+      "required_roles": ["event_ts"],
+      "ranking": {"effect_size": 0.15, "population_size": 0.45, "confidence": 0.25, "actionability": 0.15}
+    },
+    {
+      "key": "volume",
+      "required_roles": ["event_ts"],
+      "grains": ["date", "hour"],
+      "ranking": {"effect_size": 0.25, "population_size": 0.4, "confidence": 0.2, "actionability": 0.15}
+    },
+    {
+      "key": "peak",
+      "required_roles": ["event_ts", "duration_min"],
+      "quantiles": ["p50", "p90", "p95"],
+      "ranking": {"effect_size": 0.3, "population_size": 0.3, "confidence": 0.2, "actionability": 0.2}
+    },
+    {
+      "key": "duration",
+      "required_roles": ["duration_min"],
+      "quantiles": ["p50", "p90", "p95"],
+      "ranking": {"effect_size": 0.35, "population_size": 0.25, "confidence": 0.2, "actionability": 0.2}
+    },
+    {
+      "key": "geo",
+      "required_roles": ["origin_id", "duration_min"],
+      "quantiles": ["p50", "p90", "p95"],
+      "ranking": {"effect_size": 0.3, "population_size": 0.25, "confidence": 0.15, "actionability": 0.3}
+    },
+    {
+      "key": "quality",
+      "required_roles": [],
+      "ranking": {"effect_size": 0.3, "population_size": 0.25, "confidence": 0.15, "actionability": 0.3}
+    }
+  ]
+}

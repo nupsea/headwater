@@ -15,10 +15,11 @@ from headwater.analyzer.companion import (
 )
 from headwater.analyzer.eval import evaluate_catalog
 from headwater.analyzer.semantic import analyze
+from headwater.analyzer.semantic_schema import ambiguous_roles, infer_semantic_schema
 from headwater.api.project_scope import project_for_source, scoped_pipeline
 from headwater.connectors.registry import get_connector
 from headwater.core.events import EventType
-from headwater.core.models import SourceConfig
+from headwater.core.models import DatasetContext, SourceConfig
 from headwater.core.redaction import redact_secrets
 from headwater.drift.schema import build_snapshot_from_discovery, compare_schemas
 from headwater.profiler.engine import discover
@@ -224,6 +225,13 @@ class ColumnPatchRequest(BaseModel):
     locked: bool | None = None
 
 
+class SemanticConfirmRequest(BaseModel):
+    """Payload for confirming inferred semantic roles."""
+
+    min_confidence: float = 0.8
+    table_name: str | None = None
+
+
 @router.patch("/columns/{source_name}/{table_name}/{column_name}")
 async def patch_column(
     request: Request,
@@ -288,6 +296,133 @@ async def patch_column(
         "description": col.description,
         "locked": should_lock,
     }
+
+
+@router.get("/dataset-context")
+async def get_dataset_context(request: Request, project_id: str | None = None):
+    """Return optional dataset framing context for the active source."""
+    discovery = scoped_pipeline(request, project_id)["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+    store = request.app.state.metadata_store
+    row = store.get_dataset_context(discovery.source.name)
+    if row:
+        return DatasetContext(**row).model_dump(mode="json")
+    return DatasetContext(source_name=discovery.source.name).model_dump(mode="json")
+
+
+@router.put("/dataset-context")
+async def put_dataset_context(
+    body: DatasetContext,
+    request: Request,
+    project_id: str | None = None,
+):
+    """Persist optional dataset framing context for the active source."""
+    discovery = scoped_pipeline(request, project_id)["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+    source_name = discovery.source.name
+    context = body.model_copy(update={"source_name": source_name})
+    payload = context.model_dump(mode="json", exclude={"updated_at"})
+    store = request.app.state.metadata_store
+    store.upsert_dataset_context(source_name, payload)
+    store.record_decision("dataset_context", source_name, "updated", payload=payload)
+    return store.get_dataset_context(source_name) or context.model_dump(mode="json")
+
+
+@router.get("/semantic-schema")
+async def get_semantic_schema(request: Request, project_id: str | None = None):
+    """Return inferred canonical roles and derived fields for the active source."""
+    discovery = scoped_pipeline(request, project_id)["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+    store = request.app.state.metadata_store
+    context_row = store.get_dataset_context(discovery.source.name)
+    context = DatasetContext(**context_row) if context_row else None
+    schema = infer_semantic_schema(discovery, context)
+    return {
+        **schema.model_dump(mode="json"),
+        "ambiguous_count": len(ambiguous_roles(schema)),
+    }
+
+
+@router.post("/semantic-schema/confirm")
+async def confirm_semantic_schema(
+    body: SemanticConfirmRequest,
+    request: Request,
+    project_id: str | None = None,
+):
+    """Lock high-confidence inferred roles, leaving ambiguous columns for review."""
+    pipeline = scoped_pipeline(request, project_id)
+    discovery = pipeline["discovery"]
+    if not discovery:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
+    store = request.app.state.metadata_store
+    context_row = store.get_dataset_context(discovery.source.name)
+    context = DatasetContext(**context_row) if context_row else None
+    schema = infer_semantic_schema(discovery, context)
+
+    confirmed = 0
+    updates_by_table: dict[str, list[dict]] = {}
+    for role in schema.columns:
+        if role.locked or role.confidence < body.min_confidence:
+            continue
+        if body.table_name and role.table_name != body.table_name:
+            continue
+        updates_by_table.setdefault(role.table_name, []).append(
+            {
+                "name": role.column_name,
+                "role": _dictionary_role_for_canonical(role.canonical_role),
+                "semantic_type": _semantic_type_for_canonical(role.canonical_role),
+                "confidence": role.confidence,
+            }
+        )
+
+    for table_name, updates in updates_by_table.items():
+        store.bulk_update_columns(table_name, discovery.source.name, updates, lock=True)
+        confirmed += len(updates)
+        table = next((t for t in discovery.tables if t.name == table_name), None)
+        if table:
+            by_col = {update["name"]: update for update in updates}
+            for col in table.columns:
+                update = by_col.get(col.name)
+                if update:
+                    col.role = update["role"]
+                    col.semantic_type = update["semantic_type"]
+                    col.confidence = update["confidence"]
+                    col.locked = True
+
+    store.record_decision(
+        "semantic_schema",
+        discovery.source.name,
+        "confirmed",
+        payload={"columns_confirmed": confirmed, "min_confidence": body.min_confidence},
+    )
+    return {"columns_confirmed": confirmed}
+
+
+def _dictionary_role_for_canonical(role: str) -> str:
+    if role.endswith("_ts"):
+        return "temporal"
+    if role in {"origin_id", "destination_id", "location_id"}:
+        return "geographic"
+    if role in {"service_type"}:
+        return "dimension"
+    if role in {"distance", "duration", "amount", "tip_amount", "count", "measure"}:
+        return "metric"
+    return "dimension"
+
+
+def _semantic_type_for_canonical(role: str) -> str:
+    if role.endswith("_ts"):
+        return "temporal"
+    if role in {"origin_id", "destination_id", "location_id"}:
+        return "geographic"
+    if role in {"service_type"}:
+        return "dimension"
+    if role in {"distance", "duration", "amount", "tip_amount", "count", "measure"}:
+        return "metric"
+    return "dimension"
 
 
 def _persist_discovery_data(request: Request, discovery, source_name: str) -> None:

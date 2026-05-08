@@ -364,8 +364,17 @@ export interface StatisticalInsight {
   insight_type:
     | "temporal_anomaly"
     | "period_comparison"
+    | "change_point"
     | "correlation"
-    | "distribution_shift";
+    | "distribution_shift"
+    | "coverage_period"
+    | "volume_distribution"
+    | "peak_period"
+    | "duration_distribution"
+    | "geographic_hotspot"
+    | "route_pair"
+    | "congestion_proxy"
+    | "data_quality";
   description: string;
   magnitude: number;
   z_score: number | null;
@@ -416,12 +425,65 @@ export interface ExplorationResult {
 export interface ExploreSuggestionsResponse {
   suggestions: SuggestedQuestion[];
   insights: StatisticalInsight[];
+  diagnostics?: InsightFamilyDiagnostic[];
   review_pct: number;
 }
 
 export interface ExploreInsightsResponse {
   insights: StatisticalInsight[];
+  diagnostics?: InsightFamilyDiagnostic[];
   total: number;
+}
+
+export interface InsightFamilyDiagnostic {
+  schema_name: string;
+  physical_table: string;
+  table_name: string | null;
+  family: string;
+  status: "generated" | "skipped" | "failed";
+  required_roles: string[];
+  found_roles: string[];
+  generated_count: number;
+  reason: string | null;
+}
+
+export interface DatasetContext {
+  source_name: string;
+  row_represents: string | null;
+  time_grain: string | null;
+  period_covered: string | null;
+  lifecycle: string | null;
+  decisions: string | null;
+  quality_caveats: string | null;
+  external_references: string[];
+  updated_at: string | null;
+}
+
+export interface SemanticColumnRole {
+  table_name: string;
+  column_name: string;
+  canonical_role: string;
+  confidence: number;
+  source: "name_registry" | "profile_stats" | "human_lock" | "context";
+  locked: boolean;
+  reason: string | null;
+}
+
+export interface SemanticDerivedField {
+  table_name: string;
+  name: string;
+  expression: string;
+  role: string;
+  required_roles: string[];
+  confidence: number;
+}
+
+export interface SemanticSchema {
+  source_name: string;
+  columns: SemanticColumnRole[];
+  derived_fields: SemanticDerivedField[];
+  generated_at: string;
+  ambiguous_count: number;
 }
 
 // ---------- Drift types (US-402, US-403) ----------
@@ -1100,6 +1162,26 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
+    }),
+
+  datasetContext: (projectId?: string | null) =>
+    fetchJSON<DatasetContext>(`/dataset-context${projectQuery(projectId)}`),
+
+  saveDatasetContext: (body: DatasetContext, projectId?: string | null) =>
+    fetchJSON<DatasetContext>(appendProjectQuery("/dataset-context", projectId), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
+  semanticSchema: (projectId?: string | null) =>
+    fetchJSON<SemanticSchema>(`/semantic-schema${projectQuery(projectId)}`),
+
+  confirmSemanticSchema: (body: { min_confidence?: number; table_name?: string | null }, projectId?: string | null) =>
+    fetchJSON<{ columns_confirmed: number }>(appendProjectQuery("/semantic-schema/confirm", projectId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
 
   // Drift (US-402, US-403)
