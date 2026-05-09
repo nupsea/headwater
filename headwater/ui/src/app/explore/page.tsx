@@ -757,7 +757,7 @@ export default function ExplorePage() {
               <div className="grid gap-3 lg:grid-cols-3">
                 {featuredSuggestions.map((s, i) => (
                   <button
-                    key={`featured-${s.question}`}
+                    key={`featured-${s.source}-${s.category}-${i}-${s.question}`}
                     onClick={() => askQuestion(s.question)}
                     disabled={loading}
                     className={`text-left border border-border rounded-lg bg-card hover:border-foreground transition-colors disabled:opacity-50 ${

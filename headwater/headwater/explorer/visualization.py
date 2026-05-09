@@ -121,27 +121,23 @@ def _classify_columns(
     sample = data[:50]  # Sample first 50 rows
 
     for col in columns:
-        # Check by name pattern first
-        if _TEMPORAL_PATTERNS.search(col):
-            result[col] = "temporal"
-            continue
-
-        # Check by value type
         values = [row.get(col) for row in sample if row.get(col) is not None]
         if not values:
-            result[col] = "dimension"
+            if _TEMPORAL_PATTERNS.search(col):
+                result[col] = "temporal"
+            else:
+                result[col] = "dimension"
             continue
 
-        # If all values are numeric, it's a metric
+        # Trust actual value shape first. Numeric columns like avg_trip_time or
+        # wait_time are metrics even though the name contains "time".
         if all(isinstance(v, (int, float)) for v in values):
-            # Unless it looks like a dimension by name
             if _DIMENSION_PATTERNS.search(col):
                 result[col] = "dimension"
             else:
                 result[col] = "metric"
         elif all(isinstance(v, str) for v in values):
-            # Check if string values look like dates
-            if _looks_like_date(values[:5]):
+            if _TEMPORAL_PATTERNS.search(col) or _looks_like_date(values[:5]):
                 result[col] = "temporal"
             else:
                 result[col] = "dimension"

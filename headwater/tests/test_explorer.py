@@ -2464,6 +2464,16 @@ class TestVisualization:
         assert viz.x_axis == "reading_date"
         assert viz.y_axis == "avg_value"
 
+    def test_line_temporal_with_numeric_time_metric_name(self):
+        data = [
+            {"period": "2026-01-01", "avg_trip_time": 18.4},
+            {"period": "2026-01-02", "avg_trip_time": 19.1},
+        ]
+        viz = recommend_visualization(["period", "avg_trip_time"], data)
+        assert viz.chart_type == "line"
+        assert viz.x_axis == "period"
+        assert viz.y_axis == "avg_trip_time"
+
     def test_bar_dimension_metric(self):
         data = [
             {"zone_name": "Zone A", "count": 100},
