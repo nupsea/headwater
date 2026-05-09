@@ -74,6 +74,11 @@ _ENUM_LABEL_REGISTRY: dict[str, dict[object, str]] = {
 _ENUM_DIMENSION_LABELS = {
     "payment_type": "payment method",
 }
+_AGGREGATE_METRIC_RE = re.compile(
+    r"^(avg|average|mean|median|min|max|p\d+|pct|percent|rate|ratio|share|count|total|sum)_",
+    re.IGNORECASE,
+)
+_SUMMARY_NAME_RE = re.compile(r"(summary|overview|snapshot|totals?)", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +228,7 @@ def _select_diverse_questions(candidates: list[SuggestedQuestion]) -> list[Sugge
         candidates,
         key=lambda q: (
             source_priority.get(q.source, 99),
+            -_question_value_score(q),
             len(q.relevant_tables or []),
             len(q.question),
         ),
@@ -307,6 +313,35 @@ def _question_shape(question: str) -> str:
     return "other"
 
 
+def _question_value_score(question: SuggestedQuestion) -> int:
+    score = 0
+    shape = _question_shape(question.question)
+    shape_weight = {
+        "ranking": 6,
+        "trend": 5,
+        "count": 4,
+        "average": 3,
+        "quality": 2,
+        "distribution": -2,
+        "other": 0,
+    }
+    score += shape_weight.get(shape, 0)
+    if question.source in {"business", "cross_table", "catalog"}:
+        score += 4
+    elif question.source == "mart":
+        score += 2
+    if len(question.relevant_tables or []) >= 2:
+        score += 2
+    lower = question.question.lower()
+    if "distribution of average" in lower or "distribution of avg " in lower:
+        score -= 8
+    if " summary" in lower:
+        score -= 4
+    if any(token in lower for token in ("highest", "changed over time", "how many")):
+        score += 2
+    return score
+
+
 def _from_business_insights(
     business_insights: list[dict] | None,
     con: duckdb.DuckDBPyConnection | None,
@@ -346,7 +381,7 @@ def _from_business_insights(
                 grain,
             )
             question = (
-                f"How has {_business_metric_label(insight)} "
+                f"How has {_metric_question_label(_business_metric_label(insight))} "
                 f"in {_humanize(table_name)} changed over time?"
             )
             sql_hint = (
@@ -493,7 +528,7 @@ def _from_schema_graph(
             continue
 
         metric_col = _pick_cross_table_metric(fact_node)
-        metric_label = _humanize(metric_col) if metric_col else None
+        metric_label = _metric_question_label(metric_col) if metric_col else None
 
         for dim_name, dim_node in graph.tables.items():
             if dim_name == fact_name:
@@ -680,6 +715,9 @@ def _from_mart_models(
         label = _humanize(model.name)
         ref = f"marts.{model.name}"
         cols = _mart_columns(con, model.name) if con is not None else []
+        row_count = _mart_row_count(con, model.name) if con is not None else None
+        if row_count is not None and row_count <= 1:
+            continue
         temporal = _pick_mart_temporal(cols)
         metric = _pick_mart_metric(cols)
         dimension = _pick_mart_dimension(cols, temporal, metric)
@@ -687,7 +725,7 @@ def _from_mart_models(
         if temporal and metric:
             temporal_dtype = next((dtype for name, dtype in cols if name == temporal), "")
             period_expr = _time_bucket_expression(temporal, temporal_dtype)
-            question = f"How has {_humanize(metric)} in {label} changed over time?"
+            question = f"How has {_metric_question_label(metric)} in {label} changed over time?"
             sql_hint = (
                 f"SELECT {period_expr} AS period, "
                 f'ROUND(AVG("{metric}"), 2) AS avg_{metric}, '
@@ -704,7 +742,7 @@ def _from_mart_models(
             )
             question = (
                 f"Which {display_label} has the highest "
-                f"{_humanize(metric)} in {label}?"
+                f"{_metric_question_label(metric)} in {label}?"
             )
             sql_hint = (
                 f"SELECT {select_expr} AS dimension, "
@@ -715,7 +753,9 @@ def _from_mart_models(
                 f"GROUP BY {group_expr} ORDER BY avg_{metric} DESC LIMIT 20"
             )
         elif metric:
-            question = f"What is the distribution of {_humanize(metric)} in {label}?"
+            if _is_aggregate_metric_name(metric) or _looks_like_summary_model(model.name, label):
+                continue
+            question = f"What is the distribution of {_metric_question_label(metric)} in {label}?"
             sql_hint = _distribution_sql(ref, metric)
         else:
             question = _fallback_mart_question(model.name, label)
@@ -753,6 +793,17 @@ def _mart_columns(
     return [(str(row[0]), str(row[1])) for row in rows]
 
 
+def _mart_row_count(
+    con: duckdb.DuckDBPyConnection,
+    model_name: str,
+) -> int | None:
+    try:
+        row = con.execute(f"SELECT COUNT(*) FROM marts.{model_name}").fetchone()
+    except Exception:
+        return None
+    return int(row[0]) if row else None
+
+
 def _pick_mart_temporal(cols: list[tuple[str, str]]) -> str | None:
     for name, dtype in cols:
         lower = name.lower()
@@ -779,6 +830,15 @@ def _pick_mart_metric(cols: list[tuple[str, str]]) -> str | None:
         else:
             fallback.append(name)
     return (preferred or fallback or [None])[0]
+
+
+def _is_aggregate_metric_name(name: str) -> bool:
+    lower = name.lower()
+    return bool(_AGGREGATE_METRIC_RE.match(lower))
+
+
+def _looks_like_summary_model(*parts: str) -> bool:
+    return any(_SUMMARY_NAME_RE.search(part) for part in parts if part)
 
 
 def _pick_mart_dimension(
@@ -933,7 +993,9 @@ def _from_table_structure(
             period_expr = _time_bucket_expression(t_col, t_dtype)
             questions.append(
                 SuggestedQuestion(
-                    question=f"How has {_humanize(m_col)} in {label} changed over time?",
+                    question=(
+                        f"How has {_metric_question_label(m_col)} in {label} changed over time?"
+                    ),
                     source="semantic",
                     category=label.title(),
                     relevant_tables=[table.name],
@@ -961,8 +1023,8 @@ def _from_table_structure(
                 questions.append(
                     SuggestedQuestion(
                         question=(
-                            f"Which {display_label} has the highest {_humanize(m_col)} "
-                            f"in {label}?"
+                            f"Which {display_label} has the highest "
+                            f"{_metric_question_label(m_col)} in {label}?"
                         ),
                         source="semantic",
                         category=label.title(),
@@ -984,7 +1046,9 @@ def _from_table_structure(
             m_col = metric_cols[0]
             questions.append(
                 SuggestedQuestion(
-                    question=f"What is the distribution of {_humanize(m_col)} in {label}?",
+                    question=(
+                        f"What is the distribution of {_metric_question_label(m_col)} in {label}?"
+                    ),
                     source="semantic",
                     category=label.title(),
                     relevant_tables=[table.name],
@@ -1235,6 +1299,24 @@ def _business_metric_label(insight: dict) -> str:
     if column:
         return _humanize(column)
     return _humanize(str(insight.get("table") or "activity"))
+
+
+def _metric_question_label(name: str) -> str:
+    lower = name.lower()
+    if lower.startswith("avg_"):
+        return f"average {_humanize(name[4:])}"
+    if lower.startswith("mean_"):
+        return f"average {_humanize(name[5:])}"
+    if lower.startswith("median_"):
+        return f"median {_humanize(name[7:])}"
+    if re.match(r"^p\d+_", lower):
+        prefix, rest = lower.split("_", 1)
+        return f"{prefix} {_humanize(rest)}"
+    if lower.startswith("total_"):
+        return f"total {_humanize(name[6:])}"
+    if lower.endswith("_count") and len(name) > 6:
+        return f"{_humanize(name[:-6])} count"
+    return _humanize(name)
 
 
 def _humanize(name: str) -> str:

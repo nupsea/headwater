@@ -33,6 +33,61 @@ const SEVERITY_COLORS: Record<string, string> = {
   critical: "border-l-[var(--danger)] bg-[color-mix(in_srgb,var(--danger)_10%,var(--card))]",
 };
 
+const SOURCE_LABELS: Record<string, string> = {
+  business: "Business signal",
+  mart: "Model insight",
+  relationship: "Relationship",
+  quality: "Data quality",
+  semantic: "Schema-driven",
+  statistical: "Statistical",
+  catalog: "Catalog",
+  cross_table: "Cross-table",
+};
+
+function questionShape(question: string) {
+  const q = question.toLowerCase();
+  if (q.includes("changed over time") || q.startsWith("how has ")) return "Trend";
+  if (q.startsWith("which ") && q.includes(" highest ")) return "Top segment";
+  if (q.startsWith("how many ")) return "Volume";
+  if (q.includes("distribution of")) return "Distribution";
+  if (q.startsWith("what is the average ")) return "Comparison";
+  return "Explore";
+}
+
+function questionWhy(question: SuggestedQuestion) {
+  const q = question.question.toLowerCase();
+  if (q.includes("changed over time")) {
+    return "Best first check for movement, seasonality, or operational shifts.";
+  }
+  if (q.startsWith("which ") && q.includes(" highest ")) {
+    return "Useful for finding the segment or driver that matters most right now.";
+  }
+  if (q.startsWith("how many ")) {
+    return "Good for quickly sizing demand, activity, or concentration.";
+  }
+  if (q.includes("distribution of")) {
+    return "Useful when the underlying metric varies across many records.";
+  }
+  if (question.source === "cross_table") {
+    return "Combines tables to surface business context instead of a single-table view.";
+  }
+  return "Curated from the current schema, models, and detected signals.";
+}
+
+function pickFeaturedSuggestions(suggestions: SuggestedQuestion[]) {
+  const order = ["business", "cross_table", "mart", "semantic", "catalog", "relationship", "quality"];
+  const ranked = [...suggestions].sort((a, b) => {
+    const sourceDelta = order.indexOf(a.source) - order.indexOf(b.source);
+    if (sourceDelta !== 0) return sourceDelta;
+    const shapeDelta =
+      (questionShape(a.question) === "Distribution" ? 1 : 0) -
+      (questionShape(b.question) === "Distribution" ? 1 : 0);
+    if (shapeDelta !== 0) return shapeDelta;
+    return a.question.length - b.question.length;
+  });
+  return ranked.slice(0, 3);
+}
+
 function summarizeDiagnostics(diagnostics: InsightFamilyDiagnostic[]) {
   const counts = { generated: 0, skipped: 0, failed: 0 };
   const reasons = new Map<string, number>();
@@ -208,6 +263,9 @@ export default function ExplorePage() {
     filterCategory === "all"
       ? suggestions
       : suggestions.filter((s) => s.category === filterCategory);
+  const featuredSuggestions = pickFeaturedSuggestions(filtered);
+  const featuredQuestions = new Set(featuredSuggestions.map((s) => s.question));
+  const remainingSuggestions = filtered.filter((s) => !featuredQuestions.has(s.question));
 
   if (error && !suggestions.length) {
     return (
@@ -683,34 +741,98 @@ export default function ExplorePage() {
             ))}
           </div>
 
-          {/* Questions grid */}
-          <div className="grid gap-3 md:grid-cols-2">
-            {filtered.map((s, i) => (
-              <button
-                key={i}
-                onClick={() => askQuestion(s.question)}
-                disabled={loading}
-                className="text-left p-4 border border-border rounded-lg bg-card hover:border-foreground transition-colors disabled:opacity-50"
-              >
-                <div className="text-sm font-medium mb-2">{s.question}</div>
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`px-2 py-0.5 rounded text-[10px] border ${
-                      SOURCE_COLORS[s.source] || "bg-gray-100 text-gray-600"
+          {featuredSuggestions.length > 0 && (
+            <div className="mb-6">
+              <div className="flex items-end justify-between gap-4 mb-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted">
+                    Start Here
+                  </div>
+                  <div className="text-sm text-muted mt-1">
+                    Lead questions chosen to surface business movement, dominant segments,
+                    and joined context first.
+                  </div>
+                </div>
+              </div>
+              <div className="grid gap-3 lg:grid-cols-3">
+                {featuredSuggestions.map((s, i) => (
+                  <button
+                    key={`featured-${s.question}`}
+                    onClick={() => askQuestion(s.question)}
+                    disabled={loading}
+                    className={`text-left border border-border rounded-lg bg-card hover:border-foreground transition-colors disabled:opacity-50 ${
+                      i === 0 ? "lg:col-span-2 p-5" : "p-4"
                     }`}
                   >
-                    {s.source}
-                  </span>
-                  <span className="text-[10px] text-muted">{s.category}</span>
-                  {s.relevant_tables.length > 0 && (
-                    <span className="text-[10px] text-muted">
-                      {s.relevant_tables.join(", ")}
-                    </span>
-                  )}
-                </div>
-              </button>
-            ))}
-          </div>
+                    <div className="flex flex-wrap items-center gap-2 mb-3">
+                      <span className="px-2 py-0.5 rounded text-[10px] border border-border bg-background text-muted">
+                        {i === 0 ? "Featured" : `Pick ${i + 1}`}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] border ${
+                          SOURCE_COLORS[s.source] || "bg-gray-100 text-gray-600"
+                        }`}
+                      >
+                        {SOURCE_LABELS[s.source] || s.source}
+                      </span>
+                      <span className="px-2 py-0.5 rounded text-[10px] border border-border bg-background text-muted">
+                        {questionShape(s.question)}
+                      </span>
+                    </div>
+                    <div className={`${i === 0 ? "text-base" : "text-sm"} font-semibold mb-2`}>
+                      {s.question}
+                    </div>
+                    <div className="text-xs text-muted mb-3">{questionWhy(s)}</div>
+                    <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted">
+                      <span>{s.category}</span>
+                      {s.relevant_tables.length > 0 && (
+                        <span>{s.relevant_tables.join(", ")}</span>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {remainingSuggestions.length > 0 && (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted mb-3">
+                More Questions
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {remainingSuggestions.map((s, i) => (
+                  <button
+                    key={i}
+                    onClick={() => askQuestion(s.question)}
+                    disabled={loading}
+                    className="text-left p-4 border border-border rounded-lg bg-card hover:border-foreground transition-colors disabled:opacity-50"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 mb-2">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] border ${
+                          SOURCE_COLORS[s.source] || "bg-gray-100 text-gray-600"
+                        }`}
+                      >
+                        {SOURCE_LABELS[s.source] || s.source}
+                      </span>
+                      <span className="text-[10px] text-muted">{questionShape(s.question)}</span>
+                    </div>
+                    <div className="text-sm font-medium mb-2">{s.question}</div>
+                    <div className="text-xs text-muted mb-2">{questionWhy(s)}</div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[10px] text-muted">{s.category}</span>
+                      {s.relevant_tables.length > 0 && (
+                        <span className="text-[10px] text-muted">
+                          {s.relevant_tables.join(", ")}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

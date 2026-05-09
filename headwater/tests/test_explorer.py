@@ -295,7 +295,40 @@ class TestSuggestions:
 
         mart_qs = [q for q in questions if q.source == "mart"]
         assert any("changed over time" in q.question.lower() for q in mart_qs)
+        assert any("average value" in q.question.lower() for q in mart_qs)
         assert not any("key metrics" in q.question.lower() for q in mart_qs)
+
+    def test_mart_summary_distribution_questions_are_suppressed(self, sample_discovery):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_green_trip_summary AS "
+                "SELECT * FROM (VALUES (2.1, 1.4)) AS t(avg_passenger_count, p90_trip_miles)"
+            )
+            models = [
+                GeneratedModel(
+                    name="mart_green_trip_summary",
+                    model_type="mart",
+                    sql="SELECT ...",
+                    description="Green trip summary",
+                    status="executed",
+                ),
+            ]
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        assert not any(
+            "distribution of average passenger count" in q.question.lower()
+            for q in questions
+        )
+        assert not any("green trip summary" in q.question.lower() for q in questions)
 
     def test_business_signal_questions_are_prioritized(self, sample_discovery):
         business_insights = [
