@@ -295,6 +295,37 @@ class TestSuggestions:
         assert any("changed over time" in q.question.lower() for q in mart_qs)
         assert not any("key metrics" in q.question.lower() for q in mart_qs)
 
+    def test_business_signal_questions_are_prioritized(self, sample_discovery):
+        business_insights = [
+            {
+                "id": "temporal_peak:readings:timestamp",
+                "table": "readings",
+                "column": "value",
+                "group_by_column": "timestamp",
+                "group_by_grain": "day",
+                "metric": "period_total",
+                "chart_type": "line",
+            },
+            {
+                "id": "metric_driver:readings:sensor_type:value",
+                "table": "readings",
+                "column": "sensor_type",
+                "group_by_column": "sensor_type",
+                "metric": "value",
+                "chart_type": "bar",
+            },
+        ]
+
+        questions = generate_suggestions(
+            discovery=sample_discovery,
+            business_insights=business_insights,
+        )
+
+        assert questions
+        assert questions[0].source == "business"
+        assert questions[0].sql_hint is not None
+        assert any("changed over time" in q.question.lower() for q in questions)
+
     def test_suggestions_diversify_repetitive_trends(self):
         tables = []
         profiles = []

@@ -1405,6 +1405,23 @@ class TestExplorerE2E:
             f"Suggestions only from {sources}. Expected at least 2 sources."
         )
 
+    def test_explore_surfaces_business_insights_and_questions(self, client):
+        self._run_pipeline(client)
+        suggestions_resp = client.get("/api/explore/suggestions")
+        assert suggestions_resp.status_code == 200
+        suggestions_payload = suggestions_resp.json()
+        assert suggestions_payload["business_insights"]
+        assert any(s["source"] == "business" for s in suggestions_payload["suggestions"])
+        assert any(
+            "changed over time" in s["question"].lower()
+            for s in suggestions_payload["suggestions"]
+        )
+
+        insights_resp = client.get("/api/explore/insights")
+        assert insights_resp.status_code == 200
+        insights_payload = insights_resp.json()
+        assert insights_payload["business_insights"]
+
     def test_ask_with_suggested_question(self, client):
         """Clicking a suggested question should produce actual data."""
         self._run_pipeline(client)

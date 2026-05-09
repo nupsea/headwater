@@ -352,7 +352,7 @@ export interface PipelineRunResponse {
 
 export interface SuggestedQuestion {
   question: string;
-  source: "mart" | "relationship" | "quality" | "semantic" | "statistical" | "catalog" | "cross_table";
+  source: "business" | "mart" | "relationship" | "quality" | "semantic" | "statistical" | "catalog" | "cross_table";
   category: string;
   relevant_tables: string[];
   sql_hint: string | null;
@@ -424,12 +424,14 @@ export interface ExplorationResult {
 
 export interface ExploreSuggestionsResponse {
   suggestions: SuggestedQuestion[];
+  business_insights?: DataInsight[];
   insights: StatisticalInsight[];
   diagnostics?: InsightFamilyDiagnostic[];
   review_pct: number;
 }
 
 export interface ExploreInsightsResponse {
+  business_insights?: DataInsight[];
   insights: StatisticalInsight[];
   diagnostics?: InsightFamilyDiagnostic[];
   total: number;

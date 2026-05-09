@@ -6,6 +6,7 @@ import {
   type InsightFamilyDiagnostic,
   type SuggestedQuestion,
   type StatisticalInsight,
+  type DataInsight,
   type ExplorationResult,
   type DimensionOption,
 } from "@/lib/api";
@@ -15,6 +16,7 @@ import { DisambiguationUI } from "@/components/disambiguation-ui";
 import { useProjects } from "@/lib/project-context";
 
 const SOURCE_COLORS: Record<string, string> = {
+  business: "bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-700",
   mart: "bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700",
   relationship: "bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-700",
   quality: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700",
@@ -56,6 +58,7 @@ export default function ExplorePage() {
   const { activeProjectId } = useProjects();
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const [suggestions, setSuggestions] = useState<SuggestedQuestion[]>([]);
+  const [businessInsights, setBusinessInsights] = useState<DataInsight[]>([]);
   const [insights, setInsights] = useState<StatisticalInsight[]>([]);
   const [suggestionDiagnostics, setSuggestionDiagnostics] = useState<
     InsightFamilyDiagnostic[]
@@ -93,6 +96,7 @@ export default function ExplorePage() {
       const res = await api.exploreSuggestions(projectId);
       if (activeProjectIdRef.current !== projectId) return;
       setSuggestions(res.suggestions || []);
+      setBusinessInsights(res.business_insights || []);
       setInsights(res.insights || []);
       setSuggestionDiagnostics(res.diagnostics || []);
       if (typeof res.review_pct === "number") setReviewPct(res.review_pct);
@@ -119,6 +123,7 @@ export default function ExplorePage() {
     queueMicrotask(() => {
       if (cancelled) return;
       setSuggestions([]);
+      setBusinessInsights([]);
       setInsights([]);
       setSuggestionDiagnostics([]);
       setInsightDiagnostics([]);
@@ -152,6 +157,7 @@ export default function ExplorePage() {
     try {
       const res = await api.exploreInsights(projectId);
       if (activeProjectIdRef.current !== projectId) return;
+      setBusinessInsights(res.business_insights || []);
       setInsights(res.insights || []);
       setInsightDiagnostics(res.diagnostics || []);
       setInsightsLoaded(true);
@@ -648,7 +654,7 @@ export default function ExplorePage() {
               : "text-muted hover:text-foreground"
           }`}
         >
-          Statistical Insights ({insights.length})
+          Insights ({businessInsights.length + insights.length})
         </button>
       </div>
 
@@ -708,15 +714,51 @@ export default function ExplorePage() {
         <div className="space-y-3">
           {insightsLoading ? (
             <p className="text-muted text-sm">
-              Looking for statistically significant patterns...
+              Looking for business and statistical signals...
             </p>
-          ) : insights.length === 0 ? (
+          ) : businessInsights.length === 0 && insights.length === 0 ? (
             <p className="text-muted text-sm">
-              No statistically significant patterns detected yet. Run the
+              No material signals detected yet. Run the
               pipeline to materialize models and surface insights.
             </p>
           ) : (
             <div className="space-y-3">
+              {businessInsights.length > 0 && (
+                <div className="space-y-3">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted">
+                    Business Signals
+                  </div>
+                  {businessInsights.map((insight) => (
+                    <div
+                      key={insight.id}
+                      className="rounded-lg border border-border bg-card p-4"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1">
+                          <div className="text-sm font-medium mb-1">{insight.title}</div>
+                          <div className="text-sm text-muted mb-2">{insight.detail}</div>
+                          <div className="flex gap-3 text-xs text-muted flex-wrap">
+                            <span>Table: {insight.table}</span>
+                            <span>View: {insight.chart_type}</span>
+                            <span>Category: {insight.category}</span>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className="text-lg font-bold">
+                            {insight.value.toFixed(1)}
+                            {insight.unit}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {insights.length > 0 && (
+                <div className="space-y-3">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted">
+                    Supporting Statistical Signals
+                  </div>
               {insights.map((insight, i) => (
                 <div
                   key={i}
@@ -757,6 +799,8 @@ export default function ExplorePage() {
                   </div>
                 </div>
               ))}
+                </div>
+              )}
             </div>
           )}
           {(suggestionDiagnostics.length > 0 || insightDiagnostics.length > 0) && (

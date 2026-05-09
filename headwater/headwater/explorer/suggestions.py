@@ -74,6 +74,7 @@ def generate_suggestions(
     con: duckdb.DuckDBPyConnection | None = None,
     catalog=None,
     extra_relationships: list[Relationship] | None = None,
+    business_insights: list[dict] | None = None,
 ) -> list[SuggestedQuestion]:
     """Generate suggested questions from all available metadata.
 
@@ -117,6 +118,7 @@ def generate_suggestions(
     graph = SchemaGraph(discovery, all_models)
 
     buckets: dict[str, list[SuggestedQuestion]] = {
+        "business": _from_business_insights(business_insights, con, discovery.tables, all_models),
         "catalog": _from_catalog(catalog, con, all_models) if catalog else [],
         "mart": _from_mart_models(all_models, con),
         "cross_table": _from_schema_graph(graph, all_relationships, all_models, con),
@@ -134,22 +136,30 @@ def generate_suggestions(
 
     result: list[SuggestedQuestion] = []
     seen: set[str] = set()
-
-    shape_counts: dict[str, int] = {}
-    for source in ("catalog", "mart", "cross_table", "semantic", "relationship", "quality"):
+    candidates: list[SuggestedQuestion] = []
+    for source in (
+        "business",
+        "catalog",
+        "mart",
+        "cross_table",
+        "semantic",
+        "relationship",
+        "quality",
+    ):
         for q in buckets[source]:
             key = " ".join(q.question.lower().split())
             if key in seen:
                 continue
-            if not _shape_allowed(q, shape_counts):
-                continue
             seen.add(key)
-            result.append(q)
+            candidates.append(q)
+
+    result = _select_diverse_questions(candidates)
 
     logger.info(
-        "Generated %d suggestions: catalog=%d, mart=%d, cross_table=%d, "
+        "Generated %d suggestions: business=%d, catalog=%d, mart=%d, cross_table=%d, "
         "relationship=%d, semantic=%d, quality=%d",
         len(result),
+        len(buckets["business"]),
         len(buckets["catalog"]),
         len(buckets["mart"]),
         len(buckets["cross_table"]),
@@ -158,6 +168,92 @@ def generate_suggestions(
         len(buckets["quality"]),
     )
     return result[:MAX_TOTAL_SUGGESTIONS]
+
+
+def _select_diverse_questions(candidates: list[SuggestedQuestion]) -> list[SuggestedQuestion]:
+    source_limits = {
+        "business": 4,
+        "catalog": 3,
+        "mart": 3,
+        "cross_table": 3,
+        "semantic": 3,
+        "relationship": 2,
+        "quality": 2,
+    }
+    shape_limits = {
+        "trend": 2,
+        "average": 2,
+        "count": 2,
+        "ranking": 4,
+        "distribution": 2,
+        "quality": 2,
+        "other": 3,
+    }
+    source_priority = {
+        "business": 0,
+        "catalog": 1,
+        "mart": 2,
+        "cross_table": 3,
+        "semantic": 4,
+        "relationship": 5,
+        "quality": 6,
+    }
+
+    selected: list[SuggestedQuestion] = []
+    source_counts: dict[str, int] = {}
+    shape_counts: dict[str, int] = {}
+    table_counts: dict[str, int] = {}
+
+    ranked = sorted(
+        candidates,
+        key=lambda q: (
+            source_priority.get(q.source, 99),
+            len(q.relevant_tables or []),
+            len(q.question),
+        ),
+    )
+
+    def can_add(question: SuggestedQuestion) -> bool:
+        shape = _question_shape(question.question)
+        if source_counts.get(question.source, 0) >= source_limits.get(question.source, 3):
+            return False
+        if shape_counts.get(shape, 0) >= shape_limits.get(shape, 3):
+            return False
+        if len(question.relevant_tables or []) >= 2:
+            return True
+        primary_table = (question.relevant_tables or [question.category])[0]
+        return not table_counts.get(primary_table, 0) >= 2
+
+    def add(question: SuggestedQuestion) -> None:
+        selected.append(question)
+        source_counts[question.source] = source_counts.get(question.source, 0) + 1
+        shape = _question_shape(question.question)
+        shape_counts[shape] = shape_counts.get(shape, 0) + 1
+        primary_table = (question.relevant_tables or [question.category])[0]
+        table_counts[primary_table] = table_counts.get(primary_table, 0) + 1
+
+    lead_order = ("trend", "ranking", "distribution", "count", "quality")
+    for shape in lead_order:
+        lead = next(
+            (
+                q
+                for q in ranked
+                if _question_shape(q.question) == shape and can_add(q)
+            ),
+            None,
+        )
+        if lead:
+            add(lead)
+        if len(selected) >= MAX_TOTAL_SUGGESTIONS:
+            return selected
+
+    for question in ranked:
+        if len(selected) >= MAX_TOTAL_SUGGESTIONS:
+            break
+        if can_add(question):
+            add(question)
+
+    return selected
 
 
 def _shape_allowed(
@@ -189,9 +285,107 @@ def _question_shape(question: str) -> str:
         return "ranking"
     if "distribution of" in q:
         return "distribution"
+    if "drives " in q or "dominates " in q or "stand out" in q:
+        return "ranking"
     if "missing values" in q or "duplicates" in q or "unexpected" in q:
         return "quality"
     return "other"
+
+
+def _from_business_insights(
+    business_insights: list[dict] | None,
+    con: duckdb.DuckDBPyConnection | None,
+    tables: list[TableInfo],
+    models: list[GeneratedModel],
+) -> list[SuggestedQuestion]:
+    suggestions: list[SuggestedQuestion] = []
+    if not business_insights:
+        return suggestions
+
+    table_map = {table.name: table for table in tables}
+    seen: set[str] = set()
+    for insight in business_insights[:8]:
+        table_name = insight.get("table")
+        if not table_name or table_name not in table_map:
+            continue
+        table = table_map[table_name]
+        ref = resolve_table_ref(table_name, con, models) if con is not None else table_name
+        column = insight.get("column")
+        group_by_column = insight.get("group_by_column")
+        grain = insight.get("group_by_grain")
+        chart_type = insight.get("chart_type")
+        insight_id = str(insight.get("id", ""))
+
+        question = None
+        sql_hint = None
+        if insight_id.startswith(("temporal_peak:", "metric_peak:")) and group_by_column:
+            metric_expr = "COUNT(*)"
+            metric_alias = "records"
+            if insight.get("metric") == "period_total" and column:
+                metric_expr = f'SUM("{column}")'
+                metric_alias = f"total_{column}"
+            period_expr = _time_bucket_expression(
+                group_by_column,
+                _column_dtype(table, group_by_column),
+                grain,
+            )
+            question = (
+                f"How has {_business_metric_label(insight)} "
+                f"in {_humanize(table_name)} changed over time?"
+            )
+            sql_hint = (
+                f"SELECT {period_expr} AS period, {metric_expr} AS {metric_alias} "
+                f"FROM {ref} "
+                f'WHERE "{group_by_column}" IS NOT NULL '
+                f"GROUP BY 1 ORDER BY 1 LIMIT 100"
+            )
+        elif insight_id.startswith("metric_driver:") and column:
+            question = (
+                f"Which {_humanize(column)} drives {_business_metric_label(insight)} "
+                f"in {_humanize(table_name)}?"
+            )
+            sql_hint = (
+                f'SELECT "{column}", '
+                f'ROUND(SUM("{insight["metric"]}"), 2) AS total_value, '
+                f"COUNT(*) AS records "
+                f"FROM {ref} "
+                f'WHERE "{column}" IS NOT NULL AND "{insight["metric"]}" IS NOT NULL '
+                f'GROUP BY "{column}" ORDER BY total_value DESC LIMIT 20'
+            )
+        elif insight_id.startswith("segment_concentration:") and column:
+            question = f"Which {_humanize(column)} segments dominate {_humanize(table_name)}?"
+            sql_hint = (
+                f'SELECT "{column}", COUNT(*) AS records '
+                f"FROM {ref} "
+                f'WHERE "{column}" IS NOT NULL '
+                f'GROUP BY "{column}" ORDER BY records DESC LIMIT 20'
+            )
+        elif chart_type == "histogram" and column:
+            question = (
+                f"What is the distribution of {_humanize(column)} "
+                f"in {_humanize(table_name)}?"
+            )
+            sql_hint = (
+                f'SELECT MIN("{column}") AS min, MAX("{column}") AS max, '
+                f'ROUND(AVG("{column}"), 2) AS mean, COUNT(*) AS records FROM {ref}'
+            )
+
+        if not question or not sql_hint:
+            continue
+        normalized = " ".join(question.lower().split())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        suggestions.append(
+            SuggestedQuestion(
+                question=question,
+                source="business",
+                category="Business Signals",
+                relevant_tables=[table_name],
+                sql_hint=sql_hint,
+            )
+        )
+    return suggestions
 
 
 def _from_catalog(
@@ -466,13 +660,16 @@ def _from_mart_models(
         dimension = _pick_mart_dimension(cols, temporal, metric)
 
         if temporal and metric:
+            temporal_dtype = next((dtype for name, dtype in cols if name == temporal), "")
+            period_expr = _time_bucket_expression(temporal, temporal_dtype)
             question = f"How has {_humanize(metric)} in {label} changed over time?"
             sql_hint = (
-                f'SELECT "{temporal}", '
+                f"SELECT {period_expr} AS period, "
                 f'ROUND(AVG("{metric}"), 2) AS avg_{metric}, '
                 f"COUNT(*) AS records "
                 f"FROM {ref} "
-                f'GROUP BY "{temporal}" ORDER BY "{temporal}" LIMIT 100'
+                f'WHERE "{temporal}" IS NOT NULL '
+                f"GROUP BY 1 ORDER BY 1 LIMIT 100"
             )
         elif dimension and metric:
             question = (
@@ -690,6 +887,8 @@ def _from_table_structure(
         if temporal_cols and metric_cols:
             t_col = temporal_cols[0]
             m_col = metric_cols[0]
+            t_dtype = next((c.dtype for c in table.columns if c.name == t_col), "")
+            period_expr = _time_bucket_expression(t_col, t_dtype)
             questions.append(
                 SuggestedQuestion(
                     question=f"How has {_humanize(m_col)} in {label} changed over time?",
@@ -697,10 +896,11 @@ def _from_table_structure(
                     category=label.title(),
                     relevant_tables=[table.name],
                     sql_hint=(
-                        f'SELECT "{t_col}", AVG("{m_col}") AS avg_{m_col}, '
+                        f"SELECT {period_expr} AS period, AVG(\"{m_col}\") AS avg_{m_col}, "
                         f"COUNT(*) AS records "
                         f"FROM {ref} "
-                        f'GROUP BY "{t_col}" ORDER BY "{t_col}" LIMIT 100'
+                        f'WHERE "{t_col}" IS NOT NULL '
+                        f"GROUP BY 1 ORDER BY 1 LIMIT 100"
                     ),
                 )
             )
@@ -951,6 +1151,46 @@ def _prefer_display_dim(dim_cols: list[str], table_name: str = "") -> list[str]:
         return (table_affinity, display)
 
     return sorted(dim_cols, key=_rank)
+
+
+def _time_bucket_expression(column_name: str, dtype: str, grain: str | None = None) -> str:
+    quoted = f'"{column_name}"'
+    lower = column_name.lower()
+    dtype_lower = dtype.lower()
+    if lower == "year" or lower.endswith("_year"):
+        return f"CAST({quoted} AS VARCHAR)"
+    if lower == "month" or lower.endswith("_month"):
+        return f"CAST({quoted} AS VARCHAR)"
+    if grain == "hour":
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m-%d %H:00')"
+    if grain == "month":
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m')"
+    if grain == "year":
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y')"
+    if any(token in dtype_lower for token in _TEMPORAL_DTYPES) or bool(
+        _TEMPORAL_NAME_RE.search(column_name)
+    ):
+        return f"CAST({quoted} AS DATE)"
+    return quoted
+
+
+def _column_dtype(table: TableInfo, column_name: str) -> str:
+    column = next((col for col in table.columns if col.name == column_name), None)
+    return column.dtype if column else ""
+
+
+def _business_metric_label(insight: dict) -> str:
+    metric = str(insight.get("metric") or "")
+    column = str(insight.get("column") or "")
+    if metric == "record_volume":
+        return f"{_humanize(insight['table'])} volume"
+    if metric == "period_total" and column:
+        return _humanize(column)
+    if metric == "segment_share" and column:
+        return _humanize(column)
+    if column:
+        return _humanize(column)
+    return _humanize(str(insight.get("table") or "activity"))
 
 
 def _humanize(name: str) -> str:

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from headwater.analyzer.llm import NoLLMProvider, get_provider
 from headwater.api.project_scope import scoped_pipeline
+from headwater.api.routes.insights import compute_top_insights
 from headwater.core.config import get_settings
 from headwater.core.models import DatasetContext, Relationship
 from headwater.explorer.nl_to_sql import ask
@@ -184,6 +185,11 @@ async def get_suggestions(request: Request, project_id: str | None = None):
 
     catalog = pipeline.get("catalog")
     extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
+    business_insights = compute_top_insights(
+        request.app.state.duckdb_con,
+        discovery.tables,
+        discovery.profiles,
+    )
     suggestions = generate_suggestions(
         discovery=discovery,
         models=all_models,
@@ -192,6 +198,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         con=request.app.state.duckdb_con,
         catalog=catalog,
         extra_relationships=extra_rels,
+        business_insights=business_insights,
     )
     con = request.app.state.duckdb_con
     context = _dataset_context_for_pipeline(request, pipeline)
@@ -214,6 +221,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
 
     return {
         "suggestions": [s.model_dump() for s in suggestions],
+        "business_insights": business_insights,
         "insights": _serialize_statistical_insights(statistical_insights, 10),
         "diagnostics": _serialize_diagnostics(diagnostics),
         "review_pct": round(review_pct, 1),
@@ -249,6 +257,7 @@ async def ask_question(request: Request, body: AskRequest, project_id: str | Non
         quality_results=quality_results,
         con=con,
         extra_relationships=extra_rels,
+        business_insights=compute_top_insights(con, discovery.tables, discovery.profiles),
     )
 
     # Get LLM provider if configured
@@ -302,6 +311,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
     discovery = pipeline["discovery"]
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     context = _dataset_context_for_pipeline(request, pipeline)
+    business_insights = compute_top_insights(con, discovery.tables, discovery.profiles)
     staging_result = detect_insights_with_diagnostics(
         con,
         schema="staging",
@@ -320,6 +330,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
     diagnostics = staging_result.diagnostics + marts_result.diagnostics
 
     return {
+        "business_insights": business_insights,
         "insights": _serialize_statistical_insights(insights, _INSIGHTS_ENDPOINT_LIMIT),
         "diagnostics": _serialize_diagnostics(diagnostics),
         "total": len(insights),

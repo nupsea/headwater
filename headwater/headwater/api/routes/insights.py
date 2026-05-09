@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -465,6 +466,57 @@ def _period_expression(column) -> str | None:
     return None
 
 
+def _time_series_spec(con, ref: str, column) -> tuple[str, str, str] | None:
+    quoted = _quote_ident(column.name)
+    name = column.name.lower()
+    dtype = column.dtype.lower()
+    if name == "year" or name.endswith("_year"):
+        return f"CAST({quoted} AS VARCHAR)", "year", column.name
+    if name == "month" or name.endswith("_month"):
+        return f"CAST({quoted} AS VARCHAR)", "month", column.name
+    if not ("date" in dtype or "time" in dtype or "date" in name or name.endswith("_at")):
+        return None
+
+    rows = _query_rows(
+        con,
+        f"""
+        SELECT MIN(CAST({quoted} AS TIMESTAMP)) AS min_ts,
+               MAX(CAST({quoted} AS TIMESTAMP)) AS max_ts
+        FROM {ref}
+        WHERE {quoted} IS NOT NULL
+        """,
+    )
+    if not rows or rows[0][0] is None or rows[0][1] is None:
+        return None
+
+    min_ts, max_ts = rows[0]
+    if isinstance(min_ts, date) and not isinstance(min_ts, datetime):
+        min_ts = datetime.combine(min_ts, datetime.min.time())
+    if isinstance(max_ts, date) and not isinstance(max_ts, datetime):
+        max_ts = datetime.combine(max_ts, datetime.min.time())
+    span_days = max(1.0, (max_ts - min_ts).total_seconds() / 86400.0)
+
+    if span_days <= 3:
+        return (
+            f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m-%d %H:00')",
+            "hour",
+            column.name,
+        )
+    if span_days <= 120:
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m-%d')", "day", column.name
+    if span_days <= 900:
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m')", "month", column.name
+    return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y')", "year", column.name
+
+
+def _time_preposition(grain: str) -> str:
+    if grain == "hour":
+        return "at"
+    if grain == "day":
+        return "on"
+    return "in"
+
+
 def _query_rows(con, sql: str, params: list | None = None):
     try:
         return con.execute(sql, params or []).fetchall()
@@ -479,9 +531,10 @@ def _compute_temporal_peak_insights(con, table, temporal_cols, metric_cols) -> l
     table_label = _humanize_name(table.name)
 
     for temporal in temporal_cols[:2]:
-        period_expr = _period_expression(temporal)
-        if not period_expr:
+        period_spec = _time_series_spec(con, ref, temporal)
+        if not period_spec:
             continue
+        period_expr, period_grain, group_by_column = period_spec
 
         rows = _query_rows(
             con,
@@ -508,13 +561,18 @@ def _compute_temporal_peak_insights(con, table, temporal_cols, metric_cols) -> l
                         "id": f"temporal_peak:{table.name}:{temporal.name}",
                         "category": "Did You Know",
                         "severity": "info",
-                        "title": f"{table_label} peaked in {peak['label']}",
+                        "title": (
+                            f"{table_label} peaked "
+                            f"{_time_preposition(period_grain)} {peak['label']}"
+                        ),
                         "detail": (
                             f"{peak['label']} had {peak['value']:,.0f} records, "
-                            f"{(lift - 1) * 100:.0f}% above the period average."
+                            f"{(lift - 1) * 100:.0f}% above the typical {period_grain}."
                         ),
                         "table": table.name,
                         "column": temporal.name,
+                        "group_by_column": group_by_column,
+                        "group_by_grain": period_grain,
                         "metric": "record_volume",
                         "value": round(lift, 2),
                         "unit": "x",
@@ -553,14 +611,19 @@ def _compute_temporal_peak_insights(con, table, temporal_cols, metric_cols) -> l
                         "id": f"metric_peak:{table.name}:{temporal.name}:{metric.name}",
                         "category": "Did You Know",
                         "severity": "warning" if lift >= 1.5 else "info",
-                        "title": f"{metric_label} peaked in {peak['label']}",
+                        "title": (
+                            f"{metric_label} peaked "
+                            f"{_time_preposition(period_grain)} {peak['label']}"
+                        ),
                         "detail": (
                             f"{table_label} recorded {peak['value']:,.0f} total "
                             f"{metric_label.lower()} in {peak['label']}, "
-                            f"{(lift - 1) * 100:.0f}% above its typical period."
+                            f"{(lift - 1) * 100:.0f}% above a typical {period_grain}."
                         ),
                         "table": table.name,
                         "column": metric.name,
+                        "group_by_column": group_by_column,
+                        "group_by_grain": period_grain,
                         "metric": "period_total",
                         "value": round(lift, 2),
                         "unit": "x",
@@ -616,6 +679,7 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
                         ),
                         "table": table.name,
                         "column": dimension.name,
+                        "group_by_column": dimension.name,
                         "metric": "segment_share",
                         "value": round(share * 100, 1),
                         "unit": "%",
@@ -663,6 +727,7 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
                         ),
                         "table": table.name,
                         "column": dimension.name,
+                        "group_by_column": dimension.name,
                         "metric": metric.name,
                         "value": round(share * 100, 1),
                         "unit": "%",
@@ -739,6 +804,7 @@ def _compute_distribution_insights(con, table, metric_cols, column_profiles) -> 
                 ),
                 "table": table.name,
                 "column": metric.name,
+                "group_by_column": metric.name,
                 "metric": "value_distribution",
                 "value": round(share * 100, 1),
                 "unit": "%",
@@ -837,6 +903,17 @@ def _select_diverse_insights(insights: list[dict], limit: int = 10) -> list[dict
     return cleaned
 
 
+def _rank_dimension_column(column) -> tuple[int, int]:
+    lower = column.name.lower()
+    if any(token in lower for token in ("_name", "name_", "label", "description")):
+        return (0, 0)
+    if any(token in lower for token in ("borough", "zone", "site", "region", "category", "type")):
+        return (0, 1)
+    if lower.endswith("_code") or "code_" in lower:
+        return (1, 2)
+    return (0, 2)
+
+
 def _compute_top_insights(con, tables, profiles) -> list[dict]:
     """Find CXO-readable patterns from actual records.
 
@@ -862,12 +939,18 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
             c for c in table.columns
             if _is_dimension_column(c, column_profiles.get(c.name))
         ]
+        dimension_cols = sorted(dimension_cols, key=_rank_dimension_column)
 
         insights.extend(_compute_temporal_peak_insights(con, table, temporal_cols, metric_cols))
         insights.extend(_compute_segment_insights(con, table, dimension_cols, metric_cols))
         insights.extend(_compute_distribution_insights(con, table, metric_cols, column_profiles))
 
     return _select_diverse_insights(insights)
+
+
+def compute_top_insights(con, tables, profiles) -> list[dict]:
+    """Public helper for business-readable insights reused by Explore."""
+    return _compute_top_insights(con, tables, profiles)
 
 
 # ---------------------------------------------------------------------------

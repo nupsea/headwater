@@ -355,7 +355,7 @@ class SuggestedQuestion(BaseModel):
 
     question: str
     source: Literal[
-        "mart", "relationship", "quality", "semantic",
+        "business", "mart", "relationship", "quality", "semantic",
         "statistical", "catalog", "cross_table",
     ]
     category: str  # e.g. "Air Quality", "Inspections", "Trends"
