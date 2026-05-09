@@ -649,19 +649,114 @@ def _compute_temporal_peak_insights(con, table, temporal_cols, metric_cols) -> l
     return insights
 
 
-def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[dict]:
+def _is_code_like_column(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith(("_id", "_code", "_key", "_num")) or any(
+        token in lower for token in ("base_num", "vendor_id", "locationid")
+    )
+
+
+def _is_opaque_value(value: object) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    if len(text) < 3 or " " in text:
+        return False
+    if text.isdigit():
+        return True
+    has_alpha = any(ch.isalpha() for ch in text)
+    has_digit = any(ch.isdigit() for ch in text)
+    return has_alpha and has_digit and text.upper() == text
+
+
+def _build_lookup_index(tables) -> dict[str, dict[str, str]]:
+    index: dict[str, dict[str, str]] = {}
+    for table in tables:
+        id_cols = [
+            col.name
+            for col in table.columns
+            if _is_code_like_column(col.name)
+        ]
+        label_cols = [
+            col.name
+            for col in table.columns
+            if any(
+                token in col.name.lower()
+                for token in (
+                    "name",
+                    "label",
+                    "description",
+                    "zone",
+                    "borough",
+                    "region",
+                    "title",
+                )
+            )
+        ]
+        if not id_cols or not label_cols or table.row_count > 100_000:
+            continue
+        for id_col in id_cols:
+            index.setdefault(
+                id_col.lower(),
+                {
+                    "table_name": table.name,
+                    "id_column": id_col,
+                    "label_column": label_cols[0],
+                },
+            )
+    return index
+
+
+def _resolve_dimension_projection(
+    table,
+    dimension,
+    lookup_index: dict[str, dict[str, str]],
+) -> tuple[str | None, str | None, str | None]:
+    if not _is_code_like_column(dimension.name):
+        return None, dimension.name, _humanize_name(dimension.name)
+
+    lookup = lookup_index.get(dimension.name.lower())
+    if lookup and lookup["table_name"] != table.name:
+        alias = "lu"
+        join_sql = (
+            f'LEFT JOIN "{lookup["table_name"]}" {alias} '
+            f'ON fact."{dimension.name}" = {alias}."{lookup["id_column"]}"'
+        )
+        return (
+            join_sql,
+            f'{alias}."{lookup["label_column"]}"',
+            _humanize_name(lookup["label_column"]),
+        )
+
+    return None, None, None
+
+
+def _compute_segment_insights(
+    con,
+    table,
+    dimension_cols,
+    metric_cols,
+    lookup_index: dict[str, dict[str, str]],
+) -> list[dict]:
     insights = []
     ref = _table_ref(table)
     table_label = _humanize_name(table.name)
 
     for dimension in dimension_cols[:4]:
-        dim_label = _humanize_name(dimension.name)
+        join_sql, dimension_expr, dim_label = _resolve_dimension_projection(
+            table,
+            dimension,
+            lookup_index,
+        )
+        if dimension_expr is None or dim_label is None:
+            continue
         rows = _query_rows(
             con,
             f"""
-            SELECT CAST({_quote_ident(dimension.name)} AS VARCHAR) AS segment, COUNT(*) AS value
-            FROM {ref}
-            WHERE {_quote_ident(dimension.name)} IS NOT NULL
+            SELECT CAST({dimension_expr} AS VARCHAR) AS segment, COUNT(*) AS value
+            FROM {ref} fact
+            {join_sql or ""}
+            WHERE {dimension_expr} IS NOT NULL
             GROUP BY 1
             ORDER BY value DESC
             LIMIT 8
@@ -676,6 +771,8 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
         if chart and total > 0:
             leader = chart[0]
             share = _safe_ratio(leader["value"], total)
+            if _is_opaque_value(leader["label"]):
+                continue
             if share >= 0.25:
                 insights.append(
                     {
@@ -707,11 +804,12 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
             rows = _query_rows(
                 con,
                 f"""
-                SELECT CAST({_quote_ident(dimension.name)} AS VARCHAR) AS segment,
-                       SUM({_quote_ident(metric.name)}) AS value
-                FROM {ref}
-                WHERE {_quote_ident(dimension.name)} IS NOT NULL
-                  AND {_quote_ident(metric.name)} IS NOT NULL
+                SELECT CAST({dimension_expr} AS VARCHAR) AS segment,
+                       SUM(fact.{_quote_ident(metric.name)}) AS value
+                FROM {ref} fact
+                {join_sql or ""}
+                WHERE {dimension_expr} IS NOT NULL
+                  AND fact.{_quote_ident(metric.name)} IS NOT NULL
                 GROUP BY 1
                 ORDER BY value DESC
                 LIMIT 8
@@ -727,6 +825,8 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
                 continue
             leader = chart[0]
             share = _safe_ratio(leader["value"], total)
+            if _is_opaque_value(leader["label"]):
+                continue
             if share >= 0.3:
                 insights.append(
                     {
@@ -922,7 +1022,7 @@ def _rank_dimension_column(column) -> tuple[int, int]:
         return (0, 0)
     if any(token in lower for token in ("borough", "zone", "site", "region", "category", "type")):
         return (0, 1)
-    if lower.endswith("_code") or "code_" in lower:
+    if _is_code_like_column(lower):
         return (1, 2)
     return (0, 2)
 
@@ -935,6 +1035,7 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
     drive measurable totals.
     """
     insights: list[dict] = []
+    lookup_index = _build_lookup_index(tables)
     for table in sorted(tables, key=lambda t: t.row_count, reverse=True):
         column_profiles = {
             c.name: _column_profile(profiles, table.name, c.name)
@@ -955,7 +1056,15 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
         dimension_cols = sorted(dimension_cols, key=_rank_dimension_column)
 
         insights.extend(_compute_temporal_peak_insights(con, table, temporal_cols, metric_cols))
-        insights.extend(_compute_segment_insights(con, table, dimension_cols, metric_cols))
+        insights.extend(
+            _compute_segment_insights(
+                con,
+                table,
+                dimension_cols,
+                metric_cols,
+                lookup_index,
+            )
+        )
         insights.extend(_compute_distribution_insights(con, table, metric_cols, column_profiles))
 
     return _select_diverse_insights(insights)
@@ -976,6 +1085,15 @@ _SEMANTIC_HIGHLIGHT_TYPE_WEIGHT = {
     "congestion_proxy": 6,
     "coverage_period": 3,
 }
+_SEMANTIC_HIGHLIGHT_ORDER = [
+    "data_quality",
+    "duration_distribution",
+    "geographic_hotspot",
+    "peak_period",
+    "route_pair",
+    "volume_distribution",
+    "congestion_proxy",
+]
 
 
 def _decision_lens(context: DatasetContext | None, insight) -> str:
@@ -1055,9 +1173,11 @@ def compute_semantic_highlights(
     seen_tables: dict[str, int] = {}
     max_per_table = 4 if len({insight.table_name for insight in candidates}) <= 1 else 2
     ranked_candidates = sorted(candidates, key=_semantic_highlight_score, reverse=True)
-    for insight in ranked_candidates:
+    seen_types: set[str] = set()
+
+    def append_highlight(insight) -> bool:
         if seen_tables.get(insight.table_name, 0) >= max_per_table:
-            continue
+            return False
         detail = _replace_record_label(
             insight.description,
             context.row_represents if context else None,
@@ -1085,6 +1205,28 @@ def compute_semantic_highlights(
             }
         )
         seen_tables[insight.table_name] = seen_tables.get(insight.table_name, 0) + 1
+        seen_types.add(insight.insight_type)
+        return True
+
+    for insight_type in _SEMANTIC_HIGHLIGHT_ORDER:
+        candidate = next(
+            (item for item in ranked_candidates if item.insight_type == insight_type),
+            None,
+        )
+        if candidate is not None:
+            append_highlight(candidate)
+        if len(selected) >= limit:
+            return selected[:limit]
+
+    for insight in ranked_candidates:
+        if seen_tables.get(insight.table_name, 0) >= max_per_table:
+            continue
+        if (
+            insight.insight_type in {"volume_distribution", "peak_period"}
+            and insight.insight_type in seen_types
+        ):
+            continue
+        append_highlight(insight)
         if len(selected) >= limit:
             break
     if not any(item["metric"] == "wait_min" for item in selected):

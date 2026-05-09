@@ -9,7 +9,7 @@ import polars as pl
 import pytest
 
 from headwater.analyzer.llm import LLMProvider
-from headwater.api.routes.insights import compute_semantic_highlights
+from headwater.api.routes.insights import compute_semantic_highlights, compute_top_insights
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
@@ -1417,6 +1417,60 @@ class TestStatistical:
         assert any(h["decision_lens"] == "Operations" for h in highlights)
         assert any("HVFHV wait time is highest" in h["detail"] for h in highlights)
         assert any("FHV location analysis is unreliable" in h["title"] for h in highlights)
+        assert len({h["insight_type"] for h in highlights}) >= 3
+
+    def test_top_insights_skip_opaque_code_segments_without_lookup(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trip_codes AS
+            SELECT * FROM (VALUES
+                ('B03404', 100.0, TIMESTAMP '2026-02-01 08:00:00'),
+                ('B03404', 120.0, TIMESTAMP '2026-02-01 09:00:00'),
+                ('B09999', 80.0, TIMESTAMP '2026-02-01 10:00:00')
+            ) AS t(originating_base_num, trip_miles, pickup_datetime)
+            """
+        )
+        tables = [
+            TableInfo(
+                name="stg_trip_codes",
+                schema_name="staging",
+                row_count=3,
+                columns=[
+                    ColumnInfo(
+                        name="originating_base_num",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                    ColumnInfo(name="trip_miles", dtype="double", semantic_type="metric"),
+                    ColumnInfo(name="pickup_datetime", dtype="timestamp", semantic_type="temporal"),
+                ],
+            )
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="stg_trip_codes",
+                column_name="originating_base_num",
+                dtype="varchar",
+                null_count=0,
+                distinct_count=2,
+                top_values=[("B03404", 2), ("B09999", 1)],
+            ),
+            ColumnProfile(
+                table_name="stg_trip_codes",
+                column_name="trip_miles",
+                dtype="double",
+                null_count=0,
+                distinct_count=3,
+                min_value=80.0,
+                max_value=120.0,
+                mean=100.0,
+            ),
+        ]
+
+        insights = compute_top_insights(duckdb_con, tables, profiles)
+
+        assert not any("B03404" in insight["title"] for insight in insights)
+        assert not any("B03404" in insight["detail"] for insight in insights)
 
 
 # ---------------------------------------------------------------------------
