@@ -501,6 +501,107 @@ class TestSuggestions:
         assert result.visualization.chart_type == "bar"
         assert {"bucket", "records"} <= set(result.data[0])
 
+    def test_binary_technical_flags_are_suppressed_from_lead_questions(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="yellow_trips",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(name="trip_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(
+                            name="store_and_fwd_flag",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="passenger_count",
+                            dtype="int64",
+                            semantic_type="metric",
+                        ),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="store_and_fwd_flag",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("N", 700), ("Y", 300)],
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="passenger_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=6,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert not any("store and fwd flag" in q.question.lower() for q in questions)
+        assert any("payment method" in q.question.lower() for q in questions)
+
+    def test_generic_booleanish_operational_flags_are_suppressed(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="order_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="quality_flag", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="channel", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="quality_flag",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("Y", 450), ("N", 50)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="channel",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("Retail", 200), ("Online", 180), ("Partner", 120)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=100,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert not any("quality flag" in q.question.lower() for q in questions)
+        assert any("channel" in q.question.lower() for q in questions)
+
     def test_suggestions_diversify_repetitive_trends(self):
         tables = []
         profiles = []

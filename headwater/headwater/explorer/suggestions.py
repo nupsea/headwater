@@ -26,6 +26,7 @@ import duckdb
 
 from headwater.core.classification import is_dimension_column, is_metric_column
 from headwater.core.models import (
+    ColumnInfo,
     ColumnProfile,
     ContractCheckResult,
     ContractRule,
@@ -79,6 +80,32 @@ _AGGREGATE_METRIC_RE = re.compile(
     re.IGNORECASE,
 )
 _SUMMARY_NAME_RE = re.compile(r"(summary|overview|snapshot|totals?)", re.IGNORECASE)
+_LOW_SIGNAL_DIMENSION_TOKENS = (
+    "flag",
+    "indicator",
+    "store_and_fwd",
+    "source_file",
+    "source_system",
+    "load_batch",
+    "ingest",
+    "extract",
+    "audit",
+    "deleted",
+)
+_BUSINESS_DIMENSION_TOKENS = (
+    "type",
+    "category",
+    "status",
+    "reason",
+    "channel",
+    "segment",
+    "service",
+    "region",
+    "zone",
+    "site",
+    "payment",
+)
+_BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +877,8 @@ def _pick_mart_dimension(
         if name in {temporal, metric}:
             continue
         lower = name.lower()
+        if "store_and_fwd" in lower or any(token in lower for token in ("flag", "indicator")):
+            continue
         if _ID_NAME_RE.search(name) and not any(
             token in lower for token in ("zone", "location", "site")
         ):
@@ -1187,7 +1216,10 @@ def _get_dimension_cols(
     cols = []
     for c in table.columns:
         profile = profile_index.get((table.name, c.name))
-        if is_dimension_column(c, profile):
+        if (
+            is_dimension_column(c, profile)
+            and not _is_low_signal_dimension_for_question(c, profile)
+        ):
             cols.append(c.name)
     return cols
 
@@ -1223,6 +1255,23 @@ def _is_metric_col(
     if profile is None:
         return False
     return any(t in profile.dtype.lower() for t in _NUMERIC_DTYPES)
+
+
+def _is_low_signal_dimension_for_question(
+    column: ColumnInfo,
+    profile: ColumnProfile | None,
+) -> bool:
+    lower = column.name.lower()
+    distinct = profile.distinct_count if profile is not None else 0
+    business_named = any(token in lower for token in _BUSINESS_DIMENSION_TOKENS)
+    technical_named = any(token in lower for token in _LOW_SIGNAL_DIMENSION_TOKENS)
+
+    if technical_named and distinct <= 3:
+        return True
+    if profile is None or not profile.top_values or business_named:
+        return False
+    values = {str(value).strip().lower() for value, _count in profile.top_values[:4]}
+    return distinct <= 3 and values <= _BOOLEANISH_VALUES
 
 
 # ---------------------------------------------------------------------------
