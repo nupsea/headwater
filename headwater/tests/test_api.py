@@ -630,6 +630,8 @@ class TestDiscovery:
         assert any(i["id"].startswith(business_prefixes) for i in top_insights)
         assert sum(1 for i in top_insights[:5] if i["chart_type"] == "line") <= 2
         assert len({i["table"] for i in top_insights}) >= 2
+        assert "semantic_highlights" in data
+        assert isinstance(data["semantic_highlights"], list)
         for insight in top_insights:
             assert insight["category"] == "Did You Know"
             assert insight["title"]
@@ -1411,6 +1413,7 @@ class TestExplorerE2E:
         assert suggestions_resp.status_code == 200
         suggestions_payload = suggestions_resp.json()
         assert suggestions_payload["business_insights"]
+        assert "semantic_highlights" in suggestions_payload
         assert any(s["source"] == "business" for s in suggestions_payload["suggestions"])
         assert any(
             "changed over time" in s["question"].lower()
@@ -1421,6 +1424,7 @@ class TestExplorerE2E:
         assert insights_resp.status_code == 200
         insights_payload = insights_resp.json()
         assert insights_payload["business_insights"]
+        assert "semantic_highlights" in insights_payload
 
     def test_ask_with_suggested_question(self, client):
         """Clicking a suggested question should produce actual data."""

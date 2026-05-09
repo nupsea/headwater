@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from headwater.analyzer.llm import NoLLMProvider, get_provider
 from headwater.api.project_scope import scoped_pipeline
-from headwater.api.routes.insights import compute_top_insights
+from headwater.api.routes.insights import compute_semantic_highlights, compute_top_insights
 from headwater.core.config import get_settings
 from headwater.core.models import DatasetContext, Relationship
 from headwater.explorer.nl_to_sql import ask
@@ -190,6 +190,12 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         discovery.tables,
         discovery.profiles,
     )
+    semantic_highlights = compute_semantic_highlights(
+        request.app.state.duckdb_con,
+        discovery,
+        _dataset_context_for_pipeline(request, pipeline),
+        all_models,
+    )
     suggestions = generate_suggestions(
         discovery=discovery,
         models=all_models,
@@ -222,6 +228,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
     return {
         "suggestions": [s.model_dump() for s in suggestions],
         "business_insights": business_insights,
+        "semantic_highlights": semantic_highlights,
         "insights": _serialize_statistical_insights(statistical_insights, 10),
         "diagnostics": _serialize_diagnostics(diagnostics),
         "review_pct": round(review_pct, 1),
@@ -312,6 +319,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     context = _dataset_context_for_pipeline(request, pipeline)
     business_insights = compute_top_insights(con, discovery.tables, discovery.profiles)
+    semantic_highlights = compute_semantic_highlights(con, discovery, context, all_models)
     staging_result = detect_insights_with_diagnostics(
         con,
         schema="staging",
@@ -331,6 +339,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
 
     return {
         "business_insights": business_insights,
+        "semantic_highlights": semantic_highlights,
         "insights": _serialize_statistical_insights(insights, _INSIGHTS_ENDPOINT_LIMIT),
         "diagnostics": _serialize_diagnostics(diagnostics),
         "total": len(insights),

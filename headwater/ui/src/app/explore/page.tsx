@@ -7,6 +7,7 @@ import {
   type SuggestedQuestion,
   type StatisticalInsight,
   type DataInsight,
+  type SemanticHighlight,
   type ExplorationResult,
   type DimensionOption,
 } from "@/lib/api";
@@ -59,6 +60,7 @@ export default function ExplorePage() {
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const [suggestions, setSuggestions] = useState<SuggestedQuestion[]>([]);
   const [businessInsights, setBusinessInsights] = useState<DataInsight[]>([]);
+  const [semanticHighlights, setSemanticHighlights] = useState<SemanticHighlight[]>([]);
   const [insights, setInsights] = useState<StatisticalInsight[]>([]);
   const [suggestionDiagnostics, setSuggestionDiagnostics] = useState<
     InsightFamilyDiagnostic[]
@@ -97,6 +99,7 @@ export default function ExplorePage() {
       if (activeProjectIdRef.current !== projectId) return;
       setSuggestions(res.suggestions || []);
       setBusinessInsights(res.business_insights || []);
+      setSemanticHighlights(res.semantic_highlights || []);
       setInsights(res.insights || []);
       setSuggestionDiagnostics(res.diagnostics || []);
       if (typeof res.review_pct === "number") setReviewPct(res.review_pct);
@@ -124,6 +127,7 @@ export default function ExplorePage() {
       if (cancelled) return;
       setSuggestions([]);
       setBusinessInsights([]);
+      setSemanticHighlights([]);
       setInsights([]);
       setSuggestionDiagnostics([]);
       setInsightDiagnostics([]);
@@ -158,6 +162,7 @@ export default function ExplorePage() {
       const res = await api.exploreInsights(projectId);
       if (activeProjectIdRef.current !== projectId) return;
       setBusinessInsights(res.business_insights || []);
+      setSemanticHighlights(res.semantic_highlights || []);
       setInsights(res.insights || []);
       setInsightDiagnostics(res.diagnostics || []);
       setInsightsLoaded(true);
@@ -654,7 +659,7 @@ export default function ExplorePage() {
               : "text-muted hover:text-foreground"
           }`}
         >
-          Insights ({businessInsights.length + insights.length})
+          Insights ({semanticHighlights.length + businessInsights.length + insights.length})
         </button>
       </div>
 
@@ -716,13 +721,55 @@ export default function ExplorePage() {
             <p className="text-muted text-sm">
               Looking for business and statistical signals...
             </p>
-          ) : businessInsights.length === 0 && insights.length === 0 ? (
+          ) : semanticHighlights.length === 0 &&
+            businessInsights.length === 0 &&
+            insights.length === 0 ? (
             <p className="text-muted text-sm">
               No material signals detected yet. Run the
               pipeline to materialize models and surface insights.
             </p>
           ) : (
             <div className="space-y-3">
+              {semanticHighlights.length > 0 && (
+                <div className="space-y-3">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted">
+                    Semantic Findings
+                  </div>
+                  {semanticHighlights.map((highlight) => (
+                    <div
+                      key={highlight.id}
+                      className={`border-l-4 rounded-r-lg p-4 ${
+                        SEVERITY_COLORS[highlight.severity] || SEVERITY_COLORS.info
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1">
+                          <div className="flex flex-wrap items-center gap-2 mb-1">
+                            <div className="text-sm font-medium">{highlight.title}</div>
+                            <span className="px-2 py-0.5 rounded text-[10px] border border-border bg-background text-muted">
+                              {highlight.decision_lens}
+                            </span>
+                          </div>
+                          <div className="text-sm text-muted mb-2">{highlight.detail}</div>
+                          <div className="flex gap-3 text-xs text-muted flex-wrap">
+                            <span>Table: {highlight.table}</span>
+                            <span>Type: {highlight.insight_type.replace(/_/g, " ")}</span>
+                            {highlight.confidence_level && (
+                              <span>Confidence: {highlight.confidence_level}</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0 text-xs text-muted">
+                          {highlight.support_count !== null && (
+                            <div>{highlight.support_count.toLocaleString()} rows</div>
+                          )}
+                          <div>{highlight.metadata_signals.glossary_terms} glossary</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               {businessInsights.length > 0 && (
                 <div className="space-y-3">
                   <div className="text-xs font-semibold uppercase tracking-wider text-muted">

@@ -7,8 +7,11 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
 from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.project import _compute_maturity, _compute_progress
+from headwater.core.models import DatasetContext
+from headwater.explorer.statistical import detect_insights_with_diagnostics
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -217,7 +220,16 @@ async def get_insights(request: Request, project_id: str | None = None):
     data_profile = _compute_data_profile(
         tables, profiles, relationships, completeness_pct, quality_report
     )
+    store = request.app.state.metadata_store
+    context_row = store.get_dataset_context(discovery.source.name) if store else None
+    context = DatasetContext(**context_row) if context_row else None
     top_insights = _compute_top_insights(request.app.state.duckdb_con, tables, profiles)
+    semantic_highlights = compute_semantic_highlights(
+        request.app.state.duckdb_con,
+        discovery,
+        context,
+        staging_models + mart_models,
+    )
 
     # --- Workflow state ---
     workflow = _compute_workflow_state(
@@ -282,6 +294,7 @@ async def get_insights(request: Request, project_id: str | None = None):
     return {
         "data_profile": data_profile,
         "top_insights": top_insights,
+        "semantic_highlights": semantic_highlights,
         "workflow": workflow,
         "advisory_actions": advisory_actions,
         "overview": {
@@ -951,6 +964,171 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
 def compute_top_insights(con, tables, profiles) -> list[dict]:
     """Public helper for business-readable insights reused by Explore."""
     return _compute_top_insights(con, tables, profiles)
+
+
+_SEMANTIC_HIGHLIGHT_TYPE_WEIGHT = {
+    "data_quality": 9,
+    "geographic_hotspot": 8,
+    "peak_period": 8,
+    "route_pair": 7,
+    "duration_distribution": 7,
+    "volume_distribution": 6,
+    "congestion_proxy": 6,
+    "coverage_period": 3,
+}
+
+
+def _decision_lens(context: DatasetContext | None, insight) -> str:
+    text = " ".join(
+        value
+        for value in (
+            context.decisions if context else None,
+            context.quality_caveats if context else None,
+        )
+        if value
+    ).lower()
+    if insight.insight_type == "data_quality":
+        return "Data Quality"
+    if any(token in insight.metric.lower() for token in ("amount", "fare", "revenue", "price")):
+        return "Revenue"
+    if any(token in text for token in ("compliance", "audit", "regulation", "risk")):
+        return "Compliance"
+    if any(token in text for token in ("pricing", "margin", "revenue", "sales")):
+        return "Revenue"
+    return "Operations"
+
+
+def _replace_record_label(text: str, row_represents: str | None) -> str:
+    if not row_represents:
+        return text
+    phrase = row_represents.strip().lower()
+    if not phrase:
+        return text
+    plural = phrase if phrase.endswith("s") else f"{phrase}s"
+    return text.replace(" records", f" {plural}")
+
+
+def _semantic_highlight_title(description: str) -> str:
+    base = description.strip().rstrip(".")
+    for separator in (":", ". "):
+        if separator in base:
+            return base.split(separator, 1)[0].strip()
+    return base
+
+
+def _semantic_highlight_score(insight) -> float:
+    severity_weight = {"critical": 3.0, "warning": 2.0, "info": 1.0}
+    score = (
+        _SEMANTIC_HIGHLIGHT_TYPE_WEIGHT.get(insight.insight_type, 1)
+        * severity_weight.get(insight.severity, 1.0)
+        * max(abs(insight.magnitude), 1.0)
+        * max((insight.support_count or 0) ** 0.25, 1.0)
+    )
+    if insight.metric == "wait_min" or "wait time" in insight.description.lower():
+        score *= 1.5
+    return score
+
+
+def compute_semantic_highlights(
+    con,
+    discovery,
+    context: DatasetContext | None,
+    models,
+    limit: int = 5,
+) -> list[dict]:
+    """Convert semantic-family insights into business-facing findings."""
+    metadata = retrieve_metadata(discovery, context)
+    result = detect_insights_with_diagnostics(
+        con,
+        schema="staging",
+        discovery=discovery,
+        dataset_context=context,
+        models=models,
+    )
+    candidates = [
+        insight
+        for insight in result.insights
+        if insight.insight_type in _SEMANTIC_HIGHLIGHT_TYPE_WEIGHT
+        and insight.insight_type != "coverage_period"
+    ]
+    selected: list[dict] = []
+    seen_tables: dict[str, int] = {}
+    max_per_table = 4 if len({insight.table_name for insight in candidates}) <= 1 else 2
+    ranked_candidates = sorted(candidates, key=_semantic_highlight_score, reverse=True)
+    for insight in ranked_candidates:
+        if seen_tables.get(insight.table_name, 0) >= max_per_table:
+            continue
+        detail = _replace_record_label(
+            insight.description,
+            context.row_represents if context else None,
+        )
+        lens = _decision_lens(context, insight)
+        if context and context.decisions:
+            detail = f"{detail} Relevant for {lens.lower()} decisions."
+        selected.append(
+            {
+                "id": f"semantic:{insight.table_name}:{insight.insight_type}:{insight.metric}",
+                "title": _semantic_highlight_title(detail),
+                "detail": detail,
+                "table": insight.table_name,
+                "metric": insight.metric,
+                "insight_type": insight.insight_type,
+                "severity": insight.severity,
+                "confidence_level": insight.confidence_level,
+                "support_count": insight.support_count,
+                "decision_lens": lens,
+                "metadata_signals": {
+                    "has_context": metadata.context is not None,
+                    "glossary_terms": len(metadata.glossary),
+                    "lookup_tables": len(metadata.lookup_tables),
+                },
+            }
+        )
+        seen_tables[insight.table_name] = seen_tables.get(insight.table_name, 0) + 1
+        if len(selected) >= limit:
+            break
+    if not any(item["metric"] == "wait_min" for item in selected):
+        wait_candidate = next(
+            (
+                insight
+                for insight in ranked_candidates
+                if insight.metric == "wait_min" or "wait time" in insight.description.lower()
+            ),
+            None,
+        )
+        if wait_candidate is not None:
+            detail = _replace_record_label(
+                wait_candidate.description,
+                context.row_represents if context else None,
+            )
+            lens = _decision_lens(context, wait_candidate)
+            if context and context.decisions:
+                detail = f"{detail} Relevant for {lens.lower()} decisions."
+            wait_item = {
+                "id": (
+                    f"semantic:{wait_candidate.table_name}:"
+                    f"{wait_candidate.insight_type}:{wait_candidate.metric}"
+                ),
+                "title": _semantic_highlight_title(detail),
+                "detail": detail,
+                "table": wait_candidate.table_name,
+                "metric": wait_candidate.metric,
+                "insight_type": wait_candidate.insight_type,
+                "severity": wait_candidate.severity,
+                "confidence_level": wait_candidate.confidence_level,
+                "support_count": wait_candidate.support_count,
+                "decision_lens": lens,
+                "metadata_signals": {
+                    "has_context": metadata.context is not None,
+                    "glossary_terms": len(metadata.glossary),
+                    "lookup_tables": len(metadata.lookup_tables),
+                },
+            }
+            if len(selected) >= limit:
+                selected[-1] = wait_item
+            else:
+                selected.append(wait_item)
+    return selected
 
 
 # ---------------------------------------------------------------------------

@@ -9,11 +9,13 @@ import polars as pl
 import pytest
 
 from headwater.analyzer.llm import LLMProvider
+from headwater.api.routes.insights import compute_semantic_highlights
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
     ContractCheckResult,
     ContractRule,
+    DatasetContext,
     DiscoveryResult,
     ExplorationResult,
     GeneratedModel,
@@ -1328,6 +1330,93 @@ class TestStatistical:
         assert "Plant A has the longest high-volume" in descriptions
         assert "Emergency wait time is highest around 8 AM and 3 PM" in descriptions
         assert all(i.support_count is not None for i in insights)
+
+    def test_semantic_highlights_use_context_and_value_oriented_findings(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 140 THEN TIMESTAMP '2026-01-05 18:00:00'
+                        WHEN i < 220 THEN TIMESTAMP '2026-01-06 04:00:00'
+                        WHEN i < 260 THEN TIMESTAMP '2026-01-06 07:00:00'
+                        ELSE TIMESTAMP '2026-01-04 10:00:00'
+                    END AS pickup_datetime,
+                    CASE WHEN i < 260 THEN 24 ELSE 12 END AS duration_min,
+                    CASE
+                        WHEN i < 140 THEN 4
+                        WHEN i < 260 THEN 12
+                        ELSE 3
+                    END AS wait_min,
+                    CASE
+                        WHEN i < 140 THEN 'JFK'
+                        WHEN i < 260 THEN 'Downtown'
+                        ELSE NULL
+                    END AS pu_location_id
+                FROM range(300) AS t(i)
+            )
+            SELECT
+                pickup_datetime,
+                pickup_datetime + duration_min * INTERVAL 1 MINUTE AS dropoff_datetime,
+                pickup_datetime - wait_min * INTERVAL 1 MINUTE AS request_datetime,
+                pu_location_id,
+                'Manhattan' AS do_location_id,
+                CASE
+                    WHEN i < 140 THEN 'Yellow'
+                    WHEN i < 260 THEN 'HVFHV'
+                    ELSE 'FHV'
+                END AS service_type,
+                10.0 AS trip_miles
+            FROM base
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=300,
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="request_datetime", dtype="timestamp"),
+                        ColumnInfo(name="pu_location_id", dtype="varchar"),
+                        ColumnInfo(name="do_location_id", dtype="varchar"),
+                        ColumnInfo(name="service_type", dtype="varchar"),
+                        ColumnInfo(name="trip_miles", dtype="double"),
+                    ],
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_trips",
+                model_type="staging",
+                sql="SELECT * FROM trips",
+                description="Trips staging",
+                source_tables=["trips"],
+                status="executed",
+            )
+        ]
+        context = DatasetContext(
+            source_name="test",
+            row_represents="trip",
+            decisions="Operations and dispatch planning",
+        )
+
+        highlights = compute_semantic_highlights(
+            duckdb_con,
+            discovery,
+            context,
+            models,
+        )
+
+        assert highlights
+        assert any(h["decision_lens"] == "Operations" for h in highlights)
+        assert any("HVFHV wait time is highest" in h["detail"] for h in highlights)
+        assert any("FHV location analysis is unreliable" in h["title"] for h in highlights)
 
 
 # ---------------------------------------------------------------------------

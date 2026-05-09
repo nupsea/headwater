@@ -301,9 +301,28 @@ export interface DataInsight {
   chart: DataInsightChartPoint[];
 }
 
+export interface SemanticHighlight {
+  id: string;
+  title: string;
+  detail: string;
+  table: string;
+  metric: string;
+  insight_type: string;
+  severity: "info" | "warning" | "critical";
+  confidence_level: string | null;
+  support_count: number | null;
+  decision_lens: string;
+  metadata_signals: {
+    has_context: boolean;
+    glossary_terms: number;
+    lookup_tables: number;
+  };
+}
+
 export interface InsightsResponse {
   data_profile: DataProfile;
   top_insights: DataInsight[];
+  semantic_highlights?: SemanticHighlight[];
   workflow: Workflow;
   advisory_actions: AdvisoryAction[];
   overview: {
@@ -425,6 +444,7 @@ export interface ExplorationResult {
 export interface ExploreSuggestionsResponse {
   suggestions: SuggestedQuestion[];
   business_insights?: DataInsight[];
+  semantic_highlights?: SemanticHighlight[];
   insights: StatisticalInsight[];
   diagnostics?: InsightFamilyDiagnostic[];
   review_pct: number;
@@ -432,6 +452,7 @@ export interface ExploreSuggestionsResponse {
 
 export interface ExploreInsightsResponse {
   business_insights?: DataInsight[];
+  semantic_highlights?: SemanticHighlight[];
   insights: StatisticalInsight[];
   diagnostics?: InsightFamilyDiagnostic[];
   total: number;
