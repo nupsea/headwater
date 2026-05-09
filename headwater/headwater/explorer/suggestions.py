@@ -60,6 +60,21 @@ _ID_NAME_RE = re.compile(
     r"(_id|_key|_fk|_pk|^id$|^key$|^uuid$|code$|flag$|indicator$)", re.IGNORECASE
 )
 
+_ENUM_LABEL_REGISTRY: dict[str, dict[object, str]] = {
+    "payment_type": {
+        0: "Flex fare",
+        1: "Credit card",
+        2: "Cash",
+        3: "No charge",
+        4: "Dispute",
+        5: "Unknown",
+        6: "Voided trip",
+    },
+}
+_ENUM_DIMENSION_LABELS = {
+    "payment_type": "payment method",
+}
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -303,6 +318,7 @@ def _from_business_insights(
         return suggestions
 
     table_map = {table.name: table for table in tables}
+    lookup_index = _build_lookup_index(tables)
     seen: set[str] = set()
     for insight in business_insights[:8]:
         table_name = insight.get("table")
@@ -340,35 +356,44 @@ def _from_business_insights(
                 f"GROUP BY 1 ORDER BY 1 LIMIT 100"
             )
         elif insight_id.startswith("metric_driver:") and column:
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                str(column),
+                lookup_index,
+            )
             question = (
-                f"Which {_humanize(column)} drives {_business_metric_label(insight)} "
+                f"Which {display_label} drives {_business_metric_label(insight)} "
                 f"in {_humanize(table_name)}?"
             )
             sql_hint = (
-                f'SELECT "{column}", '
+                f"SELECT {select_expr} AS dimension, "
                 f'ROUND(SUM("{insight["metric"]}"), 2) AS total_value, '
                 f"COUNT(*) AS records "
-                f"FROM {ref} "
-                f'WHERE "{column}" IS NOT NULL AND "{insight["metric"]}" IS NOT NULL '
-                f'GROUP BY "{column}" ORDER BY total_value DESC LIMIT 20'
+                f"FROM {ref} fact "
+                f"{join_sql} "
+                f'WHERE {group_expr} IS NOT NULL AND fact."{insight["metric"]}" IS NOT NULL '
+                f"GROUP BY {group_expr} ORDER BY total_value DESC LIMIT 20"
             )
         elif insight_id.startswith("segment_concentration:") and column:
-            question = f"Which {_humanize(column)} segments dominate {_humanize(table_name)}?"
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                str(column),
+                lookup_index,
+            )
+            question = f"Which {display_label} segments dominate {_humanize(table_name)}?"
             sql_hint = (
-                f'SELECT "{column}", COUNT(*) AS records '
-                f"FROM {ref} "
-                f'WHERE "{column}" IS NOT NULL '
-                f'GROUP BY "{column}" ORDER BY records DESC LIMIT 20'
+                f"SELECT {select_expr} AS dimension, COUNT(*) AS records "
+                f"FROM {ref} fact "
+                f"{join_sql} "
+                f"WHERE {group_expr} IS NOT NULL "
+                f"GROUP BY {group_expr} ORDER BY records DESC LIMIT 20"
             )
         elif chart_type == "histogram" and column:
             question = (
                 f"What is the distribution of {_humanize(column)} "
                 f"in {_humanize(table_name)}?"
             )
-            sql_hint = (
-                f'SELECT MIN("{column}") AS min, MAX("{column}") AS max, '
-                f'ROUND(AVG("{column}"), 2) AS mean, COUNT(*) AS records FROM {ref}'
-            )
+            sql_hint = _distribution_sql(ref, str(column))
 
         if not question or not sql_hint:
             continue
@@ -672,24 +697,26 @@ def _from_mart_models(
                 f"GROUP BY 1 ORDER BY 1 LIMIT 100"
             )
         elif dimension and metric:
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                None,
+                dimension,
+                {},
+            )
             question = (
-                f"Which {_humanize(dimension)} has the highest "
+                f"Which {display_label} has the highest "
                 f"{_humanize(metric)} in {label}?"
             )
             sql_hint = (
-                f'SELECT "{dimension}", '
+                f"SELECT {select_expr} AS dimension, "
                 f"COUNT(*) AS records, "
                 f'ROUND(AVG("{metric}"), 2) AS avg_{metric} '
-                f"FROM {ref} "
-                f'GROUP BY "{dimension}" ORDER BY avg_{metric} DESC LIMIT 20'
+                f"FROM {ref} fact "
+                f"{join_sql} "
+                f"GROUP BY {group_expr} ORDER BY avg_{metric} DESC LIMIT 20"
             )
         elif metric:
             question = f"What is the distribution of {_humanize(metric)} in {label}?"
-            sql_hint = (
-                f'SELECT MIN("{metric}") AS min, MAX("{metric}") AS max, '
-                f'ROUND(AVG("{metric}"), 2) AS mean, COUNT(*) AS records '
-                f"FROM {ref}"
-            )
+            sql_hint = _distribution_sql(ref, metric)
         else:
             question = _fallback_mart_question(model.name, label)
             sql_hint = f"SELECT * FROM {ref} LIMIT 50"
@@ -801,6 +828,7 @@ def _from_relationships(
     """
     questions: list[SuggestedQuestion] = []
     table_map = {t.name: t for t in tables}
+    lookup_index = _build_lookup_index(tables)
     seen_pairs: set[frozenset[str]] = set()
 
     for rel in relationships:
@@ -813,7 +841,6 @@ def _from_relationships(
         seen_pairs.add(pair)
 
         from_label = _humanize(rel.from_table)
-        to_label = _humanize(rel.to_table)
 
         from_ref = (
             resolve_table_ref(rel.from_table, con, models) if con is not None else rel.from_table
@@ -823,28 +850,42 @@ def _from_relationships(
         # Find a useful metric from the from_table to aggregate
         from_table_info = table_map[rel.from_table]
         metric_col = _pick_metric_col(from_table_info)
+        to_table_info = table_map[rel.to_table]
+        dim_candidates = _prefer_display_dim(
+            [c.name for c in to_table_info.columns if c.name != rel.to_column],
+            rel.to_table,
+        )
+        target_dim = dim_candidates[0] if dim_candidates else rel.to_column
+        group_expr, select_expr, join_sql, display_label = _dimension_projection(
+            to_table_info,
+            target_dim,
+            lookup_index,
+            alias="t",
+        )
 
         if metric_col:
             sql = (
-                f'SELECT t."{rel.to_column}", COUNT(*) AS {from_label}_count, '
+                f"SELECT {select_expr} AS dimension, COUNT(*) AS {from_label}_count, "
                 f'AVG(f."{metric_col}") AS avg_{metric_col} '
                 f"FROM {from_ref} f "
                 f'JOIN {to_ref} t ON f."{rel.from_column}" = t."{rel.to_column}" '
-                f'GROUP BY t."{rel.to_column}" '
+                f"{join_sql} "
+                f"GROUP BY {group_expr} "
                 f"ORDER BY {from_label}_count DESC LIMIT 20"
             )
         else:
             sql = (
-                f'SELECT t."{rel.to_column}", COUNT(*) AS {from_label}_count '
+                f"SELECT {select_expr} AS dimension, COUNT(*) AS {from_label}_count "
                 f"FROM {from_ref} f "
                 f'JOIN {to_ref} t ON f."{rel.from_column}" = t."{rel.to_column}" '
-                f'GROUP BY t."{rel.to_column}" '
+                f"{join_sql} "
+                f"GROUP BY {group_expr} "
                 f"ORDER BY {from_label}_count DESC LIMIT 20"
             )
 
         questions.append(
             SuggestedQuestion(
-                question=f"How many {from_label} records are there per {to_label}?",
+                question=f"How many {from_label} records are there per {display_label}?",
                 source="relationship",
                 category="Cross-Entity Analysis",
                 relevant_tables=[rel.from_table, rel.to_table],
@@ -875,6 +916,7 @@ def _from_table_structure(
       - metric only        -> summary statistics
     """
     questions: list[SuggestedQuestion] = []
+    lookup_index = _build_lookup_index(tables)
 
     for table in tables:
         ref = resolve_table_ref(table.name, con, models) if con is not None else table.name
@@ -911,22 +953,28 @@ def _from_table_structure(
             dim_limit = min(len(dim_cols), 2)
             for d_col in dim_cols[:dim_limit]:
                 m_col = metric_cols[0]
+                group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                    table,
+                    d_col,
+                    lookup_index,
+                )
                 questions.append(
                     SuggestedQuestion(
                         question=(
-                            f"Which {_humanize(d_col)} has the highest {_humanize(m_col)} "
+                            f"Which {display_label} has the highest {_humanize(m_col)} "
                             f"in {label}?"
                         ),
                         source="semantic",
                         category=label.title(),
                         relevant_tables=[table.name],
                         sql_hint=(
-                            f'SELECT "{d_col}", '
+                            f"SELECT {select_expr} AS dimension, "
                             f"COUNT(*) AS records, "
                             f'ROUND(AVG("{m_col}"), 2) AS avg_{m_col}, '
                             f'MAX("{m_col}") AS max_{m_col} '
-                            f"FROM {ref} "
-                            f'GROUP BY "{d_col}" '
+                            f"FROM {ref} fact "
+                            f"{join_sql} "
+                            f"GROUP BY {group_expr} "
                             f"ORDER BY avg_{m_col} DESC LIMIT 20"
                         ),
                     )
@@ -940,11 +988,7 @@ def _from_table_structure(
                     source="semantic",
                     category=label.title(),
                     relevant_tables=[table.name],
-                    sql_hint=(
-                        f'SELECT MIN("{m_col}") AS min, MAX("{m_col}") AS max, '
-                        f'ROUND(AVG("{m_col}"), 2) AS mean, COUNT(*) AS records '
-                        f"FROM {ref}"
-                    ),
+                    sql_hint=_distribution_sql(ref, m_col),
                 )
             )
 
@@ -1207,3 +1251,137 @@ def _humanize(name: str) -> str:
 def _humanize_model(model_name: str) -> str:
     """Convert staging.stg_readings -> readings."""
     return _humanize(model_name)
+
+
+def _build_lookup_index(tables: list[TableInfo]) -> dict[str, dict[str, str]]:
+    index: dict[str, dict[str, str]] = {}
+    for table in tables:
+        id_cols = [col.name for col in table.columns if _ID_NAME_RE.search(col.name)]
+        label_cols = [
+            col.name
+            for col in table.columns
+            if any(
+                token in col.name.lower()
+                for token in (
+                    "name",
+                    "label",
+                    "description",
+                    "zone",
+                    "borough",
+                    "region",
+                    "title",
+                )
+            )
+        ]
+        if not id_cols or not label_cols or table.row_count > 100_000:
+            continue
+        for id_col in id_cols:
+            index.setdefault(
+                id_col.lower(),
+                {
+                    "table_name": table.name,
+                    "id_column": id_col,
+                    "label_column": label_cols[0],
+                },
+            )
+    return index
+
+
+def _enum_case_expression(column_name: str, raw_expr: str) -> str | None:
+    mapping = _ENUM_LABEL_REGISTRY.get(column_name.lower())
+    if not mapping:
+        return None
+    cases = []
+    for value, label in mapping.items():
+        value_sql = f"'{value}'" if isinstance(value, str) else str(value)
+        cases.append(f"WHEN {raw_expr} = {value_sql} THEN '{label}'")
+    return (
+        "CASE "
+        + " ".join(cases)
+        + f" ELSE CONCAT('Unknown (', CAST({raw_expr} AS VARCHAR), ')') END"
+    )
+
+
+def _dimension_projection(
+    table: TableInfo | None,
+    column_name: str,
+    lookup_index: dict[str, dict[str, str]],
+    alias: str = "fact",
+) -> tuple[str, str, str, str]:
+    raw_expr = f'{alias}."{column_name}"'
+    enum_expr = _enum_case_expression(column_name, raw_expr)
+    if enum_expr:
+        return (
+            enum_expr,
+            enum_expr,
+            "",
+            _ENUM_DIMENSION_LABELS.get(column_name.lower(), _humanize(column_name)),
+        )
+
+    lookup = lookup_index.get(column_name.lower())
+    if lookup and table is not None and lookup["table_name"] != table.name:
+        join_alias = f"{alias}_lu"
+        join_sql = (
+            f'LEFT JOIN "{lookup["table_name"]}" {join_alias} '
+            f'ON {raw_expr} = {join_alias}."{lookup["id_column"]}"'
+        )
+        label_expr = (
+            f"COALESCE(CAST({join_alias}.\"{lookup['label_column']}\" AS VARCHAR), "
+            f"CAST({raw_expr} AS VARCHAR))"
+        )
+        return (
+            label_expr,
+            label_expr,
+            join_sql,
+            _humanize(lookup["label_column"]),
+        )
+
+    return raw_expr, raw_expr, "", _humanize(column_name)
+
+
+def _distribution_sql(ref: str, metric: str) -> str:
+    value_expr = f'CAST("{metric}" AS DOUBLE)'
+    return f"""
+WITH stats AS (
+    SELECT
+        MIN({value_expr}) AS min_value,
+        MAX({value_expr}) AS max_value
+    FROM {ref}
+    WHERE "{metric}" IS NOT NULL
+),
+bucketed AS (
+    SELECT
+        CASE
+            WHEN stats.max_value = stats.min_value THEN 0
+            ELSE LEAST(
+                9,
+                CAST(
+                    FLOOR(
+                        (
+                            ({value_expr} - stats.min_value)
+                            / NULLIF(stats.max_value - stats.min_value, 0)
+                        ) * 10
+                    ) AS INTEGER
+                )
+            )
+        END AS bucket_idx,
+        stats.min_value,
+        stats.max_value
+    FROM {ref}
+    CROSS JOIN stats
+    WHERE "{metric}" IS NOT NULL
+)
+SELECT
+    CASE
+        WHEN min_value = max_value THEN printf('%.2f', min_value)
+        ELSE printf(
+            '%.2f - %.2f',
+            min_value + bucket_idx * ((max_value - min_value) / 10.0),
+            min_value + (bucket_idx + 1) * ((max_value - min_value) / 10.0)
+        )
+    END AS bucket,
+    COUNT(*) AS records
+FROM bucketed
+GROUP BY bucket_idx, min_value, max_value
+ORDER BY bucket_idx
+""".strip()

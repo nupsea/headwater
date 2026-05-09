@@ -328,6 +328,146 @@ class TestSuggestions:
         assert questions[0].sql_hint is not None
         assert any("changed over time" in q.question.lower() for q in questions)
 
+    def test_encoded_dimension_questions_use_readable_labels(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_yellow_trips AS
+            SELECT * FROM (VALUES
+                (1, 2),
+                (1, 3),
+                (2, 1),
+                (2, 4)
+            ) AS t(payment_type, passenger_count)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="yellow_trips",
+                    row_count=4,
+                    columns=[
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="passenger_count", dtype="int64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=2,
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="passenger_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=4,
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_yellow_trips",
+                model_type="staging",
+                sql="SELECT * FROM yellow_trips",
+                description="Yellow trips staging",
+                source_tables=["yellow_trips"],
+                status="executed",
+            )
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q for q in questions if "payment method" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.data
+        assert result.data[0]["dimension"] in {"Credit card", "Cash"}
+        assert all(not isinstance(row["dimension"], int) for row in result.data)
+
+    def test_distribution_questions_return_bucketed_results(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_measurements AS
+            SELECT i AS value
+            FROM range(1, 101) AS t(i)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="measurements",
+                    row_count=100,
+                    columns=[
+                        ColumnInfo(name="value", dtype="int64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="measurements",
+                    column_name="value",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=100,
+                    min_value=1,
+                    max_value=100,
+                    mean=50.5,
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_measurements",
+                model_type="staging",
+                sql="SELECT * FROM measurements",
+                description="Measurements staging",
+                source_tables=["measurements"],
+                status="executed",
+            )
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q for q in questions if "distribution of value" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.row_count > 1
+        assert result.visualization is not None
+        assert result.visualization.chart_type == "bar"
+        assert {"bucket", "records"} <= set(result.data[0])
+
     def test_suggestions_diversify_repetitive_trends(self):
         tables = []
         profiles = []
