@@ -440,7 +440,7 @@ def _detect_family_insights(
         "wait",
         ["request_ts", "event_ts"],
         bool(start_expr and wait_expr),
-        lambda: _wait_family(con, table_ref, source_table, start_expr, wait_expr),
+        lambda: _wait_family(con, table_ref, source_table, start_expr, wait_expr, service),
         "Requires request and event/lifecycle start roles.",
     )
 
@@ -864,9 +864,49 @@ def _quality_family(
     service: SemanticColumnRole | None,
 ) -> list[StatisticalInsight]:
     insights: list[StatisticalInsight] = []
+    service_col = quote_ident(service.column_name) if service else None
     cols = [role for role in (origin, dest) if role]
     for role in cols:
         col = quote_ident(role.column_name)
+        if service_col:
+            row = con.execute(
+                f"""
+                WITH grouped AS (
+                    SELECT CAST({service_col} AS VARCHAR) AS service_value,
+                           COUNT(*) AS n,
+                           SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS nulls
+                    FROM {table_ref}
+                    WHERE {service_col} IS NOT NULL
+                    GROUP BY 1
+                    HAVING COUNT(*) >= 30
+                )
+                SELECT service_value, n, nulls
+                FROM grouped
+                WHERE CAST(nulls AS DOUBLE) / CAST(n AS DOUBLE) >= 0.2
+                ORDER BY CAST(nulls AS DOUBLE) / CAST(n AS DOUBLE) DESC, n DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row and row[1]:
+                rate = float(row[2]) / float(row[1]) * 100
+                insights.append(
+                    StatisticalInsight(
+                        metric=role.column_name,
+                        table_name=source_table,
+                        insight_type="data_quality",
+                        description=(
+                            f"{_service_value_label(row[0])} location analysis is unreliable "
+                            f"unless null {_location_role_label(role.column_name)} are handled: "
+                            f"{rate:.1f}% are missing."
+                        ),
+                        magnitude=round(rate, 2),
+                        confidence_level="99%",
+                        comparison_baseline="service-level null-rate threshold 20%",
+                        severity="critical" if rate >= 50 else "warning",
+                        support_count=int(row[1]),
+                    )
+                )
+                continue
         row = con.execute(
             "SELECT COUNT(*) AS n, "
             f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS nulls "
@@ -874,7 +914,7 @@ def _quality_family(
         ).fetchone()
         if row and row[0] and float(row[1]) / float(row[0]) >= 0.2:
             rate = float(row[1]) / float(row[0]) * 100
-            service_label = _service_label(source_table, service)
+            service_label = _service_label(source_table, None)
             insights.append(
                 StatisticalInsight(
                     metric=role.column_name,
@@ -949,7 +989,68 @@ def _wait_family(
     source_table: str,
     start_expr: str,
     wait_expr: str,
+    service: SemanticColumnRole | None,
 ) -> list[StatisticalInsight]:
+    service_col = quote_ident(service.column_name) if service else None
+    if service_col:
+        rows = con.execute(
+            f"""
+            WITH grouped AS (
+                SELECT CAST({service_col} AS VARCHAR) AS service_value,
+                       CAST(EXTRACT(hour FROM {start_expr}) AS INTEGER) AS hour_bucket,
+                       COUNT(*) AS n,
+                       quantile_cont({wait_expr}, 0.9) AS p90_wait
+                FROM {table_ref}
+                WHERE {service_col} IS NOT NULL
+                  AND {start_expr} IS NOT NULL
+                  AND {wait_expr} BETWEEN 0 AND 240
+                GROUP BY 1, 2
+                HAVING COUNT(*) >= 30
+            ),
+            ranked AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY service_value
+                           ORDER BY p90_wait DESC, n DESC
+                       ) AS service_hour_rank
+                FROM grouped
+            ),
+            chosen_service AS (
+                SELECT service_value,
+                       MAX(p90_wait) AS top_p90,
+                       SUM(CASE WHEN service_hour_rank <= 2 THEN n ELSE 0 END) AS support_n
+                FROM ranked
+                GROUP BY 1
+                ORDER BY top_p90 DESC, support_n DESC
+                LIMIT 1
+            )
+            SELECT r.service_value, r.hour_bucket, r.n, r.p90_wait
+            FROM ranked r
+            INNER JOIN chosen_service c
+                ON r.service_value = c.service_value
+            WHERE r.service_hour_rank <= 2
+            ORDER BY r.p90_wait DESC, r.n DESC
+            """
+        ).fetchall()
+        if rows:
+            hours = " and ".join(_format_hour(row[1]) for row in rows)
+            support = sum(int(row[2]) for row in rows)
+            return [
+                StatisticalInsight(
+                    metric="wait_min",
+                    table_name=source_table,
+                    insight_type="duration_distribution",
+                    description=(
+                        f"{_service_value_label(rows[0][0])} wait time is highest around "
+                        f"{hours}, with p90 wait near {float(rows[0][3]):.1f} minutes."
+                    ),
+                    magnitude=round(float(rows[0][3]), 2),
+                    confidence_level="99%",
+                    comparison_baseline="service-level p90 wait by hour",
+                    severity="info",
+                    support_count=support,
+                )
+            ]
     rows = con.execute(
         f"""
         SELECT CAST(EXTRACT(hour FROM {start_expr}) AS INTEGER) AS hour_bucket,
@@ -1873,6 +1974,35 @@ def _service_label(source_table: str, service: SemanticColumnRole | None) -> str
     if service:
         return _humanize(service.column_name)
     return _humanize(source_table)
+
+
+def _service_value_label(value: object) -> str:
+    if value is None:
+        return "Service"
+    text = str(value).strip()
+    compact = text.lower().replace(" ", "").replace("-", "").replace("_", "")
+    if "hvfhv" in compact or "fhvhv" in compact:
+        return "HVFHV"
+    if compact == "fhv":
+        return "FHV"
+    if "yellow" in compact:
+        return "Yellow service"
+    if "green" in compact:
+        return "Green service"
+    return _humanize(text)
+
+
+def _location_role_label(column_name: str) -> str:
+    lowered = column_name.lower()
+    if "pickup" in lowered or lowered.startswith("pu_") or "pu_location" in lowered:
+        return "pickup location values"
+    if "dropoff" in lowered or lowered.startswith("do_") or "do_location" in lowered:
+        return "dropoff location values"
+    if "origin" in lowered:
+        return "origin location values"
+    if "destination" in lowered or "dest" in lowered:
+        return "destination location values"
+    return f"{_humanize(column_name).lower()} values"
 
 
 def _format_date(val: object) -> str:

@@ -43,13 +43,13 @@ _ROLE_PATTERNS: list[tuple[str, re.Pattern[str], float, str]] = [
     _role_pattern(
         "lifecycle_end_ts",
         r"(dropoff|end|finish|closed|resolved|delivered|completed).*"
-        r"(_?date|_?time|_?ts|datetime)|(^|_)dropoff_datetime$|^ended_at$",
+        r"((_?date|_?time|_?ts|datetime)|_at)$|(^|_)dropoff_datetime$|^ended_at$",
         0.92,
         "lifecycle end timestamp",
     ),
     _role_pattern(
         "request_ts",
-        r"(request|dispatch|book|created).*(_?date|_?time|_?ts|datetime)",
+        r"(request|dispatch|book|created).*((_?date|_?time|_?ts|datetime)|_at)$",
         0.86,
         "request or dispatch timestamp",
     ),

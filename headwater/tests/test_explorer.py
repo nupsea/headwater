@@ -1153,13 +1153,18 @@ class TestStatistical:
                     CASE
                         WHEN i < 140 THEN TIMESTAMP '2026-01-05 18:00:00'
                         WHEN i < 220 THEN TIMESTAMP '2026-01-06 04:00:00'
+                        WHEN i < 260 THEN TIMESTAMP '2026-01-06 07:00:00'
                         ELSE TIMESTAMP '2026-01-04 10:00:00'
                     END AS pickup_datetime,
-                    CASE WHEN i < 220 THEN 24 ELSE 12 END AS duration_min,
-                    CASE WHEN i < 140 THEN 4 WHEN i < 220 THEN 12 ELSE 2 END AS wait_min,
+                    CASE WHEN i < 260 THEN 24 ELSE 12 END AS duration_min,
                     CASE
-                        WHEN i < 160 THEN 'JFK'
-                        WHEN i < 220 THEN 'Downtown'
+                        WHEN i < 140 THEN 4
+                        WHEN i < 260 THEN 12
+                        ELSE 3
+                    END AS wait_min,
+                    CASE
+                        WHEN i < 140 THEN 'JFK'
+                        WHEN i < 260 THEN 'Downtown'
                         ELSE NULL
                     END AS pu_location_id
                 FROM range(300) AS t(i)
@@ -1170,6 +1175,11 @@ class TestStatistical:
                 pickup_datetime - wait_min * INTERVAL 1 MINUTE AS request_datetime,
                 pu_location_id,
                 'Manhattan' AS do_location_id,
+                CASE
+                    WHEN i < 140 THEN 'Yellow'
+                    WHEN i < 260 THEN 'HVFHV'
+                    ELSE 'FHV'
+                END AS service_type,
                 10.0 AS trip_miles
             FROM base
             """
@@ -1186,6 +1196,7 @@ class TestStatistical:
                         ColumnInfo(name="request_datetime", dtype="timestamp"),
                         ColumnInfo(name="pu_location_id", dtype="varchar"),
                         ColumnInfo(name="do_location_id", dtype="varchar"),
+                        ColumnInfo(name="service_type", dtype="varchar"),
                         ColumnInfo(name="trip_miles", dtype="double"),
                     ],
                 )
@@ -1208,8 +1219,83 @@ class TestStatistical:
         assert "6 PM is the busiest" in descriptions
         assert "Weekday trips average" in descriptions
         assert "JFK has the longest high-volume" in descriptions
-        assert "Wait time is highest around 4 AM" in descriptions
-        assert "location analysis is unreliable" in descriptions
+        assert "HVFHV wait time is highest around 4 AM and 7 AM" in descriptions
+        assert "FHV location analysis is unreliable" in descriptions
+        assert all(i.support_count is not None for i in insights)
+
+    def test_semantic_families_generalize_beyond_taxi_tables(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_work_orders AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 120 THEN TIMESTAMP '2026-02-02 08:00:00'
+                        WHEN i < 200 THEN TIMESTAMP '2026-02-03 15:00:00'
+                        ELSE TIMESTAMP '2026-02-01 11:00:00'
+                    END AS started_at,
+                    CASE
+                        WHEN i < 120 THEN 70
+                        WHEN i < 200 THEN 30
+                        ELSE 20
+                    END AS duration_min,
+                    CASE
+                        WHEN i < 120 THEN 18
+                        WHEN i < 200 THEN 7
+                        ELSE 4
+                    END AS wait_min,
+                    CASE
+                        WHEN i < 140 THEN 'Plant A'
+                        WHEN i < 220 THEN 'Plant B'
+                        ELSE 'Plant C'
+                    END AS site_id,
+                    CASE
+                        WHEN i < 150 THEN 'Emergency'
+                        ELSE 'Routine'
+                    END AS work_type
+                FROM range(260) AS t(i)
+            )
+            SELECT
+                started_at - wait_min * INTERVAL 1 MINUTE AS requested_at,
+                started_at,
+                started_at + duration_min * INTERVAL 1 MINUTE AS resolved_at,
+                site_id,
+                work_type
+            FROM base
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="work_orders",
+                    row_count=260,
+                    columns=[
+                        ColumnInfo(name="requested_at", dtype="timestamp"),
+                        ColumnInfo(name="started_at", dtype="timestamp"),
+                        ColumnInfo(name="resolved_at", dtype="timestamp"),
+                        ColumnInfo(name="site_id", dtype="varchar"),
+                        ColumnInfo(name="work_type", dtype="varchar"),
+                    ],
+                )
+            ],
+        )
+
+        insights = detect_insights(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+        )
+        descriptions = " ".join(i.description for i in insights)
+        types = {i.insight_type for i in insights}
+
+        assert "volume_distribution" in types
+        assert "geographic_hotspot" in types
+        assert "duration_distribution" in types
+        assert "8 AM is the busiest" in descriptions
+        assert "Plant A has the longest high-volume" in descriptions
+        assert "Emergency wait time is highest around 8 AM and 3 PM" in descriptions
         assert all(i.support_count is not None for i in insights)
 
 
