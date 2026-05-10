@@ -9,10 +9,12 @@ import polars as pl
 import pytest
 
 from headwater.analyzer.llm import LLMProvider
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
 from headwater.api.routes.insights import compute_semantic_highlights, compute_top_insights
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
+    CompanionDoc,
     ContractCheckResult,
     ContractRule,
     DatasetContext,
@@ -602,6 +604,104 @@ class TestSuggestions:
         assert not any("quality flag" in q.question.lower() for q in questions)
         assert any("channel" in q.question.lower() for q in questions)
 
+    def test_companion_glossary_improves_question_labels(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="order_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(
+                            name="fulfillment_mode",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="fulfillment_mode",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("pickup", 200), ("delivery", 180), ("ship", 120)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=100,
+                ),
+            ],
+            companion_docs=[
+                CompanionDoc(
+                    filename="glossary.md",
+                    content="fulfillment_mode: service channel\namount: order value",
+                    doc_type="markdown",
+                    matched_tables=["orders"],
+                    confidence=0.9,
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert any("service channel" in q.question.lower() for q in questions)
+        assert any("order value" in q.question.lower() for q in questions)
+
+    def test_dataset_context_row_represents_changes_count_phrasing(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="trip_events",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(
+                            name="service_zone_id",
+                            dtype="int64",
+                            semantic_type="foreign_key",
+                        ),
+                    ],
+                ),
+                TableInfo(
+                    name="zones",
+                    row_count=5,
+                    columns=[
+                        ColumnInfo(name="service_zone_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="trip_events",
+                    from_column="service_zone_id",
+                    to_table="zones",
+                    to_column="service_zone_id",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                ),
+            ],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            DatasetContext(source_name="test", row_represents="trip"),
+        )
+
+        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+
+        assert any("how many trips are there per name" in q.question.lower() for q in questions)
+        assert not any("records are there per name" in q.question.lower() for q in questions)
+
     def test_suggestions_diversify_repetitive_trends(self):
         tables = []
         profiles = []
@@ -912,7 +1012,7 @@ class TestCrossTableSuggestions:
 
         assert cross_qs
         assert not any("average patient age" in q.question.lower() for q in cross_qs)
-        assert any("how many incidents records" in q.question.lower() for q in cross_qs)
+        assert any("how many incidents are there" in q.question.lower() for q in cross_qs)
 
     def test_cross_table_suggestions_require_direct_join(self):
         discovery = DiscoveryResult(

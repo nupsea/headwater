@@ -24,6 +24,7 @@ import re
 
 import duckdb
 
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata, retrieve_metadata
 from headwater.core.classification import is_dimension_column, is_metric_column
 from headwater.core.models import (
     ColumnInfo,
@@ -122,6 +123,7 @@ def generate_suggestions(
     catalog=None,
     extra_relationships: list[Relationship] | None = None,
     business_insights: list[dict] | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[SuggestedQuestion]:
     """Generate suggested questions from all available metadata.
 
@@ -136,6 +138,7 @@ def generate_suggestions(
     Returns at most MAX_TOTAL_SUGGESTIONS questions in priority order.
     """
     all_models = models or []
+    metadata = metadata or retrieve_metadata(discovery)
     profile_index = {(p.table_name, p.column_name): p for p in discovery.profiles}
 
     # Merge confirmed PK/FK relationships with discovered ones
@@ -165,14 +168,26 @@ def generate_suggestions(
     graph = SchemaGraph(discovery, all_models)
 
     buckets: dict[str, list[SuggestedQuestion]] = {
-        "business": _from_business_insights(business_insights, con, discovery.tables, all_models),
-        "catalog": _from_catalog(catalog, con, all_models) if catalog else [],
-        "mart": _from_mart_models(all_models, con),
-        "cross_table": _from_schema_graph(graph, all_relationships, all_models, con),
-        "relationship": _from_relationships(
-            discovery.tables, all_relationships, all_models, con
+        "business": _from_business_insights(
+            business_insights,
+            con,
+            discovery.tables,
+            all_models,
+            metadata,
         ),
-        "semantic": _from_table_structure(discovery.tables, profile_index, all_models, con),
+        "catalog": _from_catalog(catalog, con, all_models) if catalog else [],
+        "mart": _from_mart_models(all_models, con, metadata),
+        "cross_table": _from_schema_graph(graph, all_relationships, all_models, con, metadata),
+        "relationship": _from_relationships(
+            discovery.tables, all_relationships, all_models, con, metadata
+        ),
+        "semantic": _from_table_structure(
+            discovery.tables,
+            profile_index,
+            all_models,
+            con,
+            metadata,
+        ),
         "quality": _from_quality_findings(
             contracts or [],
             quality_results or [],
@@ -200,7 +215,7 @@ def generate_suggestions(
             seen.add(key)
             candidates.append(q)
 
-    result = _select_diverse_questions(candidates)
+    result = _select_diverse_questions(candidates, metadata)
 
     logger.info(
         "Generated %d suggestions: business=%d, catalog=%d, mart=%d, cross_table=%d, "
@@ -217,7 +232,10 @@ def generate_suggestions(
     return result[:MAX_TOTAL_SUGGESTIONS]
 
 
-def _select_diverse_questions(candidates: list[SuggestedQuestion]) -> list[SuggestedQuestion]:
+def _select_diverse_questions(
+    candidates: list[SuggestedQuestion],
+    metadata: RetrievedMetadata | None = None,
+) -> list[SuggestedQuestion]:
     source_limits = {
         "business": 4,
         "catalog": 3,
@@ -255,7 +273,7 @@ def _select_diverse_questions(candidates: list[SuggestedQuestion]) -> list[Sugge
         candidates,
         key=lambda q: (
             source_priority.get(q.source, 99),
-            -_question_value_score(q),
+            -_question_value_score(q, metadata),
             len(q.relevant_tables or []),
             len(q.question),
         ),
@@ -340,7 +358,10 @@ def _question_shape(question: str) -> str:
     return "other"
 
 
-def _question_value_score(question: SuggestedQuestion) -> int:
+def _question_value_score(
+    question: SuggestedQuestion,
+    metadata: RetrievedMetadata | None = None,
+) -> int:
     score = 0
     shape = _question_shape(question.question)
     shape_weight = {
@@ -366,6 +387,7 @@ def _question_value_score(question: SuggestedQuestion) -> int:
         score -= 4
     if any(token in lower for token in ("highest", "changed over time", "how many")):
         score += 2
+    score += _context_question_bonus(question.question, metadata)
     return score
 
 
@@ -374,13 +396,14 @@ def _from_business_insights(
     con: duckdb.DuckDBPyConnection | None,
     tables: list[TableInfo],
     models: list[GeneratedModel],
+    metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     suggestions: list[SuggestedQuestion] = []
     if not business_insights:
         return suggestions
 
     table_map = {table.name: table for table in tables}
-    lookup_index = _build_lookup_index(tables)
+    lookup_index = _build_lookup_index(tables, metadata)
     seen: set[str] = set()
     for insight in business_insights[:8]:
         table_name = insight.get("table")
@@ -408,8 +431,8 @@ def _from_business_insights(
                 grain,
             )
             question = (
-                f"How has {_metric_question_label(_business_metric_label(insight))} "
-                f"in {_humanize(table_name)} changed over time?"
+                f"How has {_metric_question_label(_business_metric_label(insight), metadata)} "
+                f"in {_table_label(table_name, metadata)} changed over time?"
             )
             sql_hint = (
                 f"SELECT {period_expr} AS period, {metric_expr} AS {metric_alias} "
@@ -422,10 +445,11 @@ def _from_business_insights(
                 table,
                 str(column),
                 lookup_index,
+                metadata,
             )
             question = (
                 f"Which {display_label} drives {_business_metric_label(insight)} "
-                f"in {_humanize(table_name)}?"
+                f"in {_table_label(table_name, metadata)}?"
             )
             sql_hint = (
                 f"SELECT {select_expr} AS dimension, "
@@ -441,8 +465,12 @@ def _from_business_insights(
                 table,
                 str(column),
                 lookup_index,
+                metadata,
             )
-            question = f"Which {display_label} segments dominate {_humanize(table_name)}?"
+            question = (
+                f"Which {display_label} segments dominate "
+                f"{_table_label(table_name, metadata)}?"
+            )
             sql_hint = (
                 f"SELECT {select_expr} AS dimension, COUNT(*) AS records "
                 f"FROM {ref} fact "
@@ -453,7 +481,7 @@ def _from_business_insights(
         elif chart_type == "histogram" and column:
             question = (
                 f"What is the distribution of {_humanize(column)} "
-                f"in {_humanize(table_name)}?"
+                f"in {_table_label(table_name, metadata)}?"
             )
             sql_hint = _distribution_sql(ref, str(column))
 
@@ -536,6 +564,7 @@ def _from_schema_graph(
     relationships: list[Relationship],
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     """Generate cross-table analytical questions using SchemaGraph join paths.
 
@@ -555,7 +584,7 @@ def _from_schema_graph(
             continue
 
         metric_col = _pick_cross_table_metric(fact_node)
-        metric_label = _metric_question_label(metric_col) if metric_col else None
+        metric_label = _metric_question_label(metric_col, metadata) if metric_col else None
 
         for dim_name, dim_node in graph.tables.items():
             if dim_name == fact_name:
@@ -571,9 +600,9 @@ def _from_schema_graph(
                 continue
 
             dim_col_name = dim_node.dimensions[0]
-            dim_label = _humanize(dim_col_name)
-            fact_label = _humanize(fact_name)
-            dim_table_label = _humanize(dim_name)
+            dim_label = _column_label(dim_col_name, metadata)
+            fact_label = _table_label(fact_name, metadata)
+            dim_table_label = _table_label(dim_name, metadata)
 
             combo_key = (fact_name, dim_name, dim_col_name)
             if combo_key in seen_combos:
@@ -629,7 +658,7 @@ def _from_schema_graph(
                     f"ORDER BY {count_alias} DESC LIMIT 20"
                 )
                 question = (
-                    f"How many {fact_label} records are there by "
+                    f"How many {_row_subject_label(metadata, fact_label)} are there by "
                     f"{dim_label} ({dim_table_label})?"
                 )
 
@@ -723,6 +752,7 @@ def _build_catalog_sql(metric, dimension, ref_fn=None) -> str:
 def _from_mart_models(
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     """Generate analytical questions from mart model definitions.
 
@@ -739,7 +769,7 @@ def _from_mart_models(
         if con is not None and not table_exists(con, "marts", model.name):
             continue
 
-        label = _humanize(model.name)
+        label = _table_label(model.name, metadata)
         ref = f"marts.{model.name}"
         cols = _mart_columns(con, model.name) if con is not None else []
         row_count = _mart_row_count(con, model.name) if con is not None else None
@@ -752,7 +782,10 @@ def _from_mart_models(
         if temporal and metric:
             temporal_dtype = next((dtype for name, dtype in cols if name == temporal), "")
             period_expr = _time_bucket_expression(temporal, temporal_dtype)
-            question = f"How has {_metric_question_label(metric)} in {label} changed over time?"
+            question = (
+                f"How has {_metric_question_label(metric, metadata)} "
+                f"in {label} changed over time?"
+            )
             sql_hint = (
                 f"SELECT {period_expr} AS period, "
                 f'ROUND(AVG("{metric}"), 2) AS avg_{metric}, '
@@ -766,10 +799,11 @@ def _from_mart_models(
                 None,
                 dimension,
                 {},
+                metadata,
             )
             question = (
                 f"Which {display_label} has the highest "
-                f"{_metric_question_label(metric)} in {label}?"
+                f"{_metric_question_label(metric, metadata)} in {label}?"
             )
             sql_hint = (
                 f"SELECT {select_expr} AS dimension, "
@@ -782,7 +816,10 @@ def _from_mart_models(
         elif metric:
             if _is_aggregate_metric_name(metric) or _looks_like_summary_model(model.name, label):
                 continue
-            question = f"What is the distribution of {_metric_question_label(metric)} in {label}?"
+            question = (
+                f"What is the distribution of {_metric_question_label(metric, metadata)} "
+                f"in {label}?"
+            )
             sql_hint = _distribution_sql(ref, metric)
         else:
             question = _fallback_mart_question(model.name, label)
@@ -909,6 +946,7 @@ def _from_relationships(
     relationships: list[Relationship],
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     """Generate cross-entity questions from detected foreign key relationships.
 
@@ -917,7 +955,7 @@ def _from_relationships(
     """
     questions: list[SuggestedQuestion] = []
     table_map = {t.name: t for t in tables}
-    lookup_index = _build_lookup_index(tables)
+    lookup_index = _build_lookup_index(tables, metadata)
     seen_pairs: set[frozenset[str]] = set()
 
     for rel in relationships:
@@ -929,7 +967,7 @@ def _from_relationships(
             continue
         seen_pairs.add(pair)
 
-        from_label = _humanize(rel.from_table)
+        from_label = _table_label(rel.from_table, metadata)
 
         from_ref = (
             resolve_table_ref(rel.from_table, con, models) if con is not None else rel.from_table
@@ -949,6 +987,7 @@ def _from_relationships(
             to_table_info,
             target_dim,
             lookup_index,
+            metadata,
             alias="t",
         )
 
@@ -974,7 +1013,10 @@ def _from_relationships(
 
         questions.append(
             SuggestedQuestion(
-                question=f"How many {from_label} records are there per {display_label}?",
+                question=(
+                    f"How many {_row_subject_label(metadata, from_label)} "
+                    f"are there per {display_label}?"
+                ),
                 source="relationship",
                 category="Cross-Entity Analysis",
                 relevant_tables=[rel.from_table, rel.to_table],
@@ -995,6 +1037,7 @@ def _from_table_structure(
     profile_index: dict[tuple[str, str], ColumnProfile],
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     """Generate analytical questions by inspecting each table's actual column structure.
 
@@ -1005,11 +1048,11 @@ def _from_table_structure(
       - metric only        -> summary statistics
     """
     questions: list[SuggestedQuestion] = []
-    lookup_index = _build_lookup_index(tables)
+    lookup_index = _build_lookup_index(tables, metadata)
 
     for table in tables:
         ref = resolve_table_ref(table.name, con, models) if con is not None else table.name
-        label = _humanize(table.name)
+        label = _table_label(table.name, metadata)
 
         temporal_cols = _get_temporal_cols(table)
         metric_cols = _get_metric_cols(table, profile_index)
@@ -1023,7 +1066,8 @@ def _from_table_structure(
             questions.append(
                 SuggestedQuestion(
                     question=(
-                        f"How has {_metric_question_label(m_col)} in {label} changed over time?"
+                        f"How has {_metric_question_label(m_col, metadata)} "
+                        f"in {label} changed over time?"
                     ),
                     source="semantic",
                     category=label.title(),
@@ -1048,12 +1092,13 @@ def _from_table_structure(
                     table,
                     d_col,
                     lookup_index,
+                    metadata,
                 )
                 questions.append(
                     SuggestedQuestion(
                         question=(
                             f"Which {display_label} has the highest "
-                            f"{_metric_question_label(m_col)} in {label}?"
+                            f"{_metric_question_label(m_col, metadata)} in {label}?"
                         ),
                         source="semantic",
                         category=label.title(),
@@ -1076,7 +1121,8 @@ def _from_table_structure(
             questions.append(
                 SuggestedQuestion(
                     question=(
-                        f"What is the distribution of {_metric_question_label(m_col)} in {label}?"
+                        f"What is the distribution of {_metric_question_label(m_col, metadata)} "
+                        f"in {label}?"
                     ),
                     source="semantic",
                     category=label.title(),
@@ -1350,7 +1396,29 @@ def _business_metric_label(insight: dict) -> str:
     return _humanize(str(insight.get("table") or "activity"))
 
 
-def _metric_question_label(name: str) -> str:
+def _glossary_label(name: str, metadata: RetrievedMetadata | None) -> str | None:
+    if metadata is None:
+        return None
+    terms = (name.lower(), _humanize(name).lower(), name.lower().replace("_", " "))
+    for term in terms:
+        description = metadata.glossary.get(term)
+        if not description:
+            continue
+        first = re.split(r"[.;(]", description, maxsplit=1)[0].strip()
+        words = first.split()
+        if 1 < len(words) <= 6:
+            return first.lower()
+    return None
+
+
+def _table_label(name: str, metadata: RetrievedMetadata | None) -> str:
+    return _glossary_label(name, metadata) or _humanize(name)
+
+
+def _metric_question_label(name: str, metadata: RetrievedMetadata | None = None) -> str:
+    glossary = _glossary_label(name, metadata)
+    if glossary:
+        return glossary
     lower = name.lower()
     if lower.startswith("avg_"):
         return f"average {_humanize(name[4:])}"
@@ -1366,6 +1434,50 @@ def _metric_question_label(name: str) -> str:
     if lower.endswith("_count") and len(name) > 6:
         return f"{_humanize(name[:-6])} count"
     return _humanize(name)
+
+
+def _column_label(name: str, metadata: RetrievedMetadata | None) -> str:
+    return _glossary_label(name, metadata) or _humanize(name)
+
+
+def _row_subject_label(metadata: RetrievedMetadata | None, fallback: str) -> str:
+    phrase = metadata.context.row_represents if metadata and metadata.context else None
+    if not phrase:
+        return fallback
+    phrase = phrase.strip().lower()
+    if not phrase:
+        return fallback
+    return phrase if phrase.endswith("s") else f"{phrase}s"
+
+
+def _context_question_bonus(
+    question: str,
+    metadata: RetrievedMetadata | None,
+) -> int:
+    if metadata is None or metadata.context is None or not metadata.context.decisions:
+        return 0
+    decisions = metadata.context.decisions.lower()
+    q = question.lower()
+    score = 0
+    if (
+        any(token in decisions for token in ("operation", "dispatch", "capacity", "service"))
+        and any(
+            token in q
+            for token in ("changed over time", "how many", "duration", "wait", "hour")
+        )
+    ):
+        score += 3
+    if (
+        any(token in decisions for token in ("revenue", "pricing", "sales", "finance"))
+        and any(token in q for token in ("amount", "fare", "price", "revenue", "tip"))
+    ):
+        score += 3
+    if (
+        any(token in decisions for token in ("compliance", "quality", "audit", "risk"))
+        and any(token in q for token in ("missing values", "unexpected", "duplicates", "status"))
+    ):
+        score += 3
+    return score
 
 
 def _humanize(name: str) -> str:
@@ -1384,8 +1496,21 @@ def _humanize_model(model_name: str) -> str:
     return _humanize(model_name)
 
 
-def _build_lookup_index(tables: list[TableInfo]) -> dict[str, dict[str, str]]:
+def _build_lookup_index(
+    tables: list[TableInfo],
+    metadata: RetrievedMetadata | None = None,
+) -> dict[str, dict[str, str]]:
     index: dict[str, dict[str, str]] = {}
+    if metadata is not None:
+        for table_name, lookup in metadata.lookup_tables.items():
+            index.setdefault(
+                lookup["id_column"].lower(),
+                {
+                    "table_name": table_name,
+                    "id_column": lookup["id_column"],
+                    "label_column": lookup["label_column"],
+                },
+            )
     for table in tables:
         id_cols = [col.name for col in table.columns if _ID_NAME_RE.search(col.name)]
         label_cols = [
@@ -1437,6 +1562,7 @@ def _dimension_projection(
     table: TableInfo | None,
     column_name: str,
     lookup_index: dict[str, dict[str, str]],
+    metadata: RetrievedMetadata | None = None,
     alias: str = "fact",
 ) -> tuple[str, str, str, str]:
     raw_expr = f'{alias}."{column_name}"'
@@ -1446,7 +1572,7 @@ def _dimension_projection(
             enum_expr,
             enum_expr,
             "",
-            _ENUM_DIMENSION_LABELS.get(column_name.lower(), _humanize(column_name)),
+            _ENUM_DIMENSION_LABELS.get(column_name.lower(), _column_label(column_name, metadata)),
         )
 
     lookup = lookup_index.get(column_name.lower())
@@ -1464,10 +1590,10 @@ def _dimension_projection(
             label_expr,
             label_expr,
             join_sql,
-            _humanize(lookup["label_column"]),
+            _column_label(lookup["label_column"], metadata),
         )
 
-    return raw_expr, raw_expr, "", _humanize(column_name)
+    return raw_expr, raw_expr, "", _column_label(column_name, metadata)
 
 
 def _distribution_sql(ref: str, metric: str) -> str:

@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from headwater.analyzer.llm import NoLLMProvider, get_provider
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
 from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.insights import compute_semantic_highlights, compute_top_insights
 from headwater.core.config import get_settings
@@ -185,6 +186,8 @@ async def get_suggestions(request: Request, project_id: str | None = None):
 
     catalog = pipeline.get("catalog")
     extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
+    context = _dataset_context_for_pipeline(request, pipeline)
+    metadata = retrieve_metadata(discovery, context)
     business_insights = compute_top_insights(
         request.app.state.duckdb_con,
         discovery.tables,
@@ -205,9 +208,9 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         catalog=catalog,
         extra_relationships=extra_rels,
         business_insights=business_insights,
+        metadata=metadata,
     )
     con = request.app.state.duckdb_con
-    context = _dataset_context_for_pipeline(request, pipeline)
     staging_result = detect_insights_with_diagnostics(
         con,
         schema="staging",
@@ -255,6 +258,8 @@ async def ask_question(request: Request, body: AskRequest, project_id: str | Non
 
     # Load confirmed relationships and merge into discovery for richer suggestions
     extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
+    context = _dataset_context_for_pipeline(request, pipeline)
+    metadata = retrieve_metadata(discovery, context)
 
     # Generate suggestions for matching (with confirmed relationships)
     suggestions = generate_suggestions(
@@ -265,6 +270,7 @@ async def ask_question(request: Request, body: AskRequest, project_id: str | Non
         con=con,
         extra_relationships=extra_rels,
         business_insights=compute_top_insights(con, discovery.tables, discovery.profiles),
+        metadata=metadata,
     )
 
     # Get LLM provider if configured
