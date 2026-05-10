@@ -363,6 +363,58 @@ class TestSuggestions:
         assert questions[0].sql_hint is not None
         assert any("changed over time" in q.question.lower() for q in questions)
 
+    def test_semantic_role_questions_are_generated_for_operational_workflows(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="work_orders",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="requested_at", dtype="timestamp"),
+                        ColumnInfo(name="started_at", dtype="timestamp"),
+                        ColumnInfo(name="resolved_at", dtype="timestamp"),
+                        ColumnInfo(name="site_id", dtype="varchar"),
+                        ColumnInfo(name="work_type", dtype="varchar"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="work_orders",
+                    column_name="site_id",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=5,
+                ),
+                ColumnProfile(
+                    table_name="work_orders",
+                    column_name="work_type",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("Emergency", 200), ("Routine", 180), ("Inspection", 120)],
+                ),
+            ],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            DatasetContext(
+                source_name="test",
+                row_represents="work order",
+                decisions="Operations and service planning",
+            ),
+        )
+
+        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+        business_qs = [q for q in questions if q.source == "business"]
+
+        assert business_qs
+        prompts = [q.question.lower() for q in business_qs]
+        assert any("which hour has the highest work orders volume" in q for q in prompts)
+        assert any("weekday and weekend work order duration compare" in q for q in prompts)
+        assert any("highest work order wait time" in q for q in prompts)
+
     def test_encoded_dimension_questions_use_readable_labels(self, duckdb_con):
         duckdb_con.execute(
             """

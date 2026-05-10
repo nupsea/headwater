@@ -25,6 +25,7 @@ import re
 import duckdb
 
 from headwater.analyzer.metadata_retrieval import RetrievedMetadata, retrieve_metadata
+from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.core.classification import is_dimension_column, is_metric_column
 from headwater.core.models import (
     ColumnInfo,
@@ -168,7 +169,12 @@ def generate_suggestions(
     graph = SchemaGraph(discovery, all_models)
 
     buckets: dict[str, list[SuggestedQuestion]] = {
-        "business": _from_business_insights(
+        "business": _from_semantic_roles(
+            discovery,
+            all_models,
+            con,
+            metadata,
+        ) + _from_business_insights(
             business_insights,
             con,
             discovery.tables,
@@ -237,7 +243,7 @@ def _select_diverse_questions(
     metadata: RetrievedMetadata | None = None,
 ) -> list[SuggestedQuestion]:
     source_limits = {
-        "business": 4,
+        "business": 5,
         "catalog": 3,
         "mart": 3,
         "cross_table": 3,
@@ -268,6 +274,16 @@ def _select_diverse_questions(
     source_counts: dict[str, int] = {}
     shape_counts: dict[str, int] = {}
     table_counts: dict[str, int] = {}
+    primary_tables = {
+        (question.relevant_tables or [question.category])[0]
+        for question in candidates
+    }
+    if len(primary_tables) <= 1:
+        per_table_limit = 5
+    elif len(primary_tables) <= 3:
+        per_table_limit = 3
+    else:
+        per_table_limit = 2
 
     ranked = sorted(
         candidates,
@@ -288,7 +304,7 @@ def _select_diverse_questions(
         if len(question.relevant_tables or []) >= 2:
             return True
         primary_table = (question.relevant_tables or [question.category])[0]
-        return not table_counts.get(primary_table, 0) >= 2
+        return not table_counts.get(primary_table, 0) >= per_table_limit
 
     def add(question: SuggestedQuestion) -> None:
         selected.append(question)
@@ -500,6 +516,225 @@ def _from_business_insights(
                 sql_hint=sql_hint,
             )
         )
+    return suggestions
+
+
+def _from_semantic_roles(
+    discovery: DiscoveryResult,
+    models: list[GeneratedModel],
+    con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
+) -> list[SuggestedQuestion]:
+    suggestions: list[SuggestedQuestion] = []
+    semantic_schema = infer_semantic_schema(discovery, metadata.context if metadata else None)
+    lookup_index = _build_lookup_index(discovery.tables, metadata)
+    seen: set[str] = set()
+
+    for table in discovery.tables:
+        roles = roles_for_table(semantic_schema, table.name)
+        if not roles:
+            continue
+        ref = resolve_table_ref(table.name, con, models) if con is not None else table.name
+        table_label = _table_label(table.name, metadata)
+        row_label = _row_subject_label(metadata, table_label)
+        start = roles.get("lifecycle_start_ts") or roles.get("event_ts")
+        end = roles.get("lifecycle_end_ts")
+        request = roles.get("request_ts")
+        origin = roles.get("origin_id") or roles.get("location_id")
+        dest = roles.get("destination_id")
+        service = roles.get("service_type")
+
+        if start:
+            start_expr = _timestamp_expression(table, start.column_name)
+            suggestions.extend(
+                _add_semantic_questions(
+                    seen,
+                    [
+                        SuggestedQuestion(
+                            question=(
+                                f"Which hour has the highest {row_label} volume "
+                                f"in {table_label}?"
+                            ),
+                            source="business",
+                            category=_decision_category(metadata),
+                            relevant_tables=[table.name],
+                            sql_hint=(
+                                f"SELECT EXTRACT(hour FROM {start_expr}) AS hour_of_day, "
+                                f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                f"FROM {ref} "
+                                f"WHERE {start_expr} IS NOT NULL "
+                                f"GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 24"
+                            ),
+                        ),
+                    ],
+                )
+            )
+
+        if start and end:
+            start_expr = _timestamp_expression(table, start.column_name)
+            duration_expr = _duration_minutes_expression(table, start.column_name, end.column_name)
+            suggestions.extend(
+                _add_semantic_questions(
+                    seen,
+                    [
+                        SuggestedQuestion(
+                            question=(
+                                f"How do weekday and weekend "
+                                f"{_row_subject_metric(metadata, 'duration')} "
+                                f"compare in {table_label}?"
+                            ),
+                            source="business",
+                            category=_decision_category(metadata),
+                            relevant_tables=[table.name],
+                            sql_hint=(
+                                f"SELECT CASE "
+                                f"WHEN EXTRACT(dow FROM {start_expr}) IN (0, 6) THEN 'Weekend' "
+                                f"ELSE 'Weekday' END AS period_type, "
+                                f"ROUND(AVG({duration_expr}), 2) AS avg_duration_min, "
+                                f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                f"FROM {ref} "
+                                f"WHERE {start_expr} IS NOT NULL "
+                                f"AND {duration_expr} BETWEEN 0 AND 1440 "
+                                f"GROUP BY 1 ORDER BY avg_duration_min DESC"
+                            ),
+                        ),
+                    ],
+                )
+            )
+            if origin:
+                group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                    table,
+                    origin.column_name,
+                    lookup_index,
+                    metadata,
+                )
+                suggestions.extend(
+                    _add_semantic_questions(
+                        seen,
+                        [
+                            SuggestedQuestion(
+                                question=(
+                                    f"Which {display_label} has the longest "
+                                    f"{_row_subject_metric(metadata, 'duration')} in {table_label}?"
+                                ),
+                                source="business",
+                                category=_decision_category(metadata),
+                                relevant_tables=[table.name],
+                                sql_hint=(
+                                    f"SELECT {select_expr} AS dimension, "
+                                    f"ROUND(AVG({duration_expr}), 2) AS avg_duration_min, "
+                                    f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                    f"FROM {ref} fact "
+                                    f"{join_sql} "
+                                    f"WHERE {group_expr} IS NOT NULL "
+                                    f"AND {duration_expr} BETWEEN 0 AND 1440 "
+                                    f"GROUP BY {group_expr} ORDER BY avg_duration_min DESC LIMIT 20"
+                                ),
+                            ),
+                        ],
+                    )
+                )
+            if origin and dest:
+                o_expr = f'fact."{origin.column_name}"'
+                d_expr = f'fact."{dest.column_name}"'
+                suggestions.extend(
+                    _add_semantic_questions(
+                        seen,
+                        [
+                            SuggestedQuestion(
+                                question=(
+                                    f"Which routes have the longest "
+                                    f"{_row_subject_metric(metadata, 'duration')} in {table_label}?"
+                                ),
+                                source="business",
+                                category=_decision_category(metadata),
+                                relevant_tables=[table.name],
+                                sql_hint=(
+                                    f"SELECT CAST({o_expr} AS VARCHAR) || ' -> ' || "
+                                    f"CAST({d_expr} AS VARCHAR) "
+                                    f"AS route_pair, "
+                                    f"ROUND(AVG({duration_expr}), 2) AS avg_duration_min, "
+                                    f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                    f"FROM {ref} fact "
+                                    f"WHERE {o_expr} IS NOT NULL AND {d_expr} IS NOT NULL "
+                                    f"AND {duration_expr} BETWEEN 0 AND 1440 "
+                                    f"GROUP BY 1 ORDER BY avg_duration_min DESC LIMIT 20"
+                                ),
+                            ),
+                        ],
+                    )
+                )
+
+        if request and start and service:
+            duration_expr = _duration_minutes_expression(
+                table,
+                request.column_name,
+                start.column_name,
+            )
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                service.column_name,
+                lookup_index,
+                metadata,
+            )
+            suggestions.extend(
+                _add_semantic_questions(
+                    seen,
+                    [
+                        SuggestedQuestion(
+                            question=(
+                                f"Which {display_label} has the highest "
+                                f"{_row_subject_metric(metadata, 'wait time')} in {table_label}?"
+                            ),
+                            source="business",
+                            category=_decision_category(metadata),
+                            relevant_tables=[table.name],
+                            sql_hint=(
+                                f"SELECT {select_expr} AS dimension, "
+                                    f"ROUND(AVG({duration_expr}), 2) AS avg_wait_min, "
+                                    f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                    f"FROM {ref} fact "
+                                    f"{join_sql} "
+                                    f"WHERE {group_expr} IS NOT NULL "
+                                    f"AND {duration_expr} BETWEEN 0 AND 1440 "
+                                    f"GROUP BY {group_expr} ORDER BY avg_wait_min DESC LIMIT 20"
+                                ),
+                            ),
+                    ],
+                )
+            )
+        elif start and service:
+            start_expr = _timestamp_expression(table, start.column_name)
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                service.column_name,
+                lookup_index,
+                metadata,
+            )
+            suggestions.extend(
+                _add_semantic_questions(
+                    seen,
+                    [
+                        SuggestedQuestion(
+                            question=(
+                                f"Which {display_label} has the highest {row_label} volume "
+                                f"in {table_label}?"
+                            ),
+                            source="business",
+                            category=_decision_category(metadata),
+                            relevant_tables=[table.name],
+                            sql_hint=(
+                                f"SELECT {select_expr} AS dimension, "
+                                f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                f"FROM {ref} fact "
+                                f"{join_sql} "
+                                f"WHERE {group_expr} IS NOT NULL AND {start_expr} IS NOT NULL "
+                                f"GROUP BY {group_expr} ORDER BY 2 DESC LIMIT 20"
+                            ),
+                        ),
+                    ],
+                )
+            )
     return suggestions
 
 
@@ -1480,6 +1715,45 @@ def _context_question_bonus(
     return score
 
 
+def _decision_category(metadata: RetrievedMetadata | None) -> str:
+    decisions = (
+        metadata.context.decisions.lower()
+        if metadata and metadata.context and metadata.context.decisions
+        else ""
+    )
+    if any(token in decisions for token in ("revenue", "pricing", "sales", "finance")):
+        return "Revenue Signals"
+    if any(token in decisions for token in ("compliance", "quality", "audit", "risk")):
+        return "Compliance Signals"
+    if any(token in decisions for token in ("operation", "dispatch", "capacity", "service")):
+        return "Operational Signals"
+    return "Decision Signals"
+
+
+def _row_subject_metric(metadata: RetrievedMetadata | None, fallback: str) -> str:
+    phrase = metadata.context.row_represents if metadata and metadata.context else None
+    if not phrase:
+        return fallback
+    phrase = phrase.strip().lower()
+    if not phrase:
+        return fallback
+    return f"{phrase} {fallback}"
+
+
+def _add_semantic_questions(
+    seen: set[str],
+    questions: list[SuggestedQuestion],
+) -> list[SuggestedQuestion]:
+    added: list[SuggestedQuestion] = []
+    for question in questions:
+        key = " ".join(question.question.lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        added.append(question)
+    return added
+
+
 def _humanize(name: str) -> str:
     """Convert snake_case or prefixed model names to readable label."""
     name = name.split(".")[-1]  # drop schema prefix
@@ -1594,6 +1868,24 @@ def _dimension_projection(
         )
 
     return raw_expr, raw_expr, "", _column_label(column_name, metadata)
+
+
+def _timestamp_expression(table: TableInfo, column_name: str) -> str:
+    dtype = _column_dtype(table, column_name).lower()
+    quoted = f'"{column_name}"'
+    if "timestamp" in dtype:
+        return quoted
+    return f"CAST({quoted} AS TIMESTAMP)"
+
+
+def _duration_minutes_expression(
+    table: TableInfo,
+    start_column: str,
+    end_column: str,
+) -> str:
+    start_expr = _timestamp_expression(table, start_column)
+    end_expr = _timestamp_expression(table, end_column)
+    return f"date_diff('second', {start_expr}, {end_expr}) / 60.0"
 
 
 def _distribution_sql(ref: str, metric: str) -> str:
