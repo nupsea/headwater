@@ -12,7 +12,8 @@ from headwater.analyzer.companion import (
     match_docs_to_tables,
     parse_doc_file,
 )
-from headwater.core.models import CompanionDoc, SourceConfig
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
+from headwater.core.models import ColumnInfo, CompanionDoc, DiscoveryResult, SourceConfig, TableInfo
 
 
 @pytest.fixture()
@@ -209,6 +210,40 @@ def test_csv_dictionary_detection(tmp_path: Path) -> None:
     assert "data_dictionary.csv" in filenames
     # sales_data.csv should not be treated as a dictionary
     assert "sales_data.csv" not in filenames
+
+
+def test_retrieve_metadata_extracts_enum_mappings_from_dictionary_rows() -> None:
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="test", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                row_count=10,
+                columns=[ColumnInfo(name="status_code", dtype="varchar")],
+            )
+        ],
+        companion_docs=[
+            CompanionDoc(
+                filename="dictionary.csv",
+                content=(
+                    "column_name: status_code | "
+                    "description: order status. P=Pending; S=Shipped; C=Cancelled"
+                ),
+                doc_type="csv",
+                matched_tables=["orders"],
+                confidence=0.9,
+            )
+        ],
+    )
+
+    metadata = retrieve_metadata(discovery)
+
+    assert metadata.glossary["status_code"] == "order status."
+    assert metadata.enum_mappings["status_code"] == {
+        "P": "Pending",
+        "S": "Shipped",
+        "C": "Cancelled",
+    }
 
 
 def test_nonexistent_path_returns_empty() -> None:

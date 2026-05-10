@@ -489,6 +489,95 @@ class TestSuggestions:
         assert result.data[0]["dimension"] in {"Credit card", "Cash"}
         assert all(not isinstance(row["dimension"], int) for row in result.data)
 
+    def test_companion_enum_mappings_drive_question_labels_and_results(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_orders AS
+            SELECT * FROM (VALUES
+                ('P', 120.0),
+                ('P', 80.0),
+                ('S', 200.0),
+                ('C', 20.0)
+            ) AS t(status_code, amount)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=4,
+                    columns=[
+                        ColumnInfo(name="status_code", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="status_code",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("P", 2), ("S", 1), ("C", 1)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=4,
+                ),
+            ],
+            companion_docs=[
+                CompanionDoc(
+                    filename="dictionary.csv",
+                    content=(
+                        "column_name: status_code | "
+                        "description: order status. P=Pending; S=Shipped; C=Cancelled"
+                    ),
+                    doc_type="csv",
+                    matched_tables=["orders"],
+                    confidence=0.9,
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_orders",
+                model_type="staging",
+                sql="SELECT * FROM orders",
+                description="Orders staging",
+                source_tables=["orders"],
+                status="executed",
+            )
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+
+        assert any("order status" in q.question.lower() for q in questions)
+        assert not any("status code" in q.question.lower() for q in questions)
+
+        question = next(q for q in questions if "order status" in q.question.lower())
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.data
+        assert result.data[0]["dimension"] in {"Pending", "Shipped", "Cancelled"}
+        assert all(row["dimension"] not in {"P", "S", "C"} for row in result.data)
+
     def test_distribution_questions_return_bucketed_results(self, duckdb_con):
         duckdb_con.execute(
             """

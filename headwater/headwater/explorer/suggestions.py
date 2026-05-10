@@ -1817,14 +1817,37 @@ def _build_lookup_index(
     return index
 
 
-def _enum_case_expression(column_name: str, raw_expr: str) -> str | None:
-    mapping = _ENUM_LABEL_REGISTRY.get(column_name.lower())
+def _sql_string_literal(value: object) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _enum_case_expression(
+    column_name: str,
+    raw_expr: str,
+    metadata: RetrievedMetadata | None = None,
+) -> str | None:
+    column_key = column_name.lower()
+    metadata_mapping = metadata.enum_mappings.get(column_key) if metadata else None
+    if metadata_mapping:
+        cases = []
+        for value, label in metadata_mapping.items():
+            cases.append(
+                f"WHEN CAST({raw_expr} AS VARCHAR) = {_sql_string_literal(value)} "
+                f"THEN {_sql_string_literal(label)}"
+            )
+        return (
+            "CASE "
+            + " ".join(cases)
+            + f" ELSE CONCAT('Unknown (', CAST({raw_expr} AS VARCHAR), ')') END"
+        )
+
+    mapping = _ENUM_LABEL_REGISTRY.get(column_key)
     if not mapping:
         return None
     cases = []
     for value, label in mapping.items():
-        value_sql = f"'{value}'" if isinstance(value, str) else str(value)
-        cases.append(f"WHEN {raw_expr} = {value_sql} THEN '{label}'")
+        value_sql = _sql_string_literal(value) if isinstance(value, str) else str(value)
+        cases.append(f"WHEN {raw_expr} = {value_sql} THEN {_sql_string_literal(label)}")
     return (
         "CASE "
         + " ".join(cases)
@@ -1840,7 +1863,7 @@ def _dimension_projection(
     alias: str = "fact",
 ) -> tuple[str, str, str, str]:
     raw_expr = f'{alias}."{column_name}"'
-    enum_expr = _enum_case_expression(column_name, raw_expr)
+    enum_expr = _enum_case_expression(column_name, raw_expr, metadata)
     if enum_expr:
         return (
             enum_expr,
