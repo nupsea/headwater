@@ -1481,12 +1481,15 @@ def _get_metric_cols(
     table: TableInfo,
     profile_index: dict[tuple[str, str], ColumnProfile],
 ) -> list[str]:
-    cols = []
+    scored: list[tuple[int, str]] = []
     for c in table.columns:
         profile = profile_index.get((table.name, c.name))
         if is_metric_column(c, profile):
-            cols.append(c.name)
-    return cols
+            score = _metric_signal_score(c, profile)
+            if score > 0:
+                scored.append((score, c.name))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _score, name in scored]
 
 
 def _get_dimension_cols(
@@ -1494,15 +1497,18 @@ def _get_dimension_cols(
     profile_index: dict[tuple[str, str], ColumnProfile],
 ) -> list[str]:
     """Return low-cardinality columns suitable for GROUP BY."""
-    cols = []
+    scored: list[tuple[int, str]] = []
     for c in table.columns:
         profile = profile_index.get((table.name, c.name))
         if (
             is_dimension_column(c, profile)
             and not _is_low_signal_dimension_for_question(c, profile)
         ):
-            cols.append(c.name)
-    return cols
+            score = _dimension_signal_score(c, profile, table.name)
+            if score > 0:
+                scored.append((score, c.name))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _score, name in scored]
 
 
 def _pick_metric_col(table: TableInfo) -> str | None:
@@ -1553,6 +1559,75 @@ def _is_low_signal_dimension_for_question(
         return False
     values = {str(value).strip().lower() for value, _count in profile.top_values[:4]}
     return distinct <= 3 and values <= _BOOLEANISH_VALUES
+
+
+def _metric_signal_score(
+    column: ColumnInfo,
+    profile: ColumnProfile | None,
+) -> int:
+    score = _metric_question_score(column.name)
+    if score <= 0:
+        return score
+    if profile is None:
+        return score
+    if profile.null_rate >= 0.98:
+        return -10
+    if profile.distinct_count <= 1:
+        return -10
+    if profile.distinct_count <= 3:
+        score -= 4
+    elif profile.distinct_count >= 20:
+        score += 3
+    elif profile.distinct_count >= 5:
+        score += 1
+    if profile.stddev is not None and profile.stddev > 0:
+        score += 2
+    if profile.mean is not None and profile.stddev == 0:
+        score -= 3
+    return score
+
+
+def _dimension_signal_score(
+    column: ColumnInfo,
+    profile: ColumnProfile | None,
+    table_name: str,
+) -> int:
+    lower = column.name.lower()
+    table_words = set(table_name.lower().replace("_", " ").split()) if table_name else set()
+    col_words = set(lower.replace("_", " ").split())
+    score = 0
+
+    if col_words & table_words:
+        score += 4
+    if any(token in lower for token in ("_name", "name_", "label", "description", "title")):
+        score += 4
+    elif any(token in lower for token in ("_code", "code_", "_num", "_id", "_key")):
+        score -= 4
+    if any(token in lower for token in _BUSINESS_DIMENSION_TOKENS):
+        score += 3
+
+    if profile is None:
+        return score + 1
+    if profile.null_rate >= 0.98 or profile.distinct_count <= 1:
+        return -10
+    distinct = profile.distinct_count
+    if 2 <= distinct <= 20:
+        score += 4
+    elif distinct <= 50:
+        score += 3
+    elif distinct <= 200:
+        score += 1
+    else:
+        score -= 2
+    if profile.top_values:
+        total = sum(count for _value, count in profile.top_values[:5])
+        if total > 0:
+            top_share = profile.top_values[0][1] / total
+            if top_share >= 0.95:
+                score -= 5
+            elif top_share >= 0.85:
+                score -= 2
+    return score
 
 
 # ---------------------------------------------------------------------------

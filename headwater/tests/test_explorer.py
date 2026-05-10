@@ -644,6 +644,96 @@ class TestSuggestions:
         assert result.visualization.chart_type == "bar"
         assert {"bucket", "records"} <= set(result.data[0])
 
+    def test_constant_metric_does_not_generate_distribution_question(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="summary_values",
+                    row_count=100,
+                    columns=[
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="summary_values",
+                    column_name="value",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=1,
+                    mean=5.0,
+                    stddev=0.0,
+                    min_value=5.0,
+                    max_value=5.0,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert not any("distribution of value" in q.question.lower() for q in questions)
+
+    def test_question_generation_prefers_variable_metric_over_constant_metric(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="yellow_trips",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="trip_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="passenger_count",
+                            dtype="int64",
+                            semantic_type="metric",
+                        ),
+                        ColumnInfo(
+                            name="fare_amount",
+                            dtype="float64",
+                            semantic_type="metric",
+                        ),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="passenger_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=1,
+                    mean=1.0,
+                    stddev=0.0,
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="fare_amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=120,
+                    mean=18.5,
+                    stddev=6.2,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        prompts = [q.question.lower() for q in questions]
+
+        assert any("fare amount" in q for q in prompts)
+        assert not any("passenger count" in q and "changed over time" in q for q in prompts)
+        assert not any("passenger count" in q and "payment method" in q for q in prompts)
+
     def test_binary_technical_flags_are_suppressed_from_lead_questions(self):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
