@@ -701,6 +701,101 @@ class TestSuggestions:
         assert "North Hub -> Central Depot" in {row["route_pair"] for row in result.data}
         assert all("A -> B" not in str(row["route_pair"]) for row in result.data)
 
+    def test_route_pair_questions_use_lookup_labels_without_explicit_relationships(
+        self, duckdb_con
+    ):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_tlc_trips AS
+            SELECT * FROM (VALUES
+                (101, 202, TIMESTAMP '2026-01-01 08:00:00', TIMESTAMP '2026-01-01 08:45:00'),
+                (101, 202, TIMESTAMP '2026-01-01 09:00:00', TIMESTAMP '2026-01-01 09:55:00'),
+                (202, 303, TIMESTAMP '2026-01-01 10:00:00', TIMESTAMP '2026-01-01 10:20:00')
+            ) AS t(PULocationID, DOLocationID, pickup_datetime, dropoff_datetime)
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_taxi_zones AS
+            SELECT * FROM (VALUES
+                (101, 'North Hub'),
+                (202, 'Central Depot'),
+                (303, 'South Clinic')
+            ) AS t(LocationID, Zone)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_trips",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="PULocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="DOLocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="dropoff_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                ),
+                TableInfo(
+                    name="taxi_zones",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="LocationID", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="Zone", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_tlc_trips",
+                model_type="staging",
+                sql="SELECT * FROM tlc_trips",
+                description="TLC trips staging",
+                source_tables=["tlc_trips"],
+                status="executed",
+            ),
+            GeneratedModel(
+                name="stg_taxi_zones",
+                model_type="staging",
+                sql="SELECT * FROM taxi_zones",
+                description="Taxi zones staging",
+                source_tables=["taxi_zones"],
+                status="executed",
+            ),
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q for q in questions if "which routes have the longest duration" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.data
+        assert "North Hub -> Central Depot" in {row["route_pair"] for row in result.data}
+        assert all("101 -> 202" not in str(row["route_pair"]) for row in result.data)
+
     def test_distribution_questions_return_bucketed_results(self, duckdb_con):
         duckdb_con.execute(
             """

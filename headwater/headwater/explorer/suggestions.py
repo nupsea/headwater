@@ -1926,6 +1926,62 @@ def _humanize_model(model_name: str) -> str:
     return _humanize(model_name)
 
 
+def _identifier_tokens(name: str) -> list[str]:
+    parts = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    parts = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", parts).lower()
+    return [part for part in re.split(r"[_\W]+", parts) if part]
+
+
+def _lookup_match_keys(name: str) -> list[str]:
+    parts = _identifier_tokens(name)
+    if not parts:
+        return [name.lower()]
+
+    keys: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in keys:
+            keys.append(value)
+
+    add(name.lower())
+    add("".join(parts))
+    add("_".join(parts))
+
+    suffix_tokens = {"id", "code", "key"}
+    directional_prefixes = {
+        "pu",
+        "do",
+        "pickup",
+        "dropoff",
+        "drop",
+        "origin",
+        "destination",
+        "dest",
+        "from",
+        "to",
+        "start",
+        "end",
+        "src",
+        "dst",
+    }
+    if len(parts) >= 2 and parts[-1] in suffix_tokens:
+        tail = parts[-2:]
+        add("".join(tail))
+        add("_".join(tail))
+        core = list(parts[:-1])
+        while core and core[0] in directional_prefixes:
+            core = core[1:]
+        if core:
+            normalized = core + [parts[-1]]
+            add("".join(normalized))
+            add("_".join(normalized))
+            if len(normalized) >= 2:
+                add("".join(normalized[-2:]))
+                add("_".join(normalized[-2:]))
+
+    return keys
+
+
 def _build_lookup_index(
     tables: list[TableInfo],
     metadata: RetrievedMetadata | None = None,
@@ -1941,7 +1997,8 @@ def _build_lookup_index(
                 "label_column": lookup["label_column"],
             }
             lookup_by_table[table_name] = details
-            index.setdefault(lookup["id_column"].lower(), details)
+            for key in _lookup_match_keys(lookup["id_column"]):
+                index.setdefault(key, details)
     for table in tables:
         id_cols = [col.name for col in table.columns if _ID_NAME_RE.search(col.name)]
         label_cols = [
@@ -1969,7 +2026,8 @@ def _build_lookup_index(
         }
         lookup_by_table.setdefault(table.name, details)
         for id_col in id_cols:
-            index.setdefault(id_col.lower(), details)
+            for key in _lookup_match_keys(id_col):
+                index.setdefault(key, details)
     if relationships:
         for rel in relationships:
             lookup = lookup_by_table.get(rel.to_table)
@@ -1979,7 +2037,8 @@ def _build_lookup_index(
                 f"{rel.from_table.lower()}.{rel.from_column.lower()}",
                 lookup,
             )
-            index.setdefault(rel.from_column.lower(), lookup)
+            for key in _lookup_match_keys(rel.from_column):
+                index.setdefault(key, lookup)
     return index
 
 
@@ -2045,7 +2104,10 @@ def _dimension_projection(
     if table is not None:
         lookup = lookup_index.get(f"{table.name.lower()}.{column_name.lower()}")
     if lookup is None:
-        lookup = lookup_index.get(column_name.lower())
+        for key in _lookup_match_keys(column_name):
+            lookup = lookup_index.get(key)
+            if lookup is not None:
+                break
     if lookup and table is not None and lookup["table_name"] != table.name:
         resolved_lookup_alias = lookup_join_alias or f"{alias}_lu"
         lookup_ref = (
