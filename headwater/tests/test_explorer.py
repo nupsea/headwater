@@ -578,6 +578,129 @@ class TestSuggestions:
         assert result.data[0]["dimension"] in {"Pending", "Shipped", "Cancelled"}
         assert all(row["dimension"] not in {"P", "S", "C"} for row in result.data)
 
+    def test_route_pair_questions_use_lookup_labels(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_service_events AS
+            SELECT * FROM (VALUES
+                ('A', 'B', TIMESTAMP '2026-01-01 08:00:00', TIMESTAMP '2026-01-01 08:45:00'),
+                ('A', 'B', TIMESTAMP '2026-01-01 09:00:00', TIMESTAMP '2026-01-01 09:55:00'),
+                ('B', 'C', TIMESTAMP '2026-01-01 10:00:00', TIMESTAMP '2026-01-01 10:20:00')
+            ) AS t(origin_id, destination_id, started_at, resolved_at)
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_locations AS
+            SELECT * FROM (VALUES
+                ('A', 'North Hub'),
+                ('B', 'Central Depot'),
+                ('C', 'South Clinic')
+            ) AS t(location_id, location_name)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="service_events",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="origin_id", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="destination_id",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(
+                            name="started_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="resolved_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                ),
+                TableInfo(
+                    name="locations",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="location_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(
+                            name="location_name",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="service_events",
+                    from_column="origin_id",
+                    to_table="locations",
+                    to_column="location_id",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                ),
+                Relationship(
+                    from_table="service_events",
+                    from_column="destination_id",
+                    to_table="locations",
+                    to_column="location_id",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_service_events",
+                model_type="staging",
+                sql="SELECT * FROM service_events",
+                description="Service events staging",
+                source_tables=["service_events"],
+                status="executed",
+            ),
+            GeneratedModel(
+                name="stg_locations",
+                model_type="staging",
+                sql="SELECT * FROM locations",
+                description="Locations staging",
+                source_tables=["locations"],
+                status="executed",
+            ),
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q for q in questions if "which routes have the longest duration" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.data
+        assert "North Hub -> Central Depot" in {row["route_pair"] for row in result.data}
+        assert all("A -> B" not in str(row["route_pair"]) for row in result.data)
+
     def test_distribution_questions_return_bucketed_results(self, duckdb_con):
         duckdb_con.execute(
             """

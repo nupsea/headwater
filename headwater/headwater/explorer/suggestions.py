@@ -178,6 +178,7 @@ def generate_suggestions(
             business_insights,
             con,
             discovery.tables,
+            all_relationships,
             all_models,
             metadata,
         ),
@@ -447,6 +448,7 @@ def _from_business_insights(
     business_insights: list[dict] | None,
     con: duckdb.DuckDBPyConnection | None,
     tables: list[TableInfo],
+    relationships: list[Relationship],
     models: list[GeneratedModel],
     metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
@@ -455,7 +457,7 @@ def _from_business_insights(
         return suggestions
 
     table_map = {table.name: table for table in tables}
-    lookup_index = _build_lookup_index(tables, metadata)
+    lookup_index = _build_lookup_index(tables, metadata, relationships)
     seen: set[str] = set()
     for insight in business_insights[:8]:
         table_name = insight.get("table")
@@ -498,6 +500,8 @@ def _from_business_insights(
                 str(column),
                 lookup_index,
                 metadata,
+                con=con,
+                models=models,
             )
             question = (
                 f"Which {display_label} drives {_business_metric_label(insight)} "
@@ -518,6 +522,8 @@ def _from_business_insights(
                 str(column),
                 lookup_index,
                 metadata,
+                con=con,
+                models=models,
             )
             question = (
                 f"Which {display_label} segments dominate "
@@ -563,7 +569,11 @@ def _from_semantic_roles(
 ) -> list[SuggestedQuestion]:
     suggestions: list[SuggestedQuestion] = []
     semantic_schema = infer_semantic_schema(discovery, metadata.context if metadata else None)
-    lookup_index = _build_lookup_index(discovery.tables, metadata)
+    lookup_index = _build_lookup_index(
+        discovery.tables,
+        metadata,
+        discovery.relationships,
+    )
     seen: set[str] = set()
 
     for table in discovery.tables:
@@ -643,6 +653,8 @@ def _from_semantic_roles(
                     origin.column_name,
                     lookup_index,
                     metadata,
+                    con=con,
+                    models=models,
                 )
                 suggestions.extend(
                     _add_semantic_questions(
@@ -671,8 +683,30 @@ def _from_semantic_roles(
                     )
                 )
             if origin and dest:
-                o_expr = f'fact."{origin.column_name}"'
-                d_expr = f'fact."{dest.column_name}"'
+                origin_group_expr, origin_select_expr, origin_join_sql, _origin_label = (
+                    _dimension_projection(
+                        table,
+                        origin.column_name,
+                        lookup_index,
+                        metadata,
+                        alias="fact",
+                        lookup_join_alias="origin_lu",
+                        con=con,
+                        models=models,
+                    )
+                )
+                dest_group_expr, dest_select_expr, dest_join_sql, _dest_label = (
+                    _dimension_projection(
+                        table,
+                        dest.column_name,
+                        lookup_index,
+                        metadata,
+                        alias="fact",
+                        lookup_join_alias="dest_lu",
+                        con=con,
+                        models=models,
+                    )
+                )
                 suggestions.extend(
                     _add_semantic_questions(
                         seen,
@@ -686,13 +720,16 @@ def _from_semantic_roles(
                                 category=_decision_category(metadata),
                                 relevant_tables=[table.name],
                                 sql_hint=(
-                                    f"SELECT CAST({o_expr} AS VARCHAR) || ' -> ' || "
-                                    f"CAST({d_expr} AS VARCHAR) "
+                                    f"SELECT {origin_select_expr} || ' -> ' || "
+                                    f"{dest_select_expr} "
                                     f"AS route_pair, "
                                     f"ROUND(AVG({duration_expr}), 2) AS avg_duration_min, "
                                     f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
                                     f"FROM {ref} fact "
-                                    f"WHERE {o_expr} IS NOT NULL AND {d_expr} IS NOT NULL "
+                                    f"{origin_join_sql} "
+                                    f"{dest_join_sql} "
+                                    f"WHERE {origin_group_expr} IS NOT NULL "
+                                    f"AND {dest_group_expr} IS NOT NULL "
                                     f"AND {duration_expr} BETWEEN 0 AND 1440 "
                                     f"GROUP BY 1 ORDER BY avg_duration_min DESC LIMIT 20"
                                 ),
@@ -712,6 +749,8 @@ def _from_semantic_roles(
                 service.column_name,
                 lookup_index,
                 metadata,
+                con=con,
+                models=models,
             )
             suggestions.extend(
                 _add_semantic_questions(
@@ -746,6 +785,8 @@ def _from_semantic_roles(
                 service.column_name,
                 lookup_index,
                 metadata,
+                con=con,
+                models=models,
             )
             suggestions.extend(
                 _add_semantic_questions(
@@ -1226,7 +1267,7 @@ def _from_relationships(
     """
     questions: list[SuggestedQuestion] = []
     table_map = {t.name: t for t in tables}
-    lookup_index = _build_lookup_index(tables, metadata)
+    lookup_index = _build_lookup_index(tables, metadata, relationships)
     seen_pairs: set[frozenset[str]] = set()
 
     for rel in relationships:
@@ -1260,6 +1301,8 @@ def _from_relationships(
             lookup_index,
             metadata,
             alias="t",
+            con=con,
+            models=models,
         )
 
         if metric_col:
@@ -1364,6 +1407,8 @@ def _from_table_structure(
                     d_col,
                     lookup_index,
                     metadata,
+                    con=con,
+                    models=models,
                 )
                 questions.append(
                     SuggestedQuestion(
@@ -1884,18 +1929,19 @@ def _humanize_model(model_name: str) -> str:
 def _build_lookup_index(
     tables: list[TableInfo],
     metadata: RetrievedMetadata | None = None,
+    relationships: list[Relationship] | None = None,
 ) -> dict[str, dict[str, str]]:
     index: dict[str, dict[str, str]] = {}
+    lookup_by_table: dict[str, dict[str, str]] = {}
     if metadata is not None:
         for table_name, lookup in metadata.lookup_tables.items():
-            index.setdefault(
-                lookup["id_column"].lower(),
-                {
-                    "table_name": table_name,
-                    "id_column": lookup["id_column"],
-                    "label_column": lookup["label_column"],
-                },
-            )
+            details = {
+                "table_name": table_name,
+                "id_column": lookup["id_column"],
+                "label_column": lookup["label_column"],
+            }
+            lookup_by_table[table_name] = details
+            index.setdefault(lookup["id_column"].lower(), details)
     for table in tables:
         id_cols = [col.name for col in table.columns if _ID_NAME_RE.search(col.name)]
         label_cols = [
@@ -1916,15 +1962,24 @@ def _build_lookup_index(
         ]
         if not id_cols or not label_cols or table.row_count > 100_000:
             continue
+        details = {
+            "table_name": table.name,
+            "id_column": id_cols[0],
+            "label_column": label_cols[0],
+        }
+        lookup_by_table.setdefault(table.name, details)
         for id_col in id_cols:
+            index.setdefault(id_col.lower(), details)
+    if relationships:
+        for rel in relationships:
+            lookup = lookup_by_table.get(rel.to_table)
+            if not lookup:
+                continue
             index.setdefault(
-                id_col.lower(),
-                {
-                    "table_name": table.name,
-                    "id_column": id_col,
-                    "label_column": label_cols[0],
-                },
+                f"{rel.from_table.lower()}.{rel.from_column.lower()}",
+                lookup,
             )
+            index.setdefault(rel.from_column.lower(), lookup)
     return index
 
 
@@ -1972,6 +2027,9 @@ def _dimension_projection(
     lookup_index: dict[str, dict[str, str]],
     metadata: RetrievedMetadata | None = None,
     alias: str = "fact",
+    lookup_join_alias: str | None = None,
+    con: duckdb.DuckDBPyConnection | None = None,
+    models: list[GeneratedModel] | None = None,
 ) -> tuple[str, str, str, str]:
     raw_expr = f'{alias}."{column_name}"'
     enum_expr = _enum_case_expression(column_name, raw_expr, metadata)
@@ -1983,15 +2041,24 @@ def _dimension_projection(
             _ENUM_DIMENSION_LABELS.get(column_name.lower(), _column_label(column_name, metadata)),
         )
 
-    lookup = lookup_index.get(column_name.lower())
+    lookup = None
+    if table is not None:
+        lookup = lookup_index.get(f"{table.name.lower()}.{column_name.lower()}")
+    if lookup is None:
+        lookup = lookup_index.get(column_name.lower())
     if lookup and table is not None and lookup["table_name"] != table.name:
-        join_alias = f"{alias}_lu"
+        resolved_lookup_alias = lookup_join_alias or f"{alias}_lu"
+        lookup_ref = (
+            resolve_table_ref(lookup["table_name"], con, models or [])
+            if con is not None
+            else f'"{lookup["table_name"]}"'
+        )
         join_sql = (
-            f'LEFT JOIN "{lookup["table_name"]}" {join_alias} '
-            f'ON {raw_expr} = {join_alias}."{lookup["id_column"]}"'
+            f"LEFT JOIN {lookup_ref} {resolved_lookup_alias} "
+            f'ON {raw_expr} = {resolved_lookup_alias}."{lookup["id_column"]}"'
         )
         label_expr = (
-            f"COALESCE(CAST({join_alias}.\"{lookup['label_column']}\" AS VARCHAR), "
+            f"COALESCE(CAST({resolved_lookup_alias}.\"{lookup['label_column']}\" AS VARCHAR), "
             f"CAST({raw_expr} AS VARCHAR))"
         )
         return (
