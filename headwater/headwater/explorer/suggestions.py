@@ -288,8 +288,8 @@ def _select_diverse_questions(
     ranked = sorted(
         candidates,
         key=lambda q: (
-            source_priority.get(q.source, 99),
             -_question_value_score(q, metadata),
+            source_priority.get(q.source, 99),
             len(q.relevant_tables or []),
             len(q.question),
         ),
@@ -314,7 +314,7 @@ def _select_diverse_questions(
         primary_table = (question.relevant_tables or [question.category])[0]
         table_counts[primary_table] = table_counts.get(primary_table, 0) + 1
 
-    lead_order = ("trend", "ranking", "distribution", "count", "quality")
+    lead_order = ("ranking", "trend", "other", "count", "distribution", "quality")
     for shape in lead_order:
         lead = next(
             (
@@ -359,6 +359,8 @@ def _question_shape(question: str) -> str:
     q = " ".join(question.lower().split())
     if "changed over time" in q or q.startswith("how has "):
         return "trend"
+    if q.startswith("how do ") and " compare" in q:
+        return "comparison"
     if q.startswith("what is the average "):
         return "average"
     if q.startswith("how many "):
@@ -381,12 +383,13 @@ def _question_value_score(
     score = 0
     shape = _question_shape(question.question)
     shape_weight = {
-        "ranking": 6,
+        "ranking": 8,
         "trend": 5,
+        "comparison": 6,
         "count": 4,
         "average": 3,
         "quality": 2,
-        "distribution": -2,
+        "distribution": -4,
         "other": 0,
     }
     score += shape_weight.get(shape, 0)
@@ -403,7 +406,40 @@ def _question_value_score(
         score -= 4
     if any(token in lower for token in ("highest", "changed over time", "how many")):
         score += 2
+    if lower.startswith("how many "):
+        score -= 2
+    score += _decision_question_bonus(lower)
     score += _context_question_bonus(question.question, metadata)
+    return score
+
+
+def _decision_question_bonus(question: str) -> int:
+    score = 0
+    high_value_patterns = {
+        "wait time": 8,
+        "weekday and weekend": 7,
+        "drives ": 7,
+        "dominates ": 6,
+        "longest ": 6,
+        "routes have the longest": 7,
+        "busiest": 6,
+        "hour has the highest": 5,
+        "highest": 3,
+        "service": 2,
+        "channel": 2,
+        "payment": 1,
+        "volume": 2,
+    }
+    for pattern, bonus in high_value_patterns.items():
+        if pattern in question:
+            score += bonus
+    low_value_patterns = {
+        "distribution of": -3,
+        "what values stand out": -2,
+    }
+    for pattern, penalty in low_value_patterns.items():
+        if pattern in question:
+            score += penalty
     return score
 
 

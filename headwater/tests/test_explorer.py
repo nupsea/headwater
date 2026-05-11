@@ -981,6 +981,94 @@ class TestSuggestions:
         assert len(trend_questions) <= 3
         assert any("highest value" in q.question.lower() for q in questions)
 
+    def test_decision_questions_rank_ahead_of_generic_volume_prompts(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="service_events",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(
+                            name="requested_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="started_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="resolved_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="service_type",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="origin_id", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="destination_id",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="ticket_count", dtype="int64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="service_events",
+                    column_name="service_type",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("Emergency", 400), ("Routine", 350), ("Follow-up", 250)],
+                ),
+                ColumnProfile(
+                    table_name="service_events",
+                    column_name="origin_id",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=12,
+                ),
+                ColumnProfile(
+                    table_name="service_events",
+                    column_name="destination_id",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=12,
+                ),
+                ColumnProfile(
+                    table_name="service_events",
+                    column_name="ticket_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=20,
+                    mean=18.0,
+                    stddev=4.0,
+                ),
+            ],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            DatasetContext(source_name="test", row_represents="service event"),
+        )
+
+        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+        top_questions = [q.question.lower() for q in questions[:3]]
+
+        assert any("changed over time" in q for q in top_questions)
+        assert any(
+            token in q
+            for q in top_questions
+            for token in ("wait time", "weekday and weekend", "longest")
+        )
+        assert not all(q.startswith("how many ") for q in top_questions)
+
     def test_generates_domain_questions(self, sample_discovery):
         questions = generate_suggestions(discovery=sample_discovery)
         semantic_qs = [q for q in questions if q.source == "semantic"]

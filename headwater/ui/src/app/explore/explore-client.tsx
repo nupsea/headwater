@@ -48,6 +48,7 @@ function questionShape(question: string) {
   const q = question.toLowerCase();
   if (q.includes("changed over time") || q.startsWith("how has ")) return "Trend";
   if (q.startsWith("which ") && q.includes(" highest ")) return "Top segment";
+  if (q.startsWith("how do ") && q.includes(" compare")) return "Comparison";
   if (q.startsWith("how many ")) return "Volume";
   if (q.includes("distribution of")) return "Distribution";
   if (q.startsWith("what is the average ")) return "Comparison";
@@ -56,6 +57,18 @@ function questionShape(question: string) {
 
 function questionWhy(question: SuggestedQuestion) {
   const q = question.question.toLowerCase();
+  if (q.includes("wait time")) {
+    return "Useful for finding operational friction and where service slows down.";
+  }
+  if (q.includes("weekday and weekend") || q.includes(" compare")) {
+    return "Useful for spotting behavioral differences that change staffing or planning.";
+  }
+  if (q.includes("longest") || q.includes("routes")) {
+    return "Useful for finding the part of the workflow driving the most delay or effort.";
+  }
+  if (q.includes("drives ") || q.includes("dominates ")) {
+    return "Useful for finding the segment or driver that matters most right now.";
+  }
   if (q.includes("changed over time")) {
     return "Best first check for movement, seasonality, or operational shifts.";
   }
@@ -74,18 +87,60 @@ function questionWhy(question: SuggestedQuestion) {
   return "Curated from the current schema, models, and detected signals.";
 }
 
+function questionPriority(question: SuggestedQuestion) {
+  const q = question.question.toLowerCase();
+  let score = 0;
+  const sourceWeight: Record<string, number> = {
+    business: 10,
+    cross_table: 7,
+    mart: 5,
+    semantic: 4,
+    catalog: 3,
+    relationship: 2,
+    quality: 1,
+  };
+  score += sourceWeight[question.source] ?? 0;
+  if (q.includes("wait time")) score += 10;
+  if (q.includes("weekday and weekend")) score += 9;
+  if (q.includes("drives ") || q.includes("dominates ")) score += 8;
+  if (q.includes("longest ") || q.includes("routes")) score += 7;
+  if (q.includes("changed over time")) score += 6;
+  if (q.includes("highest")) score += 4;
+  if (q.startsWith("how many ")) score -= 2;
+  if (q.includes("distribution of")) score -= 5;
+  return score;
+}
+
 function pickFeaturedSuggestions(suggestions: SuggestedQuestion[]) {
-  const order = ["business", "cross_table", "mart", "semantic", "catalog", "relationship", "quality"];
   const ranked = [...suggestions].sort((a, b) => {
-    const sourceDelta = order.indexOf(a.source) - order.indexOf(b.source);
-    if (sourceDelta !== 0) return sourceDelta;
-    const shapeDelta =
-      (questionShape(a.question) === "Distribution" ? 1 : 0) -
-      (questionShape(b.question) === "Distribution" ? 1 : 0);
-    if (shapeDelta !== 0) return shapeDelta;
+    const scoreDelta = questionPriority(b) - questionPriority(a);
+    if (scoreDelta !== 0) return scoreDelta;
     return a.question.length - b.question.length;
   });
-  return ranked.slice(0, 3);
+  const selected: SuggestedQuestion[] = [];
+  const seenShapes = new Set<string>();
+  for (const suggestion of ranked) {
+    const shape = questionShape(suggestion.question);
+    if (shape === "Distribution" && selected.length < 2) continue;
+    if (shape === "Volume" && selected.some((item) => questionShape(item.question) === "Volume")) {
+      continue;
+    }
+    if (selected.length < 2 && seenShapes.has(shape) && shape !== "Explore") {
+      continue;
+    }
+    selected.push(suggestion);
+    seenShapes.add(shape);
+    if (selected.length === 3) break;
+  }
+  if (!selected.some((item) => questionShape(item.question) === "Trend")) {
+    const trend = ranked.find((item) => questionShape(item.question) === "Trend");
+    if (trend) {
+      return [selected[0] ?? trend, selected[1] ?? trend, trend]
+        .filter((item, index, array) => array.findIndex((x) => x.question === item.question) === index)
+        .slice(0, 3);
+    }
+  }
+  return selected;
 }
 
 function summarizeDiagnostics(diagnostics: InsightFamilyDiagnostic[]) {
