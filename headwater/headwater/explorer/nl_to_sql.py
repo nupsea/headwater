@@ -65,6 +65,10 @@ _EXPLICIT_DIMENSION_RE = re.compile(
 )
 _OPAQUE_ALPHANUMERIC_RE = re.compile(r"^[A-Z]{1,4}\d{2,}$")
 _BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
+_LOW_SIGNAL_FOLLOW_UP_RE = re.compile(
+    r"(flag|indicator|store and fwd|store_and_fwd|source file|source system|load batch|audit)",
+    re.IGNORECASE,
+)
 
 _SYSTEM_PROMPT = """You are a SQL query generator for a DuckDB analytical database.
 You receive table metadata (schemas, column descriptions, relationships) and a natural
@@ -1696,7 +1700,7 @@ def _alternative_questions_for_unreadable_result(
     *,
     route_like: bool,
 ) -> list[str]:
-    alternatives: list[str] = []
+    ranked: list[tuple[int, str]] = []
     for suggestion in suggestions:
         if matched_suggestion and suggestion.question == matched_suggestion.question:
             continue
@@ -1711,11 +1715,66 @@ def _alternative_questions_for_unreadable_result(
             suggestion_lower,
         ):
             continue
-        if suggestion.question not in alternatives:
-            alternatives.append(suggestion.question)
+        if _LOW_SIGNAL_FOLLOW_UP_RE.search(suggestion.question):
+            continue
+        ranked.append((_follow_up_value_score(suggestion.question), suggestion.question))
+
+    ranked.sort(key=lambda item: (-item[0], len(item[1])))
+    prioritized_shapes = ("comparison", "trend", "ranking", "other", "count", "distribution")
+    alternatives: list[str] = []
+
+    for shape in prioritized_shapes:
+        for _score, prompt in ranked:
+            if prompt in alternatives or _follow_up_shape(prompt) != shape:
+                continue
+            alternatives.append(prompt)
+            break
+        if len(alternatives) >= 3:
+            return alternatives[:3]
+
+    for _score, prompt in ranked:
+        if prompt not in alternatives:
+            alternatives.append(prompt)
         if len(alternatives) >= 3:
             break
     return alternatives
+
+
+def _follow_up_value_score(question: str) -> int:
+    lower = question.lower()
+    score = 0
+    if "weekday and weekend" in lower:
+        score += 8
+    if "wait time" in lower:
+        score += 8
+    if "longest" in lower:
+        score += 7
+    if "changed over time" in lower:
+        score += 6
+    if "hour has the highest" in lower or "busiest" in lower:
+        score += 6
+    if "highest" in lower:
+        score += 3
+    if "how many" in lower:
+        score -= 2
+    if "distribution of" in lower:
+        score -= 4
+    return score
+
+
+def _follow_up_shape(question: str) -> str:
+    lower = " ".join(question.lower().split())
+    if "changed over time" in lower or lower.startswith("how has "):
+        return "trend"
+    if lower.startswith("how do ") and " compare" in lower:
+        return "comparison"
+    if lower.startswith("which ") and " highest " in lower:
+        return "ranking"
+    if lower.startswith("how many "):
+        return "count"
+    if "distribution of" in lower:
+        return "distribution"
+    return "other"
 
 
 # ---------------------------------------------------------------------------

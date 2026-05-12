@@ -178,6 +178,7 @@ def generate_suggestions(
             business_insights,
             con,
             discovery.tables,
+            profile_index,
             all_relationships,
             all_models,
             metadata,
@@ -272,6 +273,7 @@ def _select_diverse_questions(
     }
 
     selected: list[SuggestedQuestion] = []
+    selected_keys: set[str] = set()
     source_counts: dict[str, int] = {}
     shape_counts: dict[str, int] = {}
     table_counts: dict[str, int] = {}
@@ -297,6 +299,9 @@ def _select_diverse_questions(
     )
 
     def can_add(question: SuggestedQuestion) -> bool:
+        key = " ".join(question.question.lower().split())
+        if key in selected_keys:
+            return False
         shape = _question_shape(question.question)
         if source_counts.get(question.source, 0) >= source_limits.get(question.source, 3):
             return False
@@ -309,6 +314,7 @@ def _select_diverse_questions(
 
     def add(question: SuggestedQuestion) -> None:
         selected.append(question)
+        selected_keys.add(" ".join(question.question.lower().split()))
         source_counts[question.source] = source_counts.get(question.source, 0) + 1
         shape = _question_shape(question.question)
         shape_counts[shape] = shape_counts.get(shape, 0) + 1
@@ -448,6 +454,7 @@ def _from_business_insights(
     business_insights: list[dict] | None,
     con: duckdb.DuckDBPyConnection | None,
     tables: list[TableInfo],
+    profile_index: dict[tuple[str, str], ColumnProfile],
     relationships: list[Relationship],
     models: list[GeneratedModel],
     metadata: RetrievedMetadata | None,
@@ -484,8 +491,12 @@ def _from_business_insights(
                 _column_dtype(table, group_by_column),
                 grain,
             )
+            metric_label = _metric_question_label(
+                _business_metric_label(insight, metadata),
+                metadata,
+            )
             question = (
-                f"How has {_metric_question_label(_business_metric_label(insight), metadata)} "
+                f"How has {metric_label} "
                 f"in {_table_label(table_name, metadata)} changed over time?"
             )
             sql_hint = (
@@ -495,6 +506,8 @@ def _from_business_insights(
                 f"GROUP BY 1 ORDER BY 1 LIMIT 100"
             )
         elif insight_id.startswith("metric_driver:") and column:
+            if _should_skip_business_insight_dimension(table, str(column), profile_index):
+                continue
             group_expr, select_expr, join_sql, display_label = _dimension_projection(
                 table,
                 str(column),
@@ -504,7 +517,7 @@ def _from_business_insights(
                 models=models,
             )
             question = (
-                f"Which {display_label} drives {_business_metric_label(insight)} "
+                f"Which {display_label} drives {_business_metric_label(insight, metadata)} "
                 f"in {_table_label(table_name, metadata)}?"
             )
             sql_hint = (
@@ -517,6 +530,8 @@ def _from_business_insights(
                 f"GROUP BY {group_expr} ORDER BY total_value DESC LIMIT 20"
             )
         elif insight_id.startswith("segment_concentration:") and column:
+            if _should_skip_business_insight_dimension(table, str(column), profile_index):
+                continue
             group_expr, select_expr, join_sql, display_label = _dimension_projection(
                 table,
                 str(column),
@@ -1791,11 +1806,14 @@ def _column_dtype(table: TableInfo, column_name: str) -> str:
     return column.dtype if column else ""
 
 
-def _business_metric_label(insight: dict) -> str:
+def _business_metric_label(insight: dict, metadata: RetrievedMetadata | None = None) -> str:
     metric = str(insight.get("metric") or "")
     column = str(insight.get("column") or "")
     if metric == "record_volume":
-        return f"{_humanize(insight['table'])} volume"
+        row_label = _row_subject_label(metadata, "")
+        if row_label:
+            return f"{row_label} volume"
+        return "volume"
     if metric == "period_total" and column:
         return _humanize(column)
     if metric == "segment_share" and column:
@@ -1852,10 +1870,10 @@ def _column_label(name: str, metadata: RetrievedMetadata | None) -> str:
 def _row_subject_label(metadata: RetrievedMetadata | None, fallback: str) -> str:
     phrase = metadata.context.row_represents if metadata and metadata.context else None
     if not phrase:
-        return fallback
+        return _fallback_row_subject_label(fallback)
     phrase = phrase.strip().lower()
     if not phrase:
-        return fallback
+        return _fallback_row_subject_label(fallback)
     return phrase if phrase.endswith("s") else f"{phrase}s"
 
 
@@ -1912,6 +1930,45 @@ def _row_subject_metric(metadata: RetrievedMetadata | None, fallback: str) -> st
     if not phrase:
         return fallback
     return f"{phrase} {fallback}"
+
+
+def _fallback_row_subject_label(fallback: str) -> str:
+    if not fallback:
+        return ""
+    normalized = fallback.lower()
+    preferred = (
+        "trip",
+        "ride",
+        "order",
+        "event",
+        "incident",
+        "inspection",
+        "reading",
+        "payment",
+        "shipment",
+        "ticket",
+        "visit",
+        "request",
+        "booking",
+        "grant",
+        "complaint",
+    )
+    for token in preferred:
+        if token in normalized:
+            return token if token.endswith("s") else f"{token}s"
+    return "records"
+
+
+def _should_skip_business_insight_dimension(
+    table: TableInfo,
+    column_name: str,
+    profile_index: dict[tuple[str, str], ColumnProfile],
+) -> bool:
+    column = next((col for col in table.columns if col.name == column_name), None)
+    if column is None:
+        return False
+    profile = profile_index.get((table.name, column_name))
+    return _is_low_signal_dimension_for_question(column, profile)
 
 
 def _is_readable_dimension(

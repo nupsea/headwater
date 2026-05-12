@@ -1085,6 +1085,149 @@ class TestSuggestions:
         assert not any("quality flag" in q.question.lower() for q in questions)
         assert any("channel" in q.question.lower() for q in questions)
 
+    def test_business_insight_questions_skip_low_signal_flags(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(
+                            name="access_a_ride_flag",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="trip_miles", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="trips",
+                    column_name="access_a_ride_flag",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("N", 480), ("Y", 20)],
+                ),
+                ColumnProfile(
+                    table_name="trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+                ColumnProfile(
+                    table_name="trips",
+                    column_name="trip_miles",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=100,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            business_insights=[
+                {
+                    "id": "segment_concentration:access_a_ride_flag",
+                    "table": "trips",
+                    "column": "access_a_ride_flag",
+                    "metric": "segment_share",
+                },
+                {
+                    "id": "segment_concentration:payment_type",
+                    "table": "trips",
+                    "column": "payment_type",
+                    "metric": "segment_share",
+                },
+            ],
+        )
+
+        prompts = [q.question.lower() for q in questions]
+        assert not any("access a ride flag" in prompt for prompt in prompts)
+        assert any("payment method" in prompt for prompt in prompts)
+
+    def test_business_volume_questions_use_row_subject_not_table_name(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_raw_fhvhv_tripdata_2026",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(name="trip_miles", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            business_insights=[
+                {
+                    "id": "temporal_peak:pickup_datetime",
+                    "table": "tlc_raw_fhvhv_tripdata_2026",
+                    "group_by_column": "pickup_datetime",
+                    "group_by_grain": "hour",
+                    "metric": "record_volume",
+                }
+            ],
+        )
+
+        prompts = [q.question.lower() for q in questions]
+        assert any(
+            "how has volume in tlc raw fhvhv tripdata changed over time?" in p
+            for p in prompts
+        )
+        assert not any(
+            "tlc raw fhvhv tripdata volume in tlc raw fhvhv tripdata" in p
+            for p in prompts
+        )
+
+    def test_generate_suggestions_deduplicates_identical_prompts(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_raw_fhvhv_tripdata_2026",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(name="trip_miles", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            business_insights=[
+                {
+                    "id": "temporal_peak:pickup_datetime",
+                    "table": "tlc_raw_fhvhv_tripdata_2026",
+                    "group_by_column": "pickup_datetime",
+                    "group_by_grain": "hour",
+                    "metric": "record_volume",
+                }
+            ],
+        )
+
+        prompts = [q.question.lower() for q in questions]
+        assert len(prompts) == len(set(prompts))
+
     def test_companion_glossary_improves_question_labels(self):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
@@ -2917,6 +3060,12 @@ class TestGrounding:
                 relevant_tables=["tlc_trips"],
             ),
             SuggestedQuestion(
+                question="Which access a ride flag segments dominate tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+            SuggestedQuestion(
                 question="Which hour has the highest trip volume in tlc trips?",
                 source="business",
                 category="Trips",
@@ -2935,6 +3084,9 @@ class TestGrounding:
         assert "readable lookup" in result.error.lower()
         assert result.sql == ""
         assert result.suggestions
+        assert not any("flag" in suggestion.lower() for suggestion in result.suggestions)
+        assert any("weekday and weekend" in suggestion.lower() for suggestion in result.suggestions)
+        assert len(result.suggestions) == len(set(result.suggestions))
 
 
 # ---------------------------------------------------------------------------
