@@ -19,6 +19,8 @@ from typing import Any
 import duckdb
 
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
+from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.core.classification import (
     is_dimension_column as _shared_is_dimension,
 )
@@ -37,6 +39,7 @@ from headwater.core.models import (
 )
 from headwater.explorer.query_planner import QueryPlanner
 from headwater.explorer.schema_graph import SchemaGraph
+from headwater.explorer.suggestions import _build_lookup_index, _is_readable_dimension
 from headwater.explorer.utils import resolve_table_ref, table_exists
 from headwater.explorer.visualization import recommend_visualization
 
@@ -48,6 +51,20 @@ _FORBIDDEN_PATTERNS = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXEC)\b",
     re.IGNORECASE,
 )
+_TEMPORAL_RESULT_RE = re.compile(
+    r"(date|time|month|year|day|week|quarter|period|hour|minute)", re.IGNORECASE
+)
+_METRIC_RESULT_RE = re.compile(
+    r"(count|records|rows|trips|events|rides|amount|fare|tip|value|avg|average|mean|"
+    r"median|min|max|sum|total|share|ratio|rate|duration|minutes?|hours?)",
+    re.IGNORECASE,
+)
+_EXPLICIT_DIMENSION_RE = re.compile(
+    r"(dimension|group|segment|category|type|status|route|origin|destination|location|zone|site)",
+    re.IGNORECASE,
+)
+_OPAQUE_ALPHANUMERIC_RE = re.compile(r"^[A-Z]{1,4}\d{2,}$")
+_BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
 
 _SYSTEM_PROMPT = """You are a SQL query generator for a DuckDB analytical database.
 You receive table metadata (schemas, column descriptions, relationships) and a natural
@@ -110,8 +127,13 @@ def ask(
     has_llm = provider is not None and not isinstance(provider, NoLLMProvider)
     context = _build_context(discovery, models or []) if has_llm else ""
 
+    preflight_result = _preflight_question_constraints(question, discovery, suggestions or [])
+    if preflight_result is not None:
+        return preflight_result
+
     # Strategy 0: Suggestion matcher (pre-built, validated SQL -- highest priority)
-    sql = _match_suggestion(question, suggestions or [])
+    matched_suggestion = _find_matching_suggestion(question, suggestions or [])
+    sql = matched_suggestion.sql_hint if matched_suggestion else None
 
     # Strategy 1: Catalog decomposer (ontology-driven, deterministic SQL)
     decomposition = None
@@ -204,7 +226,15 @@ def ask(
     if result.error and has_llm:
         result = _repair_loop(question, sql, result.error, con, context, provider)
 
-    result.warnings = warnings
+    readability_warnings, follow_ups = _business_readability_feedback(
+        question,
+        result,
+        suggestions or [],
+        matched_suggestion,
+    )
+    result.warnings = warnings + readability_warnings
+    if follow_ups and not result.suggestions:
+        result.suggestions = follow_ups
     return result
 
 
@@ -356,19 +386,27 @@ Fix the SQL query so it executes successfully. Return ONLY the corrected SQL."""
 # ---------------------------------------------------------------------------
 
 
-def _match_suggestion(
+def _find_matching_suggestion(
     question: str,
     suggestions: list[SuggestedQuestion],
-    con: duckdb.DuckDBPyConnection | None = None,
-) -> str | None:
+) -> SuggestedQuestion | None:
     """Find a suggested question that matches and has a SQL hint."""
     q_lower = question.lower().strip().rstrip("?")
 
     for s in suggestions:
         if s.sql_hint and _questions_similar(q_lower, s.question.lower().strip().rstrip("?")):
-            return s.sql_hint
+            return s
 
     return None
+
+
+def _match_suggestion(
+    question: str,
+    suggestions: list[SuggestedQuestion],
+) -> str | None:
+    """Backward-compatible helper that returns the SQL hint for a match."""
+    match = _find_matching_suggestion(question, suggestions)
+    return match.sql_hint if match else None
 
 
 _STOP_WORDS = {
@@ -1503,6 +1541,181 @@ def _check_grounding(
         )
 
     return warnings
+
+
+def _preflight_question_constraints(
+    question: str,
+    discovery: DiscoveryResult,
+    suggestions: list[SuggestedQuestion],
+) -> ExplorationResult | None:
+    """Fail fast for question types the current project cannot answer readably."""
+    if not re.search(r"\broutes?\b", question, re.IGNORECASE):
+        return None
+    if _project_has_readable_route_dimensions(discovery):
+        return None
+    return ExplorationResult(
+        question=question,
+        sql="",
+        error=(
+            "This project does not have a readable lookup for origin and destination IDs, "
+            "so route questions would return opaque codes instead of business labels."
+        ),
+        suggestions=_alternative_questions_for_unreadable_result(
+            question,
+            suggestions,
+            matched_suggestion=None,
+            route_like=True,
+        ),
+    )
+
+
+def _project_has_readable_route_dimensions(discovery: DiscoveryResult) -> bool:
+    metadata = retrieve_metadata(discovery)
+    semantic_schema = infer_semantic_schema(discovery, metadata.context if metadata else None)
+    lookup_index = _build_lookup_index(discovery.tables, metadata, discovery.relationships)
+    for table in discovery.tables:
+        roles = roles_for_table(semantic_schema, table.name)
+        origin = roles.get("origin_id") or roles.get("location_id")
+        dest = roles.get("destination_id")
+        if not origin or not dest:
+            continue
+        if _is_readable_dimension(table, origin.column_name, lookup_index, metadata) and (
+            _is_readable_dimension(table, dest.column_name, lookup_index, metadata)
+        ):
+            return True
+    return False
+
+
+def _business_readability_feedback(
+    question: str,
+    result: ExplorationResult,
+    suggestions: list[SuggestedQuestion],
+    matched_suggestion: SuggestedQuestion | None,
+) -> tuple[list[str], list[str]]:
+    """Warn when an otherwise valid answer is dominated by raw IDs or codes."""
+    if result.error or not result.data:
+        return [], []
+
+    opaque_columns = _opaque_result_columns(result.data)
+    if not opaque_columns:
+        return [], []
+
+    route_like = any("route" in column.lower() for column in opaque_columns) or bool(
+        re.search(r"\broutes?\b", question, re.IGNORECASE)
+    )
+    if route_like:
+        warning = (
+            "This answer uses raw route or location IDs because the dataset does not "
+            "contain a readable lookup for those fields. The ranking may be correct, "
+            "but it is not yet business-readable."
+        )
+    else:
+        labels = ", ".join(f'"{column}"' for column in opaque_columns)
+        warning = (
+            f"This answer uses raw codes or IDs in {labels}. The query ran correctly, "
+            "but the result is not yet business-readable. Add a lookup table or "
+            "dictionary mapping to resolve those values."
+        )
+
+    follow_ups = _alternative_questions_for_unreadable_result(
+        question,
+        suggestions,
+        matched_suggestion,
+        route_like=route_like,
+    )
+    return [warning], follow_ups
+
+
+def _opaque_result_columns(data: list[dict[str, Any]]) -> list[str]:
+    if not data:
+        return []
+    columns = list(data[0].keys())
+    candidates: list[str] = []
+    for index, column in enumerate(columns):
+        if not _is_dimension_like_result_column(column, index, len(columns)):
+            continue
+        values = [row.get(column) for row in data[:20] if row.get(column) is not None]
+        if len(values) < 2:
+            continue
+        opaque = sum(1 for value in values if _is_opaque_business_value(value))
+        if opaque / len(values) >= 0.8:
+            candidates.append(column)
+    return candidates
+
+
+def _is_dimension_like_result_column(column: str, index: int, total_columns: int) -> bool:
+    lower = column.lower()
+    if _TEMPORAL_RESULT_RE.search(lower):
+        return False
+    if _EXPLICIT_DIMENSION_RE.search(lower):
+        return True
+    if _METRIC_RESULT_RE.search(lower):
+        return False
+    return index == 0 and total_columns >= 2
+
+
+def _is_opaque_business_value(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return float(value).is_integer()
+
+    text = str(value).strip()
+    if not text:
+        return False
+    if " -> " in text:
+        parts = [part.strip() for part in text.split("->") if part.strip()]
+        return len(parts) >= 2 and all(_is_opaque_business_atom(part) for part in parts)
+    return _is_opaque_business_atom(text)
+
+
+def _is_opaque_business_atom(text: str) -> bool:
+    normalized = text.strip()
+    if not normalized:
+        return False
+    lower = normalized.lower()
+    if lower in _BOOLEANISH_VALUES:
+        return True
+    if normalized.isdigit():
+        return True
+    if _OPAQUE_ALPHANUMERIC_RE.match(normalized):
+        return True
+    if len(normalized) == 1 and normalized.isalpha():
+        return True
+    if " " in normalized:
+        return False
+    return False
+
+
+def _alternative_questions_for_unreadable_result(
+    question: str,
+    suggestions: list[SuggestedQuestion],
+    matched_suggestion: SuggestedQuestion | None,
+    *,
+    route_like: bool,
+) -> list[str]:
+    alternatives: list[str] = []
+    for suggestion in suggestions:
+        if matched_suggestion and suggestion.question == matched_suggestion.question:
+            continue
+        if _questions_similar(
+            question.lower().strip().rstrip("?"),
+            suggestion.question.lower().strip().rstrip("?"),
+        ):
+            continue
+        suggestion_lower = suggestion.question.lower()
+        if route_like and re.search(
+            r"\b(route|origin|destination|location|zone|pickup|dropoff)\b",
+            suggestion_lower,
+        ):
+            continue
+        if suggestion.question not in alternatives:
+            alternatives.append(suggestion.question)
+        if len(alternatives) >= 3:
+            break
+    return alternatives
 
 
 # ---------------------------------------------------------------------------

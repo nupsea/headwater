@@ -2757,6 +2757,185 @@ class TestGrounding:
         assert result.error is None
         assert len(result.warnings) == 0
 
+    def test_route_questions_with_stale_raw_id_sql_are_blocked_preflight(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_tlc_trips AS
+            SELECT * FROM (VALUES
+                (101, 202, 45.0),
+                (101, 202, 55.0),
+                (202, 303, 20.0)
+            ) AS t(PULocationID, DOLocationID, trip_time)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_trips",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="PULocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="DOLocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="trip_time", dtype="double", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+        suggestions = [
+            SuggestedQuestion(
+                question="Which routes have the longest trip time in tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+                sql_hint=(
+                    'SELECT CAST("PULocationID" AS VARCHAR) || \' -> \' || '
+                    'CAST("DOLocationID" AS VARCHAR) AS route_pair, '
+                    'AVG(trip_time) AS avg_trip_time '
+                    'FROM staging.stg_tlc_trips '
+                    'GROUP BY 1 ORDER BY avg_trip_time DESC'
+                ),
+            ),
+            SuggestedQuestion(
+                question="How has trip time in tlc trips changed over time?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+            SuggestedQuestion(
+                question="Which hours have the highest trip volume in tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+        ]
+
+        result = ask(
+            question="Which routes have the longest trip time in tlc trips?",
+            con=duckdb_con,
+            discovery=discovery,
+            suggestions=suggestions,
+        )
+
+        assert result.error is not None
+        assert "readable lookup" in result.error.lower()
+        assert result.suggestions
+        assert all("route" not in suggestion.lower() for suggestion in result.suggestions)
+
+    def test_code_heavy_answers_return_readability_warning(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            SELECT * FROM (VALUES
+                ('B03404', 100.0),
+                ('B03404', 120.0),
+                ('B09999', 80.0)
+            ) AS t(originating_base_num, trip_miles)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(
+                            name="originating_base_num",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="trip_miles", dtype="double", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+        suggestions = [
+            SuggestedQuestion(
+                question="Which base has the highest trip miles in trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["trips"],
+                sql_hint=(
+                    'SELECT "originating_base_num" AS dimension, '
+                    'SUM(trip_miles) AS total_trip_miles '
+                    "FROM staging.stg_trips "
+                    'GROUP BY 1 ORDER BY total_trip_miles DESC'
+                ),
+            )
+        ]
+
+        result = ask(
+            question="Which base has the highest trip miles in trips?",
+            con=duckdb_con,
+            discovery=discovery,
+            suggestions=suggestions,
+        )
+
+        assert result.error is None
+        assert any("raw codes or ids" in warning.lower() for warning in result.warnings)
+
+    def test_route_question_without_lookup_returns_guided_error(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_tlc_trips AS
+            SELECT * FROM (VALUES
+                (101, 202, TIMESTAMP '2026-01-01 08:00:00', TIMESTAMP '2026-01-01 08:45:00'),
+                (101, 202, TIMESTAMP '2026-01-01 09:00:00', TIMESTAMP '2026-01-01 09:55:00'),
+                (202, 303, TIMESTAMP '2026-01-01 10:00:00', TIMESTAMP '2026-01-01 10:20:00')
+            ) AS t(PULocationID, DOLocationID, pickup_datetime, dropoff_datetime)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_trips",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="PULocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="DOLocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="dropoff_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                )
+            ],
+        )
+        suggestions = [
+            SuggestedQuestion(
+                question="How do weekday and weekend trip times compare in tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+            SuggestedQuestion(
+                question="Which hour has the highest trip volume in tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+        ]
+
+        result = ask(
+            question="Which routes have the longest duration in tlc trips?",
+            con=duckdb_con,
+            discovery=discovery,
+            suggestions=suggestions,
+        )
+
+        assert result.error is not None
+        assert "readable lookup" in result.error.lower()
+        assert result.sql == ""
+        assert result.suggestions
+
 
 # ---------------------------------------------------------------------------
 # Heuristic SQL builder tests
