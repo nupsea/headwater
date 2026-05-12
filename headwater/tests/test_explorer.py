@@ -796,6 +796,38 @@ class TestSuggestions:
         assert "North Hub -> Central Depot" in {row["route_pair"] for row in result.data}
         assert all("101 -> 202" not in str(row["route_pair"]) for row in result.data)
 
+    def test_route_questions_are_suppressed_without_readable_lookup(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_trips",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(name="PULocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="DOLocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="dropoff_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        prompts = [q.question.lower() for q in questions]
+
+        assert not any("which routes have the longest duration" in q for q in prompts)
+        assert not any("which pulocation" in q for q in prompts)
+        assert any("weekday and weekend" in q for q in prompts)
+
     def test_distribution_questions_return_bucketed_results(self, duckdb_con):
         duckdb_con.execute(
             """

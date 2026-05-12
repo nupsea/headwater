@@ -619,6 +619,24 @@ def _from_semantic_roles(
         if start and end:
             start_expr = _timestamp_expression(table, start.column_name)
             duration_expr = _duration_minutes_expression(table, start.column_name, end.column_name)
+            origin_is_readable = bool(
+                origin
+                and _is_readable_dimension(
+                    table,
+                    origin.column_name,
+                    lookup_index,
+                    metadata,
+                )
+            )
+            dest_is_readable = bool(
+                dest
+                and _is_readable_dimension(
+                    table,
+                    dest.column_name,
+                    lookup_index,
+                    metadata,
+                )
+            )
             suggestions.extend(
                 _add_semantic_questions(
                     seen,
@@ -647,7 +665,7 @@ def _from_semantic_roles(
                     ],
                 )
             )
-            if origin:
+            if origin and origin_is_readable:
                 group_expr, select_expr, join_sql, display_label = _dimension_projection(
                     table,
                     origin.column_name,
@@ -682,7 +700,7 @@ def _from_semantic_roles(
                         ],
                     )
                 )
-            if origin and dest:
+            if origin and dest and origin_is_readable and dest_is_readable:
                 origin_group_expr, origin_select_expr, origin_join_sql, _origin_label = (
                     _dimension_projection(
                         table,
@@ -1894,6 +1912,23 @@ def _row_subject_metric(metadata: RetrievedMetadata | None, fallback: str) -> st
     if not phrase:
         return fallback
     return f"{phrase} {fallback}"
+
+
+def _is_readable_dimension(
+    table: TableInfo,
+    column_name: str,
+    lookup_index: dict[str, dict[str, str]],
+    metadata: RetrievedMetadata | None,
+) -> bool:
+    lower = column_name.lower()
+    raw_label_tokens = ("name", "label", "description", "title", "zone", "borough", "region")
+    if any(token in lower for token in raw_label_tokens) and "id" not in lower:
+        return True
+    if _enum_case_expression(column_name, f'fact."{column_name}"', metadata):
+        return True
+    if lookup_index.get(f"{table.name.lower()}.{lower}"):
+        return True
+    return any(lookup_index.get(key) for key in _lookup_match_keys(column_name))
 
 
 def _add_semantic_questions(
