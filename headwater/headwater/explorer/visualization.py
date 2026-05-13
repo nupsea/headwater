@@ -20,6 +20,15 @@ _TEMPORAL_PATTERNS = re.compile(
 _DIMENSION_PATTERNS = re.compile(
     r"(name|type|category|status|zone|site|region|level|priority|severity|_type$)", re.IGNORECASE
 )
+_PIE_QUESTION_PATTERNS = re.compile(
+    r"(distribution of|share of|split by|breakdown of|composition of)",
+    re.IGNORECASE,
+)
+_BUCKET_PATTERNS = re.compile(r"(bucket|bin|range|histogram)", re.IGNORECASE)
+_SHARE_METRIC_PATTERNS = re.compile(
+    r"(count|records|share|pct|percent|percentage|volume|total)",
+    re.IGNORECASE,
+)
 
 
 def recommend_visualization(
@@ -67,6 +76,30 @@ def recommend_visualization(
             y_axis=metric_cols[0],
             group_by=group,
             description=f"Time series: {metric_cols[0]} by {temporal_cols[0]}",
+        )
+
+    # Small categorical part-of-whole -> pie chart
+    if (
+        dimension_cols
+        and metric_cols
+        and len(dimension_cols) == 1
+        and _should_use_pie_chart(
+            columns,
+            data,
+            dimension_cols[0],
+            metric_cols[0],
+            question,
+        )
+    ):
+        return VisualizationSpec(
+            chart_type="pie",
+            title=(
+                _title_from_question(question)
+                or f"{metric_cols[0]} share by {dimension_cols[0]}"
+            ),
+            x_axis=dimension_cols[0],
+            y_axis=metric_cols[0],
+            description=f"Part-to-whole: {metric_cols[0]} share across {dimension_cols[0]}",
         )
 
     # Dimension + metric (few categories) -> bar chart
@@ -145,6 +178,51 @@ def _classify_columns(
             result[col] = "dimension"
 
     return result
+
+
+def _should_use_pie_chart(
+    columns: list[str],
+    data: list[dict[str, Any]],
+    dimension_col: str,
+    metric_col: str,
+    question: str,
+) -> bool:
+    if len(data) < 2 or len(data) > 6:
+        return False
+    if len(columns) > 3:
+        return False
+    lower_dimension = dimension_col.lower()
+    lower_metric = metric_col.lower()
+    lower_question = question.lower()
+    if _BUCKET_PATTERNS.search(lower_dimension):
+        return False
+    if _looks_like_range_dimension(data, dimension_col):
+        return False
+    if not _PIE_QUESTION_PATTERNS.search(lower_question):
+        return False
+    if not _SHARE_METRIC_PATTERNS.search(lower_metric):
+        return False
+    total = 0.0
+    for row in data:
+        value = row.get(metric_col)
+        if not isinstance(value, (int, float)):
+            return False
+        if value < 0:
+            return False
+        total += float(value)
+    return total > 0
+
+
+def _looks_like_range_dimension(data: list[dict[str, Any]], column: str) -> bool:
+    values = [str(row.get(column, "")).strip() for row in data[:8]]
+    return all(
+        value
+        and (
+            re.match(r"^-?\d+(?:\.\d+)?\s*-\s*-?\d+(?:\.\d+)?$", value) is not None
+            or re.match(r"^\d+(?:\.\d+)?$", value) is not None
+        )
+        for value in values
+    )
 
 
 def _looks_like_date(values: list[Any]) -> bool:

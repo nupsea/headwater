@@ -411,7 +411,7 @@ class InsightDetectionResult(BaseModel):
 class VisualizationSpec(BaseModel):
     """Recommendation for how to visualize a query result."""
 
-    chart_type: Literal["kpi", "bar", "line", "scatter", "table", "heatmap"]
+    chart_type: Literal["kpi", "bar", "line", "pie", "scatter", "table", "heatmap"]
     title: str
     x_axis: str | None = None
     y_axis: str | None = None

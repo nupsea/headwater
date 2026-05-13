@@ -4002,6 +4002,34 @@ class TestVisualization:
         assert viz.chart_type == "bar"
         assert viz.x_axis == "zone_name"
 
+    def test_pie_categorical_distribution(self):
+        data = [
+            {"payment_method": "Credit card", "records": 60},
+            {"payment_method": "Cash", "records": 30},
+            {"payment_method": "No charge", "records": 10},
+        ]
+        viz = recommend_visualization(
+            ["payment_method", "records"],
+            data,
+            "What is the distribution of trips by payment method?",
+        )
+        assert viz.chart_type == "pie"
+        assert viz.x_axis == "payment_method"
+        assert viz.y_axis == "records"
+
+    def test_numeric_bucket_distribution_stays_bar(self):
+        data = [
+            {"bucket": "0-10", "records": 15},
+            {"bucket": "10-20", "records": 25},
+            {"bucket": "20-30", "records": 12},
+        ]
+        viz = recommend_visualization(
+            ["bucket", "records"],
+            data,
+            "What is the distribution of tolls?",
+        )
+        assert viz.chart_type == "bar"
+
     def test_scatter_two_metrics(self):
         data = [
             {"value": 10.0, "score": 85.0},

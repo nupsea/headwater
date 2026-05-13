@@ -6,6 +6,9 @@ import {
   Line,
   BarChart,
   Bar,
+  PieChart,
+  Pie,
+  Cell,
   ScatterChart,
   Scatter,
   XAxis,
@@ -44,6 +47,8 @@ export function ResultChart({ spec, data }: ResultChartProps) {
       return <LineChartView spec={spec} data={data} />;
     case "bar":
       return <BarChartView spec={spec} data={data} />;
+    case "pie":
+      return <PieChartView spec={spec} data={data} />;
     case "scatter":
       return <ScatterChartView spec={spec} data={data} />;
     case "heatmap":
@@ -130,6 +135,68 @@ function BarChartView({ spec, data }: ResultChartProps) {
             />
           ))}
         </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pie chart
+// ---------------------------------------------------------------------------
+
+function PieChartView({ spec, data }: ResultChartProps) {
+  const dimensionKey = spec.x_axis ?? Object.keys(data[0])[0];
+  const metricKey =
+    spec.y_axis ??
+    Object.keys(data[0]).find((key) => typeof data[0][key] === "number") ??
+    Object.keys(data[0])[1];
+  const seriesData = data.map((row) => ({
+    name: String(row[dimensionKey] ?? ""),
+    value: Number(row[metricKey] ?? 0),
+  }));
+  const total = seriesData.reduce((sum, row) => sum + row.value, 0);
+
+  return (
+    <div className="p-4">
+      <h3 className="text-sm font-medium mb-3">{spec.title}</h3>
+      <ResponsiveContainer width="100%" height={360}>
+        <PieChart>
+          <Pie
+            data={seriesData}
+            dataKey="value"
+            nameKey="name"
+            cx="50%"
+            cy="50%"
+            innerRadius={72}
+            outerRadius={120}
+            paddingAngle={2}
+            labelLine={false}
+            label={({ name, value }) => {
+              if (!total) return name;
+              const pct = ((Number(value) / total) * 100).toFixed(0);
+              return `${name} ${pct}%`;
+            }}
+          >
+            {seriesData.map((entry, i) => (
+              <Cell key={`${entry.name}-${i}`} fill={COLORS[i % COLORS.length]} />
+            ))}
+          </Pie>
+          <Tooltip
+            contentStyle={{ fontSize: 12 }}
+            formatter={(value) => {
+              const numericValue = Number(value ?? 0);
+              return [
+                total > 0
+                  ? `${numericValue.toLocaleString()} (${((numericValue / total) * 100).toFixed(
+                      1
+                    )}%)`
+                  : numericValue.toLocaleString(),
+                _humanizeKey(metricKey),
+              ];
+            }}
+          />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+        </PieChart>
       </ResponsiveContainer>
     </div>
   );
@@ -314,4 +381,8 @@ function formatTick(value: unknown): string {
     return s.slice(0, 14) + "..";
   }
   return s;
+}
+
+function _humanizeKey(value: string): string {
+  return value.replace(/_/g, " ");
 }

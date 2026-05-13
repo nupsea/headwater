@@ -405,7 +405,7 @@ export interface StatisticalInsight {
 }
 
 export interface VisualizationSpec {
-  chart_type: "kpi" | "bar" | "line" | "scatter" | "table" | "heatmap";
+  chart_type: "kpi" | "bar" | "line" | "pie" | "scatter" | "table" | "heatmap";
   title: string;
   x_axis: string | null;
   y_axis: string | null;
