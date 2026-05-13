@@ -332,6 +332,42 @@ class TestSuggestions:
         )
         assert not any("green trip summary" in q.question.lower() for q in questions)
 
+    def test_mart_by_period_row_count_trends_are_suppressed(self, sample_discovery):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_trip_volume_by_period AS "
+                "SELECT * FROM (VALUES "
+                "(DATE '2026-01-01', 100), "
+                "(DATE '2026-01-02', 120)"
+                ") AS t(period, row_count)"
+            )
+            models = [
+                GeneratedModel(
+                    name="mart_trip_volume_by_period",
+                    model_type="mart",
+                    sql="SELECT ...",
+                    description="Trip volume by period",
+                    status="executed",
+                ),
+            ]
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        assert not any(
+            q.source == "mart"
+            and "row count" in q.question.lower()
+            and "changed over time" in q.question.lower()
+            for q in questions
+        )
+
     def test_business_signal_questions_are_prioritized(self, sample_discovery):
         business_insights = [
             {

@@ -1192,8 +1192,11 @@ def _from_mart_models(
         temporal = _pick_mart_temporal(cols)
         metric = _pick_mart_metric(cols)
         dimension = _pick_mart_dimension(cols, temporal, metric)
+        by_period_model = _looks_like_period_model(model.name, label)
 
         if temporal and metric:
+            if by_period_model and _is_low_value_period_metric(metric):
+                continue
             temporal_dtype = next((dtype for name, dtype in cols if name == temporal), "")
             period_expr = _time_bucket_expression(temporal, temporal_dtype)
             question = (
@@ -1296,6 +1299,7 @@ def _pick_mart_temporal(cols: list[tuple[str, str]]) -> str | None:
 
 def _pick_mart_metric(cols: list[tuple[str, str]]) -> str | None:
     preferred = []
+    countish = []
     fallback = []
     for name, dtype in cols:
         lower = name.lower()
@@ -1303,11 +1307,15 @@ def _pick_mart_metric(cols: list[tuple[str, str]]) -> str | None:
             continue
         if not any(token in dtype.lower() for token in _NUMERIC_DTYPES):
             continue
-        if any(token in lower for token in ("avg", "p90", "p95", "count", "total", "sum", "rate")):
+        if _is_low_value_period_metric(name):
+            countish.append(name)
+        elif any(
+            token in lower for token in ("avg", "p90", "p95", "count", "total", "sum", "rate")
+        ):
             preferred.append(name)
         else:
             fallback.append(name)
-    return (preferred or fallback or [None])[0]
+    return (preferred or fallback or countish or [None])[0]
 
 
 def _is_aggregate_metric_name(name: str) -> bool:
@@ -1317,6 +1325,27 @@ def _is_aggregate_metric_name(name: str) -> bool:
 
 def _looks_like_summary_model(*parts: str) -> bool:
     return any(_SUMMARY_NAME_RE.search(part) for part in parts if part)
+
+
+def _looks_like_period_model(*parts: str) -> bool:
+    lowered = [part.lower() for part in parts if part]
+    return any(
+        "_by_period" in part or part.endswith("by_period") or " by period" in part
+        for part in lowered
+    )
+
+
+def _is_low_value_period_metric(name: str) -> bool:
+    lower = name.lower()
+    return lower in {
+        "row_count",
+        "record_count",
+        "records",
+        "records_count",
+        "row_total",
+        "rows",
+        "count",
+    }
 
 
 def _pick_mart_dimension(
