@@ -1190,12 +1190,23 @@ def _from_mart_models(
         if row_count is not None and row_count <= 1:
             continue
         temporal = _pick_mart_temporal(cols)
-        metric = _pick_mart_metric(cols)
-        dimension = _pick_mart_dimension(cols, temporal, metric)
         by_period_model = _looks_like_period_model(model.name, label)
+        metric = _pick_mart_metric(
+            con,
+            model.name,
+            cols,
+            temporal=temporal,
+            prefer_signal=by_period_model,
+        )
+        dimension = _pick_mart_dimension(cols, temporal, metric)
 
         if temporal and metric:
-            if by_period_model and _is_low_value_period_metric(metric):
+            if by_period_model and _mart_metric_is_low_signal(
+                con,
+                model.name,
+                metric,
+                temporal,
+            ):
                 continue
             temporal_dtype = next((dtype for name, dtype in cols if name == temporal), "")
             period_expr = _time_bucket_expression(temporal, temporal_dtype)
@@ -1239,6 +1250,8 @@ def _from_mart_models(
             )
             sql_hint = _distribution_sql(ref, metric)
         else:
+            if by_period_model:
+                continue
             question = _fallback_mart_question(model.name, label)
             sql_hint = f"SELECT * FROM {ref} LIMIT 50"
 
@@ -1297,25 +1310,35 @@ def _pick_mart_temporal(cols: list[tuple[str, str]]) -> str | None:
     return None
 
 
-def _pick_mart_metric(cols: list[tuple[str, str]]) -> str | None:
-    preferred = []
-    countish = []
-    fallback = []
+def _pick_mart_metric(
+    con: duckdb.DuckDBPyConnection | None,
+    model_name: str,
+    cols: list[tuple[str, str]],
+    temporal: str | None = None,
+    prefer_signal: bool = False,
+) -> str | None:
+    candidates: list[tuple[int, str]] = []
     for name, dtype in cols:
         lower = name.lower()
         if _ID_NAME_RE.search(name) or lower in {"period"}:
             continue
         if not any(token in dtype.lower() for token in _NUMERIC_DTYPES):
             continue
-        if _is_low_value_period_metric(name):
-            countish.append(name)
-        elif any(
-            token in lower for token in ("avg", "p90", "p95", "count", "total", "sum", "rate")
-        ):
-            preferred.append(name)
-        else:
-            fallback.append(name)
-    return (preferred or fallback or countish or [None])[0]
+        score = _mart_metric_score(
+            con,
+            model_name,
+            name,
+            temporal=temporal,
+            prefer_signal=prefer_signal,
+        )
+        candidates.append((score, name))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    best_score, best_name = candidates[0]
+    if prefer_signal and best_score < 6:
+        return None
+    return best_name
 
 
 def _is_aggregate_metric_name(name: str) -> bool:
@@ -1345,6 +1368,138 @@ def _is_low_value_period_metric(name: str) -> bool:
         "row_total",
         "rows",
         "count",
+    }
+
+
+def _mart_metric_is_low_signal(
+    con: duckdb.DuckDBPyConnection | None,
+    model_name: str,
+    metric: str,
+    temporal: str | None,
+) -> bool:
+    return _mart_metric_score(
+        con,
+        model_name,
+        metric,
+        temporal=temporal,
+        prefer_signal=True,
+    ) < 6
+
+
+def _mart_metric_score(
+    con: duckdb.DuckDBPyConnection | None,
+    model_name: str,
+    metric: str,
+    temporal: str | None = None,
+    prefer_signal: bool = False,
+) -> int:
+    lower = metric.lower()
+    score = _metric_question_score(metric)
+    if _is_low_value_period_metric(metric):
+        return -100
+    if prefer_signal and lower.startswith("current_"):
+        return -100
+    if lower.startswith(("current_avg_", "current_mean_", "current_median_")):
+        score -= 5
+    elif lower.startswith(("current_", "avg_", "mean_")):
+        score -= 2
+    if con is None:
+        return score
+    profile = _mart_metric_profile(con, model_name, metric, temporal if prefer_signal else None)
+    if profile is None:
+        return score
+    distinct_count = int(profile["distinct_count"])
+    if distinct_count <= 1:
+        return -100
+    if distinct_count <= 3:
+        score -= 4
+    elif distinct_count >= 12:
+        score += 4
+    elif distinct_count >= 6:
+        score += 2
+    stddev = profile["stddev"]
+    mean_value = profile["mean_value"]
+    if stddev is None or stddev <= 0:
+        score -= 6
+    elif mean_value not in (None, 0):
+        coefficient = abs(float(stddev) / float(mean_value))
+        if coefficient >= 0.2:
+            score += 4
+        elif coefficient >= 0.08:
+            score += 2
+        elif coefficient <= 0.02:
+            score -= 3
+    turning_points = int(profile["turning_points"])
+    if turning_points >= 2:
+        score += 4
+    elif turning_points == 1:
+        score += 2
+    elif prefer_signal and distinct_count >= 4:
+        score -= 4
+    return score
+
+
+def _mart_metric_profile(
+    con: duckdb.DuckDBPyConnection,
+    model_name: str,
+    metric: str,
+    temporal: str | None = None,
+) -> dict[str, float | int | None] | None:
+    try:
+        row = con.execute(
+            f"""
+            SELECT
+                COUNT(*) AS n,
+                COUNT(DISTINCT "{metric}") AS distinct_count,
+                AVG(CAST("{metric}" AS DOUBLE)) AS mean_value,
+                STDDEV_SAMP(CAST("{metric}" AS DOUBLE)) AS stddev
+            FROM marts.{model_name}
+            WHERE "{metric}" IS NOT NULL
+            """
+        ).fetchone()
+    except Exception:
+        return None
+    if not row or int(row[0] or 0) == 0:
+        return None
+    turning_points = 0
+    if temporal:
+        try:
+            turn_row = con.execute(
+                f"""
+                WITH ordered AS (
+                    SELECT
+                        CAST("{metric}" AS DOUBLE) AS metric_value,
+                        ROW_NUMBER() OVER (ORDER BY "{temporal}") AS seq,
+                        LAG(CAST("{metric}" AS DOUBLE)) OVER (ORDER BY "{temporal}") AS prev_value
+                    FROM marts.{model_name}
+                    WHERE "{metric}" IS NOT NULL AND "{temporal}" IS NOT NULL
+                ),
+                deltas AS (
+                    SELECT
+                        seq,
+                        SIGN(metric_value - prev_value) AS direction
+                    FROM ordered
+                    WHERE prev_value IS NOT NULL AND metric_value <> prev_value
+                ),
+                turns AS (
+                    SELECT
+                        direction,
+                        LAG(direction) OVER (ORDER BY seq) AS prev_direction
+                    FROM deltas
+                )
+                SELECT COUNT(*)
+                FROM turns
+                WHERE prev_direction IS NOT NULL AND direction <> prev_direction
+                """
+            ).fetchone()
+            turning_points = int(turn_row[0] or 0) if turn_row else 0
+        except Exception:
+            turning_points = 0
+    return {
+        "distinct_count": int(row[1] or 0),
+        "mean_value": float(row[2]) if row[2] is not None else None,
+        "stddev": float(row[3]) if row[3] is not None else None,
+        "turning_points": turning_points,
     }
 
 

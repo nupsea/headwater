@@ -368,6 +368,83 @@ class TestSuggestions:
             for q in questions
         )
 
+    def test_mart_by_period_prefers_more_variable_business_metric(self, sample_discovery):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_trip_kpis_by_period AS "
+                "SELECT * FROM (VALUES "
+                "(DATE '2026-01-01', 1.00, 15.0), "
+                "(DATE '2026-01-02', 1.01, 32.0), "
+                "(DATE '2026-01-03', 1.02, 18.0), "
+                "(DATE '2026-01-04', 1.03, 40.0)"
+                ") AS t(period, current_avg_passenger_count, fare_amount)"
+            )
+            models = [
+                GeneratedModel(
+                    name="mart_trip_kpis_by_period",
+                    model_type="mart",
+                    sql="SELECT ...",
+                    description="Trip KPIs by period",
+                    status="executed",
+                ),
+            ]
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        mart_trends = [
+            q.question.lower()
+            for q in questions
+            if q.source == "mart" and "changed over time" in q.question.lower()
+        ]
+        assert any("fare amount" in q for q in mart_trends)
+        assert not any("passenger count" in q for q in mart_trends)
+
+    def test_low_signal_current_average_period_mart_is_suppressed(self, sample_discovery):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_trip_passenger_count_by_period AS "
+                "SELECT * FROM (VALUES "
+                "(DATE '2026-01-01', 1.00), "
+                "(DATE '2026-01-02', 1.01), "
+                "(DATE '2026-01-03', 1.02), "
+                "(DATE '2026-01-04', 1.03)"
+                ") AS t(period, current_avg_passenger_count)"
+            )
+            models = [
+                GeneratedModel(
+                    name="mart_trip_passenger_count_by_period",
+                    model_type="mart",
+                    sql="SELECT ...",
+                    description="Trip passenger count by period",
+                    status="executed",
+                ),
+            ]
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        assert not any(
+            q.source == "mart"
+            and "passenger count" in q.question.lower()
+            and "changed over time" in q.question.lower()
+            for q in questions
+        )
+
     def test_business_signal_questions_are_prioritized(self, sample_discovery):
         business_insights = [
             {
