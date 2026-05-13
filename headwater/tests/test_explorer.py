@@ -47,7 +47,7 @@ from headwater.explorer.statistical import (
     detect_insights,
     detect_insights_with_diagnostics,
 )
-from headwater.explorer.suggestions import generate_suggestions
+from headwater.explorer.suggestions import _select_diverse_questions, generate_suggestions
 from headwater.explorer.visualization import _classify_columns, recommend_visualization
 
 # ---------------------------------------------------------------------------
@@ -1227,6 +1227,53 @@ class TestSuggestions:
 
         prompts = [q.question.lower() for q in questions]
         assert len(prompts) == len(set(prompts))
+
+    def test_diverse_selection_limits_repetitive_sibling_templates(self):
+        candidates = [
+            SuggestedQuestion(
+                question="Which hour has the highest trips volume in tlc raw fhv tripdata 2026?",
+                source="business",
+                category="Decision Signals",
+                relevant_tables=["tlc_raw_fhv_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question="Which hour has the highest trips volume in tlc raw fhv tripdata 2026 02?",
+                source="business",
+                category="Decision Signals",
+                relevant_tables=["tlc_raw_fhv_tripdata_2026_02"],
+            ),
+            SuggestedQuestion(
+                question="How has volume in tlc raw fhv tripdata 2026 changed over time?",
+                source="business",
+                category="Business Signals",
+                relevant_tables=["tlc_raw_fhv_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question=(
+                    "How do weekday and weekend trip times compare "
+                    "in tlc raw yellow tripdata 2026?"
+                ),
+                source="business",
+                category="Decision Signals",
+                relevant_tables=["tlc_raw_yellow_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question=(
+                    "Which payment method has the highest fare amount "
+                    "in tlc raw yellow tripdata 2026?"
+                ),
+                source="semantic",
+                category="Tlc Raw Yellow Tripdata 2026",
+                relevant_tables=["tlc_raw_yellow_tripdata_2026_01"],
+            ),
+        ]
+
+        selected = _select_diverse_questions(candidates)
+        prompts = [q.question.lower() for q in selected]
+
+        assert sum("which hour has the highest trips volume" in prompt for prompt in prompts) == 1
+        assert any("weekday and weekend" in prompt for prompt in prompts)
+        assert any("payment method" in prompt for prompt in prompts)
 
     def test_companion_glossary_improves_question_labels(self):
         discovery = DiscoveryResult(

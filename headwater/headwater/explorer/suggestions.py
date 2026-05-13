@@ -277,6 +277,8 @@ def _select_diverse_questions(
     source_counts: dict[str, int] = {}
     shape_counts: dict[str, int] = {}
     table_counts: dict[str, int] = {}
+    template_counts: dict[str, int] = {}
+    family_template_counts: dict[tuple[str, str], int] = {}
     primary_tables = {
         (question.relevant_tables or [question.category])[0]
         for question in candidates
@@ -303,9 +305,19 @@ def _select_diverse_questions(
         if key in selected_keys:
             return False
         shape = _question_shape(question.question)
+        template = _question_template(question.question)
+        family = _question_family(question)
         if source_counts.get(question.source, 0) >= source_limits.get(question.source, 3):
             return False
         if shape_counts.get(shape, 0) >= shape_limits.get(shape, 3):
+            return False
+        template_limit = _template_limit(template)
+        if template_limit is not None and template_counts.get(template, 0) >= template_limit:
+            return False
+        if (
+            len(question.relevant_tables or []) < 2
+            and family_template_counts.get((family, template), 0) >= 1
+        ):
             return False
         if len(question.relevant_tables or []) >= 2:
             return True
@@ -318,10 +330,16 @@ def _select_diverse_questions(
         source_counts[question.source] = source_counts.get(question.source, 0) + 1
         shape = _question_shape(question.question)
         shape_counts[shape] = shape_counts.get(shape, 0) + 1
+        template = _question_template(question.question)
+        template_counts[template] = template_counts.get(template, 0) + 1
+        family = _question_family(question)
+        family_template_counts[(family, template)] = (
+            family_template_counts.get((family, template), 0) + 1
+        )
         primary_table = (question.relevant_tables or [question.category])[0]
         table_counts[primary_table] = table_counts.get(primary_table, 0) + 1
 
-    lead_order = ("ranking", "trend", "other", "count", "distribution", "quality")
+    lead_order = ("ranking", "comparison", "trend", "other", "count", "distribution", "quality")
     for shape in lead_order:
         lead = next(
             (
@@ -343,6 +361,53 @@ def _select_diverse_questions(
             add(question)
 
     return selected
+
+
+def _question_family(question: SuggestedQuestion) -> str:
+    primary = (question.relevant_tables or [question.category])[0]
+    return _canonical_question_family(primary)
+
+
+def _canonical_question_family(value: str) -> str:
+    lower = value.lower().split(".")[-1]
+    for prefix in ("stg_", "mart_"):
+        if lower.startswith(prefix):
+            lower = lower[len(prefix):]
+    lower = re.sub(r"_(by_period|summary|overview|snapshot|totals?)$", "", lower)
+    lower = re.sub(r"_\d{4}(?:_\d{2}){0,2}$", "", lower)
+    lower = re.sub(r"_\d{1,3}$", "", lower)
+    return lower
+
+
+def _question_template(question: str) -> str:
+    q = " ".join(question.lower().split())
+    if q.startswith("which hour has the highest") and "volume" in q:
+        return "peak_hour_volume"
+    if q.startswith("how has ") and "changed over time" in q:
+        return "trend_over_time"
+    if q.startswith("how do ") and " compare" in q:
+        return "comparison"
+    if q.startswith("which ") and " drives " in q:
+        return "driver"
+    if q.startswith("which ") and " dominates " in q:
+        return "dominance"
+    if q.startswith("which ") and " longest " in q:
+        return "longest"
+    if q.startswith("which ") and " highest " in q:
+        return "ranking"
+    if q.startswith("how many "):
+        return "count"
+    if "distribution of" in q:
+        return "distribution"
+    return "other"
+
+
+def _template_limit(template: str) -> int | None:
+    limits = {
+        "peak_hour_volume": 2,
+        "trend_over_time": 2,
+    }
+    return limits.get(template)
 
 
 def _shape_allowed(
@@ -413,6 +478,10 @@ def _question_value_score(
         score -= 4
     if any(token in lower for token in ("highest", "changed over time", "how many")):
         score += 2
+    if lower.startswith("which ") and " highest " in lower and " volume " not in lower:
+        score += 5
+    if lower.startswith("which ") and " highest " in lower and " volume " in lower:
+        score -= 3
     if lower.startswith("how many "):
         score -= 2
     score += _decision_question_bonus(lower)

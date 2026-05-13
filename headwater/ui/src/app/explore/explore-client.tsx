@@ -55,6 +55,29 @@ function questionShape(question: string) {
   return "Explore";
 }
 
+function questionTemplate(question: string) {
+  const q = question.toLowerCase().split(/\s+/).join(" ");
+  if (q.startsWith("which hour has the highest") && q.includes("volume")) return "Peak hour";
+  if (q.startsWith("how has ") && q.includes("changed over time")) return "Trend";
+  if (q.startsWith("how do ") && q.includes(" compare")) return "Comparison";
+  if (q.startsWith("which ") && q.includes("drives ")) return "Driver";
+  if (q.startsWith("which ") && q.includes("dominates ")) return "Dominance";
+  if (q.startsWith("which ") && q.includes("longest ")) return "Bottleneck";
+  if (q.includes("distribution of")) return "Distribution";
+  if (q.startsWith("how many ")) return "Volume";
+  return "Explore";
+}
+
+function suggestionFamily(question: SuggestedQuestion) {
+  const primary = question.relevant_tables[0] || question.category || question.question;
+  let value = primary.toLowerCase().split(".").pop() || primary.toLowerCase();
+  value = value.replace(/^(stg_|mart_)/, "");
+  value = value.replace(/_(by_period|summary|overview|snapshot|totals?)$/, "");
+  value = value.replace(/_\d{4}(?:_\d{2}){0,2}$/, "");
+  value = value.replace(/_\d{1,3}$/, "");
+  return value;
+}
+
 function questionWhy(question: SuggestedQuestion) {
   const q = question.question.toLowerCase();
   if (q.includes("wait time")) {
@@ -117,30 +140,47 @@ function pickFeaturedSuggestions(suggestions: SuggestedQuestion[]) {
     if (scoreDelta !== 0) return scoreDelta;
     return a.question.length - b.question.length;
   });
-  const selected: SuggestedQuestion[] = [];
-  const seenShapes = new Set<string>();
-  for (const suggestion of ranked) {
+  const picked: SuggestedQuestion[] = [];
+  const seenQuestions = new Set<string>();
+  const seenTemplates = new Set<string>();
+  const seenFamilies = new Set<string>();
+
+  const tryAdd = (suggestion: SuggestedQuestion, opts?: { strictFamily?: boolean }) => {
+    const key = suggestion.question;
+    if (seenQuestions.has(key)) return false;
     const shape = questionShape(suggestion.question);
-    if (shape === "Distribution" && selected.length < 2) continue;
-    if (shape === "Volume" && selected.some((item) => questionShape(item.question) === "Volume")) {
-      continue;
+    const template = questionTemplate(suggestion.question);
+    const family = suggestionFamily(suggestion);
+    if (shape === "Distribution" && picked.length < 2) return false;
+    if (template !== "Explore" && seenTemplates.has(template)) return false;
+    if (opts?.strictFamily !== false && seenFamilies.has(family) && picked.length < 3) return false;
+    picked.push(suggestion);
+    seenQuestions.add(key);
+    seenTemplates.add(template);
+    seenFamilies.add(family);
+    return true;
+  };
+
+  const desiredTemplates = ["Comparison", "Driver", "Bottleneck", "Trend", "Peak hour", "Dominance"];
+  for (const desired of desiredTemplates) {
+    const candidate = ranked.find((item) => questionTemplate(item.question) === desired && !seenQuestions.has(item.question));
+    if (candidate) {
+      tryAdd(candidate);
     }
-    if (selected.length < 2 && seenShapes.has(shape) && shape !== "Explore") {
-      continue;
-    }
-    selected.push(suggestion);
-    seenShapes.add(shape);
-    if (selected.length === 3) break;
+    if (picked.length === 3) return picked;
   }
-  if (!selected.some((item) => questionShape(item.question) === "Trend")) {
-    const trend = ranked.find((item) => questionShape(item.question) === "Trend");
-    if (trend) {
-      return [selected[0] ?? trend, selected[1] ?? trend, trend]
-        .filter((item, index, array) => array.findIndex((x) => x.question === item.question) === index)
-        .slice(0, 3);
-    }
+
+  for (const suggestion of ranked) {
+    tryAdd(suggestion);
+    if (picked.length === 3) return picked;
   }
-  return selected;
+
+  for (const suggestion of ranked) {
+    tryAdd(suggestion, { strictFamily: false });
+    if (picked.length === 3) return picked;
+  }
+
+  return picked;
 }
 
 function summarizeDiagnostics(diagnostics: InsightFamilyDiagnostic[]) {
