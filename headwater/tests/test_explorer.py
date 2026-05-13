@@ -2605,6 +2605,67 @@ class TestStatistical:
         assert not any("B03404" in insight["title"] for insight in insights)
         assert not any("B03404" in insight["detail"] for insight in insights)
 
+    def test_top_insights_skip_low_signal_flag_segments(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trip_flags AS
+            SELECT * FROM (VALUES
+                ('N', 12.0, TIMESTAMP '2026-02-01 08:00:00'),
+                ('N', 14.0, TIMESTAMP '2026-02-01 09:00:00'),
+                ('Y', 18.0, TIMESTAMP '2026-02-01 10:00:00'),
+                ('Cash', 25.0, TIMESTAMP '2026-02-01 11:00:00'),
+                ('Card', 30.0, TIMESTAMP '2026-02-01 12:00:00'),
+                ('Cash', 28.0, TIMESTAMP '2026-02-01 13:00:00')
+            ) AS t(access_a_ride_flag, trip_miles, pickup_datetime)
+            """
+        )
+        tables = [
+            TableInfo(
+                name="stg_trip_flags",
+                schema_name="staging",
+                row_count=6,
+                columns=[
+                    ColumnInfo(
+                        name="access_a_ride_flag",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                    ColumnInfo(name="trip_miles", dtype="double", semantic_type="metric"),
+                    ColumnInfo(name="pickup_datetime", dtype="timestamp", semantic_type="temporal"),
+                ],
+            )
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="stg_trip_flags",
+                column_name="access_a_ride_flag",
+                dtype="varchar",
+                null_count=0,
+                distinct_count=2,
+                top_values=[("N", 4), ("Y", 2)],
+            ),
+            ColumnProfile(
+                table_name="stg_trip_flags",
+                column_name="trip_miles",
+                dtype="double",
+                null_count=0,
+                distinct_count=6,
+                min_value=12.0,
+                max_value=30.0,
+                mean=21.17,
+            ),
+        ]
+
+        insights = compute_top_insights(duckdb_con, tables, profiles)
+
+        assert not any("access a ride flag" in insight["title"].lower() for insight in insights)
+        assert not any("access a ride flag" in insight["detail"].lower() for insight in insights)
+        assert not any(
+            insight.get("column") == "access_a_ride_flag"
+            and insight["metric"] in {"segment_share", "trip_miles"}
+            for insight in insights
+        )
+
 
 # ---------------------------------------------------------------------------
 # NL-to-SQL tests

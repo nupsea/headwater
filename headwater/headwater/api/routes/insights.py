@@ -16,6 +16,33 @@ from headwater.explorer.statistical import detect_insights_with_diagnostics
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_LOW_SIGNAL_DIMENSION_TOKENS = (
+    "flag",
+    "indicator",
+    "store_and_fwd",
+    "source_file",
+    "source_system",
+    "load_batch",
+    "ingest",
+    "extract",
+    "audit",
+    "deleted",
+)
+_BUSINESS_DIMENSION_TOKENS = (
+    "type",
+    "category",
+    "status",
+    "reason",
+    "channel",
+    "segment",
+    "service",
+    "region",
+    "zone",
+    "site",
+    "payment",
+)
+_BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
+
 
 @router.get("/insights")
 async def get_insights(request: Request, project_id: str | None = None):
@@ -468,6 +495,20 @@ def _is_dimension_column(column, profile) -> bool:
     return 2 <= profile.distinct_count <= 40
 
 
+def _is_low_signal_dimension(column, profile) -> bool:
+    lower = column.name.lower()
+    distinct = profile.distinct_count if profile is not None else 0
+    business_named = any(token in lower for token in _BUSINESS_DIMENSION_TOKENS)
+    technical_named = any(token in lower for token in _LOW_SIGNAL_DIMENSION_TOKENS)
+
+    if technical_named and distinct <= 3:
+        return True
+    if profile is None or not profile.top_values or business_named:
+        return False
+    values = {str(value).strip().lower() for value, _count in profile.top_values[:4]}
+    return distinct <= 3 and values <= _BOOLEANISH_VALUES
+
+
 def _period_expression(column) -> str | None:
     quoted = _quote_ident(column.name)
     name = column.name.lower()
@@ -660,7 +701,15 @@ def _is_opaque_value(value: object) -> bool:
     if value is None:
         return False
     text = str(value).strip()
-    if len(text) < 3 or " " in text:
+    if not text:
+        return False
+    if text.lower() in _BOOLEANISH_VALUES:
+        return True
+    if len(text) == 1 and text.isalpha():
+        return True
+    if " " in text:
+        return False
+    if len(text) < 3:
         return False
     if text.isdigit():
         return True
@@ -1051,7 +1100,10 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
         ]
         dimension_cols = [
             c for c in table.columns
-            if _is_dimension_column(c, column_profiles.get(c.name))
+            if (
+                _is_dimension_column(c, column_profiles.get(c.name))
+                and not _is_low_signal_dimension(c, column_profiles.get(c.name))
+            )
         ]
         dimension_cols = sorted(dimension_cols, key=_rank_dimension_column)
 
