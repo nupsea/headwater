@@ -478,6 +478,8 @@ def _question_value_score(
         score -= 4
     if any(token in lower for token in ("highest", "changed over time", "how many")):
         score += 2
+    if _is_part_to_whole_distribution_question(lower):
+        score += 8
     if lower.startswith("which ") and " highest " in lower and " volume " not in lower:
         score += 5
     if lower.startswith("which ") and " highest " in lower and " volume " in lower:
@@ -516,7 +518,25 @@ def _decision_question_bonus(question: str) -> int:
     for pattern, penalty in low_value_patterns.items():
         if pattern in question:
             score += penalty
+    if _is_part_to_whole_distribution_question(question):
+        score += 5
     return score
+
+
+def _is_part_to_whole_distribution_question(question: str) -> bool:
+    if "distribution of" not in question or " by " not in question:
+        return False
+    business_tokens = (
+        "payment",
+        "method",
+        "service",
+        "status",
+        "category",
+        "channel",
+        "segment",
+        "type",
+    )
+    return any(token in question for token in business_tokens)
 
 
 def _from_business_insights(
@@ -1718,6 +1738,36 @@ def _from_table_structure(
                     )
                 )
 
+        share_dim = _pick_share_dimension(table, dim_cols, profile_index, metadata)
+        if share_dim:
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                share_dim,
+                lookup_index,
+                metadata,
+                con=con,
+                models=models,
+            )
+            questions.append(
+                SuggestedQuestion(
+                    question=(
+                        f"What is the distribution of {_row_subject_label(metadata, label)} "
+                        f"by {display_label} in {label}?"
+                    ),
+                    source="semantic",
+                    category=label.title(),
+                    relevant_tables=[table.name],
+                    sql_hint=(
+                        f"SELECT {select_expr} AS dimension, "
+                        f"COUNT(*) AS records "
+                        f"FROM {ref} fact "
+                        f"{join_sql} "
+                        f"WHERE {group_expr} IS NOT NULL "
+                        f"GROUP BY {group_expr} ORDER BY records DESC LIMIT 10"
+                    ),
+                )
+            )
+
         if metric_cols and not temporal_cols and not dim_cols:
             m_col = metric_cols[0]
             questions.append(
@@ -1878,6 +1928,27 @@ def _get_dimension_cols(
     return [name for _score, name in scored]
 
 
+def _pick_share_dimension(
+    table: TableInfo,
+    dim_cols: list[str],
+    profile_index: dict[tuple[str, str], ColumnProfile],
+    metadata: RetrievedMetadata | None,
+) -> str | None:
+    scored: list[tuple[int, str]] = []
+    for name in dim_cols:
+        column = next((col for col in table.columns if col.name == name), None)
+        if column is None:
+            continue
+        profile = profile_index.get((table.name, name))
+        score = _share_dimension_score(column, profile, metadata)
+        if score > 0:
+            scored.append((score, name))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][1]
+
+
 def _pick_metric_col(table: TableInfo) -> str | None:
     """Pick the first non-ID, non-code numeric column from a table."""
     for c in table.columns:
@@ -1995,6 +2066,37 @@ def _dimension_signal_score(
             elif top_share >= 0.85:
                 score -= 2
     return score
+
+
+def _share_dimension_score(
+    column: ColumnInfo,
+    profile: ColumnProfile | None,
+    metadata: RetrievedMetadata | None,
+) -> int:
+    lower = column.name.lower()
+    if any(token in lower for token in _LOW_SIGNAL_DIMENSION_TOKENS):
+        return -10
+    if profile is None:
+        return 0
+    distinct = profile.distinct_count
+    if distinct < 2 or distinct > 6:
+        return -10
+    score = 0
+    if any(token in lower for token in _BUSINESS_DIMENSION_TOKENS):
+        score += 6
+    if _column_label(column.name, metadata) != _humanize(column.name):
+        score += 2
+    if profile.top_values:
+        total = sum(count for _value, count in profile.top_values[:6])
+        if total > 0:
+            top_share = profile.top_values[0][1] / total
+            if top_share >= 0.95:
+                return -10
+            if top_share >= 0.8:
+                score -= 2
+            elif top_share <= 0.6:
+                score += 2
+    return score + 1
 
 
 # ---------------------------------------------------------------------------

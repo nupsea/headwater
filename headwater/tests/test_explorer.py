@@ -1151,6 +1151,88 @@ class TestSuggestions:
         assert not any("store and fwd flag" in q.question.lower() for q in questions)
         assert any("payment method" in q.question.lower() for q in questions)
 
+    def test_payment_method_distribution_question_renders_as_pie(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_yellow_trips AS
+            SELECT * FROM (VALUES
+                (1, 2),
+                (1, 1),
+                (2, 3),
+                (2, 1),
+                (1, 2)
+            ) AS t(payment_type, passenger_count)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="yellow_trips",
+                    row_count=5,
+                    columns=[
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="passenger_count",
+                            dtype="int64",
+                            semantic_type="metric",
+                        ),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("1", 3), ("2", 2)],
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="passenger_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_yellow_trips",
+                model_type="staging",
+                sql="SELECT * FROM yellow_trips",
+                description="Yellow trips staging",
+                source_tables=["yellow_trips"],
+                status="executed",
+            )
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q
+            for q in questions
+            if "distribution of trips by payment method" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.visualization is not None
+        assert result.visualization.chart_type == "pie"
+        assert {row["dimension"] for row in result.data} == {"Credit card", "Cash"}
+
     def test_generic_booleanish_operational_flags_are_suppressed(self):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
