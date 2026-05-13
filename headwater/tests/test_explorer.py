@@ -2552,6 +2552,203 @@ class TestStatistical:
         assert any("FHV location analysis is unreliable" in h["title"] for h in highlights)
         assert len({h["insight_type"] for h in highlights}) >= 3
 
+    def test_semantic_highlights_skip_unreadable_route_and_location_ids(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 160 THEN TIMESTAMP '2026-02-01 08:00:00'
+                        WHEN i < 260 THEN TIMESTAMP '2026-02-01 18:00:00'
+                        ELSE TIMESTAMP '2026-02-02 05:00:00'
+                    END AS pickup_datetime,
+                    CASE WHEN i < 160 THEN 52 WHEN i < 260 THEN 38 ELSE 18 END AS duration_min,
+                    CASE WHEN i < 260 THEN 12 ELSE 4 END AS wait_min,
+                    CASE WHEN i < 160 THEN 79 WHEN i < 260 THEN 132 ELSE 205 END AS PULocationID,
+                    CASE WHEN i < 160 THEN 265 WHEN i < 260 THEN 201 ELSE 88 END AS DOLocationID
+                FROM range(320) AS t(i)
+            )
+            SELECT
+                pickup_datetime,
+                pickup_datetime + duration_min * INTERVAL 1 MINUTE AS dropoff_datetime,
+                pickup_datetime - wait_min * INTERVAL 1 MINUTE AS request_datetime,
+                PULocationID,
+                DOLocationID,
+                CASE WHEN i < 220 THEN 'HVFHV' ELSE 'FHV' END AS service_type,
+                10.0 AS trip_miles
+            FROM base
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=320,
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="request_datetime", dtype="timestamp"),
+                        ColumnInfo(name="PULocationID", dtype="int64"),
+                        ColumnInfo(name="DOLocationID", dtype="int64"),
+                        ColumnInfo(name="service_type", dtype="varchar"),
+                        ColumnInfo(name="trip_miles", dtype="double"),
+                    ],
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_trips",
+                model_type="staging",
+                sql="SELECT * FROM trips",
+                description="Trips staging",
+                source_tables=["trips"],
+                status="executed",
+            )
+        ]
+        context = DatasetContext(
+            source_name="test",
+            row_represents="trip",
+            decisions="Operations and dispatch planning",
+        )
+
+        highlights = compute_semantic_highlights(
+            duckdb_con,
+            discovery,
+            context,
+            models,
+        )
+
+        assert highlights
+        assert not any(
+            h["insight_type"] in {"geographic_hotspot", "route_pair"} for h in highlights
+        )
+        assert all("79 -> 265" not in h["detail"] for h in highlights)
+        assert any(
+            h["insight_type"] in {"peak_period", "duration_distribution"}
+            for h in highlights
+        )
+
+    def test_semantic_highlights_resolve_route_and_location_labels_from_lookup(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 160 THEN TIMESTAMP '2026-02-01 08:00:00'
+                        WHEN i < 260 THEN TIMESTAMP '2026-02-01 18:00:00'
+                        ELSE TIMESTAMP '2026-02-02 05:00:00'
+                    END AS pickup_datetime,
+                    CASE WHEN i < 160 THEN 52 WHEN i < 260 THEN 38 ELSE 18 END AS duration_min,
+                    CASE WHEN i < 260 THEN 12 ELSE 4 END AS wait_min,
+                    CASE WHEN i < 160 THEN 79 WHEN i < 260 THEN 132 ELSE 205 END AS PULocationID,
+                    CASE WHEN i < 160 THEN 265 WHEN i < 260 THEN 201 ELSE 88 END AS DOLocationID
+                FROM range(320) AS t(i)
+            )
+            SELECT
+                pickup_datetime,
+                pickup_datetime + duration_min * INTERVAL 1 MINUTE AS dropoff_datetime,
+                pickup_datetime - wait_min * INTERVAL 1 MINUTE AS request_datetime,
+                PULocationID,
+                DOLocationID,
+                CASE WHEN i < 220 THEN 'HVFHV' ELSE 'FHV' END AS service_type,
+                10.0 AS trip_miles
+            FROM base
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_taxi_zones AS
+            SELECT * FROM (VALUES
+                (79, 'Central Hub'),
+                (132, 'Airport'),
+                (205, 'North Terminal'),
+                (265, 'Downtown'),
+                (201, 'Harbor'),
+                (88, 'Midtown')
+            ) AS t(LocationID, Zone)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=320,
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="request_datetime", dtype="timestamp"),
+                        ColumnInfo(name="PULocationID", dtype="int64"),
+                        ColumnInfo(name="DOLocationID", dtype="int64"),
+                        ColumnInfo(name="service_type", dtype="varchar"),
+                        ColumnInfo(name="trip_miles", dtype="double"),
+                    ],
+                ),
+                TableInfo(
+                    name="taxi_zones",
+                    row_count=6,
+                    columns=[
+                        ColumnInfo(name="LocationID", dtype="int64"),
+                        ColumnInfo(name="Zone", dtype="varchar"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="trips",
+                    from_column="PULocationID",
+                    to_table="taxi_zones",
+                    to_column="LocationID",
+                    type="many_to_one",
+                    confidence=0.99,
+                    referential_integrity=1.0,
+                    source="inferred_name",
+                ),
+                Relationship(
+                    from_table="trips",
+                    from_column="DOLocationID",
+                    to_table="taxi_zones",
+                    to_column="LocationID",
+                    type="many_to_one",
+                    confidence=0.99,
+                    referential_integrity=1.0,
+                    source="inferred_name",
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_trips",
+                model_type="staging",
+                sql="SELECT * FROM trips",
+                description="Trips staging",
+                source_tables=["trips"],
+                status="executed",
+            )
+        ]
+        context = DatasetContext(
+            source_name="test",
+            row_represents="trip",
+            decisions="Operations and dispatch planning",
+        )
+
+        highlights = compute_semantic_highlights(
+            duckdb_con,
+            discovery,
+            context,
+            models,
+        )
+
+        assert any("Central Hub" in h["detail"] or "Airport" in h["detail"] for h in highlights)
+        assert any("Central Hub -> Downtown" in h["detail"] for h in highlights)
+        assert all("79 -> 265" not in h["detail"] for h in highlights)
+
     def test_top_insights_skip_opaque_code_segments_without_lookup(self, duckdb_con):
         duckdb_con.execute(
             """

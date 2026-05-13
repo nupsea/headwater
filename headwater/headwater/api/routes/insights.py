@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
 from headwater.analyzer.metadata_retrieval import retrieve_metadata
+from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.project import _compute_maturity, _compute_progress
 from headwater.core.models import DatasetContext
 from headwater.explorer.statistical import detect_insights_with_diagnostics
+from headwater.explorer.utils import resolve_table_ref
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -42,6 +45,8 @@ _BUSINESS_DIMENSION_TOKENS = (
     "payment",
 )
 _BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
+_RAW_ROUTE_RE = re.compile(r"route is (?P<origin>.+?) -> (?P<dest>.+?):", re.IGNORECASE)
+_RAW_GEO_RE = re.compile(r"^(?P<label>.+?) has the longest high-volume ", re.IGNORECASE)
 
 
 @router.get("/insights")
@@ -709,10 +714,10 @@ def _is_opaque_value(value: object) -> bool:
         return True
     if " " in text:
         return False
-    if len(text) < 3:
-        return False
     if text.isdigit():
         return True
+    if len(text) < 3:
+        return False
     has_alpha = any(ch.isalpha() for ch in text)
     has_digit = any(ch.isdigit() for ch in text)
     return has_alpha and has_digit and text.upper() == text
@@ -1186,6 +1191,199 @@ def _semantic_highlight_title(description: str) -> str:
     return base
 
 
+def _identifier_tokens(name: str) -> list[str]:
+    parts = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    parts = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", parts).lower()
+    return [part for part in re.split(r"[_\W]+", parts) if part]
+
+
+def _lookup_match_keys(name: str) -> list[str]:
+    parts = _identifier_tokens(name)
+    if not parts:
+        return [name.lower()]
+
+    keys: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in keys:
+            keys.append(value)
+
+    add(name.lower())
+    add("".join(parts))
+    add("_".join(parts))
+
+    suffix_tokens = {"id", "code", "key"}
+    directional_prefixes = {
+        "pu",
+        "do",
+        "pickup",
+        "dropoff",
+        "drop",
+        "origin",
+        "destination",
+        "dest",
+        "from",
+        "to",
+        "start",
+        "end",
+        "src",
+        "dst",
+    }
+    if len(parts) >= 2 and parts[-1] in suffix_tokens:
+        tail = parts[-2:]
+        add("".join(tail))
+        add("_".join(tail))
+        core = list(parts[:-1])
+        while core and core[0] in directional_prefixes:
+            core = core[1:]
+        if core:
+            normalized = core + [parts[-1]]
+            add("".join(normalized))
+            add("_".join(normalized))
+            if len(normalized) >= 2:
+                add("".join(normalized[-2:]))
+                add("_".join(normalized[-2:]))
+
+    return keys
+
+
+def _build_semantic_lookup_index(discovery, metadata) -> dict[str, dict[str, str]]:
+    index: dict[str, dict[str, str]] = {}
+    lookup_by_table: dict[str, dict[str, str]] = {}
+
+    for table_name, lookup in metadata.lookup_tables.items():
+        details = {
+            "table_name": table_name,
+            "id_column": lookup["id_column"],
+            "label_column": lookup["label_column"],
+        }
+        lookup_by_table[table_name] = details
+        for key in _lookup_match_keys(lookup["id_column"]):
+            index.setdefault(key, details)
+
+    for rel in discovery.relationships:
+        lookup = lookup_by_table.get(rel.to_table)
+        if not lookup:
+            continue
+        index.setdefault(f"{rel.from_table.lower()}.{rel.from_column.lower()}", lookup)
+        for key in _lookup_match_keys(rel.from_column):
+            index.setdefault(key, lookup)
+
+    return index
+
+
+def _lookup_for_column(
+    table_name: str,
+    column_name: str,
+    lookup_index: dict[str, dict[str, str]],
+) -> dict[str, str] | None:
+    lookup = lookup_index.get(f"{table_name.lower()}.{column_name.lower()}")
+    if lookup is not None:
+        return lookup
+    for key in _lookup_match_keys(column_name):
+        lookup = lookup_index.get(key)
+        if lookup is not None:
+            return lookup
+    return None
+
+
+def _lookup_label_for_value(
+    con,
+    lookup: dict[str, str] | None,
+    raw_value: str,
+    models,
+    cache: dict[tuple[str, str, str, str], str | None],
+) -> str | None:
+    if lookup is None or not raw_value:
+        return None
+    ref = resolve_table_ref(lookup["table_name"], con, models)
+    cache_key = (
+        ref,
+        lookup["id_column"],
+        lookup["label_column"],
+        raw_value,
+    )
+    if cache_key in cache:
+        return cache[cache_key]
+    try:
+        row = con.execute(
+            f"""
+            SELECT CAST({_quote_ident(lookup["label_column"])} AS VARCHAR)
+            FROM {ref}
+            WHERE CAST({_quote_ident(lookup["id_column"])} AS VARCHAR) = ?
+              AND {_quote_ident(lookup["label_column"])} IS NOT NULL
+            LIMIT 1
+            """,
+            [raw_value],
+        ).fetchone()
+    except Exception:
+        cache[cache_key] = None
+        return None
+    label = str(row[0]).strip() if row and row[0] is not None else None
+    cache[cache_key] = label or None
+    return cache[cache_key]
+
+
+def _semantic_highlight_detail(
+    con,
+    insight,
+    detail: str,
+    roles: dict[str, object],
+    lookup_index: dict[str, dict[str, str]],
+    models,
+    lookup_cache: dict[tuple[str, str, str, str], str | None],
+) -> str | None:
+    if insight.insight_type == "geographic_hotspot":
+        match = _RAW_GEO_RE.match(detail)
+        if not match:
+            return detail
+        raw_label = match.group("label").strip()
+        if not _is_opaque_value(raw_label):
+            return detail
+        origin = roles.get("origin_id") or roles.get("location_id")
+        if origin is None:
+            return None
+        lookup = _lookup_for_column(insight.table_name, origin.column_name, lookup_index)
+        resolved = _lookup_label_for_value(con, lookup, raw_label, models, lookup_cache)
+        if not resolved or _is_opaque_value(resolved):
+            return None
+        return detail.replace(raw_label, resolved, 1)
+
+    if insight.insight_type == "route_pair":
+        match = _RAW_ROUTE_RE.search(detail)
+        if not match:
+            return detail
+        raw_origin = match.group("origin").strip()
+        raw_dest = match.group("dest").strip()
+        origin = roles.get("origin_id") or roles.get("location_id")
+        dest = roles.get("destination_id")
+        if origin is None or dest is None:
+            return None if _is_opaque_value(raw_origin) or _is_opaque_value(raw_dest) else detail
+        origin_lookup = _lookup_for_column(insight.table_name, origin.column_name, lookup_index)
+        dest_lookup = _lookup_for_column(insight.table_name, dest.column_name, lookup_index)
+        resolved_origin = raw_origin
+        resolved_dest = raw_dest
+        if _is_opaque_value(raw_origin):
+            resolved_origin = (
+                _lookup_label_for_value(con, origin_lookup, raw_origin, models, lookup_cache)
+                or raw_origin
+            )
+        if _is_opaque_value(raw_dest):
+            resolved_dest = (
+                _lookup_label_for_value(con, dest_lookup, raw_dest, models, lookup_cache)
+                or raw_dest
+            )
+        if _is_opaque_value(resolved_origin) or _is_opaque_value(resolved_dest):
+            return None
+        return detail.replace(
+            f"{raw_origin} -> {raw_dest}",
+            f"{resolved_origin} -> {resolved_dest}",
+            1,
+        )
+
+    return detail
+
+
 def _semantic_highlight_score(insight) -> float:
     severity_weight = {"critical": 3.0, "warning": 2.0, "info": 1.0}
     score = (
@@ -1208,6 +1406,13 @@ def compute_semantic_highlights(
 ) -> list[dict]:
     """Convert semantic-family insights into business-facing findings."""
     metadata = retrieve_metadata(discovery, context)
+    semantic_schema = infer_semantic_schema(discovery, context)
+    semantic_roles = {
+        table.name: roles_for_table(semantic_schema, table.name)
+        for table in discovery.tables
+    }
+    lookup_index = _build_semantic_lookup_index(discovery, metadata)
+    lookup_cache: dict[tuple[str, str, str, str], str | None] = {}
     result = detect_insights_with_diagnostics(
         con,
         schema="staging",
@@ -1234,6 +1439,17 @@ def compute_semantic_highlights(
             insight.description,
             context.row_represents if context else None,
         )
+        detail = _semantic_highlight_detail(
+            con,
+            insight,
+            detail,
+            semantic_roles.get(insight.table_name, {}),
+            lookup_index,
+            models,
+            lookup_cache,
+        )
+        if detail is None:
+            return False
         lens = _decision_lens(context, insight)
         if context and context.decisions:
             detail = f"{detail} Relevant for {lens.lower()} decisions."
@@ -1295,6 +1511,17 @@ def compute_semantic_highlights(
                 wait_candidate.description,
                 context.row_represents if context else None,
             )
+            detail = _semantic_highlight_detail(
+                con,
+                wait_candidate,
+                detail,
+                semantic_roles.get(wait_candidate.table_name, {}),
+                lookup_index,
+                models,
+                lookup_cache,
+            )
+            if detail is None:
+                return selected[:limit]
             lens = _decision_lens(context, wait_candidate)
             if context and context.decisions:
                 detail = f"{detail} Relevant for {lens.lower()} decisions."
