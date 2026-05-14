@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from typing import Any
+
 from headwater.analyzer.metadata_retrieval import RetrievedMetadata, lookup_for_column
 
 _READABLE_LABEL_TOKENS = (
@@ -29,6 +32,9 @@ BUILTIN_ENUM_LABEL_REGISTRY: dict[str, dict[object, str]] = {
 BUILTIN_ENUM_DIMENSION_LABELS = {
     "payment_type": "payment method",
 }
+
+_OPAQUE_ALPHANUMERIC_RE = re.compile(r"^[A-Z]{1,4}\d{2,}$")
+_OPAQUE_BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
 
 
 def is_label_like_column(column_name: str) -> bool:
@@ -86,5 +92,40 @@ def is_readable_dimension(
     )
 
 
+def is_opaque_business_value(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return float(value).is_integer()
+
+    text = str(value).strip()
+    if not text:
+        return False
+    if " -> " in text:
+        parts = [part.strip() for part in text.split("->") if part.strip()]
+        return len(parts) >= 2 and all(_is_opaque_business_atom(part) for part in parts)
+    return _is_opaque_business_atom(text)
+
+
 def _sql_string_literal(value: object) -> str:
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _is_opaque_business_atom(text: str) -> bool:
+    normalized = text.strip()
+    if not normalized:
+        return False
+    lower = normalized.lower()
+    if lower in _OPAQUE_BOOLEANISH_VALUES:
+        return True
+    if normalized.isdigit():
+        return True
+    if _OPAQUE_ALPHANUMERIC_RE.match(normalized):
+        return True
+    if len(normalized) == 1 and normalized.isalpha():
+        return True
+    if " " in normalized:
+        return False
+    return False

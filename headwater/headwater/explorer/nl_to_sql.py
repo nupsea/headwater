@@ -38,7 +38,7 @@ from headwater.core.models import (
     TableInfo,
 )
 from headwater.explorer.query_planner import QueryPlanner
-from headwater.explorer.readability import is_readable_dimension
+from headwater.explorer.readability import is_opaque_business_value, is_readable_dimension
 from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.utils import resolve_table_ref, table_exists
 from headwater.explorer.visualization import recommend_visualization
@@ -63,8 +63,6 @@ _EXPLICIT_DIMENSION_RE = re.compile(
     r"(dimension|group|segment|category|type|status|route|origin|destination|location|zone|site)",
     re.IGNORECASE,
 )
-_OPAQUE_ALPHANUMERIC_RE = re.compile(r"^[A-Z]{1,4}\d{2,}$")
-_BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
 _LOW_SIGNAL_FOLLOW_UP_RE = re.compile(
     r"(flag|indicator|store and fwd|store_and_fwd|source file|source system|load batch|audit)",
     re.IGNORECASE,
@@ -1641,7 +1639,7 @@ def _opaque_result_columns(data: list[dict[str, Any]]) -> list[str]:
         values = [row.get(column) for row in data[:20] if row.get(column) is not None]
         if len(values) < 2:
             continue
-        opaque = sum(1 for value in values if _is_opaque_business_value(value))
+        opaque = sum(1 for value in values if is_opaque_business_value(value))
         if opaque / len(values) >= 0.8:
             candidates.append(column)
     return candidates
@@ -1656,43 +1654,6 @@ def _is_dimension_like_result_column(column: str, index: int, total_columns: int
     if _METRIC_RESULT_RE.search(lower):
         return False
     return index == 0 and total_columns >= 2
-
-
-def _is_opaque_business_value(value: Any) -> bool:
-    if value is None or isinstance(value, bool):
-        return False
-    if isinstance(value, int):
-        return True
-    if isinstance(value, float):
-        return float(value).is_integer()
-
-    text = str(value).strip()
-    if not text:
-        return False
-    if " -> " in text:
-        parts = [part.strip() for part in text.split("->") if part.strip()]
-        return len(parts) >= 2 and all(_is_opaque_business_atom(part) for part in parts)
-    return _is_opaque_business_atom(text)
-
-
-def _is_opaque_business_atom(text: str) -> bool:
-    normalized = text.strip()
-    if not normalized:
-        return False
-    lower = normalized.lower()
-    if lower in _BOOLEANISH_VALUES:
-        return True
-    if normalized.isdigit():
-        return True
-    if _OPAQUE_ALPHANUMERIC_RE.match(normalized):
-        return True
-    if len(normalized) == 1 and normalized.isalpha():
-        return True
-    if " " in normalized:
-        return False
-    return False
-
-
 def _alternative_questions_for_unreadable_result(
     question: str,
     suggestions: list[SuggestedQuestion],

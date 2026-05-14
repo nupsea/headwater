@@ -22,6 +22,7 @@ from headwater.explorer.readability import (
     enum_case_expression,
     enum_dimension_label,
     enum_mapping_for_column,
+    is_opaque_business_value,
 )
 from headwater.explorer.statistical import (
     detect_insights_with_diagnostics,
@@ -722,24 +723,7 @@ def _is_code_like_column(name: str) -> bool:
 
 
 def _is_opaque_value(value: object) -> bool:
-    if value is None:
-        return False
-    text = str(value).strip()
-    if not text:
-        return False
-    if text.lower() in _BOOLEANISH_VALUES:
-        return True
-    if len(text) == 1 and text.isalpha():
-        return True
-    if " " in text:
-        return False
-    if text.isdigit():
-        return True
-    if len(text) < 3:
-        return False
-    has_alpha = any(ch.isalpha() for ch in text)
-    has_digit = any(ch.isdigit() for ch in text)
-    return has_alpha and has_digit and text.upper() == text
+    return is_opaque_business_value(value)
 
 
 def _resolve_dimension_projection(
