@@ -488,6 +488,8 @@ def _is_dimension_column(column, profile) -> bool:
     name = column.name.lower()
     if column.is_primary_key or name == "id" or name.endswith("_id"):
         return False
+    if profile and profile.distinct_count <= 1:
+        return False
     if column.role == "dimension" or column.semantic_type in {"dimension", "geographic"}:
         return True
     if not profile or not profile.top_values:

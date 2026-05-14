@@ -158,7 +158,7 @@ def generate_suggestions(
         "mart": _from_mart_models(all_models, con, metadata),
         "cross_table": _from_schema_graph(graph, all_relationships, all_models, con, metadata),
         "relationship": _from_relationships(
-            discovery.tables, all_relationships, all_models, con, metadata
+            discovery.tables, all_relationships, profile_index, all_models, con, metadata
         ),
         "semantic": _from_table_structure(
             discovery.tables,
@@ -707,7 +707,7 @@ def _from_semantic_roles(
         dest = roles.get("destination_id")
         service = roles.get("service_type")
 
-        if start:
+        if start and _supports_hour_grain(table, start.column_name):
             start_expr = _timestamp_expression(table, start.column_name)
             suggestions.extend(
                 _add_semantic_questions(
@@ -775,7 +775,7 @@ def _from_semantic_roles(
                                 f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
                                 f"FROM {ref} "
                                 f"WHERE {start_expr} IS NOT NULL "
-                                f"AND {duration_expr} BETWEEN 0 AND 1440 "
+                                f"AND {duration_expr} >= 0 "
                                 f"GROUP BY 1 ORDER BY avg_duration_min DESC"
                             ),
                         ),
@@ -810,7 +810,7 @@ def _from_semantic_roles(
                                     f"FROM {ref} fact "
                                     f"{join_sql} "
                                     f"WHERE {group_expr} IS NOT NULL "
-                                    f"AND {duration_expr} BETWEEN 0 AND 1440 "
+                                    f"AND {duration_expr} >= 0 "
                                     f"GROUP BY {group_expr} ORDER BY avg_duration_min DESC LIMIT 20"
                                 ),
                             ),
@@ -865,7 +865,7 @@ def _from_semantic_roles(
                                     f"{dest_join_sql} "
                                     f"WHERE {origin_group_expr} IS NOT NULL "
                                     f"AND {dest_group_expr} IS NOT NULL "
-                                    f"AND {duration_expr} BETWEEN 0 AND 1440 "
+                                    f"AND {duration_expr} >= 0 "
                                     f"GROUP BY 1 ORDER BY avg_duration_min DESC LIMIT 20"
                                 ),
                             ),
@@ -906,7 +906,7 @@ def _from_semantic_roles(
                                     f"FROM {ref} fact "
                                     f"{join_sql} "
                                     f"WHERE {group_expr} IS NOT NULL "
-                                    f"AND {duration_expr} BETWEEN 0 AND 1440 "
+                                    f"AND {duration_expr} >= 0 "
                                     f"GROUP BY {group_expr} ORDER BY avg_wait_min DESC LIMIT 20"
                                 ),
                             ),
@@ -1575,6 +1575,7 @@ def _fallback_mart_question(model_name: str, label: str) -> str:
 def _from_relationships(
     tables: list[TableInfo],
     relationships: list[Relationship],
+    profile_index: dict[tuple[str, str], ColumnProfile],
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
     metadata: RetrievedMetadata | None,
@@ -1610,10 +1611,16 @@ def _from_relationships(
         metric_col = _pick_metric_col(from_table_info)
         to_table_info = table_map[rel.to_table]
         dim_candidates = _prefer_display_dim(
-            [c.name for c in to_table_info.columns if c.name != rel.to_column],
+            [
+                name
+                for name in _get_dimension_cols(to_table_info, profile_index)
+                if name != rel.to_column
+            ],
             rel.to_table,
         )
-        target_dim = dim_candidates[0] if dim_candidates else rel.to_column
+        if not dim_candidates:
+            continue
+        target_dim = dim_candidates[0]
         group_expr, select_expr, join_sql, display_label = _dimension_projection(
             to_table_info,
             target_dim,
@@ -2051,6 +2058,8 @@ def _dimension_signal_score(
         return score + 1
     if profile.null_rate >= 0.98 or profile.distinct_count <= 1:
         return -10
+    if profile.uniqueness_ratio >= 0.9 and profile.distinct_count >= 8:
+        return -10
     distinct = profile.distinct_count
     if 2 <= distinct <= 20:
         score += 4
@@ -2162,6 +2171,19 @@ def _time_bucket_expression(column_name: str, dtype: str, grain: str | None = No
 def _column_dtype(table: TableInfo, column_name: str) -> str:
     column = next((col for col in table.columns if col.name == column_name), None)
     return column.dtype if column else ""
+
+
+def _supports_hour_grain(table: TableInfo, column_name: str) -> bool:
+    dtype = _column_dtype(table, column_name).lower()
+    lower = column_name.lower()
+    if "timestamp" in dtype or "datetime" in dtype:
+        return True
+    if dtype == "time" or dtype.endswith(" time"):
+        return True
+    return (
+        ("_at" in lower or lower.endswith("_ts") or "timestamp" in lower or "datetime" in lower)
+        and "date" not in lower
+    )
 
 
 def _business_metric_label(insight: dict, metadata: RetrievedMetadata | None = None) -> str:

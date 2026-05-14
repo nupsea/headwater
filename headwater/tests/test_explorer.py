@@ -1281,6 +1281,127 @@ class TestSuggestions:
         assert not any("quality flag" in q.question.lower() for q in questions)
         assert any("channel" in q.question.lower() for q in questions)
 
+    def test_relationship_questions_skip_high_uniqueness_name_dimensions(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="sensors",
+                    row_count=24,
+                    columns=[
+                        ColumnInfo(name="sensor_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=12,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="site_type", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="name",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=12,
+                    uniqueness_ratio=1.0,
+                ),
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="site_type",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("park", 5), ("clinic", 4), ("school", 3)],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="sensors",
+                    from_column="site_id",
+                    to_table="sites",
+                    to_column="site_id",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        prompts = [q.question.lower() for q in questions]
+
+        assert not any("per name" in prompt for prompt in prompts)
+        assert any("per site type" in prompt for prompt in prompts)
+
+    def test_date_only_fields_do_not_generate_hour_prompts(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="sites",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="commissioned_date",
+                            dtype="varchar",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="commissioned_date",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=400,
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert not any("which hour has the highest" in q.question.lower() for q in questions)
+
+    def test_duration_questions_allow_multi_day_programs(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="programs",
+                    row_count=10,
+                    columns=[
+                        ColumnInfo(name="program_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="start_date", dtype="varchar", semantic_type="temporal"),
+                        ColumnInfo(name="end_date", dtype="varchar", semantic_type="temporal"),
+                        ColumnInfo(name="type", dtype="varchar", semantic_type="dimension"),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        question = next(
+            q
+            for q in questions
+            if "weekday and weekend duration compare in programs" in q.question.lower()
+        )
+
+        assert "BETWEEN 0 AND 1440" not in (question.sql_hint or "")
+        assert ">= 0" in (question.sql_hint or "")
+
     def test_business_insight_questions_skip_low_signal_flags(self):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
@@ -3249,6 +3370,61 @@ class TestStatistical:
         assert any("Pending" in insight["title"] or "Pending" in insight["detail"] for insight in status_insights)
         assert all(not insight["title"].startswith("P ") for insight in status_insights)
         assert all("P accounts for" not in insight["detail"] for insight in status_insights)
+
+    def test_top_insights_skip_constant_dimensions(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_daily_pm25 AS
+            SELECT * FROM (VALUES
+                ('PM2.5 - Local Conditions', 12.0),
+                ('PM2.5 - Local Conditions', 9.5),
+                ('PM2.5 - Local Conditions', 16.2)
+            ) AS t(parameter_name, arithmetic_mean)
+            """
+        )
+        tables = [
+            TableInfo(
+                name="stg_daily_pm25",
+                schema_name="staging",
+                row_count=3,
+                columns=[
+                    ColumnInfo(
+                        name="parameter_name",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                    ColumnInfo(
+                        name="arithmetic_mean",
+                        dtype="double",
+                        semantic_type="metric",
+                    ),
+                ],
+            )
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="stg_daily_pm25",
+                column_name="parameter_name",
+                dtype="varchar",
+                null_count=0,
+                distinct_count=1,
+                top_values=[("PM2.5 - Local Conditions", 3)],
+            ),
+            ColumnProfile(
+                table_name="stg_daily_pm25",
+                column_name="arithmetic_mean",
+                dtype="double",
+                null_count=0,
+                distinct_count=3,
+                min_value=9.5,
+                max_value=16.2,
+                mean=12.57,
+            ),
+        ]
+
+        insights = compute_top_insights(duckdb_con, tables, profiles)
+
+        assert not any(insight.get("column") == "parameter_name" for insight in insights)
 
     def test_top_insights_skip_low_signal_flag_segments(self, duckdb_con):
         duckdb_con.execute(
