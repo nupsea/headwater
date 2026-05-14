@@ -8,7 +8,11 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
-from headwater.analyzer.metadata_retrieval import infer_lookup_candidate, retrieve_metadata
+from headwater.analyzer.metadata_retrieval import (
+    build_lookup_index,
+    lookup_for_column,
+    retrieve_metadata,
+)
 from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.project import _compute_maturity, _compute_progress
@@ -726,23 +730,6 @@ def _is_opaque_value(value: object) -> bool:
     return has_alpha and has_digit and text.upper() == text
 
 
-def _build_lookup_index(tables) -> dict[str, dict[str, str]]:
-    index: dict[str, dict[str, str]] = {}
-    for table in tables:
-        candidate = infer_lookup_candidate(table)
-        if candidate is None:
-            continue
-        index.setdefault(
-            candidate["id_column"].lower(),
-            {
-                "table_name": table.name,
-                "id_column": candidate["id_column"],
-                "label_column": candidate["label_column"],
-            },
-        )
-    return index
-
-
 def _resolve_dimension_projection(
     table,
     dimension,
@@ -751,11 +738,14 @@ def _resolve_dimension_projection(
     if not _is_code_like_column(dimension.name):
         return None, dimension.name, _humanize_name(dimension.name)
 
-    lookup = lookup_index.get(dimension.name.lower())
+    lookup = lookup_for_column(table.name, dimension.name, lookup_index)
     if lookup and lookup["table_name"] != table.name:
         alias = "lu"
+        lookup_ref = _quote_ident(lookup["table_name"])
+        if lookup.get("schema_name"):
+            lookup_ref = f'{_quote_ident(lookup["schema_name"])}.{lookup_ref}'
         join_sql = (
-            f'LEFT JOIN "{lookup["table_name"]}" {alias} '
+            f"LEFT JOIN {lookup_ref} {alias} "
             f'ON fact."{dimension.name}" = {alias}."{lookup["id_column"]}"'
         )
         return (
@@ -1063,6 +1053,18 @@ def _rank_dimension_column(column) -> tuple[int, int]:
     return (0, 2)
 
 
+def _is_business_dimension_column(table, column, profile, lookup_index) -> bool:
+    if _is_dimension_column(column, profile):
+        return True
+    if column.role not in {"dimension", "geographic"} and column.semantic_type not in {
+        "dimension",
+        "geographic",
+    }:
+        return False
+    lookup = lookup_for_column(table.name, column.name, lookup_index)
+    return bool(lookup and lookup["table_name"] != table.name)
+
+
 def _compute_top_insights(con, tables, profiles) -> list[dict]:
     """Find CXO-readable patterns from actual records.
 
@@ -1071,7 +1073,7 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
     drive measurable totals.
     """
     insights: list[dict] = []
-    lookup_index = _build_lookup_index(tables)
+    lookup_index = build_lookup_index(tables)
     for table in sorted(tables, key=lambda t: t.row_count, reverse=True):
         column_profiles = {
             c.name: _column_profile(profiles, table.name, c.name)
@@ -1088,7 +1090,12 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
         dimension_cols = [
             c for c in table.columns
             if (
-                _is_dimension_column(c, column_profiles.get(c.name))
+                _is_business_dimension_column(
+                    table,
+                    c,
+                    column_profiles.get(c.name),
+                    lookup_index,
+                )
                 and not _is_low_signal_dimension(c, column_profiles.get(c.name))
             )
         ]
@@ -1164,102 +1171,6 @@ def _semantic_highlight_title(description: str) -> str:
     return base
 
 
-def _identifier_tokens(name: str) -> list[str]:
-    parts = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
-    parts = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", parts).lower()
-    return [part for part in re.split(r"[_\W]+", parts) if part]
-
-
-def _lookup_match_keys(name: str) -> list[str]:
-    parts = _identifier_tokens(name)
-    if not parts:
-        return [name.lower()]
-
-    keys: list[str] = []
-
-    def add(value: str) -> None:
-        if value and value not in keys:
-            keys.append(value)
-
-    add(name.lower())
-    add("".join(parts))
-    add("_".join(parts))
-
-    suffix_tokens = {"id", "code", "key"}
-    directional_prefixes = {
-        "pu",
-        "do",
-        "pickup",
-        "dropoff",
-        "drop",
-        "origin",
-        "destination",
-        "dest",
-        "from",
-        "to",
-        "start",
-        "end",
-        "src",
-        "dst",
-    }
-    if len(parts) >= 2 and parts[-1] in suffix_tokens:
-        tail = parts[-2:]
-        add("".join(tail))
-        add("_".join(tail))
-        core = list(parts[:-1])
-        while core and core[0] in directional_prefixes:
-            core = core[1:]
-        if core:
-            normalized = core + [parts[-1]]
-            add("".join(normalized))
-            add("_".join(normalized))
-            if len(normalized) >= 2:
-                add("".join(normalized[-2:]))
-                add("_".join(normalized[-2:]))
-
-    return keys
-
-
-def _build_semantic_lookup_index(discovery, metadata) -> dict[str, dict[str, str]]:
-    index: dict[str, dict[str, str]] = {}
-    lookup_by_table: dict[str, dict[str, str]] = {}
-
-    for table_name, lookup in metadata.lookup_tables.items():
-        details = {
-            "table_name": table_name,
-            "id_column": lookup["id_column"],
-            "label_column": lookup["label_column"],
-        }
-        lookup_by_table[table_name] = details
-        for key in _lookup_match_keys(lookup["id_column"]):
-            index.setdefault(key, details)
-
-    for rel in discovery.relationships:
-        lookup = lookup_by_table.get(rel.to_table)
-        if not lookup:
-            continue
-        index.setdefault(f"{rel.from_table.lower()}.{rel.from_column.lower()}", lookup)
-        for key in _lookup_match_keys(rel.from_column):
-            index.setdefault(key, lookup)
-
-    return index
-
-
-def _lookup_for_column(
-    table_name: str,
-    column_name: str,
-    lookup_index: dict[str, dict[str, str]],
-) -> dict[str, str] | None:
-    lookup = lookup_index.get(f"{table_name.lower()}.{column_name.lower()}")
-    if lookup is not None:
-        return lookup
-    for key in _lookup_match_keys(column_name):
-        lookup = lookup_index.get(key)
-        if lookup is not None:
-            return lookup
-    return None
-
-
 def _lookup_label_for_value(
     con,
     lookup: dict[str, str] | None,
@@ -1316,7 +1227,7 @@ def _semantic_highlight_detail(
         origin = roles.get("origin_id") or roles.get("location_id")
         if origin is None:
             return None
-        lookup = _lookup_for_column(insight.table_name, origin.column_name, lookup_index)
+        lookup = lookup_for_column(insight.table_name, origin.column_name, lookup_index)
         resolved = _lookup_label_for_value(con, lookup, raw_label, models, lookup_cache)
         if not resolved or _is_opaque_value(resolved):
             return None
@@ -1332,8 +1243,8 @@ def _semantic_highlight_detail(
         dest = roles.get("destination_id")
         if origin is None or dest is None:
             return None if _is_opaque_value(raw_origin) or _is_opaque_value(raw_dest) else detail
-        origin_lookup = _lookup_for_column(insight.table_name, origin.column_name, lookup_index)
-        dest_lookup = _lookup_for_column(insight.table_name, dest.column_name, lookup_index)
+        origin_lookup = lookup_for_column(insight.table_name, origin.column_name, lookup_index)
+        dest_lookup = lookup_for_column(insight.table_name, dest.column_name, lookup_index)
         resolved_origin = raw_origin
         resolved_dest = raw_dest
         if _is_opaque_value(raw_origin):
@@ -1385,7 +1296,7 @@ def compute_semantic_highlights(
         table.name: roles_for_table(semantic_schema, table.name)
         for table in discovery.tables
     }
-    lookup_index = _build_semantic_lookup_index(discovery, metadata)
+    lookup_index = build_lookup_index(discovery.tables, metadata, discovery.relationships)
     lookup_cache: dict[tuple[str, str, str, str], str | None] = {}
     result = detect_insights_with_diagnostics(
         con,

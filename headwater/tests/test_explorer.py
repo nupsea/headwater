@@ -3094,6 +3094,89 @@ class TestStatistical:
         assert not any("B03404" in insight["title"] for insight in insights)
         assert not any("B03404" in insight["detail"] for insight in insights)
 
+    def test_top_insights_resolve_generic_location_lookup_without_relationship(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_service_events AS
+            SELECT * FROM (VALUES
+                ('A', 45.0, TIMESTAMP '2026-02-01 08:00:00'),
+                ('A', 35.0, TIMESTAMP '2026-02-01 09:00:00'),
+                ('B', 12.0, TIMESTAMP '2026-02-01 10:00:00')
+            ) AS t(origin_location_id, trip_miles, started_at)
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_locations AS
+            SELECT * FROM (VALUES
+                ('A', 'North Hub'),
+                ('B', 'Central Depot'),
+                ('C', 'South Clinic'),
+                ('D', 'West Yard'),
+                ('E', 'East Gate')
+            ) AS t(location_id, location_name)
+            """
+        )
+        tables = [
+            TableInfo(
+                name="stg_service_events",
+                schema_name="staging",
+                row_count=3,
+                columns=[
+                    ColumnInfo(
+                        name="origin_location_id",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                    ColumnInfo(name="trip_miles", dtype="double", semantic_type="metric"),
+                    ColumnInfo(name="started_at", dtype="timestamp", semantic_type="temporal"),
+                ],
+            ),
+            TableInfo(
+                name="stg_locations",
+                schema_name="staging",
+                row_count=5,
+                columns=[
+                    ColumnInfo(name="location_id", dtype="varchar", semantic_type="id"),
+                    ColumnInfo(
+                        name="location_name",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                ],
+            ),
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="stg_service_events",
+                column_name="origin_location_id",
+                dtype="varchar",
+                null_count=0,
+                distinct_count=2,
+                top_values=[("A", 2), ("B", 1)],
+            ),
+            ColumnProfile(
+                table_name="stg_service_events",
+                column_name="trip_miles",
+                dtype="double",
+                null_count=0,
+                distinct_count=3,
+                min_value=12.0,
+                max_value=45.0,
+                mean=30.67,
+            ),
+        ]
+
+        insights = compute_top_insights(duckdb_con, tables, profiles)
+        origin_insights = [
+            insight for insight in insights if insight.get("column") == "origin_location_id"
+        ]
+
+        assert origin_insights
+        assert any("North Hub" in insight["title"] or "North Hub" in insight["detail"] for insight in origin_insights)
+        assert all("A drives" not in insight["title"] for insight in origin_insights)
+        assert all("A represents" not in insight["detail"] for insight in origin_insights)
+
     def test_top_insights_skip_low_signal_flag_segments(self, duckdb_con):
         duckdb_con.execute(
             """

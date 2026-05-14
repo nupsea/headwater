@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from headwater.core.models import DatasetContext, DiscoveryResult, TableInfo
+from headwater.core.models import DatasetContext, DiscoveryResult, Relationship, TableInfo
 
 _LOOKUP_ID_RE = re.compile(r"(^id$|_id$|locationid$|code$|key$|_num$|number$)", re.I)
 _LOOKUP_LABEL_RE = re.compile(
@@ -134,6 +134,126 @@ def infer_lookup_candidate(table: TableInfo) -> dict[str, str] | None:
     return {"id_column": id_column, "label_column": label_column}
 
 
+def lookup_match_keys(name: str) -> list[str]:
+    parts = _identifier_tokens(name)
+    if not parts:
+        return [name.lower()]
+
+    keys: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in keys:
+            keys.append(value)
+
+    add(name.lower())
+    add("".join(parts))
+    add("_".join(parts))
+
+    suffix_tokens = {"id", "code", "key"}
+    directional_prefixes = {
+        "pu",
+        "do",
+        "pickup",
+        "dropoff",
+        "drop",
+        "origin",
+        "destination",
+        "dest",
+        "from",
+        "to",
+        "start",
+        "end",
+        "src",
+        "dst",
+    }
+    if len(parts) >= 2 and parts[-1] in suffix_tokens:
+        tail = parts[-2:]
+        add("".join(tail))
+        add("_".join(tail))
+        core = list(parts[:-1])
+        while core and core[0] in directional_prefixes:
+            core = core[1:]
+        if core:
+            normalized = core + [parts[-1]]
+            add("".join(normalized))
+            add("_".join(normalized))
+            if len(normalized) >= 2:
+                add("".join(normalized[-2:]))
+                add("_".join(normalized[-2:]))
+
+    return keys
+
+
+def build_lookup_index(
+    tables: list[TableInfo],
+    metadata: RetrievedMetadata | None = None,
+    relationships: list[Relationship] | None = None,
+) -> dict[str, dict[str, str]]:
+    index: dict[str, dict[str, str]] = {}
+    lookup_by_table: dict[str, dict[str, str]] = {}
+    table_by_name = {table.name: table for table in tables}
+
+    if metadata is not None:
+        for table_name, lookup in metadata.lookup_tables.items():
+            table = table_by_name.get(table_name)
+            details = {
+                "table_name": table_name,
+                "id_column": lookup["id_column"],
+                "label_column": lookup["label_column"],
+            }
+            if table and table.schema_name:
+                details["schema_name"] = table.schema_name
+            lookup_by_table[table_name] = details
+            for key in lookup_match_keys(lookup["id_column"]):
+                index.setdefault(key, details)
+
+    for table in tables:
+        candidate = infer_lookup_candidate(table)
+        if candidate is None:
+            continue
+        details = {
+            "table_name": table.name,
+            "id_column": candidate["id_column"],
+            "label_column": candidate["label_column"],
+        }
+        if table.schema_name:
+            details["schema_name"] = table.schema_name
+        existing = lookup_by_table.setdefault(table.name, details)
+        if table.schema_name and "schema_name" not in existing:
+            existing["schema_name"] = table.schema_name
+        for key in lookup_match_keys(candidate["id_column"]):
+            index.setdefault(key, existing)
+
+    if relationships:
+        for rel in relationships:
+            lookup = lookup_by_table.get(rel.to_table)
+            if not lookup:
+                continue
+            index.setdefault(
+                f"{rel.from_table.lower()}.{rel.from_column.lower()}",
+                lookup,
+            )
+            for key in lookup_match_keys(rel.from_column):
+                index.setdefault(key, lookup)
+
+    return index
+
+
+def lookup_for_column(
+    table_name: str,
+    column_name: str,
+    lookup_index: dict[str, dict[str, str]],
+) -> dict[str, str] | None:
+    lookup = lookup_index.get(f"{table_name.lower()}.{column_name.lower()}")
+    if lookup is not None:
+        return lookup
+    for key in lookup_match_keys(column_name):
+        lookup = lookup_index.get(key)
+        if lookup is not None:
+            return lookup
+    return None
+
+
 def _lookup_id_score(name: str, semantic_type: str, role: str) -> int:
     score = 0
     lower = name.lower()
@@ -169,6 +289,12 @@ def _lookup_label_score(name: str, dtype: str, semantic_type: str, role: str) ->
     if semantic_type in {"id", "foreign_key"} or role == "identifier":
         score -= 5
     return score
+
+
+def _identifier_tokens(name: str) -> list[str]:
+    parts = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    parts = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", parts).lower()
+    return [part for part in re.split(r"[_\W]+", parts) if part]
 
 
 def _structured_doc_rows(content: str) -> list[dict[str, str]]:

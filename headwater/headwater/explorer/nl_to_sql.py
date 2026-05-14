@@ -19,7 +19,7 @@ from typing import Any
 import duckdb
 
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider
-from headwater.analyzer.metadata_retrieval import retrieve_metadata
+from headwater.analyzer.metadata_retrieval import build_lookup_index, retrieve_metadata
 from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.core.classification import (
     is_dimension_column as _shared_is_dimension,
@@ -39,7 +39,7 @@ from headwater.core.models import (
 )
 from headwater.explorer.query_planner import QueryPlanner
 from headwater.explorer.schema_graph import SchemaGraph
-from headwater.explorer.suggestions import _build_lookup_index, _is_readable_dimension
+from headwater.explorer.suggestions import _is_readable_dimension
 from headwater.explorer.utils import resolve_table_ref, table_exists
 from headwater.explorer.visualization import recommend_visualization
 
@@ -1576,7 +1576,7 @@ def _preflight_question_constraints(
 def _project_has_readable_route_dimensions(discovery: DiscoveryResult) -> bool:
     metadata = retrieve_metadata(discovery)
     semantic_schema = infer_semantic_schema(discovery, metadata.context if metadata else None)
-    lookup_index = _build_lookup_index(discovery.tables, metadata, discovery.relationships)
+    lookup_index = build_lookup_index(discovery.tables, metadata, discovery.relationships)
     for table in discovery.tables:
         roles = roles_for_table(semantic_schema, table.name)
         origin = roles.get("origin_id") or roles.get("location_id")
