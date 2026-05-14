@@ -69,6 +69,37 @@ class TestInsightRanking:
 
         assert ranked[0] is semantic
 
+    def test_statistical_ranking_uses_configured_type_priorities(self, monkeypatch):
+        coverage = StatisticalInsight(
+            metric="event_date",
+            table_name="events",
+            insight_type="coverage_period",
+            description="Coverage window",
+            magnitude=30,
+            severity="info",
+            support_count=1_000,
+        )
+        quality = StatisticalInsight(
+            metric="pickup_location_id",
+            table_name="events",
+            insight_type="data_quality",
+            description="Location IDs are missing",
+            magnitude=30,
+            severity="info",
+            support_count=1_000,
+        )
+        monkeypatch.setattr(
+            "headwater.api.routes.explore.insight_type_priority_weights",
+            lambda: {
+                "coverage_period": 10,
+                "data_quality": 1,
+            },
+        )
+
+        ranked = _rank_statistical_insights([quality, coverage])
+
+        assert ranked[0] is coverage
+
     def test_insight_surfacing_limits_repetitive_types_and_tables(self):
         insights = [
             StatisticalInsight(

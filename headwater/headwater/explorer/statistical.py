@@ -54,6 +54,24 @@ _ZSCORE_THRESHOLD = 2.0  # Flag values beyond 2 standard deviations
 _P_VALUE_THRESHOLD = 0.05  # 95% confidence
 _MAX_POLARS_LOAD_ROWS = 1_000_000
 
+_INSIGHT_TYPE_TO_FAMILY = {
+    "coverage_period": "coverage",
+    "volume_distribution": "volume",
+    "peak_period": "peak",
+    "duration_distribution": "duration",
+    "geographic_hotspot": "geo",
+    "route_pair": "route",
+    "congestion_proxy": "congestion",
+    "data_quality": "quality",
+}
+_GENERIC_INSIGHT_TYPE_PRIORITY = {
+    "period_comparison": 3.0,
+    "change_point": 2.0,
+    "correlation": 2.0,
+    "temporal_anomaly": 1.0,
+    "distribution_shift": 1.0,
+}
+
 
 def detect_insights(
     con: duckdb.DuckDBPyConnection,
@@ -1082,15 +1100,22 @@ def _wait_family(
     ]
 
 
+def insight_type_priority_weights() -> dict[str, float]:
+    """Return ranking priorities by insight type, backed by the family catalog."""
+    priorities = dict(_GENERIC_INSIGHT_TYPE_PRIORITY)
+    configured = {
+        str(family.get("key")): float(family.get("priority", 1.0))
+        for family in _load_family_spec().get("families", [])
+        if isinstance(family, dict) and family.get("key")
+    }
+    for insight_type, family in _INSIGHT_TYPE_TO_FAMILY.items():
+        priorities[insight_type] = configured.get(family, priorities.get(insight_type, 1.0))
+    return priorities
+
+
 def _rank_family_insights(insights: list[StatisticalInsight]) -> list[StatisticalInsight]:
     severity_weight = {"critical": 3.0, "warning": 2.0, "info": 1.0}
-    type_weight = {
-        "data_quality": 1.25,
-        "volume_distribution": 1.2,
-        "peak_period": 1.15,
-        "geographic_hotspot": 1.1,
-        "route_pair": 1.05,
-    }
+    type_weight = insight_type_priority_weights()
     return sorted(
         insights,
         key=lambda i: (
@@ -1098,7 +1123,7 @@ def _rank_family_insights(insights: list[StatisticalInsight]) -> list[Statistica
                 abs(i.magnitude)
                 * math.log10((i.support_count or 0) + 10)
                 * severity_weight.get(i.severity, 1.0)
-                * type_weight.get(i.insight_type, 1.0)
+                * max(type_weight.get(i.insight_type, 1.0), 1.0)
             ),
             i.table_name,
             i.metric,

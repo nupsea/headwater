@@ -19,7 +19,10 @@ from headwater.api.routes.insights import compute_semantic_highlights, compute_t
 from headwater.core.config import get_settings
 from headwater.core.models import DatasetContext, Relationship
 from headwater.explorer.nl_to_sql import ask
-from headwater.explorer.statistical import detect_insights_with_diagnostics
+from headwater.explorer.statistical import (
+    detect_insights_with_diagnostics,
+    insight_type_priority_weights,
+)
 from headwater.explorer.suggestions import generate_suggestions
 
 router = APIRouter()
@@ -43,21 +46,7 @@ _INSIGHT_TYPE_LIMITS = {
 
 def _rank_statistical_insights(insights):
     severity_weight = {"critical": 3, "warning": 2, "info": 1}
-    type_weight = {
-        "data_quality": 9,
-        "volume_distribution": 8,
-        "peak_period": 8,
-        "duration_distribution": 7,
-        "geographic_hotspot": 7,
-        "route_pair": 7,
-        "congestion_proxy": 6,
-        "coverage_period": 5,
-        "period_comparison": 3,
-        "change_point": 2,
-        "correlation": 2,
-        "temporal_anomaly": 1,
-        "distribution_shift": 1,
-    }
+    type_weight = insight_type_priority_weights()
     return sorted(
         insights,
         key=lambda insight: (

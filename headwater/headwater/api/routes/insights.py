@@ -13,7 +13,10 @@ from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_
 from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.project import _compute_maturity, _compute_progress
 from headwater.core.models import DatasetContext
-from headwater.explorer.statistical import detect_insights_with_diagnostics
+from headwater.explorer.statistical import (
+    detect_insights_with_diagnostics,
+    insight_type_priority_weights,
+)
 from headwater.explorer.utils import resolve_table_ref
 
 router = APIRouter()
@@ -1132,16 +1135,6 @@ def compute_top_insights(con, tables, profiles) -> list[dict]:
     return _compute_top_insights(con, tables, profiles)
 
 
-_SEMANTIC_HIGHLIGHT_TYPE_WEIGHT = {
-    "data_quality": 9,
-    "geographic_hotspot": 8,
-    "peak_period": 8,
-    "route_pair": 7,
-    "duration_distribution": 7,
-    "volume_distribution": 6,
-    "congestion_proxy": 6,
-    "coverage_period": 3,
-}
 _SEMANTIC_HIGHLIGHT_ORDER = [
     "data_quality",
     "duration_distribution",
@@ -1386,8 +1379,9 @@ def _semantic_highlight_detail(
 
 def _semantic_highlight_score(insight) -> float:
     severity_weight = {"critical": 3.0, "warning": 2.0, "info": 1.0}
+    type_weight = insight_type_priority_weights()
     score = (
-        _SEMANTIC_HIGHLIGHT_TYPE_WEIGHT.get(insight.insight_type, 1)
+        type_weight.get(insight.insight_type, 1)
         * severity_weight.get(insight.severity, 1.0)
         * max(abs(insight.magnitude), 1.0)
         * max((insight.support_count or 0) ** 0.25, 1.0)
@@ -1420,10 +1414,11 @@ def compute_semantic_highlights(
         dataset_context=context,
         models=models,
     )
+    highlight_types = set(_SEMANTIC_HIGHLIGHT_ORDER) | {"coverage_period"}
     candidates = [
         insight
         for insight in result.insights
-        if insight.insight_type in _SEMANTIC_HIGHLIGHT_TYPE_WEIGHT
+        if insight.insight_type in highlight_types
         and insight.insight_type != "coverage_period"
     ]
     selected: list[dict] = []
