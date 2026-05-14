@@ -22,6 +22,7 @@ from headwater.explorer.readability import (
     enum_case_expression,
     enum_dimension_label,
     enum_mapping_for_column,
+    is_low_signal_dimension,
     is_opaque_business_value,
 )
 from headwater.explorer.statistical import (
@@ -33,32 +34,6 @@ from headwater.explorer.utils import resolve_table_ref
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_LOW_SIGNAL_DIMENSION_TOKENS = (
-    "flag",
-    "indicator",
-    "store_and_fwd",
-    "source_file",
-    "source_system",
-    "load_batch",
-    "ingest",
-    "extract",
-    "audit",
-    "deleted",
-)
-_BUSINESS_DIMENSION_TOKENS = (
-    "type",
-    "category",
-    "status",
-    "reason",
-    "channel",
-    "segment",
-    "service",
-    "region",
-    "zone",
-    "site",
-    "payment",
-)
-_BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
 _RAW_ROUTE_RE = re.compile(r"route is (?P<origin>.+?) -> (?P<dest>.+?):", re.IGNORECASE)
 _RAW_GEO_RE = re.compile(r"^(?P<label>.+?) has the longest high-volume ", re.IGNORECASE)
 
@@ -521,17 +496,7 @@ def _is_dimension_column(column, profile) -> bool:
 
 
 def _is_low_signal_dimension(column, profile) -> bool:
-    lower = column.name.lower()
-    distinct = profile.distinct_count if profile is not None else 0
-    business_named = any(token in lower for token in _BUSINESS_DIMENSION_TOKENS)
-    technical_named = any(token in lower for token in _LOW_SIGNAL_DIMENSION_TOKENS)
-
-    if technical_named and distinct <= 3:
-        return True
-    if profile is None or not profile.top_values or business_named:
-        return False
-    values = {str(value).strip().lower() for value, _count in profile.top_values[:4]}
-    return distinct <= 3 and values <= _BOOLEANISH_VALUES
+    return is_low_signal_dimension(column.name, profile)
 
 
 def _period_expression(column) -> str | None:

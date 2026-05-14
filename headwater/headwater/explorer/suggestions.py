@@ -44,9 +44,12 @@ from headwater.core.models import (
     TableInfo,
 )
 from headwater.explorer.readability import (
+    BUSINESS_DIMENSION_TOKENS,
+    LOW_SIGNAL_DIMENSION_TOKENS,
     enum_case_expression,
     enum_dimension_label,
     is_readable_dimension,
+    is_low_signal_dimension,
 )
 from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.utils import resolve_table_ref, table_exists
@@ -78,34 +81,6 @@ _AGGREGATE_METRIC_RE = re.compile(
     re.IGNORECASE,
 )
 _SUMMARY_NAME_RE = re.compile(r"(summary|overview|snapshot|totals?)", re.IGNORECASE)
-_LOW_SIGNAL_DIMENSION_TOKENS = (
-    "flag",
-    "indicator",
-    "store_and_fwd",
-    "source_file",
-    "source_system",
-    "load_batch",
-    "ingest",
-    "extract",
-    "audit",
-    "deleted",
-)
-_BUSINESS_DIMENSION_TOKENS = (
-    "type",
-    "category",
-    "status",
-    "reason",
-    "channel",
-    "segment",
-    "service",
-    "region",
-    "zone",
-    "site",
-    "payment",
-)
-_BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
-
-
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -2024,17 +1999,7 @@ def _is_low_signal_dimension_for_question(
     column: ColumnInfo,
     profile: ColumnProfile | None,
 ) -> bool:
-    lower = column.name.lower()
-    distinct = profile.distinct_count if profile is not None else 0
-    business_named = any(token in lower for token in _BUSINESS_DIMENSION_TOKENS)
-    technical_named = any(token in lower for token in _LOW_SIGNAL_DIMENSION_TOKENS)
-
-    if technical_named and distinct <= 3:
-        return True
-    if profile is None or not profile.top_values or business_named:
-        return False
-    values = {str(value).strip().lower() for value, _count in profile.top_values[:4]}
-    return distinct <= 3 and values <= _BOOLEANISH_VALUES
+    return is_low_signal_dimension(column.name, profile)
 
 
 def _metric_signal_score(
@@ -2079,7 +2044,7 @@ def _dimension_signal_score(
         score += 4
     elif any(token in lower for token in ("_code", "code_", "_num", "_id", "_key")):
         score -= 4
-    if any(token in lower for token in _BUSINESS_DIMENSION_TOKENS):
+    if any(token in lower for token in BUSINESS_DIMENSION_TOKENS):
         score += 3
 
     if profile is None:
@@ -2112,7 +2077,7 @@ def _share_dimension_score(
     metadata: RetrievedMetadata | None,
 ) -> int:
     lower = column.name.lower()
-    if any(token in lower for token in _LOW_SIGNAL_DIMENSION_TOKENS):
+    if any(token in lower for token in LOW_SIGNAL_DIMENSION_TOKENS):
         return -10
     if profile is None:
         return 0
@@ -2120,7 +2085,7 @@ def _share_dimension_score(
     if distinct < 2 or distinct > 6:
         return -10
     score = 0
-    if any(token in lower for token in _BUSINESS_DIMENSION_TOKENS):
+    if any(token in lower for token in BUSINESS_DIMENSION_TOKENS):
         score += 6
     if _column_label(column.name, metadata) != _humanize(column.name):
         score += 2

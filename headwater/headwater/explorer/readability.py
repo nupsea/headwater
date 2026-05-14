@@ -17,6 +17,33 @@ _READABLE_LABEL_TOKENS = (
     "region",
 )
 
+LOW_SIGNAL_DIMENSION_TOKENS = (
+    "flag",
+    "indicator",
+    "store_and_fwd",
+    "source_file",
+    "source_system",
+    "load_batch",
+    "ingest",
+    "extract",
+    "audit",
+    "deleted",
+)
+
+BUSINESS_DIMENSION_TOKENS = (
+    "type",
+    "category",
+    "status",
+    "reason",
+    "channel",
+    "segment",
+    "service",
+    "region",
+    "zone",
+    "site",
+    "payment",
+)
+
 BUILTIN_ENUM_LABEL_REGISTRY: dict[str, dict[object, str]] = {
     "payment_type": {
         0: "Flex fare",
@@ -107,6 +134,23 @@ def is_opaque_business_value(value: Any) -> bool:
         parts = [part.strip() for part in text.split("->") if part.strip()]
         return len(parts) >= 2 and all(_is_opaque_business_atom(part) for part in parts)
     return _is_opaque_business_atom(text)
+
+
+def is_low_signal_dimension(column_name: str, profile: Any | None) -> bool:
+    lower = column_name.lower()
+    distinct = getattr(profile, "distinct_count", 0) if profile is not None else 0
+    business_named = any(token in lower for token in BUSINESS_DIMENSION_TOKENS)
+    technical_named = any(token in lower for token in LOW_SIGNAL_DIMENSION_TOKENS)
+
+    if technical_named and distinct <= 3:
+        return True
+
+    top_values = getattr(profile, "top_values", None) if profile is not None else None
+    if profile is None or not top_values or business_named:
+        return False
+
+    values = {str(value).strip().lower() for value, _count in top_values[:4]}
+    return distinct <= 3 and values <= _OPAQUE_BOOLEANISH_VALUES
 
 
 def _sql_string_literal(value: object) -> str:
