@@ -8,7 +8,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
-from headwater.analyzer.metadata_retrieval import retrieve_metadata
+from headwater.analyzer.metadata_retrieval import infer_lookup_candidate, retrieve_metadata
 from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.project import _compute_maturity, _compute_progress
@@ -729,38 +729,17 @@ def _is_opaque_value(value: object) -> bool:
 def _build_lookup_index(tables) -> dict[str, dict[str, str]]:
     index: dict[str, dict[str, str]] = {}
     for table in tables:
-        id_cols = [
-            col.name
-            for col in table.columns
-            if _is_code_like_column(col.name)
-        ]
-        label_cols = [
-            col.name
-            for col in table.columns
-            if any(
-                token in col.name.lower()
-                for token in (
-                    "name",
-                    "label",
-                    "description",
-                    "zone",
-                    "borough",
-                    "region",
-                    "title",
-                )
-            )
-        ]
-        if not id_cols or not label_cols or table.row_count > 100_000:
+        candidate = infer_lookup_candidate(table)
+        if candidate is None:
             continue
-        for id_col in id_cols:
-            index.setdefault(
-                id_col.lower(),
-                {
-                    "table_name": table.name,
-                    "id_column": id_col,
-                    "label_column": label_cols[0],
-                },
-            )
+        index.setdefault(
+            candidate["id_column"].lower(),
+            {
+                "table_name": table.name,
+                "id_column": candidate["id_column"],
+                "label_column": candidate["label_column"],
+            },
+        )
     return index
 
 
@@ -1424,7 +1403,7 @@ def compute_semantic_highlights(
     ]
     selected: list[dict] = []
     seen_tables: dict[str, int] = {}
-    max_per_table = 4 if len({insight.table_name for insight in candidates}) <= 1 else 2
+    max_per_table = 5 if len({insight.table_name for insight in candidates}) <= 1 else 2
     ranked_candidates = sorted(candidates, key=_semantic_highlight_score, reverse=True)
     seen_types: set[str] = set()
 

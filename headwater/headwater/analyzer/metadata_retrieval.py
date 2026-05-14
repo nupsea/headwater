@@ -11,7 +11,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from headwater.core.models import DatasetContext, DiscoveryResult
+from headwater.core.models import DatasetContext, DiscoveryResult, TableInfo
+
+_LOOKUP_ID_RE = re.compile(r"(^id$|_id$|locationid$|code$|key$|_num$|number$)", re.I)
+_LOOKUP_LABEL_RE = re.compile(
+    r"(name|label|description|zone|borough|region|title|status|category|type|display|text|value)",
+    re.I,
+)
+_TEXTUAL_DTYPES = ("varchar", "char", "text", "string")
 
 
 @dataclass
@@ -87,22 +94,81 @@ def _enum_mappings_from_docs(discovery: DiscoveryResult) -> dict[str, dict[str, 
 def _lookup_candidates(discovery: DiscoveryResult) -> dict[str, dict[str, str]]:
     candidates: dict[str, dict[str, str]] = {}
     for table in discovery.tables:
-        id_cols = [
-            col.name
-            for col in table.columns
-            if re.search(r"(^id$|_id$|locationid$|code$|key$)", col.name, re.I)
-        ]
-        label_cols = [
-            col.name
-            for col in table.columns
-            if re.search(r"(name|label|description|zone|borough|region|title)", col.name, re.I)
-        ]
-        if id_cols and label_cols and table.row_count <= 100_000:
-            candidates[table.name] = {
-                "id_column": id_cols[0],
-                "label_column": label_cols[0],
-            }
+        candidate = infer_lookup_candidate(table)
+        if candidate is not None:
+            candidates[table.name] = candidate
     return candidates
+
+
+def infer_lookup_candidate(table: TableInfo) -> dict[str, str] | None:
+    """Infer a generic code-to-label lookup shape for a small dimension table."""
+    if table.row_count > 100_000 or len(table.columns) < 2:
+        return None
+
+    id_candidates = [
+        (col.name, _lookup_id_score(col.name, col.semantic_type or "", col.role or ""))
+        for col in table.columns
+    ]
+    id_candidates = [item for item in id_candidates if item[1] > 0]
+    if not id_candidates:
+        return None
+
+    label_candidates = [
+        (col.name, _lookup_label_score(col.name, col.dtype, col.semantic_type or "", col.role or ""))
+        for col in table.columns
+    ]
+    label_candidates = [item for item in label_candidates if item[1] > 0]
+    if not label_candidates:
+        return None
+    if len(table.columns) > len(id_candidates) + len(label_candidates) + 1:
+        return None
+
+    id_column = max(id_candidates, key=lambda item: item[1])[0]
+    label_options = [item for item in label_candidates if item[0] != id_column]
+    if not label_options:
+        return None
+    label_column, label_score = max(label_options, key=lambda item: item[1])
+    if label_score < 6:
+        return None
+
+    return {"id_column": id_column, "label_column": label_column}
+
+
+def _lookup_id_score(name: str, semantic_type: str, role: str) -> int:
+    score = 0
+    lower = name.lower()
+    if _LOOKUP_ID_RE.search(name):
+        score += 6
+    if lower == "id":
+        score += 4
+    if lower.endswith("_id") or lower.endswith("id"):
+        score += 3
+    if lower.endswith("_code") or lower.endswith("code"):
+        score += 2
+    if semantic_type in {"id", "foreign_key"}:
+        score += 3
+    if role == "identifier":
+        score += 2
+    return score
+
+
+def _lookup_label_score(name: str, dtype: str, semantic_type: str, role: str) -> int:
+    lower = name.lower()
+    if _LOOKUP_ID_RE.search(name):
+        return -1
+
+    score = 0
+    if _LOOKUP_LABEL_RE.search(name):
+        score += 6
+    if any(token in (dtype or "").lower() for token in _TEXTUAL_DTYPES):
+        score += 4
+    if semantic_type == "dimension":
+        score += 3
+    if role == "dimension":
+        score += 2
+    if semantic_type in {"id", "foreign_key"} or role == "identifier":
+        score -= 5
+    return score
 
 
 def _structured_doc_rows(content: str) -> list[dict[str, str]]:

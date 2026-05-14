@@ -3615,6 +3615,124 @@ class TestGrounding:
         assert result.error is None
         assert any("raw codes or ids" in warning.lower() for warning in result.warnings)
 
+    def test_generic_status_lookup_makes_answers_business_readable(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_orders AS
+            SELECT * FROM (VALUES
+                ('OPEN', 125.0),
+                ('OPEN', 95.0),
+                ('HOLD', 210.0)
+            ) AS t(status_code, amount)
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_order_status AS
+            SELECT * FROM (VALUES
+                ('OPEN', 'Open'),
+                ('HOLD', 'On hold')
+            ) AS t(status_code, status)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(
+                            name="status_code",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="amount", dtype="double", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="order_status",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(name="status_code", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="status", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="status_code",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("OPEN", 2), ("HOLD", 1)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="amount",
+                    dtype="double",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="orders",
+                    from_column="status_code",
+                    to_table="order_status",
+                    to_column="status_code",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_orders",
+                model_type="staging",
+                sql="SELECT * FROM orders",
+                description="Orders staging",
+                source_tables=["orders"],
+                status="executed",
+            ),
+            GeneratedModel(
+                name="stg_order_status",
+                model_type="staging",
+                sql="SELECT * FROM order_status",
+                description="Order status lookup",
+                source_tables=["order_status"],
+                status="executed",
+            ),
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q
+            for q in questions
+            if "status" in q.question.lower() and "amount" in q.question.lower()
+        )
+
+        assert "LEFT JOIN staging.stg_order_status" in (question.sql_hint or "")
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert not any("raw codes or ids" in warning.lower() for warning in result.warnings)
+        assert {row["dimension"] for row in result.data} == {"Open", "On hold"}
+
     def test_route_question_without_lookup_returns_guided_error(self, duckdb_con):
         duckdb_con.execute(
             """

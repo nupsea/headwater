@@ -24,7 +24,11 @@ import re
 
 import duckdb
 
-from headwater.analyzer.metadata_retrieval import RetrievedMetadata, retrieve_metadata
+from headwater.analyzer.metadata_retrieval import (
+    RetrievedMetadata,
+    infer_lookup_candidate,
+    retrieve_metadata,
+)
 from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.core.classification import is_dimension_column, is_metric_column
 from headwater.core.models import (
@@ -2489,34 +2493,17 @@ def _build_lookup_index(
             for key in _lookup_match_keys(lookup["id_column"]):
                 index.setdefault(key, details)
     for table in tables:
-        id_cols = [col.name for col in table.columns if _ID_NAME_RE.search(col.name)]
-        label_cols = [
-            col.name
-            for col in table.columns
-            if any(
-                token in col.name.lower()
-                for token in (
-                    "name",
-                    "label",
-                    "description",
-                    "zone",
-                    "borough",
-                    "region",
-                    "title",
-                )
-            )
-        ]
-        if not id_cols or not label_cols or table.row_count > 100_000:
+        candidate = infer_lookup_candidate(table)
+        if candidate is None:
             continue
         details = {
             "table_name": table.name,
-            "id_column": id_cols[0],
-            "label_column": label_cols[0],
+            "id_column": candidate["id_column"],
+            "label_column": candidate["label_column"],
         }
         lookup_by_table.setdefault(table.name, details)
-        for id_col in id_cols:
-            for key in _lookup_match_keys(id_col):
-                index.setdefault(key, details)
+        for key in _lookup_match_keys(candidate["id_column"]):
+            index.setdefault(key, details)
     if relationships:
         for rel in relationships:
             lookup = lookup_by_table.get(rel.to_table)
