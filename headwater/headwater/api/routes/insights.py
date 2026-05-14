@@ -9,6 +9,7 @@ from datetime import date, datetime
 from fastapi import APIRouter, HTTPException, Request
 
 from headwater.analyzer.metadata_retrieval import (
+    RetrievedMetadata,
     build_lookup_index,
     lookup_for_column,
     retrieve_metadata,
@@ -17,6 +18,11 @@ from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_
 from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.project import _compute_maturity, _compute_progress
 from headwater.core.models import DatasetContext
+from headwater.explorer.readability import (
+    enum_case_expression,
+    enum_dimension_label,
+    enum_mapping_for_column,
+)
 from headwater.explorer.statistical import (
     detect_insights_with_diagnostics,
     insight_type_priority_weights,
@@ -262,7 +268,13 @@ async def get_insights(request: Request, project_id: str | None = None):
     store = request.app.state.metadata_store
     context_row = store.get_dataset_context(discovery.source.name) if store else None
     context = DatasetContext(**context_row) if context_row else None
-    top_insights = _compute_top_insights(request.app.state.duckdb_con, tables, profiles)
+    metadata = retrieve_metadata(discovery, context)
+    top_insights = _compute_top_insights(
+        request.app.state.duckdb_con,
+        tables,
+        profiles,
+        metadata,
+    )
     semantic_highlights = compute_semantic_highlights(
         request.app.state.duckdb_con,
         discovery,
@@ -734,7 +746,15 @@ def _resolve_dimension_projection(
     table,
     dimension,
     lookup_index: dict[str, dict[str, str]],
+    metadata: RetrievedMetadata | None = None,
 ) -> tuple[str | None, str | None, str | None]:
+    enum_expr = enum_case_expression(dimension.name, f'fact."{dimension.name}"', metadata)
+    if enum_expr:
+        return (
+            None,
+            enum_expr,
+            enum_dimension_label(dimension.name, _humanize_name(dimension.name)),
+        )
     if not _is_code_like_column(dimension.name):
         return None, dimension.name, _humanize_name(dimension.name)
 
@@ -763,6 +783,7 @@ def _compute_segment_insights(
     dimension_cols,
     metric_cols,
     lookup_index: dict[str, dict[str, str]],
+    metadata: RetrievedMetadata | None = None,
 ) -> list[dict]:
     insights = []
     ref = _table_ref(table)
@@ -773,6 +794,7 @@ def _compute_segment_insights(
             table,
             dimension,
             lookup_index,
+            metadata,
         )
         if dimension_expr is None or dim_label is None:
             continue
@@ -1053,7 +1075,13 @@ def _rank_dimension_column(column) -> tuple[int, int]:
     return (0, 2)
 
 
-def _is_business_dimension_column(table, column, profile, lookup_index) -> bool:
+def _is_business_dimension_column(
+    table,
+    column,
+    profile,
+    lookup_index,
+    metadata: RetrievedMetadata | None = None,
+) -> bool:
     if _is_dimension_column(column, profile):
         return True
     if column.role not in {"dimension", "geographic"} and column.semantic_type not in {
@@ -1061,11 +1089,18 @@ def _is_business_dimension_column(table, column, profile, lookup_index) -> bool:
         "geographic",
     }:
         return False
+    if enum_mapping_for_column(column.name, metadata):
+        return True
     lookup = lookup_for_column(table.name, column.name, lookup_index)
     return bool(lookup and lookup["table_name"] != table.name)
 
 
-def _compute_top_insights(con, tables, profiles) -> list[dict]:
+def _compute_top_insights(
+    con,
+    tables,
+    profiles,
+    metadata: RetrievedMetadata | None = None,
+) -> list[dict]:
     """Find CXO-readable patterns from actual records.
 
     The output avoids schema-quality commentary and favors business outcome
@@ -1073,7 +1108,7 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
     drive measurable totals.
     """
     insights: list[dict] = []
-    lookup_index = build_lookup_index(tables)
+    lookup_index = build_lookup_index(tables, metadata)
     for table in sorted(tables, key=lambda t: t.row_count, reverse=True):
         column_profiles = {
             c.name: _column_profile(profiles, table.name, c.name)
@@ -1095,6 +1130,7 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
                     c,
                     column_profiles.get(c.name),
                     lookup_index,
+                    metadata,
                 )
                 and not _is_low_signal_dimension(c, column_profiles.get(c.name))
             )
@@ -1109,6 +1145,7 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
                 dimension_cols,
                 metric_cols,
                 lookup_index,
+                metadata,
             )
         )
         insights.extend(_compute_distribution_insights(con, table, metric_cols, column_profiles))
@@ -1116,9 +1153,14 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
     return _select_diverse_insights(insights)
 
 
-def compute_top_insights(con, tables, profiles) -> list[dict]:
+def compute_top_insights(
+    con,
+    tables,
+    profiles,
+    metadata: RetrievedMetadata | None = None,
+) -> list[dict]:
     """Public helper for business-readable insights reused by Explore."""
-    return _compute_top_insights(con, tables, profiles)
+    return _compute_top_insights(con, tables, profiles, metadata)
 
 
 _SEMANTIC_HIGHLIGHT_ORDER = [

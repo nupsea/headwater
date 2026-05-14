@@ -182,6 +182,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         request.app.state.duckdb_con,
         discovery.tables,
         discovery.profiles,
+        metadata,
     )
     semantic_highlights = compute_semantic_highlights(
         request.app.state.duckdb_con,
@@ -259,7 +260,12 @@ async def ask_question(request: Request, body: AskRequest, project_id: str | Non
         quality_results=quality_results,
         con=con,
         extra_relationships=extra_rels,
-        business_insights=compute_top_insights(con, discovery.tables, discovery.profiles),
+        business_insights=compute_top_insights(
+            con,
+            discovery.tables,
+            discovery.profiles,
+            metadata,
+        ),
         metadata=metadata,
     )
 
@@ -314,7 +320,8 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
     discovery = pipeline["discovery"]
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     context = _dataset_context_for_pipeline(request, pipeline)
-    business_insights = compute_top_insights(con, discovery.tables, discovery.profiles)
+    metadata = retrieve_metadata(discovery, context)
+    business_insights = compute_top_insights(con, discovery.tables, discovery.profiles, metadata)
     semantic_highlights = compute_semantic_highlights(con, discovery, context, all_models)
     staging_result = detect_insights_with_diagnostics(
         con,

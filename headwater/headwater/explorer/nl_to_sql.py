@@ -38,8 +38,8 @@ from headwater.core.models import (
     TableInfo,
 )
 from headwater.explorer.query_planner import QueryPlanner
+from headwater.explorer.readability import is_readable_dimension
 from headwater.explorer.schema_graph import SchemaGraph
-from headwater.explorer.suggestions import _is_readable_dimension
 from headwater.explorer.utils import resolve_table_ref, table_exists
 from headwater.explorer.visualization import recommend_visualization
 
@@ -1583,8 +1583,8 @@ def _project_has_readable_route_dimensions(discovery: DiscoveryResult) -> bool:
         dest = roles.get("destination_id")
         if not origin or not dest:
             continue
-        if _is_readable_dimension(table, origin.column_name, lookup_index, metadata) and (
-            _is_readable_dimension(table, dest.column_name, lookup_index, metadata)
+        if is_readable_dimension(table.name, origin.column_name, lookup_index, metadata) and (
+            is_readable_dimension(table.name, dest.column_name, lookup_index, metadata)
         ):
             return True
     return False

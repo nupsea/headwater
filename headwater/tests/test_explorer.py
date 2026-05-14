@@ -3177,6 +3177,79 @@ class TestStatistical:
         assert all("A drives" not in insight["title"] for insight in origin_insights)
         assert all("A represents" not in insight["detail"] for insight in origin_insights)
 
+    def test_top_insights_use_companion_enum_labels(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_orders AS
+            SELECT * FROM (VALUES
+                ('P', 120.0),
+                ('P', 80.0),
+                ('P', 60.0),
+                ('S', 200.0),
+                ('C', 20.0)
+            ) AS t(status_code, amount)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="stg_orders",
+                    schema_name="staging",
+                    row_count=5,
+                    columns=[
+                        ColumnInfo(name="status_code", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="stg_orders",
+                    column_name="status_code",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("P", 3), ("S", 1), ("C", 1)],
+                ),
+                ColumnProfile(
+                    table_name="stg_orders",
+                    column_name="amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=5,
+                    min_value=20.0,
+                    max_value=200.0,
+                    mean=96.0,
+                ),
+            ],
+            companion_docs=[
+                CompanionDoc(
+                    filename="dictionary.csv",
+                    content=(
+                        "column_name: status_code | "
+                        "description: order status. P=Pending; S=Shipped; C=Cancelled"
+                    ),
+                    doc_type="csv",
+                    matched_tables=["stg_orders"],
+                    confidence=0.9,
+                )
+            ],
+        )
+
+        insights = compute_top_insights(
+            duckdb_con,
+            discovery.tables,
+            discovery.profiles,
+            retrieve_metadata(discovery),
+        )
+        status_insights = [insight for insight in insights if insight.get("column") == "status_code"]
+
+        assert status_insights
+        assert any("Pending" in insight["title"] or "Pending" in insight["detail"] for insight in status_insights)
+        assert all(not insight["title"].startswith("P ") for insight in status_insights)
+        assert all("P accounts for" not in insight["detail"] for insight in status_insights)
+
     def test_top_insights_skip_low_signal_flag_segments(self, duckdb_con):
         duckdb_con.execute(
             """

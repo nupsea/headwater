@@ -43,6 +43,11 @@ from headwater.core.models import (
     SuggestedQuestion,
     TableInfo,
 )
+from headwater.explorer.readability import (
+    enum_case_expression,
+    enum_dimension_label,
+    is_readable_dimension,
+)
 from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.utils import resolve_table_ref, table_exists
 
@@ -68,20 +73,6 @@ _ID_NAME_RE = re.compile(
     r"(_id|_key|_fk|_pk|^id$|^key$|^uuid$|code$|flag$|indicator$)", re.IGNORECASE
 )
 
-_ENUM_LABEL_REGISTRY: dict[str, dict[object, str]] = {
-    "payment_type": {
-        0: "Flex fare",
-        1: "Credit card",
-        2: "Cash",
-        3: "No charge",
-        4: "Dispute",
-        5: "Unknown",
-        6: "Voided trip",
-    },
-}
-_ENUM_DIMENSION_LABELS = {
-    "payment_type": "payment method",
-}
 _AGGREGATE_METRIC_RE = re.compile(
     r"^(avg|average|mean|median|min|max|p\d+|pct|percent|rate|ratio|share|count|total|sum)_",
     re.IGNORECASE,
@@ -772,8 +763,8 @@ def _from_semantic_roles(
             duration_expr = _duration_minutes_expression(table, start.column_name, end.column_name)
             origin_is_readable = bool(
                 origin
-                and _is_readable_dimension(
-                    table,
+                and is_readable_dimension(
+                    table.name,
                     origin.column_name,
                     lookup_index,
                     metadata,
@@ -781,8 +772,8 @@ def _from_semantic_roles(
             )
             dest_is_readable = bool(
                 dest
-                and _is_readable_dimension(
-                    table,
+                and is_readable_dimension(
+                    table.name,
                     dest.column_name,
                     lookup_index,
                     metadata,
@@ -2373,21 +2364,6 @@ def _should_skip_business_insight_dimension(
     return _is_low_signal_dimension_for_question(column, profile)
 
 
-def _is_readable_dimension(
-    table: TableInfo,
-    column_name: str,
-    lookup_index: dict[str, dict[str, str]],
-    metadata: RetrievedMetadata | None,
-) -> bool:
-    lower = column_name.lower()
-    raw_label_tokens = ("name", "label", "description", "title", "zone", "borough", "region")
-    if any(token in lower for token in raw_label_tokens) and "id" not in lower:
-        return True
-    if _enum_case_expression(column_name, f'fact."{column_name}"', metadata):
-        return True
-    return lookup_for_column(table.name, column_name, lookup_index) is not None
-
-
 def _add_semantic_questions(
     seen: set[str],
     questions: list[SuggestedQuestion],
@@ -2416,46 +2392,6 @@ def _humanize(name: str) -> str:
 def _humanize_model(model_name: str) -> str:
     """Convert staging.stg_readings -> readings."""
     return _humanize(model_name)
-
-
-def _sql_string_literal(value: object) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def _enum_case_expression(
-    column_name: str,
-    raw_expr: str,
-    metadata: RetrievedMetadata | None = None,
-) -> str | None:
-    column_key = column_name.lower()
-    metadata_mapping = metadata.enum_mappings.get(column_key) if metadata else None
-    if metadata_mapping:
-        cases = []
-        for value, label in metadata_mapping.items():
-            cases.append(
-                f"WHEN CAST({raw_expr} AS VARCHAR) = {_sql_string_literal(value)} "
-                f"THEN {_sql_string_literal(label)}"
-            )
-        return (
-            "CASE "
-            + " ".join(cases)
-            + f" ELSE CONCAT('Unknown (', CAST({raw_expr} AS VARCHAR), ')') END"
-        )
-
-    mapping = _ENUM_LABEL_REGISTRY.get(column_key)
-    if not mapping:
-        return None
-    cases = []
-    for value, label in mapping.items():
-        value_sql = _sql_string_literal(value) if isinstance(value, str) else str(value)
-        cases.append(f"WHEN {raw_expr} = {value_sql} THEN {_sql_string_literal(label)}")
-    return (
-        "CASE "
-        + " ".join(cases)
-        + f" ELSE CONCAT('Unknown (', CAST({raw_expr} AS VARCHAR), ')') END"
-    )
-
-
 def _dimension_projection(
     table: TableInfo | None,
     column_name: str,
@@ -2467,13 +2403,13 @@ def _dimension_projection(
     models: list[GeneratedModel] | None = None,
 ) -> tuple[str, str, str, str]:
     raw_expr = f'{alias}."{column_name}"'
-    enum_expr = _enum_case_expression(column_name, raw_expr, metadata)
+    enum_expr = enum_case_expression(column_name, raw_expr, metadata)
     if enum_expr:
         return (
             enum_expr,
             enum_expr,
             "",
-            _ENUM_DIMENSION_LABELS.get(column_name.lower(), _column_label(column_name, metadata)),
+            enum_dimension_label(column_name, _column_label(column_name, metadata)),
         )
 
     lookup = lookup_for_column(table.name, column_name, lookup_index) if table is not None else None
