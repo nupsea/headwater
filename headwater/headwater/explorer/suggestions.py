@@ -279,6 +279,8 @@ def _select_diverse_questions(
     table_counts: dict[str, int] = {}
     template_counts: dict[str, int] = {}
     family_template_counts: dict[tuple[str, str], int] = {}
+    family_template_focus_counts: dict[tuple[str, str, str], int] = {}
+    focus_counts: dict[str, int] = {}
     primary_tables = {
         (question.relevant_tables or [question.category])[0]
         for question in candidates
@@ -307,6 +309,7 @@ def _select_diverse_questions(
         shape = _question_shape(question.question)
         template = _question_template(question.question)
         family = _question_family(question)
+        focus = _question_focus(question.question)
         if source_counts.get(question.source, 0) >= source_limits.get(question.source, 3):
             return False
         if shape_counts.get(shape, 0) >= shape_limits.get(shape, 3):
@@ -314,9 +317,19 @@ def _select_diverse_questions(
         template_limit = _template_limit(template)
         if template_limit is not None and template_counts.get(template, 0) >= template_limit:
             return False
+        if len(question.relevant_tables or []) < 2:
+            if focus is None and family_template_counts.get((family, template), 0) >= 1:
+                return False
+            if (
+                focus is not None
+                and family_template_focus_counts.get((family, template, focus), 0) >= 1
+            ):
+                return False
         if (
-            len(question.relevant_tables or []) < 2
-            and family_template_counts.get((family, template), 0) >= 1
+            focus is not None
+            and len(question.relevant_tables or []) < 2
+            and len(primary_tables) > 1
+            and focus_counts.get(focus, 0) >= 1
         ):
             return False
         if len(question.relevant_tables or []) >= 2:
@@ -333,9 +346,17 @@ def _select_diverse_questions(
         template = _question_template(question.question)
         template_counts[template] = template_counts.get(template, 0) + 1
         family = _question_family(question)
-        family_template_counts[(family, template)] = (
-            family_template_counts.get((family, template), 0) + 1
-        )
+        focus = _question_focus(question.question)
+        if focus is None:
+            family_template_counts[(family, template)] = (
+                family_template_counts.get((family, template), 0) + 1
+            )
+        else:
+            family_template_focus_counts[(family, template, focus)] = (
+                family_template_focus_counts.get((family, template, focus), 0) + 1
+            )
+        if focus is not None:
+            focus_counts[focus] = focus_counts.get(focus, 0) + 1
         primary_table = (question.relevant_tables or [question.category])[0]
         table_counts[primary_table] = table_counts.get(primary_table, 0) + 1
 
@@ -400,6 +421,27 @@ def _question_template(question: str) -> str:
     if "distribution of" in q:
         return "distribution"
     return "other"
+
+
+def _question_focus(question: str) -> str | None:
+    q = " ".join(question.lower().split()).rstrip("?")
+    patterns = (
+        r"^which (?P<focus>.+?) has the highest .+ in .+$",
+        r"^which (?P<focus>.+?) has the longest .+ in .+$",
+        r"^which (?P<focus>.+?) has the highest .+ volume in .+$",
+        r"^what is the distribution of .+ by (?P<focus>.+?) in .+$",
+        r"^how many .+ are there by (?P<focus>.+?)(?: \(.+\))?$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, q)
+        if not match:
+            continue
+        focus = match.group("focus").strip()
+        if not focus:
+            return None
+        focus = re.sub(r"\s+", " ", focus)
+        return focus
+    return None
 
 
 def _template_limit(template: str) -> int | None:

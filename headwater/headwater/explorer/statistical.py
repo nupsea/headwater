@@ -26,6 +26,7 @@ from pathlib import Path
 
 import duckdb
 import polars as pl
+import yaml
 from scipy import stats
 
 from headwater.analyzer.semantic_schema import (
@@ -260,7 +261,11 @@ def _detect_family_insights(
 
     table_ref = f"{quote_ident(schema)}.{quote_ident(physical_table)}"
     family_spec = _load_family_spec()
-    enabled = {family["key"] for family in family_spec.get("families", [])}
+    configured_families = {
+        str(family.get("key")): family
+        for family in family_spec.get("families", [])
+        if isinstance(family, dict) and family.get("key")
+    }
 
     insights: list[StatisticalInsight] = []
     diagnostics: list[InsightFamilyDiagnostic] = []
@@ -317,132 +322,123 @@ def _detect_family_insights(
         fn,
         skip_reason: str,
     ) -> None:
-        if family in {"route", "congestion", "wait"} or family in enabled:
-            if not can_run:
-                diagnostics.append(
-                    InsightFamilyDiagnostic(
-                        schema_name=schema,
-                        physical_table=physical_table,
-                        table_name=source_table,
-                        family=family,
-                        status="skipped",
-                        required_roles=required_roles,
-                        found_roles=found_roles,
-                        reason=skip_reason,
-                    )
+        if not can_run:
+            diagnostics.append(
+                InsightFamilyDiagnostic(
+                    schema_name=schema,
+                    physical_table=physical_table,
+                    table_name=source_table,
+                    family=family,
+                    status="skipped",
+                    required_roles=required_roles,
+                    found_roles=found_roles,
+                    reason=skip_reason,
                 )
-                return
-            try:
-                before = len(insights)
-                family_insights = fn()
-                insights.extend(family_insights)
-                generated = len(insights) - before
-                diagnostics.append(
-                    InsightFamilyDiagnostic(
-                        schema_name=schema,
-                        physical_table=physical_table,
-                        table_name=source_table,
-                        family=family,
-                        status="generated" if generated else "skipped",
-                        required_roles=required_roles,
-                        found_roles=found_roles,
-                        generated_count=generated,
-                        reason=None if generated else "No rows met family support thresholds.",
-                    )
+            )
+            return
+        try:
+            before = len(insights)
+            family_insights = fn()
+            insights.extend(family_insights)
+            generated = len(insights) - before
+            diagnostics.append(
+                InsightFamilyDiagnostic(
+                    schema_name=schema,
+                    physical_table=physical_table,
+                    table_name=source_table,
+                    family=family,
+                    status="generated" if generated else "skipped",
+                    required_roles=required_roles,
+                    found_roles=found_roles,
+                    generated_count=generated,
+                    reason=None if generated else "No rows met family support thresholds.",
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "Semantic insight family failed for %s.%s family=%s: %s",
-                    schema,
-                    physical_table,
-                    family,
-                    exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Semantic insight family failed for %s.%s family=%s: %s",
+                schema,
+                physical_table,
+                family,
+                exc,
+            )
+            diagnostics.append(
+                InsightFamilyDiagnostic(
+                    schema_name=schema,
+                    physical_table=physical_table,
+                    table_name=source_table,
+                    family=family,
+                    status="failed",
+                    required_roles=required_roles,
+                    found_roles=found_roles,
+                    reason=str(exc),
                 )
-                diagnostics.append(
-                    InsightFamilyDiagnostic(
-                        schema_name=schema,
-                        physical_table=physical_table,
-                        table_name=source_table,
-                        family=family,
-                        status="failed",
-                        required_roles=required_roles,
-                        found_roles=found_roles,
-                        reason=str(exc),
-                    )
-                )
+            )
 
-    run_family(
-        "coverage",
-        ["event_ts"],
-        bool(start and start_expr),
-        lambda: _coverage_family(con, table_ref, source_table, start, start_expr),
-        "Requires a temporal role that can be cast to TIMESTAMP.",
-    )
-    run_family(
-        "volume",
-        ["event_ts"],
-        bool(start and start_expr),
-        lambda: _volume_family(con, table_ref, source_table, start, start_expr, duration_expr),
-        "Requires a temporal role that can be cast to TIMESTAMP.",
-    )
-    run_family(
-        "peak",
-        ["event_ts", "duration_min"],
-        bool(start_expr and duration_expr),
-        lambda: _peak_family(con, table_ref, source_table, start_expr, duration_expr),
-        "Requires temporal start and lifecycle end roles to derive duration.",
-    )
-    run_family(
-        "duration",
-        ["duration_min"],
-        bool(duration_expr),
-        lambda: _duration_family(con, table_ref, source_table, start_expr, duration_expr),
-        "Requires lifecycle start and end roles to derive duration.",
-    )
-    run_family(
-        "geo",
-        ["origin_id", "duration_min"],
-        bool(origin and duration_expr),
-        lambda: _geo_family(con, table_ref, source_table, origin, duration_expr),
-        "Requires origin/location and duration roles.",
-    )
-    run_family(
-        "route",
-        ["origin_id", "destination_id", "duration_min"],
-        bool(origin and dest and duration_expr),
-        lambda: _route_family(con, table_ref, source_table, origin, dest, duration_expr),
-        "Requires origin, destination, and duration roles.",
-    )
-    run_family(
-        "congestion",
-        ["distance", "duration_min"],
-        bool(distance and duration_expr),
-        lambda: _congestion_family(con, table_ref, source_table, distance, duration_expr),
-        "Requires distance and duration roles.",
-    )
-    run_family(
-        "quality",
-        [],
-        True,
-        lambda: _quality_family(
-            con,
-            table_ref,
-            source_table,
-            origin,
-            dest,
-            distance,
-            duration_expr,
-            service,
+    family_handlers = {
+        "coverage": (
+            bool(start and start_expr),
+            lambda: _coverage_family(con, table_ref, source_table, start, start_expr),
+            "Requires a temporal role that can be cast to TIMESTAMP.",
         ),
-        "Quality family is always eligible.",
-    )
-    run_family(
-        "wait",
-        ["request_ts", "event_ts"],
-        bool(start_expr and wait_expr),
-        lambda: _wait_family(con, table_ref, source_table, start_expr, wait_expr, service),
-        "Requires request and event/lifecycle start roles.",
-    )
+        "volume": (
+            bool(start and start_expr),
+            lambda: _volume_family(con, table_ref, source_table, start, start_expr, duration_expr),
+            "Requires a temporal role that can be cast to TIMESTAMP.",
+        ),
+        "peak": (
+            bool(start_expr and duration_expr),
+            lambda: _peak_family(con, table_ref, source_table, start_expr, duration_expr),
+            "Requires temporal start and lifecycle end roles to derive duration.",
+        ),
+        "duration": (
+            bool(duration_expr),
+            lambda: _duration_family(con, table_ref, source_table, start_expr, duration_expr),
+            "Requires lifecycle start and end roles to derive duration.",
+        ),
+        "geo": (
+            bool(origin and duration_expr),
+            lambda: _geo_family(con, table_ref, source_table, origin, duration_expr),
+            "Requires origin/location and duration roles.",
+        ),
+        "route": (
+            bool(origin and dest and duration_expr),
+            lambda: _route_family(con, table_ref, source_table, origin, dest, duration_expr),
+            "Requires origin, destination, and duration roles.",
+        ),
+        "congestion": (
+            bool(distance and duration_expr),
+            lambda: _congestion_family(con, table_ref, source_table, distance, duration_expr),
+            "Requires distance and duration roles.",
+        ),
+        "quality": (
+            True,
+            lambda: _quality_family(
+                con,
+                table_ref,
+                source_table,
+                origin,
+                dest,
+                distance,
+                duration_expr,
+                service,
+            ),
+            "Quality family is always eligible.",
+        ),
+        "wait": (
+            bool(start_expr and wait_expr),
+            lambda: _wait_family(con, table_ref, source_table, start_expr, wait_expr, service),
+            "Requires request and event/lifecycle start roles.",
+        ),
+    }
+
+    for family_name, config in configured_families.items():
+        handler = family_handlers.get(family_name)
+        if handler is None:
+            continue
+        required_roles = [str(role) for role in config.get("required_roles", [])]
+        can_run, fn, skip_reason = handler
+        run_family(family_name, required_roles, can_run, fn, skip_reason)
 
     return InsightDetectionResult(insights=insights, diagnostics=diagnostics)
 
@@ -1709,6 +1705,12 @@ def _detect_correlations(
 def _load_family_spec() -> dict:
     path = Path(__file__).resolve().parents[1] / "analyzer" / "insight_families.yaml"
     try:
+        parsed = yaml.safe_load(path.read_text()) or {}
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    try:
         return json.loads(path.read_text())
     except Exception:
         return {
@@ -1718,7 +1720,10 @@ def _load_family_spec() -> dict:
                 {"key": "peak"},
                 {"key": "duration"},
                 {"key": "geo"},
+                {"key": "route"},
+                {"key": "congestion"},
                 {"key": "quality"},
+                {"key": "wait"},
             ]
         }
 

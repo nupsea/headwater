@@ -44,6 +44,7 @@ from headwater.explorer.statistical import (
     _detect_temporal_anomalies,
     _find_metric_columns,
     _find_temporal_columns,
+    _load_family_spec,
     detect_insights,
     detect_insights_with_diagnostics,
 )
@@ -1470,6 +1471,43 @@ class TestSuggestions:
         assert any("weekday and weekend" in prompt for prompt in prompts)
         assert any("payment method" in prompt for prompt in prompts)
 
+    def test_diverse_selection_limits_repeated_focus_across_question_shapes(self):
+        candidates = [
+            SuggestedQuestion(
+                question=(
+                    "What is the distribution of trips by payment method "
+                    "in tlc raw green tripdata 2026?"
+                ),
+                source="semantic",
+                category="Tlc Raw Green Tripdata 2026",
+                relevant_tables=["tlc_raw_green_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question=(
+                    "Which payment method has the highest fare amount "
+                    "in tlc raw yellow tripdata 2026?"
+                ),
+                source="semantic",
+                category="Tlc Raw Yellow Tripdata 2026",
+                relevant_tables=["tlc_raw_yellow_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question=(
+                    "How do weekday and weekend duration compare "
+                    "in tlc raw yellow tripdata 2026?"
+                ),
+                source="business",
+                category="Decision Signals",
+                relevant_tables=["tlc_raw_yellow_tripdata_2026_01"],
+            ),
+        ]
+
+        selected = _select_diverse_questions(candidates)
+        prompts = [q.question.lower() for q in selected]
+
+        assert sum("payment method" in prompt for prompt in prompts) == 1
+        assert any("weekday and weekend" in prompt for prompt in prompts)
+
     def test_companion_glossary_improves_question_labels(self):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
@@ -2397,6 +2435,63 @@ class TestStatistical:
         duration = next(d for d in result.diagnostics if d.family == "duration")
         assert duration.required_roles == ["duration_min"]
         assert duration.reason
+
+    def test_semantic_family_dispatcher_uses_catalog_configuration(self, duckdb_con, monkeypatch):
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_events AS "
+            "SELECT * FROM (VALUES "
+            "('2026-01-01', 1.0), ('2026-01-02', 2.0)"
+            ") AS t(event_date, value)"
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="event_date",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="value", dtype="double"),
+                    ],
+                )
+            ],
+        )
+        monkeypatch.setattr(
+            "headwater.explorer.statistical._load_family_spec",
+            lambda: {
+                "families": [
+                    {"key": "coverage", "required_roles": ["event_ts"]},
+                    {"key": "duration", "required_roles": ["custom_duration_role"]},
+                ]
+            },
+        )
+
+        result = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+        )
+
+        coverage = next(d for d in result.diagnostics if d.family == "coverage")
+        duration = next(d for d in result.diagnostics if d.family == "duration")
+
+        configured = {d.family for d in result.diagnostics if d.family != "semantic_schema"}
+
+        assert configured == {"coverage", "duration"}
+        assert coverage.required_roles == ["event_ts"]
+        assert duration.required_roles == ["custom_duration_role"]
+        assert duration.status == "skipped"
+
+    def test_family_catalog_lists_extended_semantic_families(self):
+        family_keys = {family["key"] for family in _load_family_spec()["families"]}
+
+        assert {"coverage", "volume", "peak", "duration", "geo"}.issubset(family_keys)
+        assert {"route", "congestion", "quality", "wait"}.issubset(family_keys)
 
     def test_semantic_model_lineage_maps_mart_table(self, duckdb_con):
         duckdb_con.execute(

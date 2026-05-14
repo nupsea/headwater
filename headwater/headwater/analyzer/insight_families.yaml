@@ -31,8 +31,26 @@
       "ranking": {"effect_size": 0.3, "population_size": 0.25, "confidence": 0.15, "actionability": 0.3}
     },
     {
+      "key": "route",
+      "required_roles": ["origin_id", "destination_id", "duration_min"],
+      "quantiles": ["p50", "p90", "p95"],
+      "ranking": {"effect_size": 0.3, "population_size": 0.25, "confidence": 0.15, "actionability": 0.3}
+    },
+    {
+      "key": "congestion",
+      "required_roles": ["distance", "duration_min"],
+      "quantiles": ["p50", "p90", "p95"],
+      "ranking": {"effect_size": 0.3, "population_size": 0.25, "confidence": 0.15, "actionability": 0.3}
+    },
+    {
       "key": "quality",
       "required_roles": [],
+      "ranking": {"effect_size": 0.3, "population_size": 0.25, "confidence": 0.15, "actionability": 0.3}
+    },
+    {
+      "key": "wait",
+      "required_roles": ["request_ts", "event_ts"],
+      "quantiles": ["p50", "p90", "p95"],
       "ranking": {"effect_size": 0.3, "population_size": 0.25, "confidence": 0.15, "actionability": 0.3}
     }
   ]
