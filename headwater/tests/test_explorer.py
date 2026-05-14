@@ -2219,6 +2219,78 @@ class TestCrossTableSuggestions:
         assert any("by borough" in q.question.lower() for q in cross_qs)
         assert not any("by unit" in q.question.lower() for q in cross_qs)
 
+    def test_cross_table_skips_unique_name_dimensions(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="sensors",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(name="sensor_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="foreign_key"),
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="site_type", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="sensors",
+                    column_name="value",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=4000,
+                    mean=37.5,
+                    stddev=8.2,
+                ),
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="name",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=500,
+                    uniqueness_ratio=1.0,
+                ),
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="site_type",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=7,
+                    uniqueness_ratio=0.014,
+                    top_values=[("Roadside", 150), ("Urban", 120), ("Industrial", 80)],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="sensors",
+                    from_column="site_id",
+                    to_table="sites",
+                    to_column="site_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+
+        assert cross_qs
+        assert any("by site type" in q.question.lower() for q in cross_qs)
+        assert not any("by name (sites)" in q.question.lower() for q in cross_qs)
+
     def test_cross_table_prefers_business_metric_over_age(self):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),

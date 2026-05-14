@@ -156,7 +156,15 @@ def generate_suggestions(
         ),
         "catalog": _from_catalog(catalog, con, all_models) if catalog else [],
         "mart": _from_mart_models(all_models, con, metadata),
-        "cross_table": _from_schema_graph(graph, all_relationships, all_models, con, metadata),
+        "cross_table": _from_schema_graph(
+            graph,
+            discovery.tables,
+            profile_index,
+            all_relationships,
+            all_models,
+            con,
+            metadata,
+        ),
         "relationship": _from_relationships(
             discovery.tables, all_relationships, profile_index, all_models, con, metadata
         ),
@@ -1008,6 +1016,8 @@ def _from_catalog(
 
 def _from_schema_graph(
     graph: SchemaGraph,
+    tables: list[TableInfo],
+    profile_index: dict[tuple[str, str], ColumnProfile],
     relationships: list[Relationship],
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
@@ -1024,6 +1034,8 @@ def _from_schema_graph(
     if len(graph.tables) < 2:
         return suggestions
 
+    table_map = {table.name: table for table in tables}
+    lookup_index = build_lookup_index(tables, metadata, relationships)
     seen_combos: set[tuple[str, str, str]] = set()
 
     for fact_name, fact_node in graph.tables.items():
@@ -1046,8 +1058,22 @@ def _from_schema_graph(
             if len(path) > 1:
                 continue
 
-            dim_col_name = dim_node.dimensions[0]
-            dim_label = _column_label(dim_col_name, metadata)
+            dim_table = table_map.get(dim_name)
+            if dim_table is not None:
+                dim_candidates = _prefer_display_dim(
+                    [
+                        name
+                        for name in _get_dimension_cols(dim_table, profile_index)
+                        if name in dim_node.dimensions
+                    ],
+                    dim_name,
+                )
+            else:
+                dim_candidates = dim_node.dimensions
+            if not dim_candidates:
+                continue
+
+            dim_col_name = dim_candidates[0]
             fact_label = _table_label(fact_name, metadata)
             dim_table_label = _table_label(dim_name, metadata)
 
@@ -1079,34 +1105,46 @@ def _from_schema_graph(
 
             dim_alias = aliases.get(dim_name, "t0")
             fact_alias = aliases.get(fact_name, "t0")
+            group_expr, select_expr, dim_join_sql, display_label = _dimension_projection(
+                dim_table,
+                dim_col_name,
+                lookup_index,
+                metadata,
+                alias=dim_alias,
+                lookup_join_alias=f"{dim_alias}_lu",
+                con=con,
+                models=models,
+            )
 
             count_alias = f'{_humanize(fact_name).replace(" ", "_")}_count'
             if metric_col:
                 sql = (
-                    f'SELECT {dim_alias}."{dim_col_name}", '
+                    f"SELECT {select_expr} AS dimension, "
                     f"COUNT(*) AS {count_alias}, "
                     f'ROUND(AVG({fact_alias}."{metric_col}"), 2) AS avg_{metric_col} '
                     f"FROM {fact_ref} t0 "
                     + " ".join(join_clauses)
-                    + f' GROUP BY {dim_alias}."{dim_col_name}" '
+                    + f" {dim_join_sql} "
+                    + f"GROUP BY {group_expr} "
                     f"ORDER BY avg_{metric_col} DESC LIMIT 20"
                 )
                 question = (
                     f"What is the average {metric_label} in {fact_label} "
-                    f"by {dim_label} ({dim_table_label})?"
+                    f"by {display_label} ({dim_table_label})?"
                 )
             else:
                 sql = (
-                    f'SELECT {dim_alias}."{dim_col_name}", '
+                    f"SELECT {select_expr} AS dimension, "
                     f"COUNT(*) AS {count_alias} "
                     f"FROM {fact_ref} t0 "
                     + " ".join(join_clauses)
-                    + f' GROUP BY {dim_alias}."{dim_col_name}" '
+                    + f" {dim_join_sql} "
+                    + f"GROUP BY {group_expr} "
                     f"ORDER BY {count_alias} DESC LIMIT 20"
                 )
                 question = (
                     f"How many {_row_subject_label(metadata, fact_label)} are there by "
-                    f"{dim_label} ({dim_table_label})?"
+                    f"{display_label} ({dim_table_label})?"
                 )
 
             suggestions.append(
