@@ -1138,6 +1138,7 @@ def compute_top_insights(con, tables, profiles) -> list[dict]:
 _SEMANTIC_HIGHLIGHT_ORDER = [
     "data_quality",
     "duration_distribution",
+    "wait_time_pattern",
     "geographic_hotspot",
     "peak_period",
     "route_pair",

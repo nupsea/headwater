@@ -37,6 +37,7 @@ _INSIGHT_TYPE_LIMITS = {
     "volume_distribution": 3,
     "peak_period": 3,
     "duration_distribution": 3,
+    "wait_time_pattern": 3,
     "geographic_hotspot": 3,
     "route_pair": 3,
     "congestion_proxy": 2,

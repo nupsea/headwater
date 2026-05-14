@@ -59,6 +59,7 @@ _INSIGHT_TYPE_TO_FAMILY = {
     "volume_distribution": "volume",
     "peak_period": "peak",
     "duration_distribution": "duration",
+    "wait_time_pattern": "wait",
     "geographic_hotspot": "geo",
     "route_pair": "route",
     "congestion_proxy": "congestion",
@@ -1053,7 +1054,7 @@ def _wait_family(
                 StatisticalInsight(
                     metric="wait_min",
                     table_name=source_table,
-                    insight_type="duration_distribution",
+                    insight_type="wait_time_pattern",
                     description=(
                         f"{_service_value_label(rows[0][0])} wait time is highest around "
                         f"{hours}, with p90 wait near {float(rows[0][3]):.1f} minutes."
@@ -1086,7 +1087,7 @@ def _wait_family(
         StatisticalInsight(
             metric="wait_min",
             table_name=source_table,
-            insight_type="duration_distribution",
+            insight_type="wait_time_pattern",
             description=(
                 f"Wait time is highest around {hours}, with p90 wait near "
                 f"{float(rows[0][2]):.1f} minutes."

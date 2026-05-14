@@ -372,7 +372,7 @@ class StatisticalInsight(BaseModel):
         "temporal_anomaly", "period_comparison", "change_point",
         "correlation", "distribution_shift", "coverage_period",
         "volume_distribution", "peak_period", "duration_distribution",
-        "geographic_hotspot", "route_pair", "congestion_proxy",
+        "wait_time_pattern", "geographic_hotspot", "route_pair", "congestion_proxy",
         "data_quality",
     ]
     description: str  # Plain-English explanation

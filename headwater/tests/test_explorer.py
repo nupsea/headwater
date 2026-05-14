@@ -2671,6 +2671,7 @@ class TestStatistical:
         assert "peak_period" in types
         assert "geographic_hotspot" in types
         assert "duration_distribution" in types
+        assert "wait_time_pattern" in types
         assert "data_quality" in types
         assert "6 PM is the busiest" in descriptions
         assert "Weekday trips average" in descriptions
@@ -2749,6 +2750,7 @@ class TestStatistical:
         assert "volume_distribution" in types
         assert "geographic_hotspot" in types
         assert "duration_distribution" in types
+        assert "wait_time_pattern" in types
         assert "8 AM is the busiest" in descriptions
         assert "Plant A has the longest high-volume" in descriptions
         assert "Emergency wait time is highest around 8 AM and 3 PM" in descriptions
@@ -2918,7 +2920,7 @@ class TestStatistical:
         )
         assert all("79 -> 265" not in h["detail"] for h in highlights)
         assert any(
-            h["insight_type"] in {"peak_period", "duration_distribution"}
+            h["insight_type"] in {"peak_period", "duration_distribution", "wait_time_pattern"}
             for h in highlights
         )
 
