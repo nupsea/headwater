@@ -228,7 +228,7 @@ def _select_diverse_questions(
         "catalog": 3,
         "mart": 3,
         "cross_table": 3,
-        "semantic": 3,
+        "semantic": 5,
         "relationship": 2,
         "quality": 2,
     }
@@ -237,7 +237,7 @@ def _select_diverse_questions(
         "average": 2,
         "count": 2,
         "ranking": 4,
-        "distribution": 2,
+        "distribution": 3,
         "quality": 2,
         "other": 3,
     }
@@ -339,7 +339,7 @@ def _select_diverse_questions(
         primary_table = (question.relevant_tables or [question.category])[0]
         table_counts[primary_table] = table_counts.get(primary_table, 0) + 1
 
-    lead_order = ("ranking", "comparison", "trend", "other", "count", "distribution", "quality")
+    lead_order = ("ranking", "comparison", "trend", "distribution", "other", "count", "quality")
     for shape in lead_order:
         lead = next(
             (
@@ -387,6 +387,10 @@ def _question_template(question: str) -> str:
         return "trend_over_time"
     if q.startswith("how do ") and " compare" in q:
         return "comparison"
+    if q.startswith("how does ") and " vary by " in q:
+        return "matrix"
+    if q.startswith("how does ") and " relate to " in q:
+        return "correlation"
     if q.startswith("which ") and " drives " in q:
         return "driver"
     if q.startswith("which ") and " dominates " in q:
@@ -454,6 +458,8 @@ def _question_shape(question: str) -> str:
         return "trend"
     if q.startswith("how do ") and " compare" in q:
         return "comparison"
+    if q.startswith("how does ") and (" relate to " in q or " vary by " in q):
+        return "comparison"
     if q.startswith("what is the average "):
         return "average"
     if q.startswith("how many "):
@@ -499,6 +505,10 @@ def _question_value_score(
         score -= 4
     if any(token in lower for token in ("highest", "changed over time", "how many")):
         score += 2
+    if " relate to " in lower:
+        score += 5
+    if " vary by " in lower:
+        score += 4
     if _is_part_to_whole_distribution_question(lower):
         score += 8
     if lower.startswith("which ") and " highest " in lower and " volume " not in lower:
@@ -524,6 +534,8 @@ def _decision_question_bonus(question: str) -> int:
         "busiest": 6,
         "hour has the highest": 5,
         "highest": 3,
+        "relate to": 5,
+        "vary by": 4,
         "service": 2,
         "channel": 2,
         "payment": 1,
@@ -1182,8 +1194,9 @@ def _metric_question_score(column_name: str) -> int:
     score = 0
     strong_tokens = (
         "amount", "total", "cost", "price", "fare", "revenue", "sales", "value",
-        "score", "severity", "duration", "elapsed", "distance", "miles", "rate",
-        "percent", "ratio", "count", "qty", "quantity", "avg", "mean", "p90", "p95",
+        "margin", "profit", "spend", "score", "severity", "duration", "elapsed",
+        "distance", "miles", "rate", "percent", "ratio", "count", "qty", "quantity",
+        "avg", "mean", "p90", "p95",
     )
     if any(token in lower for token in strong_tokens):
         score += 10
@@ -1760,6 +1773,39 @@ def _from_table_structure(
                 )
             )
 
+            if dim_cols:
+                d_col = dim_cols[0]
+                month_expr = _time_bucket_expression(t_col, t_dtype, grain="month")
+                group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                    table,
+                    d_col,
+                    lookup_index,
+                    metadata,
+                    con=con,
+                    models=models,
+                )
+                questions.append(
+                    SuggestedQuestion(
+                        question=(
+                            f"How does {_metric_question_label(m_col, metadata)} vary by "
+                            f"month and {display_label} in {label}?"
+                        ),
+                        source="semantic",
+                        category=label.title(),
+                        relevant_tables=[table.name],
+                        sql_hint=(
+                            f"SELECT {month_expr} AS period, "
+                            f"{select_expr} AS dimension, "
+                            f'ROUND(AVG("{m_col}"), 2) AS avg_{m_col} '
+                            f"FROM {ref} fact "
+                            f"{join_sql} "
+                            f'WHERE "{t_col}" IS NOT NULL '
+                            f"AND {group_expr} IS NOT NULL "
+                            f"GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 120"
+                        ),
+                    )
+                )
+
         if dim_cols and metric_cols:
             # Generate questions for up to 2 distinct dimensions (e.g. county
             # and state) so both geographic levels get coverage.
@@ -1821,7 +1867,28 @@ def _from_table_structure(
                         f"FROM {ref} fact "
                         f"{join_sql} "
                         f"WHERE {group_expr} IS NOT NULL "
-                        f"GROUP BY {group_expr} ORDER BY records DESC LIMIT 10"
+                        f"GROUP BY {group_expr} ORDER BY records DESC LIMIT 6"
+                    ),
+                )
+            )
+
+        if len(metric_cols) >= 2:
+            x_col, y_col = metric_cols[:2]
+            questions.append(
+                SuggestedQuestion(
+                    question=(
+                        f"How does {_metric_question_label(x_col, metadata)} relate to "
+                        f"{_metric_question_label(y_col, metadata)} in {label}?"
+                    ),
+                    source="semantic",
+                    category=label.title(),
+                    relevant_tables=[table.name],
+                    sql_hint=(
+                        f'SELECT CAST("{x_col}" AS DOUBLE) AS {x_col}, '
+                        f'CAST("{y_col}" AS DOUBLE) AS {y_col} '
+                        f"FROM {ref} "
+                        f'WHERE "{x_col}" IS NOT NULL AND "{y_col}" IS NOT NULL '
+                        f"LIMIT 200"
                     ),
                 )
             )

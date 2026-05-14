@@ -21,12 +21,20 @@ _DIMENSION_PATTERNS = re.compile(
     r"(name|type|category|status|zone|site|region|level|priority|severity|_type$)", re.IGNORECASE
 )
 _PIE_QUESTION_PATTERNS = re.compile(
-    r"(distribution of|share of|split by|breakdown of|composition of)",
+    r"(distribution of|share of|split by|breakdown of|composition of|how many .+ by)",
     re.IGNORECASE,
 )
 _BUCKET_PATTERNS = re.compile(r"(bucket|bin|range|histogram)", re.IGNORECASE)
 _SHARE_METRIC_PATTERNS = re.compile(
     r"(count|records|share|pct|percent|percentage|volume|total)",
+    re.IGNORECASE,
+)
+_RANKING_QUESTION_PATTERNS = re.compile(
+    r"(highest|lowest|top|bottom|most|least|rank|stand out|dominates?)",
+    re.IGNORECASE,
+)
+_HEATMAP_QUESTION_PATTERNS = re.compile(
+    r"(vary by .+ and .+|across .+ and .+|by .+ and .+|combination of)",
     re.IGNORECASE,
 )
 
@@ -66,6 +74,25 @@ def recommend_visualization(
             description=f"{len(metric_cols)} metrics",
         )
 
+    categorical_axes = temporal_cols + dimension_cols
+
+    # Two axes + metric with a matrix-style question -> heatmap
+    if (
+        len(categorical_axes) >= 2
+        and len(metric_cols) == 1
+        and _should_use_heatmap(question, row_count)
+    ):
+        return VisualizationSpec(
+            chart_type="heatmap",
+            title=(
+                _title_from_question(question)
+                or f"{metric_cols[0]} by {categorical_axes[0]} and {categorical_axes[1]}"
+            ),
+            x_axis=categorical_axes[0],
+            y_axis=categorical_axes[1],
+            description=f"Heatmap of {metric_cols[0]}",
+        )
+
     # Temporal + metric -> line chart
     if temporal_cols and metric_cols:
         group = dimension_cols[0] if dimension_cols else None
@@ -81,7 +108,7 @@ def recommend_visualization(
     # Small categorical part-of-whole -> pie chart
     if (
         dimension_cols
-        and metric_cols
+        and len(metric_cols) == 1
         and len(dimension_cols) == 1
         and _should_use_pie_chart(
             columns,
@@ -187,20 +214,24 @@ def _should_use_pie_chart(
     metric_col: str,
     question: str,
 ) -> bool:
-    if len(data) < 2 or len(data) > 6:
+    if len(data) < 2 or len(data) > 8:
         return False
     if len(columns) > 3:
         return False
     lower_dimension = dimension_col.lower()
     lower_metric = metric_col.lower()
     lower_question = question.lower()
+    if _RANKING_QUESTION_PATTERNS.search(lower_question):
+        return False
     if _BUCKET_PATTERNS.search(lower_dimension):
         return False
     if _looks_like_range_dimension(data, dimension_col):
         return False
-    if not _PIE_QUESTION_PATTERNS.search(lower_question):
+    metric_supports_share = _SHARE_METRIC_PATTERNS.search(lower_metric) is not None
+    question_supports_share = _PIE_QUESTION_PATTERNS.search(lower_question) is not None
+    if not metric_supports_share:
         return False
-    if not _SHARE_METRIC_PATTERNS.search(lower_metric):
+    if not question_supports_share and " by " not in lower_question:
         return False
     total = 0.0
     for row in data:
@@ -211,6 +242,12 @@ def _should_use_pie_chart(
             return False
         total += float(value)
     return total > 0
+
+
+def _should_use_heatmap(question: str, row_count: int) -> bool:
+    if row_count < 6:
+        return False
+    return _HEATMAP_QUESTION_PATTERNS.search(question.lower()) is not None
 
 
 def _looks_like_range_dimension(data: list[dict[str, Any]], column: str) -> bool:

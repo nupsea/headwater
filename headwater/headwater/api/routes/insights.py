@@ -938,7 +938,7 @@ def _select_diverse_insights(insights: list[dict], limit: int = 10) -> list[dict
     max_by_chart = {"line": 4}
     max_by_table = 3
     initial_line_cap = 2
-    preferred_chart_order = ("bar", "pie", "histogram")
+    preferred_chart_order = ("pie", "bar", "histogram")
 
     def can_add(insight: dict) -> bool:
         chart_type = insight["chart_type"]

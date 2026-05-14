@@ -408,6 +408,62 @@ class TestSuggestions:
         assert any("fare amount" in q for q in mart_trends)
         assert not any("passenger count" in q for q in mart_trends)
 
+    def test_semantic_suggestions_include_heatmap_scatter_and_share_prompts(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=2000,
+                    columns=[
+                        ColumnInfo(name="order_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="order_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="region", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="revenue", dtype="float64", semantic_type="metric"),
+                        ColumnInfo(name="margin", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="region",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=4,
+                    top_values=[("North", 700), ("South", 600), ("East", 400)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="revenue",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=1200,
+                    mean=145.0,
+                    stddev=35.0,
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="margin",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=900,
+                    mean=24.0,
+                    stddev=9.0,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        prompts = [q.question.lower() for q in questions]
+
+        assert any("vary by month and region in orders" in q for q in prompts)
+        assert any(
+            " relate to " in q and "revenue" in q and "margin" in q and "in orders" in q
+            for q in prompts
+        )
+        assert any("distribution of " in q and "by region in orders" in q for q in prompts)
+
     def test_low_signal_current_average_period_mart_is_suppressed(self, sample_discovery):
         con = duckdb.connect(":memory:")
         try:
@@ -4718,6 +4774,32 @@ class TestVisualization:
         assert viz.x_axis == "payment_method"
         assert viz.y_axis == "records"
 
+    def test_pie_small_count_breakdown_without_distribution_wording(self):
+        data = [
+            {"site_type": "Roadside", "records": 240},
+            {"site_type": "Urban", "records": 180},
+            {"site_type": "Industrial", "records": 80},
+        ]
+        viz = recommend_visualization(
+            ["site_type", "records"],
+            data,
+            "How many records are there by site type?",
+        )
+        assert viz.chart_type == "pie"
+
+    def test_average_breakdown_with_aux_count_stays_bar(self):
+        data = [
+            {"site_type": "Roadside", "records": 240, "avg_value": 12.5},
+            {"site_type": "Urban", "records": 180, "avg_value": 10.8},
+            {"site_type": "Industrial", "records": 80, "avg_value": 9.3},
+        ]
+        viz = recommend_visualization(
+            ["site_type", "records", "avg_value"],
+            data,
+            "What is the average value in readings by site type?",
+        )
+        assert viz.chart_type == "bar"
+
     def test_numeric_bucket_distribution_stays_bar(self):
         data = [
             {"bucket": "0-10", "records": 15},
@@ -4738,6 +4820,24 @@ class TestVisualization:
         ]
         viz = recommend_visualization(["value", "score"], data)
         assert viz.chart_type == "scatter"
+
+    def test_heatmap_for_matrix_style_question(self):
+        data = [
+            {"period": "2024-01", "sensor_type": "pm25", "avg_value": 12.0},
+            {"period": "2024-01", "sensor_type": "ozone", "avg_value": 18.0},
+            {"period": "2024-02", "sensor_type": "pm25", "avg_value": 14.0},
+            {"period": "2024-02", "sensor_type": "ozone", "avg_value": 19.0},
+            {"period": "2024-03", "sensor_type": "pm25", "avg_value": 11.0},
+            {"period": "2024-03", "sensor_type": "ozone", "avg_value": 17.0},
+        ]
+        viz = recommend_visualization(
+            ["period", "sensor_type", "avg_value"],
+            data,
+            "How does average value vary by month and sensor type in readings?",
+        )
+        assert viz.chart_type == "heatmap"
+        assert viz.x_axis == "period"
+        assert viz.y_axis == "sensor_type"
 
     def test_table_fallback(self):
         data = [{"a": "x", "b": "y", "c": "z"}]
