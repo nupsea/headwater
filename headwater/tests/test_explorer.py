@@ -3861,6 +3861,67 @@ class TestAutoRepair:
         assert len(r.repair_history) == 1
         assert r.repair_history[0]["error"] == "table not found"
 
+    def test_heuristic_sql_sanitizes_aliases_for_hyphenated_columns(self, duckdb_con):
+        duckdb_con.execute("CREATE SCHEMA IF NOT EXISTS staging")
+        duckdb_con.execute(
+            """
+            CREATE OR REPLACE TABLE staging.stg_prst_audience_profile_pivot_history AS
+            SELECT * FROM (
+                VALUES
+                    ('direct_debit', 120.0),
+                    ('credit_card', 240.0),
+                    ('credit_card', 180.0)
+            ) AS t(
+                "subscription-general-detail-latest billing channel",
+                "account-financial-summary-total payments"
+            )
+            """
+        )
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="prst_audience_profile_pivot_history",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(
+                            name="subscription-general-detail-latest billing channel",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(
+                            name="account-financial-summary-total payments",
+                            dtype="float64",
+                            semantic_type="metric",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_prst_audience_profile_pivot_history",
+                model_type="staging",
+                sql="SELECT * FROM prst_audience_profile_pivot_history",
+                description="staging",
+                source_tables=["prst_audience_profile_pivot_history"],
+                status="executed",
+            )
+        ]
+
+        sql = _heuristic_sql(
+            "Which subscription-general-detail-latest billing channel has the highest account-financial-summary-total payments in prst audience profile pivot history?",
+            discovery,
+            models,
+            con=duckdb_con,
+        )
+
+        assert sql is not None
+        assert "max_account_financial_summary_total_payments" in sql
+        result = duckdb_con.execute(sql).fetchall()
+        assert result
+
 
 # ---------------------------------------------------------------------------
 # Grounding check tests

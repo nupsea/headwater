@@ -732,6 +732,12 @@ export interface Project {
   progress?: ProjectProgress;
 }
 
+export interface ProjectUpdatePayload {
+  display_name?: string;
+  description?: string;
+  sources?: string[];
+}
+
 // ---------- v2: Catalog types ----------
 
 export interface CatalogMetric {
@@ -982,6 +988,36 @@ export interface ConnectionTestResult {
   detail: string;
 }
 
+export interface SetupDraftSecretResponse {
+  password: string;
+}
+
+export interface SourcePreviewTableDetail {
+  name: string;
+  estimated_rows: number | null;
+}
+
+export interface SourcePreviewResponse {
+  source_name: string;
+  source_type: string;
+  schemas_found: number;
+  schemas: string[];
+  tables_found: number;
+  tables_considered: number;
+  tables_skipped: number;
+  tables_skipped_names: string[];
+  tables: SourcePreviewTableDetail[];
+  total_estimated_rows: number | null;
+  has_row_estimates: boolean;
+  config: {
+    max_tables: number;
+    sample_rows: number;
+    schema_filter: Record<string, string[]> | null;
+  };
+  sample_rows_per_table: number;
+  estimated_sample_total: number;
+}
+
 // ---------- Warehouse insight planning types ----------
 
 export interface WarehouseInsightCandidate {
@@ -1079,10 +1115,18 @@ export const api = {
   status: (projectId?: string | null) =>
     fetchJSON<StatusResponse>(`/status${projectQuery(projectId)}`),
 
-  testConnection: (sourcePath: string, sourceType = "auto") =>
+  testConnection: (sourcePath: string, sourceType = "auto", filters?: { include_schemas?: string[]; exclude_schemas?: string[]; include_tables?: string[]; exclude_tables?: string[] }) =>
     fetchJSON<ConnectionTestResult>(
-      `/pipeline/test-connection?source_path=${encodeURIComponent(sourcePath)}&source_type=${sourceType}`,
-      { method: "POST" }
+      `/pipeline/test-connection`,
+      { 
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          source_path: sourcePath, 
+          source_type: sourceType,
+          ...filters 
+        }),
+      }
     ),
 
   pipelineRun: (sourcePath: string, sourceType = "auto") =>
@@ -1302,11 +1346,29 @@ export const api = {
 
   // v3: Verify LLM connectivity
   verifyLLM: () => fetchJSON<LLMVerifyResponse>("/settings/verify-llm"),
+  getCreateProjectSecret: () =>
+    fetchJSON<SetupDraftSecretResponse>("/settings/setup-drafts/create-project-secret"),
+  saveCreateProjectSecret: (body: { password: string }) =>
+    fetchJSON<{ saved: boolean }>("/settings/setup-drafts/create-project-secret", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteCreateProjectSecret: () =>
+    fetchJSON<{ deleted: boolean }>("/settings/setup-drafts/create-project-secret", {
+      method: "DELETE",
+    }),
 
   // v3: Create project
   createProject: (body: CreateProjectPayload) =>
     fetchJSON<Project>("/projects", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  updateProject: (id: string, body: ProjectUpdatePayload) =>
+    fetchJSON<Project>(`/projects/${id}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
@@ -1409,6 +1471,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  updateSource: (name: string, body: SourceUpdatePayload) =>
+    fetchJSON<SourceDetail>(`/sources/${name}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   syncSource: (name: string) =>
     fetchJSON<{
       name: string;
@@ -1431,6 +1499,10 @@ export const api = {
       `/sources/${name}`,
       { method: "DELETE" }
     ),
+  previewSource: (name: string) =>
+    fetchJSON<SourcePreviewResponse>(`/sources/${name}/preview`, {
+      method: "POST",
+    }),
   sourceEvents: (name: string, limit = 50) =>
     fetchJSON<{ events: SystemEvent[] }>(`/sources/${name}/events?limit=${limit}`),
   events: (limit = 50, source?: string) =>
@@ -1565,6 +1637,9 @@ export interface SystemEvent {
 }
 
 export interface SourceDetail extends SourceSummary {
+  uri?: string | null;
+  path?: string | null;
+  config?: Record<string, unknown>;
   events: SystemEvent[];
   runs: SyncRun[];
 }
@@ -1587,6 +1662,16 @@ export interface SyncRun {
 export interface SourceCreatePayload {
   name: string;
   type: string;
+  host?: string;
+  uri?: string;
+  path?: string;
+  display_name?: string;
+  auto_sync?: boolean;
+  config?: Record<string, unknown>;
+}
+
+export interface SourceUpdatePayload {
+  type?: string;
   host?: string;
   uri?: string;
   path?: string;

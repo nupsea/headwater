@@ -156,10 +156,14 @@ def get_catalog(request: Request, project_id: str | None = None):
     lists every table that physically exists in the analytical database.
     """
     con = request.app.state.duckdb_con
-    project_tables: set[str] | None = None
+    project_tables: set[tuple[str | None, str]] | None = None
     if project_id:
         discovery = scoped_pipeline(request, project_id).get("discovery")
-        project_tables = {table.name for table in discovery.tables} if discovery else set()
+        project_tables = (
+            {(table.schema_name, table.name) for table in discovery.tables}
+            if discovery
+            else set()
+        )
 
     rows = con.execute(
         "SELECT table_schema, table_name "
@@ -172,7 +176,7 @@ def get_catalog(request: Request, project_id: str | None = None):
     for schema, tname in rows:
         if schema in _INTERNAL_SCHEMAS:
             continue
-        if project_tables is not None and tname not in project_tables:
+        if project_tables is not None and (schema, tname) not in project_tables:
             continue
 
         # Get column info

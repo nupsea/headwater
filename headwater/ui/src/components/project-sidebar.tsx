@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { api, type Project, type ProjectProgress } from "@/lib/api";
 import { CreateProjectDialog } from "@/components/create-project-dialog";
+import { useProjects } from "@/lib/project-context";
 
 const MATURITY_COLORS: Record<string, string> = {
   raw: "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
@@ -22,31 +23,29 @@ const MATURITY_WIDTHS: Record<string, string> = {
 };
 
 export function ProjectSidebar() {
-  const [projects, setProjects] = useState<Project[]>([]);
   const [progressMap, setProgressMap] = useState<
     Record<string, ProjectProgress>
   >({});
   const [collapsed, setCollapsed] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const pathname = usePathname();
+  const {
+    projects,
+    activeProjectId,
+    refreshProjects,
+    selectProject,
+  } = useProjects();
 
   useEffect(() => {
-    api
-      .projects()
-      .then((res) => {
-        const projs = res.projects || [];
-        setProjects(projs);
-        // Fetch progress for each project
-        projs.forEach((p) => {
-          api
-            .projectProgress(p.id)
-            .then((r) =>
-              setProgressMap((prev) => ({ ...prev, [p.id]: r.progress }))
-            )
-            .catch(() => {});
-        });
-      })
-      .catch(() => {});
+    // Fetch progress for each project
+    projects.forEach((p) => {
+      api
+        .projectProgress(p.id)
+        .then((r) =>
+          setProgressMap((prev) => ({ ...prev, [p.id]: r.progress }))
+        )
+        .catch(() => {});
+    });
   }, [pathname]); // refresh on navigation
 
   if (collapsed) {
@@ -60,13 +59,18 @@ export function ProjectSidebar() {
           &raquo;
         </button>
         {projects.map((p) => (
-          <div
+          <button
             key={p.id}
-            className="w-6 h-6 rounded-full bg-accent/20 flex items-center justify-center text-[9px] font-bold text-accent mt-2"
+            onClick={() => selectProject(p.id)}
+            className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold mt-2 ${
+              p.id === activeProjectId
+                ? "bg-accent text-white"
+                : "bg-accent/20 text-accent"
+            }`}
             title={p.display_name}
           >
             {p.display_name.charAt(0).toUpperCase()}
-          </div>
+          </button>
         ))}
       </div>
     );
@@ -99,8 +103,9 @@ export function ProjectSidebar() {
       <CreateProjectDialog
         open={showCreate}
         onClose={() => setShowCreate(false)}
-        onCreated={(proj) => {
-          setProjects((prev) => [proj, ...prev]);
+        onCreated={async (proj) => {
+          selectProject(proj.id);
+          await refreshProjects();
           setShowCreate(false);
         }}
       />
@@ -118,13 +123,18 @@ export function ProjectSidebar() {
         {projects.map((p) => {
           const prog = progressMap[p.id];
           return (
-            <div
+            <button
               key={p.id}
-              className="px-3 py-3 border-b border-border hover:bg-background transition-colors"
+              onClick={() => selectProject(p.id)}
+              className={`w-full px-3 py-3 border-b border-border hover:bg-background transition-colors text-left ${
+                p.id === activeProjectId ? "bg-accent/5" : ""
+              }`}
             >
               <div className="flex items-center justify-between mb-1">
                 <span
-                  className="text-sm font-medium truncate"
+                  className={`text-sm font-medium truncate ${
+                    p.id === activeProjectId ? "text-accent" : ""
+                  }`}
                   title={p.display_name}
                 >
                   {p.display_name}
@@ -178,7 +188,7 @@ export function ProjectSidebar() {
                   <span>Score: {Math.round(p.maturity_score * 100)}%</span>
                 </div>
               )}
-            </div>
+            </button>
           );
         })}
       </div>

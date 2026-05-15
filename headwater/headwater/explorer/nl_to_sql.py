@@ -47,6 +47,18 @@ logger = logging.getLogger(__name__)
 
 MAX_REPAIR_ATTEMPTS = 3
 
+
+def _safe_sql_alias(value: str, prefix: str | None = None) -> str:
+    """Return a stable SQL-safe alias for human-readable column names."""
+    normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", value).strip("_").lower()
+    if not normalized:
+        normalized = "value"
+    if normalized[0].isdigit():
+        normalized = f"c_{normalized}"
+    if prefix:
+        normalized = f"{prefix}_{normalized}"
+    return normalized
+
 _FORBIDDEN_PATTERNS = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXEC)\b",
     re.IGNORECASE,
@@ -728,18 +740,20 @@ def _heuristic_sql(
     if scalar_agg and not has_breakdown_word:
         metric = target_metric or (metric_cols[0] if metric_cols else None)
         if metric:
+            alias = _safe_sql_alias(metric.name, scalar_agg.lower())
             return (
                 f'SELECT {scalar_agg}("{metric.name}") AS '
-                f'{scalar_agg.lower()}_{metric.name} FROM {table_ref}'
+                f"{alias} FROM {table_ref}"
             )
 
     # -- COUNT DISTINCT: "how many distinct X are there?"
     if is_count and has_distinct:
         dim = target_dim or (dimension_cols[0] if dimension_cols else None)
         if dim:
+            alias = _safe_sql_alias(dim.name, "distinct")
             return (
                 f'SELECT COUNT(DISTINCT "{dim.name}") AS '
-                f'distinct_{dim.name} FROM {table_ref}'
+                f"{alias} FROM {table_ref}"
             )
 
     # -- Trend query: metric over time, optionally grouped by a dimension
@@ -764,7 +778,8 @@ def _heuristic_sql(
         if dim:
             parts[0] += f', "{dim.name}"'
         if metric:
-            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}'
+            avg_alias = _safe_sql_alias(metric.name, "avg")
+            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS {avg_alias}'
             parts[0] += ", COUNT(*) AS total"
         else:
             parts[0] += ", COUNT(*) AS total"
@@ -782,13 +797,14 @@ def _heuristic_sql(
         metric = target_metric or (metric_cols[0] if metric_cols else None)
         parts = [f'SELECT "{target_dim.name}"']
         if metric:
-            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}'
+            avg_alias = _safe_sql_alias(metric.name, "avg")
+            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS {avg_alias}'
         parts[0] += ", COUNT(*) AS total"
         parts.append(f"FROM {table_ref}")
         parts.append(f'GROUP BY "{target_dim.name}"')
         order = "ORDER BY total DESC"
         if metric:
-            order = f"ORDER BY avg_{metric.name} DESC"
+            order = f"ORDER BY {avg_alias} DESC"
         parts.append(order)
         return " ".join(parts)
 
@@ -797,12 +813,13 @@ def _heuristic_sql(
         metric = target_metric or (metric_cols[0] if metric_cols else None)
         dim = target_dim or (dimension_cols[0] if dimension_cols else None)
         if dim and metric:
+            avg_alias = _safe_sql_alias(metric.name, "avg")
             return (
-                f'SELECT "{dim.name}", ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}, '
+                f'SELECT "{dim.name}", ROUND(AVG("{metric.name}"), 2) AS {avg_alias}, '
                 f"COUNT(*) AS total "
                 f"FROM {table_ref} "
                 f'GROUP BY "{dim.name}" '
-                f"ORDER BY avg_{metric.name} DESC LIMIT 15"
+                f"ORDER BY {avg_alias} DESC LIMIT 15"
             )
         if dim:
             return (
@@ -826,9 +843,10 @@ def _heuristic_sql(
     if dimension_cols and metric_cols:
         dim = target_dim or dimension_cols[0]
         metric = target_metric or metric_cols[0]
+        avg_alias = _safe_sql_alias(metric.name, "avg")
         return (
             f'SELECT "{dim.name}", '
-            f'ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}, '
+            f'ROUND(AVG("{metric.name}"), 2) AS {avg_alias}, '
             f"COUNT(*) AS total "
             f"FROM {table_ref} "
             f'GROUP BY "{dim.name}" '
@@ -894,7 +912,9 @@ def _build_join_sql(
 
     select_parts = [f'{group_col} AS "{group_label}"', "COUNT(*) AS total"]
     if pri_metric:
-        select_parts.append(f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}')
+        select_parts.append(
+            f'ROUND(AVG(p."{pri_metric.name}"), 2) AS {_safe_sql_alias(pri_metric.name, "avg")}'
+        )
 
     return (
         f"SELECT {', '.join(select_parts)} "
@@ -1039,7 +1059,9 @@ def _build_indirect_join_sql(
 
     select_parts = [f'{group_col} AS "{group_label}"', "COUNT(*) AS total"]
     if pri_metric:
-        select_parts.append(f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}')
+        select_parts.append(
+            f'ROUND(AVG(p."{pri_metric.name}"), 2) AS {_safe_sql_alias(pri_metric.name, "avg")}'
+        )
 
     return (
         f"SELECT {', '.join(select_parts)} "

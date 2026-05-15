@@ -25,6 +25,7 @@ class SourceConfig(BaseModel):
         "postgres",
         "mysql",
         "snowflake",
+        "redshift",
     ]
     path: str | None = None  # For file-based sources
     uri: str | None = None  # For database sources
@@ -231,7 +232,7 @@ class GeneratedModel(BaseModel):
     description: str
     source_tables: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
-    status: Literal["proposed", "approved", "rejected", "executed"] = "proposed"
+    status: Literal["proposed", "approved", "rejected", "executed", "invalidated"] = "proposed"
     assumptions: list[str] = Field(default_factory=list)  # For marts
     questions: list[str] = Field(default_factory=list)  # Clarifying questions for reviewer
 

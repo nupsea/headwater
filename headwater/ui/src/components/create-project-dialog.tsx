@@ -8,6 +8,7 @@ import {
   type Project,
   type SourceCreatePayload,
 } from "@/lib/api";
+import { ConnectionTestResultPanel } from "@/components/connection-test-result";
 import { useToast } from "@/components/toast";
 
 interface CreateProjectDialogProps {
@@ -33,7 +34,25 @@ type ConnectionForm = {
   auto_sync: boolean;
   max_tables: number;
   sample_rows: number;
+  include_schemas: string;
+  exclude_schemas: string;
+  include_tables: string;
+  exclude_tables: string;
 };
+
+type SetupDraft = {
+  version: 1;
+  step: Step;
+  projectName: string;
+  projectDescription: string;
+  search: string;
+  selectedConnectorId: string | null;
+  form: ConnectionForm;
+};
+
+const DRAFT_STORAGE_KEY = "headwater.createProjectDraft";
+const PASSWORD_SESSION_KEY = "headwater.createProjectPassword";
+const FILTERABLE_CONNECTORS = new Set(["redshift", "snowflake", "postgres", "mysql"]);
 
 const DEFAULT_FORM: ConnectionForm = {
   source_name: "",
@@ -50,6 +69,10 @@ const DEFAULT_FORM: ConnectionForm = {
   auto_sync: true,
   max_tables: 50,
   sample_rows: 10_000,
+  include_schemas: "",
+  exclude_schemas: "",
+  include_tables: "",
+  exclude_tables: "",
 };
 
 const CONNECTOR_HINTS: Record<string, { title: string; bullets: string[] }> = {
@@ -109,6 +132,14 @@ const CONNECTOR_HINTS: Record<string, { title: string; bullets: string[] }> = {
       "Headwater will treat the directory as a file source, not a database.",
     ],
   },
+  redshift: {
+    title: "Redshift connection guide",
+    bullets: [
+      "Use standard host:port/db or redshift+iam:// for IAM authentication.",
+      "Headwater supports both standard user/pass and AWS Access Keys.",
+      "Use schema filters to scope discovery to specific analytics schemas.",
+    ],
+  },
 };
 
 export function CreateProjectDialog({
@@ -117,11 +148,13 @@ export function CreateProjectDialog({
   onCreated,
 }: CreateProjectDialogProps) {
   const { toast } = useToast();
+  const draftLoadedRef = useRef(false);
   const [step, setStep] = useState<Step>(1);
   const [projectName, setProjectName] = useState("");
   const [projectDescription, setProjectDescription] = useState("");
   const [connectors, setConnectors] = useState<ConnectorType[]>([]);
   const [selectedConnector, setSelectedConnector] = useState<ConnectorType | null>(null);
+  const [savedConnectorId, setSavedConnectorId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [form, setForm] = useState<ConnectionForm>(DEFAULT_FORM);
   const [preflight, setPreflight] = useState<ConnectionTestResult | null>(null);
@@ -129,6 +162,7 @@ export function CreateProjectDialog({
   const [testing, setTesting] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
+  const [hasSavedDraft, setHasSavedDraft] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -140,19 +174,55 @@ export function CreateProjectDialog({
 
   useEffect(() => {
     if (!open) {
+      draftLoadedRef.current = false;
       setStep(1);
-      setProjectName("");
-      setProjectDescription("");
-      setSelectedConnector(null);
-      setSearch("");
-      setForm(DEFAULT_FORM);
       setPreflight(null);
       preflightRef.current = null;
       setTesting(false);
       setCreating(false);
       setError("");
+      setHasSavedDraft(loadDraft() !== null);
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!open || draftLoadedRef.current) return;
+    const draft = loadDraft();
+    if (!draft) return;
+    draftLoadedRef.current = true;
+    setStep(draft.step);
+    setProjectName(draft.projectName);
+    setProjectDescription(draft.projectDescription);
+    setSearch(draft.search);
+    setForm({ ...DEFAULT_FORM, ...draft.form });
+    setSavedConnectorId(draft.selectedConnectorId);
+    setHasSavedDraft(true);
+    toast("Restored saved setup draft from this browser", "info");
+  }, [open, toast]);
+
+  useEffect(() => {
+    if (!open) return;
+    const sessionPassword = loadSessionPassword();
+    if (sessionPassword) {
+      setForm((current) => ({ ...current, password: sessionPassword }));
+      return;
+    }
+    if (!hasSavedDraft) return;
+    api
+      .getCreateProjectSecret()
+      .then((secret) => {
+        if (!secret.password) return;
+        setForm((current) => ({ ...current, password: secret.password }));
+        saveSessionPassword(secret.password);
+      })
+      .catch(() => {});
+  }, [hasSavedDraft, open]);
+
+  useEffect(() => {
+    if (!savedConnectorId || connectors.length === 0) return;
+    const connector = connectors.find((item) => item.id === savedConnectorId) ?? null;
+    setSelectedConnector(connector);
+  }, [connectors, savedConnectorId]);
 
   useEffect(() => {
     if (!selectedConnector) return;
@@ -169,6 +239,7 @@ export function CreateProjectDialog({
       }
       if (selectedConnector.id === "postgres" && !next.port) next.port = "5432";
       if (selectedConnector.id === "mysql" && !next.port) next.port = "3306";
+      if (selectedConnector.id === "redshift" && !next.port) next.port = "5439";
       return next;
     });
   }, [projectName, selectedConnector]);
@@ -194,7 +265,15 @@ export function CreateProjectDialog({
     form.source_name,
     form.user,
     form.warehouse,
+    form.include_schemas,
+    form.exclude_schemas,
+    form.include_tables,
+    form.exclude_tables,
   ]);
+
+  useEffect(() => {
+    saveSessionPassword(form.password);
+  }, [form.password]);
 
   const groupedConnectors = useMemo(() => {
     const filtered = connectors.filter(
@@ -219,10 +298,50 @@ export function CreateProjectDialog({
       return;
     }
     setSelectedConnector(connector);
+    setSavedConnectorId(connector.id);
     setPreflight(null);
     preflightRef.current = null;
     setError("");
     setStep(2);
+  };
+
+  const saveDraft = () => {
+    const draft: SetupDraft = {
+      version: 1,
+      step,
+      projectName,
+      projectDescription,
+      search,
+      selectedConnectorId: selectedConnector?.id ?? savedConnectorId,
+      form: {
+        ...form,
+        password: "",
+      },
+    };
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    }
+    api
+      .saveCreateProjectSecret({ password: form.password })
+      .then(() => {
+        setHasSavedDraft(true);
+        toast("Setup draft saved on this browser", "success");
+      })
+      .catch((e) => {
+        const message = e instanceof Error ? e.message : String(e);
+        toast(`Draft save failed: ${message}`, "error");
+      });
+  };
+
+  const discardDraft = () => {
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(DRAFT_STORAGE_KEY);
+    }
+    clearSessionPassword();
+    setForm((current) => ({ ...current, password: "" }));
+    void api.deleteCreateProjectSecret().catch(() => {});
+    setHasSavedDraft(false);
+    toast("Saved setup draft removed", "info");
   };
 
   const testConnection = async () => {
@@ -239,7 +358,13 @@ export function CreateProjectDialog({
     setError("");
     setPreflight(null);
     try {
-      const result = await api.testConnection(target, selectedConnector.id);
+      const filters = {
+        include_schemas: form.include_schemas.split(",").map(s => s.trim()).filter(Boolean),
+        exclude_schemas: form.exclude_schemas.split(",").map(s => s.trim()).filter(Boolean),
+        include_tables: form.include_tables.split(",").map(s => s.trim()).filter(Boolean),
+        exclude_tables: form.exclude_tables.split(",").map(s => s.trim()).filter(Boolean),
+      };
+      const result = await api.testConnection(target, selectedConnector.id, filters);
       setPreflight(result);
       preflightRef.current = result;
       toast(
@@ -269,6 +394,10 @@ export function CreateProjectDialog({
         display_name: projectName.trim(),
         description: projectDescription.trim() || undefined,
       });
+      discardStoredDraft();
+      clearSessionPassword();
+      await api.deleteCreateProjectSecret().catch(() => {});
+      setHasSavedDraft(false);
       toast("Project created", "success");
       onCreated(project);
       onClose();
@@ -302,23 +431,24 @@ export function CreateProjectDialog({
 
     setCreating(true);
     setError("");
+    let createdSourceName: string | null = null;
     try {
       const sourceName =
         form.source_name.trim() || slugify(`${projectName.trim()}-${selectedConnector.id}`);
-      const project = await api.createProject({
-        display_name: projectName.trim(),
-        description: projectDescription.trim() || undefined,
-        sources: [sourceName],
-      });
       const sourcePayload: SourceCreatePayload = {
         name: sourceName,
         type: selectedConnector.id,
-        display_name: form.display_name.trim() || `${project.display_name} ${selectedConnector.name}`,
+        display_name:
+          form.display_name.trim() || `${projectName.trim()} ${selectedConnector.name}`,
         auto_sync: form.auto_sync,
         config: {
           max_tables: form.max_tables,
           sample_rows: form.sample_rows,
           connector: selectedConnector.id,
+          include_schemas: form.include_schemas.split(",").map(s => s.trim()).filter(Boolean),
+          exclude_schemas: form.exclude_schemas.split(",").map(s => s.trim()).filter(Boolean),
+          include_tables: form.include_tables.split(",").map(s => s.trim()).filter(Boolean),
+          exclude_tables: form.exclude_tables.split(",").map(s => s.trim()).filter(Boolean),
           connection: {
             host: form.host.trim() || undefined,
             port: form.port.trim() || undefined,
@@ -340,20 +470,30 @@ export function CreateProjectDialog({
       if ("host" in connectionValue) {
         sourcePayload.host = connectionValue.host;
       }
-      if (selectedConnector.id === "snowflake" || selectedConnector.id === "postgres" || selectedConnector.id === "mysql") {
+      if (selectedConnector.id === "snowflake" || selectedConnector.id === "postgres" || selectedConnector.id === "mysql" || selectedConnector.id === "redshift") {
         sourcePayload.host = form.host.trim() || undefined;
       }
       const source = await api.createSource(sourcePayload);
+      createdSourceName = source.name;
       const persistedTest = await api.testSource(source.name);
       if (persistedTest.status !== "ok") {
         await api.deleteSource(source.name).catch(() => {});
         throw new Error(persistedTest.detail || "Persisted source validation failed.");
       }
+      const project = await api.createProject({
+        display_name: projectName.trim(),
+        description: projectDescription.trim() || undefined,
+        sources: [sourceName],
+      });
       if (form.auto_sync) {
         toast(`Connected ${source.display_name || source.name}; starting sync`, "info");
         await api.syncSource(source.name);
       }
       onCreated(project);
+      discardStoredDraft();
+      clearSessionPassword();
+      await api.deleteCreateProjectSecret().catch(() => {});
+      setHasSavedDraft(false);
       toast(
         form.auto_sync
           ? `Created project and ingested ${source.display_name || source.name}`
@@ -362,6 +502,9 @@ export function CreateProjectDialog({
       );
       onClose();
     } catch (e) {
+      if (createdSourceName) {
+        await api.deleteSource(createdSourceName).catch(() => {});
+      }
       const message = e instanceof Error ? e.message : String(e);
       setError(message);
       toast(`Setup failed: ${message}`, "error");
@@ -598,19 +741,23 @@ export function CreateProjectDialog({
                 )}
 
                 {selectedConnector.id === "postgres" ||
-                selectedConnector.id === "mysql" ? (
+                selectedConnector.id === "mysql" ||
+                selectedConnector.id === "redshift" ? (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                     <Field
                       label="Host"
                       value={form.host}
                       onChange={(value) => setForm((current) => ({ ...current, host: value }))}
-                      placeholder="db.example.com"
+                      placeholder={selectedConnector.id === "redshift" ? "cluster.abc.us-east-1.redshift.amazonaws.com" : "db.example.com"}
                     />
                     <Field
                       label="Port"
                       value={form.port}
                       onChange={(value) => setForm((current) => ({ ...current, port: value }))}
-                      placeholder={selectedConnector.id === "mysql" ? "3306" : "5432"}
+                      placeholder={
+                        selectedConnector.id === "mysql" ? "3306" : 
+                        selectedConnector.id === "redshift" ? "5439" : "5432"
+                      }
                     />
                     <Field
                       label="Database"
@@ -633,6 +780,35 @@ export function CreateProjectDialog({
                     />
                   </div>
                 ) : null}
+
+                {FILTERABLE_CONNECTORS.has(selectedConnector.id) && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 border-t border-border pt-4">
+                    <Field
+                      label="Include schema or qualified patterns"
+                      value={form.include_schemas}
+                      onChange={(v) => setForm(f => ({ ...f, include_schemas: v }))}
+                      placeholder="data.dim*, prst.*, view.*"
+                    />
+                    <Field
+                      label="Exclude schema or qualified patterns"
+                      value={form.exclude_schemas}
+                      onChange={(v) => setForm(f => ({ ...f, exclude_schemas: v }))}
+                      placeholder="staging.*, tmp_*"
+                    />
+                    <Field
+                      label="Include tables"
+                      value={form.include_tables}
+                      onChange={(v) => setForm(f => ({ ...f, include_tables: v }))}
+                      placeholder="dim_*, fact_*"
+                    />
+                    <Field
+                      label="Exclude tables"
+                      value={form.exclude_tables}
+                      onChange={(v) => setForm(f => ({ ...f, exclude_tables: v }))}
+                      placeholder="*_tmp"
+                    />
+                  </div>
+                )}
 
                 {selectedConnector.id === "sqlite" ||
                 selectedConnector.id === "duckdb" ||
@@ -729,25 +905,7 @@ export function CreateProjectDialog({
                 </div>
               )}
 
-              {preflight && (
-                <div
-                  className={`rounded-lg border px-3 py-2 ${
-                    preflight.status === "ok"
-                      ? "border-green-200 bg-green-50 text-green-700 dark:border-green-900 dark:bg-green-950/30 dark:text-green-300"
-                      : "border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"
-                  }`}
-                >
-                  <div className="text-sm font-semibold mb-1">
-                    {preflight.status === "ok" ? "Connection ready" : "Connection failed"}
-                  </div>
-                  <div className="text-[12px] leading-5">{preflight.detail}</div>
-                  {preflight.status === "ok" && preflight.table_names?.length ? (
-                    <div className="mt-2 text-[11px] text-inherit/80">
-                      Example tables: {preflight.table_names.slice(0, 4).join(", ")}
-                    </div>
-                  ) : null}
-                </div>
-              )}
+              <ConnectionTestResultPanel result={preflight} />
 
               <div className="rounded-lg border border-border bg-card px-3 py-3 text-[12px] text-muted space-y-2">
                 <div className="font-semibold text-foreground">What happens next</div>
@@ -756,12 +914,39 @@ export function CreateProjectDialog({
                 <div>3. The connection is tested again from the persisted source record.</div>
                 <div>4. If sync is enabled, Headwater ingests tables using bounded sampling.</div>
               </div>
+
+              <div className="rounded-lg border border-border bg-card px-3 py-3 text-[12px] text-muted space-y-2">
+                <div className="font-semibold text-foreground">Draft persistence</div>
+                <div>
+                  Save a draft at any step to keep the current setup on this browser, including
+                  connection details except the password.
+                </div>
+                <div>
+                  The password stays in session storage for refresh recovery and is saved to an
+                  encrypted local Headwater draft file only when you explicitly save a draft.
+                </div>
+                <div>{hasSavedDraft ? "A saved draft is available." : "No saved draft yet."}</div>
+              </div>
             </div>
           </div>
         </div>
 
         <div className="px-6 py-4 border-t border-border flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-2">
+            <button
+              onClick={saveDraft}
+              className="rounded-md border border-border px-3 py-2 text-sm text-muted hover:bg-background"
+            >
+              Save draft
+            </button>
+            {hasSavedDraft && (
+              <button
+                onClick={discardDraft}
+                className="rounded-md border border-border px-3 py-2 text-sm text-muted hover:bg-background"
+              >
+                Discard draft
+              </button>
+            )}
             {step > 1 && (
               <button
                 onClick={() => setStep((current) => Math.max(1, current - 1) as Step)}
@@ -913,6 +1098,53 @@ function buildConnectionTarget(
   return null;
 }
 
+function loadDraft(): SetupDraft | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<SetupDraft>;
+    if (parsed.version !== 1) return null;
+    return {
+      version: 1,
+      step: parsed.step === 2 || parsed.step === 3 ? parsed.step : 1,
+      projectName: typeof parsed.projectName === "string" ? parsed.projectName : "",
+      projectDescription:
+        typeof parsed.projectDescription === "string" ? parsed.projectDescription : "",
+      search: typeof parsed.search === "string" ? parsed.search : "",
+      selectedConnectorId:
+        typeof parsed.selectedConnectorId === "string" ? parsed.selectedConnectorId : null,
+      form: { ...DEFAULT_FORM, ...(parsed.form ?? {}), password: "" },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function discardStoredDraft() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(DRAFT_STORAGE_KEY);
+}
+
+function loadSessionPassword(): string {
+  if (typeof window === "undefined") return "";
+  return window.sessionStorage.getItem(PASSWORD_SESSION_KEY) ?? "";
+}
+
+function saveSessionPassword(password: string) {
+  if (typeof window === "undefined") return;
+  if (password) {
+    window.sessionStorage.setItem(PASSWORD_SESSION_KEY, password);
+  } else {
+    window.sessionStorage.removeItem(PASSWORD_SESSION_KEY);
+  }
+}
+
+function clearSessionPassword() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(PASSWORD_SESSION_KEY);
+}
+
 function buildConnectionValue(
   connectorId: string,
   form: ConnectionForm
@@ -949,6 +1181,16 @@ function buildConnectionValue(
     const database = form.database.trim();
     return {
       uri: `mysql://${user}:${password}@${host}:${port}/${database}`,
+    };
+  }
+  if (connectorId === "redshift") {
+    const user = encodeURIComponent(form.user.trim());
+    const password = encodeURIComponent(form.password.trim());
+    const host = form.host.trim();
+    const port = form.port.trim() || "5439";
+    const database = form.database.trim();
+    return {
+      uri: `redshift://${user}:${password}@${host}:${port}/${database}`,
     };
   }
   if (connectorId === "sqlite") {

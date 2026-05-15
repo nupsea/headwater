@@ -17,6 +17,7 @@ from headwater.api.project_scope import (
     scoped_pipeline,
     visible_projects,
 )
+from headwater.core.runtime_state import get_runtime_state
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -32,6 +33,12 @@ class CreateProjectRequest(BaseModel):
 class RenameProjectRequest(BaseModel):
     display_name: str | None = None
     description: str | None = None
+
+
+class UpdateProjectRequest(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    sources: list[str] | None = None
 
 
 def _slugify(name: str) -> str:
@@ -397,6 +404,23 @@ def _hydrate_project(project: dict, store) -> dict:
     return hydrated
 
 
+def _persist_project_update(store, project_id: str, project: dict, body: UpdateProjectRequest) -> dict:
+    display_name = body.display_name or project["display_name"]
+    description = body.description if body.description is not None else project.get("description", "")
+    sources = body.sources if body.sources is not None else project.get("sources", [])
+    store.upsert_project(
+        project_id,
+        _slugify(display_name),
+        display_name,
+        description=description,
+        sources_json=json.dumps(sources),
+        maturity=project.get("maturity", "raw"),
+        maturity_score=project.get("maturity_score", 0.0),
+        catalog_confidence=project.get("catalog_confidence", 0.0),
+    )
+    return store.get_project(project_id)
+
+
 @router.get("/projects/{project_id}/progress")
 async def get_project_progress(project_id: str, request: Request):
     """Get live progress counters for a project."""
@@ -470,15 +494,24 @@ async def delete_project(project_id: str, request: Request):
     """Delete a project and its catalog data."""
     store = request.app.state.metadata_store
     project = store.get_project(project_id)
-    if not project:
+    if project:
+        store.clear_catalog(project_id)
+        deleted = store.delete_project(project_id)
+        if not deleted:
+            raise HTTPException(status_code=500, detail="Failed to delete project.")
+
+        logger.info("Deleted project %s (%s)", project_id, project.get("display_name"))
+        return {"deleted": project_id}
+
+    source = store.get_source(project_id)
+    if not source:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
 
-    store.clear_catalog(project_id)
-    deleted = store.delete_project(project_id)
+    deleted = store.delete_source(project_id)
     if not deleted:
-        raise HTTPException(status_code=500, detail="Failed to delete project.")
-
-    logger.info("Deleted project %s (%s)", project_id, project.get("display_name"))
+        raise HTTPException(status_code=500, detail="Failed to delete source-backed project.")
+    get_runtime_state(request).clear_for_source(project_id)
+    logger.info("Deleted source-backed project %s (%s)", project_id, source.get("display_name"))
     return {"deleted": project_id}
 
 
@@ -490,24 +523,41 @@ async def rename_project(project_id: str, body: RenameProjectRequest, request: R
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
 
-    display_name = body.display_name or project["display_name"]
-    description = body.description if body.description is not None else project.get("description")
-    slug = _slugify(display_name)
-
-    store.upsert_project(
+    updated = _persist_project_update(
+        store,
         project_id,
-        slug,
-        display_name,
-        description=description,
+        project,
+        UpdateProjectRequest(
+            display_name=body.display_name,
+            description=body.description,
+        ),
     )
     store.log_activity(
         "project_renamed",
-        f"Renamed project to '{display_name}'",
+        f"Renamed project to '{updated['display_name']}'",
         artifact_type="project",
         artifact_id=project_id,
     )
-    updated = store.get_project(project_id)
-    logger.info("Renamed project %s to '%s'", project_id, display_name)
+    logger.info("Renamed project %s to '%s'", project_id, updated["display_name"])
+    return updated
+
+
+@router.patch("/projects/{project_id}")
+async def update_project(project_id: str, body: UpdateProjectRequest, request: Request):
+    """Update project metadata and linked sources."""
+    store = request.app.state.metadata_store
+    project = store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+
+    updated = _persist_project_update(store, project_id, project, body)
+    store.log_activity(
+        "project_updated",
+        f"Updated project '{updated['display_name']}'",
+        artifact_type="project",
+        artifact_id=project_id,
+    )
+    logger.info("Updated project %s", project_id)
     return updated
 
 

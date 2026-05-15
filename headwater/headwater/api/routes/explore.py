@@ -7,6 +7,7 @@ blocks execution (I-4).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -295,7 +296,8 @@ async def ask_question(request: Request, body: AskRequest, project_id: str | Non
                 update={"relationships": list(discovery.relationships) + new_rels}
             )
 
-    result = ask(
+    result = await asyncio.to_thread(
+        ask,
         question=body.question,
         con=con,
         discovery=enriched_discovery,

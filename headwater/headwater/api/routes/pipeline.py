@@ -7,6 +7,7 @@ from pathlib import Path
 
 import duckdb
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from headwater.analyzer.catalog import build_catalog
 from headwater.analyzer.eval import evaluate_catalog
@@ -41,13 +42,49 @@ from headwater.services.pipeline_runner import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+class ConnectionTestRequest(BaseModel):
+    source_path: str
+    source_type: str = "auto"
+    include_schemas: list[str] | None = None
+    exclude_schemas: list[str] | None = None
+    include_tables: list[str] | None = None
+    exclude_tables: list[str] | None = None
 
 @router.post("/pipeline/test-connection")
-def test_connection(source_path: str, source_type: str = "auto"):
+async def test_connection(
+    request: Request,
+    source_path: str | None = None,
+    source_type: str = "auto",
+    include_schemas: list[str] | None = None,
+    exclude_schemas: list[str] | None = None,
+    include_tables: list[str] | None = None,
+    exclude_tables: list[str] | None = None,
+):
     """Test connectivity to a data source without running the full pipeline.
 
     Returns connection status, table count, and any error details.
     """
+    payload = None
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict) and payload:
+        request_body = ConnectionTestRequest.model_validate(payload)
+    else:
+        request_body = ConnectionTestRequest(
+            source_path=source_path or "",
+            source_type=source_type,
+            include_schemas=include_schemas,
+            exclude_schemas=exclude_schemas,
+            include_tables=include_tables,
+            exclude_tables=exclude_tables,
+        )
+    source_path = request_body.source_path
+    source_type = request_body.source_type
+    if not source_path:
+        raise HTTPException(status_code=422, detail="source_path is required")
     if _is_db_uri(source_path):
         resolved_type = (
             source_type if source_type != "auto" else _connector_type_from_uri(source_path)
@@ -56,13 +93,22 @@ def test_connection(source_path: str, source_type: str = "auto"):
         try:
             connector = get_connector(resolved_type)
             connector.connect(source)
+            # Apply filters if provided
+            if hasattr(connector, "set_schema_filter"):
+                filter_config = {
+                    "include_schemas": request_body.include_schemas,
+                    "exclude_schemas": request_body.exclude_schemas,
+                    "include_tables": request_body.include_tables,
+                    "exclude_tables": request_body.exclude_tables,
+                }
+                connector.set_schema_filter(filter_config)
             tables = connector.list_tables()
             connector.close()
             return {
                 "status": "ok",
                 "source_type": resolved_type,
                 "tables": len(tables),
-                "table_names": tables[:20],
+                "table_names": tables,
                 "detail": f"Connected. Found {len(tables)} table(s).",
             }
         except Exception as exc:

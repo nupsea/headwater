@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from headwater.api.app import create_app
+from headwater.core.models import ExplorationResult
 from headwater.api.routes.explore import (
     _diversify_statistical_insights,
     _rank_statistical_insights,
@@ -180,7 +182,7 @@ class TestSourcesCatalog:
         assert evaluations["duckdb"]["profiling_policy"]["mode"] == "observe"
         assert evaluations["snowflake"]["workload"] == "olap"
         assert evaluations["snowflake"]["readiness"] == "preview"
-        assert evaluations["redshift"]["readiness"] == "planned"
+        assert evaluations["redshift"]["readiness"] == "preview"
 
     def test_create_source_rejects_preview_connector(self, client):
         resp = client.post(
@@ -230,6 +232,43 @@ class TestSourcesCatalog:
         assert resp.json()["status"] == "error"
         assert resp.json()["source_type"] == "snowflake"
         assert "snowflake-connector-python" in resp.json()["detail"]
+
+    def test_connection_test_accepts_json_body(self, client):
+        resp = client.post(
+            "/api/pipeline/test-connection",
+            json={"source_path": "/definitely/missing/path", "source_type": "json"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "error"
+        assert resp.json()["source_type"] == "file"
+
+    def test_create_project_secret_roundtrip(self, client, tmp_path, monkeypatch):
+        monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+        from headwater.core.config import get_settings
+
+        get_settings.cache_clear()
+        try:
+            save = client.put(
+                "/api/settings/setup-drafts/create-project-secret",
+                json={"password": "top-secret"},
+            )
+            assert save.status_code == 200
+            assert save.json()["saved"] is True
+
+            load = client.get("/api/settings/setup-drafts/create-project-secret")
+            assert load.status_code == 200
+            assert load.json()["password"] == "top-secret"
+
+            delete = client.delete("/api/settings/setup-drafts/create-project-secret")
+            assert delete.status_code == 200
+            assert delete.json()["deleted"] is True
+
+            load_after = client.get("/api/settings/setup-drafts/create-project-secret")
+            assert load_after.status_code == 200
+            assert load_after.json()["password"] == ""
+        finally:
+            get_settings.cache_clear()
 
     def test_source_test_endpoint_verifies_supported_source(self, client):
         create = client.post(
@@ -438,6 +477,38 @@ class TestSourcesCatalog:
         assert latest_quality["score"] == result["quality_score"]
         assert latest_quality["sync_run_id"] == result["run_id"]
 
+    def test_source_preview_returns_discovery_summary(self, client):
+        create = client.post(
+            "/api/sources",
+            json={
+                "name": "preview_json",
+                "type": "json",
+                "path": SAMPLE_DATA,
+                "config": {"max_tables": 3, "sample_rows": 500},
+            },
+        )
+        assert create.status_code == 201
+
+        resp = client.post("/api/sources/preview_json/preview")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["source_name"] == "preview_json"
+        assert body["source_type"] == "json"
+        assert body["tables_found"] == 8
+        assert body["tables_considered"] == 3
+        assert body["tables_skipped"] == 5
+        assert body["config"]["max_tables"] == 3
+        assert body["config"]["sample_rows"] == 500
+        assert body["sample_rows_per_table"] == 500
+        assert len(body["tables"]) == 3
+        for t in body["tables"]:
+            assert "name" in t
+            assert "estimated_rows" in t
+
+    def test_source_preview_not_found(self, client):
+        resp = client.post("/api/sources/nonexistent/preview")
+        assert resp.status_code == 404
+
     def test_synced_source_can_be_browsed_in_data_viewer(self, client):
         create = client.post(
             "/api/sources",
@@ -450,9 +521,9 @@ class TestSourcesCatalog:
         catalog = client.get("/api/data/catalog")
         assert catalog.status_code == 200
         tables = {row["qualified_name"] for row in catalog.json()["tables"]}
-        assert "env_health.zones" in tables
+        assert "src_sample_json.zones" in tables
 
-        preview = client.get("/api/data/env_health.zones/preview")
+        preview = client.get("/api/data/src_sample_json.zones/preview")
         assert preview.status_code == 200
         body = preview.json()
         assert body["row_count"] > 0
@@ -474,6 +545,19 @@ class TestSourcesCatalog:
         assert client.app.state.pipeline["discovery"] is None
         assert client.app.state.pipeline["staging_models"] == []
         assert client.app.state.metadata_store.get_source("sample_json") is None
+
+    def test_delete_source_backed_project_removes_underlying_source(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+
+        delete = client.delete("/api/projects/sample")
+
+        assert delete.status_code == 200
+        assert delete.json() == {"deleted": "sample"}
+        assert client.app.state.metadata_store.get_source("sample") is None
         assert client.app.state.metadata_store.get_tables("sample_json") == []
 
     def test_duckdb_source_can_be_registered_and_synced(self, client, tmp_path):
@@ -1136,6 +1220,57 @@ class TestProjectRename:
         assert resp.json()["description"] == "Updated desc"
 
 
+class TestProjectUpdate:
+    def test_update_project_sources(self, client):
+        client.post(
+            "/api/sources",
+            json={
+                "name": "warehouse_a",
+                "type": "json",
+                "path": SAMPLE_DATA,
+                "config": {"include_schemas": ["data.dim*", "prst.*"]},
+            },
+        )
+        project = client.post("/api/projects", json={"display_name": "Retail"}).json()
+        resp = client.patch(
+            f"/api/projects/{project['id']}",
+            json={
+                "display_name": "Retail Ops",
+                "description": "Updated",
+                "sources": ["warehouse_a"],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["display_name"] == "Retail Ops"
+        assert data["sources"] == ["warehouse_a"]
+
+
+class TestSourceUpdate:
+    def test_update_source_config(self, client):
+        client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        resp = client.patch(
+            "/api/sources/sample_json",
+            json={
+                "display_name": "Sample JSON",
+                "config": {
+                    "include_schemas": ["data.dim*", "prst.*", "view.*"],
+                    "max_tables": 25,
+                },
+                "auto_sync": True,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["display_name"] == "Sample JSON"
+        assert data["config"]["include_schemas"] == ["data.dim*", "prst.*", "view.*"]
+        assert data["config"]["max_tables"] == 25
+        assert data["auto_sync"] is True
+
+
 class TestProjectGraph:
     """Project-scoped graph API payload shape."""
 
@@ -1485,6 +1620,27 @@ class TestExplorerE2E:
         assert result.get("data") or result.get("sql"), (
             f"Asking '{question}' produced no data and no SQL"
         )
+
+    def test_ask_route_runs_sync_explorer_off_event_loop(self, client, monkeypatch):
+        """The async API route must not call sync ask() on the running event loop."""
+        self._run_pipeline(client)
+
+        def fake_ask(**kwargs):
+            return asyncio.run(asyncio.sleep(0, result=ExplorationResult(
+                question=kwargs["question"],
+                sql="SELECT 1 AS ok",
+                data=[{"ok": 1}],
+                row_count=1,
+                error=None,
+            )))
+
+        monkeypatch.setattr("headwater.api.routes.explore.ask", fake_ask)
+
+        resp = client.post("/api/explore/ask", json={"question": "Does threading work?"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["error"] is None
+        assert payload["data"] == [{"ok": 1}]
 
     def test_pk_fk_suggestions_after_discovery(self, client):
         """PK/FK detection should produce suggestions for tables with _id columns."""

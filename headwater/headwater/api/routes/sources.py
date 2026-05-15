@@ -7,6 +7,7 @@ the connector picker catalog and a per-source sync event log.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -38,6 +39,16 @@ class SourceCreate(BaseModel):
     path: str | None = None
     display_name: str | None = None
     auto_sync: bool = False
+    config: dict | None = None
+
+
+class SourceUpdate(BaseModel):
+    type: str | None = None
+    host: str | None = None
+    uri: str | None = None
+    path: str | None = None
+    display_name: str | None = None
+    auto_sync: bool | None = None
     config: dict | None = None
 
 
@@ -116,6 +127,21 @@ def _row_to_summary(store, row: dict) -> dict:
     }
 
 
+def _row_to_detail(store, row: dict) -> dict:
+    config = row.get("config_json")
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except (TypeError, ValueError):
+            config = {}
+    return {
+        **_row_to_summary(store, row),
+        "uri": row.get("uri"),
+        "path": row.get("path"),
+        "config": config if isinstance(config, dict) else {},
+    }
+
+
 # ---- Routes ---------------------------------------------------------------
 
 
@@ -151,10 +177,10 @@ async def get_source_route(request: Request, name: str):
     row = store.get_source(name)
     if not row:
         raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
-    summary = _row_to_summary(store, row)
-    summary["events"] = store.list_events(source_name=name, limit=20)
-    summary["runs"] = store.list_sync_runs(source_name=name, limit=10)
-    return summary
+    detail = _row_to_detail(store, row)
+    detail["events"] = store.list_events(source_name=name, limit=20)
+    detail["runs"] = store.list_sync_runs(source_name=name, limit=10)
+    return detail
 
 
 @router.get("/sources/{name}/evaluation")
@@ -212,6 +238,51 @@ async def create_source(request: Request, body: SourceCreate):
     return _row_to_summary(store, row)
 
 
+@router.patch("/sources/{name}")
+async def update_source(request: Request, name: str, body: SourceUpdate):
+    """Update a registered source without running sync."""
+    store = request.app.state.metadata_store
+    row = store.get_source(name)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
+
+    next_type = body.type or row["type"]
+    catalog = {c["id"] for c in list_connector_catalog()}
+    if next_type not in catalog:
+        raise HTTPException(status_code=400, detail=f"Unknown connector type: {next_type}")
+    connector = next((c for c in list_connector_catalog() if c["id"] == next_type), None)
+    status = connector_status(next_type)
+    if not connector or not connector.get("supported"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Connector '{next_type}' is {status}, not supported in this build.",
+        )
+
+    store.upsert_source(
+        name,
+        next_type,
+        body.path if body.path is not None else row.get("path"),
+        body.uri if body.uri is not None else row.get("uri"),
+        mode=row.get("mode") or "generate",
+    )
+    store.upsert_source_meta(
+        name,
+        display_name=body.display_name if body.display_name is not None else row.get("display_name"),
+        host=body.host if body.host is not None else row.get("host"),
+        config=body.config if body.config is not None else None,
+        status="idle",
+        auto_sync=body.auto_sync if body.auto_sync is not None else bool(row.get("auto_sync")),
+    )
+    SourceSyncService(request).record_event(
+        EventType.SOURCE_REGISTERED,
+        f"Source '{name}' configuration updated",
+        source_name=name,
+        invalidates=["sources", "briefing"],
+    )
+    updated = store.get_source(name)
+    return _row_to_detail(store, updated)
+
+
 @router.post("/sources/{name}/test")
 async def test_source(request: Request, name: str):
     """Test connection for an existing source without running discovery."""
@@ -245,6 +316,117 @@ async def sync_source(request: Request, name: str):
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ConnectorError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@router.post("/sources/{name}/preview")
+async def preview_source(request: Request, name: str):
+    """Preview what a sync would discover without running the full pipeline.
+
+    Connects to the source, applies schema/table filters from the source config,
+    lists tables and schemas, estimates row counts where available, and returns
+    a summary for the user to confirm before syncing.
+    """
+    store = request.app.state.metadata_store
+    row = store.get_source(name)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
+
+    from headwater.connectors.registry import get_connector
+    from headwater.connectors.schema_filter import SchemaTableFilter
+    from headwater.core.models import SourceConfig
+    from headwater.services.source_sync import _source_config
+
+    config = _source_config(row)
+    source_type = row["type"]
+    uri = row.get("uri")
+    path = row.get("path")
+
+    try:
+        connector = get_connector(source_type)
+        source_cfg = SourceConfig(
+            name=name, type=source_type,
+            uri=uri, path=path,
+        )
+        connector.connect(source_cfg)
+    except ConnectorError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    try:
+        # Apply schema filter from config.
+        sf = SchemaTableFilter.from_config(config)
+        if hasattr(connector, "set_schema_filter") and not sf.is_empty:
+            connector.set_schema_filter(config)
+
+        # List schemas if supported.
+        schemas: list[str] = []
+        if hasattr(connector, "list_schemas"):
+            try:
+                schemas = connector.list_schemas()
+            except Exception:
+                schemas = []
+
+        # List tables.
+        all_tables = connector.list_tables()
+
+        # Apply filter for connectors that don't have built-in filter support.
+        if not hasattr(connector, "set_schema_filter") and not sf.is_empty:
+            all_tables = sf.filter_tables(all_tables)
+
+        max_tables = config.get("max_tables", 50)
+        sample_rows = config.get("sample_rows", 10000)
+        tables_considered = all_tables[:max_tables]
+        tables_skipped = all_tables[max_tables:]
+
+        # Estimate row counts where possible.
+        table_details: list[dict] = []
+        total_estimated_rows = 0
+        has_row_estimates = hasattr(connector, "estimate_row_count")
+        for table_name in tables_considered:
+            row_estimate = None
+            if has_row_estimates:
+                try:
+                    row_estimate = connector.estimate_row_count(table_name)
+                except Exception:
+                    row_estimate = None
+            if row_estimate is not None:
+                total_estimated_rows += row_estimate
+            table_details.append({
+                "name": table_name,
+                "estimated_rows": row_estimate,
+            })
+
+        # Estimate total sample data size.
+        sample_rows_total = min(sample_rows, max(1, total_estimated_rows)) * len(tables_considered)
+        if not has_row_estimates:
+            sample_rows_total = sample_rows * len(tables_considered)
+
+        return {
+            "source_name": name,
+            "source_type": source_type,
+            "schemas_found": len(schemas),
+            "schemas": schemas[:50],
+            "tables_found": len(all_tables),
+            "tables_considered": len(tables_considered),
+            "tables_skipped": len(tables_skipped),
+            "tables_skipped_names": tables_skipped[:20],
+            "tables": table_details,
+            "total_estimated_rows": total_estimated_rows if has_row_estimates else None,
+            "has_row_estimates": has_row_estimates,
+            "config": {
+                "max_tables": max_tables,
+                "sample_rows": sample_rows,
+                "schema_filter": sf.describe() if not sf.is_empty else None,
+            },
+            "sample_rows_per_table": sample_rows,
+            "estimated_sample_total": sample_rows_total,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    finally:
+        if hasattr(connector, "close"):
+            connector.close()
 
 
 @router.delete("/sources/{name}")

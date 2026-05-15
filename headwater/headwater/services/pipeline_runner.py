@@ -37,7 +37,7 @@ from headwater.services.pipeline_state import (
 
 logger = logging.getLogger(__name__)
 
-DB_SCHEMES = {"postgresql", "postgres", "mysql", "mysql+pymysql", "sqlite", "snowflake"}
+DB_SCHEMES = {"postgresql", "postgres", "mysql", "mysql+pymysql", "sqlite", "snowflake", "redshift", "redshift+iam"}
 DEFAULT_MAX_TABLES = 50
 DEFAULT_SAMPLE_ROWS = 10_000
 MAX_TABLES_CAP = 500
@@ -57,6 +57,8 @@ def connector_type_from_uri(uri: str) -> str:
         return "sqlite"
     if uri.startswith("snowflake://"):
         return "snowflake"
+    if uri.startswith(("redshift://", "redshift+iam://")):
+        return "redshift"
     return "json"
 
 
@@ -80,6 +82,7 @@ def run_pipeline(
     target_schema: str,
     max_tables: int = DEFAULT_MAX_TABLES,
     sample_rows: int = DEFAULT_SAMPLE_ROWS,
+    schema_filter_config: dict | None = None,
     auto_confirm,
     connector_factory=get_connector,
 ) -> dict:
@@ -105,6 +108,9 @@ def run_pipeline(
         source = SourceConfig(name=source_name, type=resolved_type, uri=source_path)
         connector = connector_factory(resolved_type)
         connector.connect(source)
+        # Apply schema/table filter if the connector supports it.
+        if schema_filter_config and hasattr(connector, "set_schema_filter"):
+            connector.set_schema_filter(schema_filter_config)
         try:
             all_table_names = connector.list_tables()
             if not all_table_names:

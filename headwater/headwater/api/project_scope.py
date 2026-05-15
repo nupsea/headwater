@@ -205,6 +205,15 @@ def _pipeline_for_source(
 
 
 def _catalog_for_source(store, source_name: str) -> SemanticCatalog | None:
+    get_catalog_metrics = getattr(store, "get_catalog_metrics", None)
+    get_catalog_dimensions = getattr(store, "get_catalog_dimensions", None)
+    get_catalog_entities = getattr(store, "get_catalog_entities", None)
+    if not (
+        callable(get_catalog_metrics)
+        and callable(get_catalog_dimensions)
+        and callable(get_catalog_entities)
+    ):
+        return None
     ids = []
     linked_project = project_for_source(store, source_name)
     if linked_project:
@@ -212,9 +221,9 @@ def _catalog_for_source(store, source_name: str) -> SemanticCatalog | None:
     ids.append(source_name)
 
     for project_id in ids:
-        metrics_raw = store.get_catalog_metrics(project_id)
-        dims_raw = store.get_catalog_dimensions(project_id)
-        ents_raw = store.get_catalog_entities(project_id)
+        metrics_raw = get_catalog_metrics(project_id)
+        dims_raw = get_catalog_dimensions(project_id)
+        ents_raw = get_catalog_entities(project_id)
         if not metrics_raw and not dims_raw and not ents_raw:
             continue
         return SemanticCatalog(
@@ -341,9 +350,12 @@ def _table_search_text(table) -> str:
 
 
 def _contracts_for_models(store, model_names: set[str]) -> list[ContractRule]:
+    get_contracts = getattr(store, "get_contracts", None)
+    if not callable(get_contracts):
+        return []
     normalized_names = {name.split(".", 1)[-1] for name in model_names}
     contracts: list[ContractRule] = []
-    for row in store.get_contracts():
+    for row in get_contracts():
         row_model_name = row["model_name"]
         row_base_name = row_model_name.split(".", 1)[-1]
         if row_model_name not in model_names and row_base_name not in normalized_names:
@@ -365,8 +377,11 @@ def _contracts_for_models(store, model_names: set[str]) -> list[ContractRule]:
 
 
 def _execution_results_for_models(store, model_names: set[str]) -> list[ExecutionResult]:
+    get_execution_results = getattr(store, "get_execution_results", None)
+    if not callable(get_execution_results):
+        return []
     results: list[ExecutionResult] = []
-    for row in store.get_execution_results():
+    for row in get_execution_results():
         if row["model_name"] not in model_names:
             continue
         results.append(
@@ -382,7 +397,10 @@ def _execution_results_for_models(store, model_names: set[str]) -> list[Executio
 
 
 def _quality_report_for_source(store, source_name: str, model_names: set[str]):
-    row = store.get_latest_quality_report(source_name)
+    get_latest_quality_report = getattr(store, "get_latest_quality_report", None)
+    if not callable(get_latest_quality_report):
+        return None
+    row = get_latest_quality_report(source_name)
     if not row:
         return None
     filtered_results = [

@@ -8,7 +8,11 @@ import pytest
 
 from headwater.core.events import EventType
 from headwater.core.metadata import MetadataStore
-from headwater.services.source_sync import SourceNotFoundError, SourceSyncService
+from headwater.services.source_sync import (
+    SourceNotFoundError,
+    SourceSyncService,
+    _default_source_schema,
+)
 
 
 @pytest.fixture()
@@ -65,3 +69,9 @@ def test_record_event_redacts_secret_payloads(meta: MetadataStore):
     assert "secret" not in event["summary"]
     assert event["payload"]["uri"] == "postgresql://user:***@localhost/db"
     assert event["payload"]["password"] == "***"
+
+
+def test_default_source_schema_is_stable_and_source_specific():
+    assert _default_source_schema({"name": "Lifestyle"}) == "src_lifestyle"
+    assert _default_source_schema({"name": "Lifestyle Redshift"}) == "src_lifestyle_redshift"
+    assert _default_source_schema({"name": "123 source"}) == "src_s_123_source"

@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { api, type Project, type ProjectProgress } from "@/lib/api";
 import { useProjects } from "@/lib/project-context";
 import { CreateProjectDialog } from "@/components/create-project-dialog";
+import { EditProjectDialog } from "@/components/edit-project-dialog";
 import { useToast } from "@/components/toast";
 
 const MATURITY_LABEL: Record<string, string> = {
@@ -28,9 +29,6 @@ export default function ProjectsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [progressMap, setProgressMap] = useState<Record<string, ProjectProgress>>({});
   const [editing, setEditing] = useState<Project | null>(null);
-  const [editName, setEditName] = useState("");
-  const [editDescription, setEditDescription] = useState("");
-  const [savingEdit, setSavingEdit] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -54,27 +52,6 @@ export default function ProjectsPage() {
 
   const startEdit = (project: Project) => {
     setEditing(project);
-    setEditName(project.display_name);
-    setEditDescription(project.description || "");
-  };
-
-  const saveEdit = async () => {
-    if (!editing || !editName.trim()) return;
-    setSavingEdit(true);
-    try {
-      await api.renameProject(editing.id, {
-        display_name: editName.trim(),
-        description: editDescription.trim(),
-      });
-      toast("Project updated", "success");
-      setEditing(null);
-      await refreshProjects();
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      toast(`Update failed: ${message}`, "error");
-    } finally {
-      setSavingEdit(false);
-    }
   };
 
   const removeProject = async (project: Project) => {
@@ -232,7 +209,7 @@ export default function ProjectsPage() {
                     onClick={() => startEdit(project)}
                     className="px-3 py-1.5 border border-border rounded-md text-xs font-medium hover:bg-background"
                   >
-                    Rename
+                    Edit project
                   </button>
                   <button
                     onClick={() => removeProject(project)}
@@ -258,53 +235,16 @@ export default function ProjectsPage() {
         }}
       />
 
-      {editing && (
-        <div
-          className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-5"
-          onClick={() => setEditing(null)}
-        >
-          <div
-            className="bg-card border border-border rounded-lg shadow-xl w-full max-w-md p-5"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <h2 className="text-base font-semibold mb-4">Rename project</h2>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs text-muted mb-1">Name</label>
-                <input
-                  value={editName}
-                  onChange={(event) => setEditName(event.target.value)}
-                  className="w-full px-3 py-2 border border-border rounded-md bg-background text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-muted mb-1">Description</label>
-                <textarea
-                  value={editDescription}
-                  onChange={(event) => setEditDescription(event.target.value)}
-                  rows={3}
-                  className="w-full px-3 py-2 border border-border rounded-md bg-background text-sm resize-none"
-                />
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-5">
-              <button
-                onClick={() => setEditing(null)}
-                className="px-3 py-1.5 border border-border rounded-md text-sm text-muted hover:text-foreground"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={saveEdit}
-                disabled={savingEdit || !editName.trim()}
-                className="px-4 py-1.5 bg-accent text-white rounded-md text-sm font-medium disabled:opacity-50"
-              >
-                {savingEdit ? "Saving..." : "Save"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <EditProjectDialog
+        open={Boolean(editing)}
+        project={editing}
+        onClose={() => setEditing(null)}
+        onSaved={async (project) => {
+          selectProject(project.id);
+          setEditing(null);
+          await refreshProjects();
+        }}
+      />
     </div>
   );
 }
