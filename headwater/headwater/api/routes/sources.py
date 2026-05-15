@@ -19,6 +19,7 @@ from headwater.connectors.registry import (
 )
 from headwater.core.events import EventType
 from headwater.core.exceptions import ConnectorError
+from headwater.core.runtime_state import get_runtime_state
 from headwater.services.source_evaluation import evaluate_all_connectors, evaluate_source
 from headwater.services.source_sync import SourceNotFoundError, SourceSyncService
 
@@ -252,17 +253,7 @@ async def delete_source_route(request: Request, name: str):
     if not store.get_source(name):
         raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
     store.delete_source(name)
-    pipeline = getattr(request.app.state, "pipeline", None)
-    if pipeline and pipeline.get("discovery"):
-        active_source = pipeline["discovery"].source.name if pipeline["discovery"].source else None
-        if active_source == name:
-            pipeline["discovery"] = None
-            pipeline["catalog"] = None
-            pipeline["staging_models"] = []
-            pipeline["mart_models"] = []
-            pipeline["contracts"] = []
-            pipeline["execution_results"] = []
-            pipeline["quality_report"] = None
+    get_runtime_state(request).clear_for_source(name)
     return {"name": name, "deleted": True}
 
 

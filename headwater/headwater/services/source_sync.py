@@ -14,6 +14,8 @@ from headwater.core.events import EventType
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 from headwater.core.redaction import redact_secrets
+from headwater.core.runtime_state import get_runtime_state
+from headwater.services.pipeline_runner import run_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -172,10 +174,10 @@ class SourceSyncService:
         return row
 
     def _run_pipeline(self, row: dict, name: str) -> dict:
-        from headwater.api.routes.pipeline import _run_pipeline_inner
+        from headwater.api.routes.pipeline import _auto_confirm
 
         source_path = _source_value(row)
-        pipeline = self.request.app.state.pipeline
+        pipeline = get_runtime_state(self.request)
         source_schema = _default_source_schema(row)
         target_schema = "staging"
         config = _source_config(row)
@@ -183,33 +185,35 @@ class SourceSyncService:
         sample_rows = config.get("sample_rows")
 
         if getattr(self.request.app.state, "_in_memory", False):
-            return _run_pipeline_inner(
+            return run_pipeline(
                 self.request.app.state.duckdb_con,
-                self.request,
-                pipeline,
-                source_path,
-                row["type"],
-                name,
-                source_schema,
-                target_schema,
-                max_tables,
-                sample_rows,
+                pipeline=pipeline,
+                metadata_store=self.store,
+                source_path=source_path,
+                source_type=row["type"],
+                source_name=name,
+                source_schema=source_schema,
+                target_schema=target_schema,
+                max_tables=max_tables,
+                sample_rows=sample_rows,
+                auto_confirm=_auto_confirm,
             )
 
         settings = get_settings()
         con = duckdb.connect(str(settings.analytical_db_path))
         try:
-            return _run_pipeline_inner(
+            return run_pipeline(
                 con,
-                self.request,
-                pipeline,
-                source_path,
-                row["type"],
-                name,
-                source_schema,
-                target_schema,
-                max_tables,
-                sample_rows,
+                pipeline=pipeline,
+                metadata_store=self.store,
+                source_path=source_path,
+                source_type=row["type"],
+                source_name=name,
+                source_schema=source_schema,
+                target_schema=target_schema,
+                max_tables=max_tables,
+                sample_rows=sample_rows,
+                auto_confirm=_auto_confirm,
             )
         finally:
             con.close()

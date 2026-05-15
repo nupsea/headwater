@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from headwater.core.runtime_state import get_runtime_state
 from headwater.executor.duckdb_backend import DuckDBBackend
 from headwater.executor.runner import run_models
 
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 @router.post("/execute")
 async def execute_models(request: Request):
     """Execute all approved models."""
-    pipeline = request.app.state.pipeline
+    pipeline = get_runtime_state(request)
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     if not all_models:
         raise HTTPException(status_code=400, detail="No models generated yet.")

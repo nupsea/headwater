@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from headwater.api.project_scope import scoped_pipeline
 from headwater.core.events import EventType
+from headwater.core.runtime_state import get_runtime_state
 from headwater.generator.contracts import generate_contracts
 from headwater.generator.marts import generate_mart_models
 from headwater.generator.staging import generate_staging_models
@@ -33,7 +34,8 @@ async def generate_models(
     target_schema: str = "staging",
 ):
     """Generate staging models, mart models, and quality contracts."""
-    discovery = request.app.state.pipeline["discovery"]
+    runtime_state = get_runtime_state(request)
+    discovery = runtime_state["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
 
@@ -43,9 +45,9 @@ async def generate_models(
     marts = generate_mart_models(discovery, target_schema=target_schema)
     contracts = generate_contracts(discovery.profiles, target_schema=target_schema)
 
-    request.app.state.pipeline["staging_models"] = staging
-    request.app.state.pipeline["mart_models"] = marts
-    request.app.state.pipeline["contracts"] = contracts
+    runtime_state["staging_models"] = staging
+    runtime_state["mart_models"] = marts
+    runtime_state["contracts"] = contracts
 
     store = getattr(request.app.state, "metadata_store", None)
     if store is not None:

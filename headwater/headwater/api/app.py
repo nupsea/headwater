@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 import traceback
 from contextlib import asynccontextmanager
-from typing import Any
 
 import duckdb
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes import (
     briefing,
     confidence,
@@ -34,7 +34,7 @@ from headwater.api.routes import (
 )
 from headwater.core.config import get_settings
 from headwater.core.metadata import MetadataStore
-from headwater.api.project_scope import scoped_pipeline
+from headwater.core.runtime_state import PipelineRuntimeState, set_runtime_state
 
 # Ensure headwater loggers are visible at INFO level
 logging.basicConfig(
@@ -169,15 +169,16 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to restore pipeline state from metadata")
 
-    app.state.pipeline: dict[str, Any] = {
-        "discovery": restored_discovery,
-        "catalog": restored_catalog,
-        "staging_models": restored_staging,
-        "mart_models": restored_marts,
-        "contracts": restored_contracts,
-        "execution_results": restored_exec_results,
-        "quality_report": None,
-    }
+    runtime_state = PipelineRuntimeState(
+        discovery=restored_discovery,
+        catalog=restored_catalog,
+        staging_models=restored_staging,
+        mart_models=restored_marts,
+        contracts=restored_contracts,
+        execution_results=restored_exec_results,
+        quality_report=None,
+    )
+    set_runtime_state(app, runtime_state)
     yield
     app.state.duckdb_con.close()
     app.state.metadata_store.close()

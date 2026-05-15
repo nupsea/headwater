@@ -6,7 +6,16 @@ from types import SimpleNamespace
 
 from fastapi import HTTPException, Request
 
-from headwater.core.models import ContractRule, ExecutionResult, GeneratedModel
+from headwater.core.models import (
+    ContractRule,
+    DimensionDefinition,
+    EntityDefinition,
+    ExecutionResult,
+    GeneratedModel,
+    MetricDefinition,
+    SemanticCatalog,
+)
+from headwater.core.runtime_state import PipelineRuntimeState, get_runtime_state
 
 
 def resolve_project(store, project_id: str) -> dict | None:
@@ -97,10 +106,22 @@ def catalog_ids_for_project(project: dict, store) -> list[str]:
     return deduped
 
 
-def scoped_pipeline(request: Request, project_id: str | None = None) -> dict:
-    """Return pipeline-like state for a project, falling back to app state."""
+def scoped_pipeline(request: Request, project_id: str | None = None) -> PipelineRuntimeState:
+    """Return runtime pipeline state for a project, falling back to app state."""
     if not project_id:
-        return request.app.state.pipeline
+        runtime_state = get_runtime_state(request)
+        store = getattr(request.app.state, "metadata_store", None)
+        active_source_name = runtime_state.active_source_name()
+        if store is None or not active_source_name:
+            return runtime_state
+        hydrated = _pipeline_for_source(
+            store,
+            active_source_name,
+            runtime_state=runtime_state,
+        )
+        if hydrated is None:
+            return runtime_state
+        return hydrated
 
     store = getattr(request.app.state, "metadata_store", None)
     if store is None:
@@ -112,50 +133,106 @@ def scoped_pipeline(request: Request, project_id: str | None = None) -> dict:
 
     source_names = project_sources(project, store)
     if not source_names:
-        return {
-            "project": project,
-            "source_names": [],
-            "discovery": None,
-            "staging_models": [],
-            "mart_models": [],
-            "contracts": [],
-            "execution_results": [],
-            "quality_report": None,
-        }
+        return PipelineRuntimeState(
+            project=project,
+            source_names=[],
+            discovery=None,
+            staging_models=[],
+            mart_models=[],
+            contracts=[],
+            execution_results=[],
+            quality_report=None,
+        )
 
     source_name = source_names[0]
+    runtime_state = _pipeline_for_source(store, source_name)
+    if runtime_state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No persisted pipeline state found for source '{source_name}'.",
+        )
+    runtime_state.project = project
+    runtime_state.source_names = source_names
+
+    table_names = _project_table_names(project, runtime_state.discovery)
+    if table_names is not None:
+        runtime_state.discovery = _filter_discovery(runtime_state.discovery, table_names)
+        runtime_state.staging_models = _filter_models(runtime_state.staging_models, table_names)
+        runtime_state.mart_models = _filter_models(runtime_state.mart_models, table_names)
+        model_names = {
+            model.name
+            for model in runtime_state.staging_models + runtime_state.mart_models
+        }
+        runtime_state.contracts = _contracts_for_models(store, model_names)
+        runtime_state.execution_results = _execution_results_for_models(store, model_names)
+        runtime_state.quality_report = _quality_report_for_source(store, source_name, model_names)
+    runtime_state.table_names = sorted(table_names) if table_names is not None else None
+    return runtime_state
+
+
+def _pipeline_for_source(
+    store,
+    source_name: str,
+    *,
+    runtime_state: PipelineRuntimeState | None = None,
+) -> PipelineRuntimeState | None:
     try:
         discovery = store.rebuild_discovery(source_name)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to load project source '{source_name}': {exc}",
-        ) from exc
-
-    table_names = _project_table_names(project, discovery)
-    if table_names is not None:
-        discovery = _filter_discovery(discovery, table_names)
+    except Exception:
+        return None
+    if discovery is None:
+        return None
 
     staging, marts = _models_for_source(store, source_name)
-    if table_names is not None:
-        staging = _filter_models(staging, table_names)
-        marts = _filter_models(marts, table_names)
     model_names = {model.name for model in staging + marts}
     contracts = _contracts_for_models(store, model_names)
     execution_results = _execution_results_for_models(store, model_names)
     quality_report = _quality_report_for_source(store, source_name, model_names)
+    catalog = _catalog_for_source(store, source_name)
 
-    return {
-        "project": project,
-        "source_names": source_names,
-        "table_names": sorted(table_names) if table_names is not None else None,
-        "discovery": discovery,
-        "staging_models": staging,
-        "mart_models": marts,
-        "contracts": contracts,
-        "execution_results": execution_results,
-        "quality_report": quality_report,
-    }
+    return PipelineRuntimeState(
+        discovery=discovery,
+        catalog=catalog,
+        staging_models=staging,
+        mart_models=marts,
+        contracts=contracts,
+        execution_results=execution_results,
+        quality_report=quality_report,
+        graph_store=runtime_state.graph_store if runtime_state is not None else None,
+        vector_store=runtime_state.vector_store if runtime_state is not None else None,
+        source_names=[source_name],
+    )
+
+
+def _catalog_for_source(store, source_name: str) -> SemanticCatalog | None:
+    ids = []
+    linked_project = project_for_source(store, source_name)
+    if linked_project:
+        ids.append(linked_project["id"])
+    ids.append(source_name)
+
+    for project_id in ids:
+        metrics_raw = store.get_catalog_metrics(project_id)
+        dims_raw = store.get_catalog_dimensions(project_id)
+        ents_raw = store.get_catalog_entities(project_id)
+        if not metrics_raw and not dims_raw and not ents_raw:
+            continue
+        return SemanticCatalog(
+            metrics=[MetricDefinition(**_remap_catalog_row(row)) for row in metrics_raw],
+            dimensions=[DimensionDefinition(**_remap_catalog_row(row)) for row in dims_raw],
+            entities=[EntityDefinition(**_remap_catalog_row(row)) for row in ents_raw],
+        )
+    return None
+
+
+def _remap_catalog_row(row: dict) -> dict:
+    out = dict(row)
+    if "column_name" in out:
+        out["column"] = out.pop("column_name")
+    if "table_name" in out:
+        out["table"] = out.pop("table_name")
+    out.pop("project_id", None)
+    return out
 
 
 def primary_source_for_project(request: Request, project_id: str) -> str:
@@ -171,7 +248,10 @@ def primary_source_for_project(request: Request, project_id: str) -> str:
     return sources[0]
 
 
-def _models_for_source(store, source_name: str) -> tuple[list[GeneratedModel], list[GeneratedModel]]:
+def _models_for_source(
+    store,
+    source_name: str,
+) -> tuple[list[GeneratedModel], list[GeneratedModel]]:
     staging: list[GeneratedModel] = []
     marts: list[GeneratedModel] = []
     for row in store.get_models(source_name):
@@ -261,22 +341,26 @@ def _table_search_text(table) -> str:
 
 
 def _contracts_for_models(store, model_names: set[str]) -> list[ContractRule]:
+    normalized_names = {name.split(".", 1)[-1] for name in model_names}
     contracts: list[ContractRule] = []
-    for model_name in sorted(model_names):
-        for row in store.get_contracts(model_name):
-            contracts.append(
-                ContractRule(
-                    id=row["id"],
-                    model_name=row["model_name"],
-                    column_name=row.get("column_name"),
-                    rule_type=row["rule_type"],
-                    expression=row["expression"],
-                    severity=row.get("severity", "warning"),
-                    description=row.get("description", ""),
-                    confidence=row.get("confidence", 0.8),
-                    status=row.get("status", "proposed"),
-                )
+    for row in store.get_contracts():
+        row_model_name = row["model_name"]
+        row_base_name = row_model_name.split(".", 1)[-1]
+        if row_model_name not in model_names and row_base_name not in normalized_names:
+            continue
+        contracts.append(
+            ContractRule(
+                id=row["id"],
+                model_name=row_model_name,
+                column_name=row.get("column_name"),
+                rule_type=row["rule_type"],
+                expression=row["expression"],
+                severity=row.get("severity", "warning"),
+                description=row.get("description", ""),
+                confidence=row.get("confidence", 0.8),
+                status=row.get("status", "proposed"),
             )
+        )
     return contracts
 
 
@@ -306,7 +390,11 @@ def _quality_report_for_source(store, source_name: str, model_names: set[str]):
         for result in row.get("results", [])
         if not model_names or result.get("model_name") in model_names
     ]
-    passed = sum(1 for result in filtered_results if result.get("passed") and not result.get("skipped"))
+    passed = sum(
+        1
+        for result in filtered_results
+        if result.get("passed") and not result.get("skipped")
+    )
     skipped = sum(1 for result in filtered_results if result.get("skipped"))
     failed = sum(
         1
