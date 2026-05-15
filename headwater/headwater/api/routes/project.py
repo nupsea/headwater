@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from headwater.api.project_scope import (
     catalog_ids_for_project,
     project_sources,
+    resolve_project,
     scoped_pipeline,
     visible_projects,
 )
@@ -363,7 +364,7 @@ async def list_projects(request: Request):
 async def get_project(project_id: str, request: Request):
     """Get a single project with full progress and maturity."""
     store = request.app.state.metadata_store
-    project = store.get_project(project_id)
+    project = resolve_project(store, project_id)
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
     project = _hydrate_project(project, store)
@@ -400,7 +401,7 @@ def _hydrate_project(project: dict, store) -> dict:
 async def get_project_progress(project_id: str, request: Request):
     """Get live progress counters for a project."""
     store = request.app.state.metadata_store
-    project = store.get_project(project_id)
+    project = resolve_project(store, project_id)
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
 
@@ -426,7 +427,7 @@ async def get_project_progress(project_id: str, request: Request):
 async def get_project_catalog(project_id: str, request: Request):
     """Get the semantic catalog (metrics, dimensions, entities) for a project."""
     store = request.app.state.metadata_store
-    project = store.get_project(project_id)
+    project = resolve_project(store, project_id)
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
 

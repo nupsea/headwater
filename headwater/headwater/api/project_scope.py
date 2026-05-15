@@ -9,6 +9,20 @@ from fastapi import HTTPException, Request
 from headwater.core.models import ContractRule, ExecutionResult, GeneratedModel
 
 
+def resolve_project(store, project_id: str) -> dict | None:
+    get_project = getattr(store, "get_project", None)
+    project = get_project(project_id) if callable(get_project) else None
+    if project:
+        return project
+    get_source = getattr(store, "get_source", None)
+    if not callable(get_source):
+        return None
+    source = get_source(project_id)
+    if not source:
+        return None
+    return _source_backed_project(source)
+
+
 def project_sources(project: dict, store) -> list[str]:
     explicit = [
         str(source)
@@ -63,7 +77,14 @@ def visible_projects(store) -> list[dict]:
     for source_name in source_names:
         if project_for_source(store, source_name):
             linked_sources.add(source_name)
-    return [project for project in projects if project.get("id") not in linked_sources]
+    visible = [project for project in projects if project.get("id") not in linked_sources]
+    visible_ids = {project.get("id") for project in visible}
+    for source in store.list_sources():
+        source_name = source.get("name")
+        if not source_name or source_name in visible_ids or source_name in linked_sources:
+            continue
+        visible.append(_source_backed_project(source))
+    return visible
 
 
 def catalog_ids_for_project(project: dict, store) -> list[str]:
@@ -85,7 +106,7 @@ def scoped_pipeline(request: Request, project_id: str | None = None) -> dict:
     if store is None:
         raise HTTPException(status_code=503, detail="Metadata store not available.")
 
-    project = store.get_project(project_id)
+    project = resolve_project(store, project_id)
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
 
@@ -141,7 +162,7 @@ def primary_source_for_project(request: Request, project_id: str) -> str:
     store = getattr(request.app.state, "metadata_store", None)
     if store is None:
         raise HTTPException(status_code=503, detail="Metadata store not available.")
-    project = store.get_project(project_id)
+    project = resolve_project(store, project_id)
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
     sources = project_sources(project, store)
@@ -322,6 +343,25 @@ def _json_list(value) -> list:
     except (TypeError, ValueError):
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+def _source_backed_project(source: dict) -> dict:
+    source_name = str(source.get("name") or "")
+    display_name = str(source.get("display_name") or source_name)
+    created_at = str(source.get("created_at") or "")
+    updated_at = str(source.get("last_sync_at") or source.get("created_at") or "")
+    return {
+        "id": source_name,
+        "slug": _slugify(display_name or source_name),
+        "display_name": display_name or source_name,
+        "description": "",
+        "maturity": "raw",
+        "maturity_score": 0.0,
+        "catalog_confidence": 0.0,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "sources": [source_name],
+    }
 
 
 def _slugify(name: str) -> str:

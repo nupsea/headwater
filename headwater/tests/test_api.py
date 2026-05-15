@@ -1090,6 +1090,16 @@ class TestProjectCreation:
         names = [p["display_name"] for p in resp.json()["projects"]]
         assert "Listed Project" in names
 
+    def test_source_only_entry_appears_in_project_list(self, client):
+        client.app.state.metadata_store.upsert_source("sample", "json", "/data/sample", None)
+
+        resp = client.get("/api/projects")
+
+        assert resp.status_code == 200
+        projects = {p["id"]: p for p in resp.json()["projects"]}
+        assert "sample" in projects
+        assert projects["sample"]["sources"] == ["sample"]
+
 
 class TestProjectRename:
     """PATCH /api/projects/{id}/rename -- update name or description."""
