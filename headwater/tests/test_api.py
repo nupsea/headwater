@@ -258,7 +258,7 @@ class TestSourcesCatalog:
 
             load = client.get("/api/settings/setup-drafts/create-project-secret")
             assert load.status_code == 200
-            assert load.json()["password"] == "top-secret"
+            assert load.json() == {"saved": True}
 
             delete = client.delete("/api/settings/setup-drafts/create-project-secret")
             assert delete.status_code == 200
@@ -266,9 +266,31 @@ class TestSourcesCatalog:
 
             load_after = client.get("/api/settings/setup-drafts/create-project-secret")
             assert load_after.status_code == 200
-            assert load_after.json()["password"] == ""
+            assert load_after.json() == {"saved": False}
         finally:
             get_settings.cache_clear()
+
+    def test_source_detail_redacts_credentials(self, client):
+        create = client.post(
+            "/api/sources",
+            json={
+                "name": "snow",
+                "type": "snowflake",
+                "uri": "snowflake://analyst:top-secret@acme-xy123/analytics/public?warehouse=WH",
+                "config": {
+                    "connection": {"host": "acme-xy123", "password": "top-secret"},
+                    "secret_access_key": "very-secret",
+                },
+            },
+        )
+        assert create.status_code == 201
+
+        detail = client.get("/api/sources/snow")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["uri"] == "snowflake://analyst:***@acme-xy123/analytics/public?warehouse=WH"
+        assert body["config"]["connection"]["password"] == "***"
+        assert body["config"]["secret_access_key"] == "***"
 
     def test_source_test_endpoint_verifies_supported_source(self, client):
         create = client.post(
@@ -432,6 +454,7 @@ class TestSourcesCatalog:
             r["status"] == "succeeded" and r["payload"]["dry_run"] is False
             for r in evidence
         )
+        assert all("rows" not in r["payload"] for r in evidence if isinstance(r.get("payload"), dict))
         assert any(r["query_id"] == "fake-query-id-123" for r in evidence)
         saved_plan = client.get("/api/warehouse-insight-plans", params={"source": "snow"}).json()[
             "plans"

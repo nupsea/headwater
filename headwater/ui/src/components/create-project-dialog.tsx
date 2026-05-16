@@ -205,18 +205,8 @@ export function CreateProjectDialog({
     const sessionPassword = loadSessionPassword();
     if (sessionPassword) {
       setForm((current) => ({ ...current, password: sessionPassword }));
-      return;
     }
-    if (!hasSavedDraft) return;
-    api
-      .getCreateProjectSecret()
-      .then((secret) => {
-        if (!secret.password) return;
-        setForm((current) => ({ ...current, password: secret.password }));
-        saveSessionPassword(secret.password);
-      })
-      .catch(() => {});
-  }, [hasSavedDraft, open]);
+  }, [open]);
 
   useEffect(() => {
     if (!savedConnectorId || connectors.length === 0) return;
@@ -321,16 +311,8 @@ export function CreateProjectDialog({
     if (typeof window !== "undefined") {
       window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
     }
-    api
-      .saveCreateProjectSecret({ password: form.password })
-      .then(() => {
-        setHasSavedDraft(true);
-        toast("Setup draft saved on this browser", "success");
-      })
-      .catch((e) => {
-        const message = e instanceof Error ? e.message : String(e);
-        toast(`Draft save failed: ${message}`, "error");
-      });
+    setHasSavedDraft(true);
+    toast("Setup draft saved on this browser", "success");
   };
 
   const discardDraft = () => {
@@ -922,8 +904,8 @@ export function CreateProjectDialog({
                   connection details except the password.
                 </div>
                 <div>
-                  The password stays in session storage for refresh recovery and is saved to an
-                  encrypted local Headwater draft file only when you explicitly save a draft.
+                  The password stays in session storage for refresh recovery and is not written to
+                  the saved browser draft.
                 </div>
                 <div>{hasSavedDraft ? "A saved draft is available." : "No saved draft yet."}</div>
               </div>

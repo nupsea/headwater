@@ -52,6 +52,10 @@ class SetupDraftSecretPayload(BaseModel):
     password: str = ""
 
 
+class SetupDraftSecretStatus(BaseModel):
+    saved: bool
+
+
 @router.get("/settings/llm")
 async def get_llm_settings(request: Request) -> LLMSettingsResponse:
     """Return current LLM provider configuration. Never returns actual keys."""
@@ -67,12 +71,12 @@ async def get_llm_settings(request: Request) -> LLMSettingsResponse:
 
 
 @router.get("/settings/setup-drafts/create-project-secret")
-async def get_create_project_secret():
+async def get_create_project_secret() -> SetupDraftSecretStatus:
     try:
         secret = DraftSecretStore().load("create-project") or {}
     except DraftSecretDependencyError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"password": str(secret.get("password") or "")}
+    return SetupDraftSecretStatus(saved=bool(secret.get("password")))
 
 
 @router.put("/settings/setup-drafts/create-project-secret")

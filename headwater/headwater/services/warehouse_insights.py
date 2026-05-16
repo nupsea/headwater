@@ -229,7 +229,10 @@ def execute_approved_plan(
                 skipped_reason=result.get("error"),
                 query_id=result.get("query_id"),
                 statement_timeout_seconds=timeout_seconds,
-                payload={"dry_run": False, "rows": result.get("rows", [])},
+                payload={
+                    "dry_run": False,
+                    "result_rows": result.get("row_count", 0),
+                },
             )
             if result["status"] != "succeeded":
                 status = "failed"

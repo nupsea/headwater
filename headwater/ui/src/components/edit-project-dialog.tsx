@@ -552,6 +552,7 @@ function readConnectionForm(source: SourceDetail): ConnectionForm {
   const config = source.config ?? {};
   const connection = asRecord(config.connection);
   const parsed = source.uri ? parseConnectionUri(source.type, source.uri) : {};
+  const parsedPassword = stringValue(parsed.password);
   return {
     display_name: source.display_name || source.name,
     host: stringValue(connection.host) || stringValue(parsed.host),
@@ -561,7 +562,7 @@ function readConnectionForm(source: SourceDetail): ConnectionForm {
     warehouse: stringValue(connection.warehouse) || stringValue(parsed.warehouse),
     role: stringValue(connection.role) || stringValue(parsed.role),
     user: stringValue(parsed.user),
-    password: stringValue(parsed.password),
+    password: parsedPassword == "***" ? "" : parsedPassword,
     path: source.path || stringValue(connection.path),
     auto_sync: source.auto_sync,
     max_tables: numberValue(config.max_tables, 50),

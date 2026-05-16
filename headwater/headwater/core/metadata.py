@@ -959,6 +959,11 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                 row[out_key] = json.loads(row.get(db_key) or "{}")
             except (TypeError, ValueError):
                 row[out_key] = {}
+        payload = row.get("payload")
+        if isinstance(payload, dict) and "rows" in payload:
+            payload = dict(payload)
+            payload.pop("rows", None)
+            row["payload"] = payload
         return row
 
     # -- Sync events -------------------------------------------------------

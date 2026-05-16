@@ -20,6 +20,7 @@ from headwater.connectors.registry import (
 )
 from headwater.core.events import EventType
 from headwater.core.exceptions import ConnectorError
+from headwater.core.redaction import redact_secrets
 from headwater.core.runtime_state import get_runtime_state
 from headwater.services.source_evaluation import evaluate_all_connectors, evaluate_source
 from headwater.services.source_sync import SourceNotFoundError, SourceSyncService
@@ -113,7 +114,7 @@ def _row_to_summary(store, row: dict) -> dict:
         "quality_score": latest_quality["score"] if latest_quality else None,
         "latest_run_status": latest_run["status"] if latest_run else None,
         "latest_run_duration_ms": latest_run.get("duration_ms") if latest_run else None,
-        "latest_error": latest_run.get("error") if latest_run else None,
+        "latest_error": redact_secrets(latest_run.get("error")) if latest_run else None,
         "auto_sync": bool(row.get("auto_sync")),
         "tables": tables,
         "rows": rows_count,
@@ -127,18 +128,40 @@ def _row_to_summary(store, row: dict) -> dict:
     }
 
 
-def _row_to_detail(store, row: dict) -> dict:
-    config = row.get("config_json")
+def _redact_source_config(config: object) -> dict:
     if isinstance(config, str):
         try:
             config = json.loads(config)
         except (TypeError, ValueError):
             config = {}
+    if not isinstance(config, dict):
+        return {}
+    return redact_secrets(config)
+
+
+def _sanitize_sync_run(row: dict) -> dict:
+    sanitized = dict(row)
+    sanitized["error"] = redact_secrets(sanitized.get("error"))
+    if "payload" in sanitized:
+        sanitized["payload"] = redact_secrets(sanitized.get("payload"))
+    return sanitized
+
+
+def _sanitize_event(row: dict) -> dict:
+    sanitized = dict(row)
+    sanitized["summary"] = redact_secrets(sanitized.get("summary"))
+    sanitized["detail"] = redact_secrets(sanitized.get("detail"))
+    if "payload" in sanitized:
+        sanitized["payload"] = redact_secrets(sanitized.get("payload"))
+    return sanitized
+
+
+def _row_to_detail(store, row: dict) -> dict:
     return {
         **_row_to_summary(store, row),
-        "uri": row.get("uri"),
+        "uri": redact_secrets(row.get("uri")),
         "path": row.get("path"),
-        "config": config if isinstance(config, dict) else {},
+        "config": _redact_source_config(row.get("config_json")),
     }
 
 
@@ -178,8 +201,8 @@ async def get_source_route(request: Request, name: str):
     if not row:
         raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
     detail = _row_to_detail(store, row)
-    detail["events"] = store.list_events(source_name=name, limit=20)
-    detail["runs"] = store.list_sync_runs(source_name=name, limit=10)
+    detail["events"] = [_sanitize_event(event) for event in store.list_events(source_name=name, limit=20)]
+    detail["runs"] = [_sanitize_sync_run(run) for run in store.list_sync_runs(source_name=name, limit=10)]
     return detail
 
 

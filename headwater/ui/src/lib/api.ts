@@ -989,7 +989,7 @@ export interface ConnectionTestResult {
 }
 
 export interface SetupDraftSecretResponse {
-  password: string;
+  saved: boolean;
 }
 
 export interface SourcePreviewTableDetail {
