@@ -5,7 +5,15 @@ from __future__ import annotations
 import json
 
 from headwater.core.metadata import MetadataStore
-from headwater.core.models import ContractCheckResult, QualityReport
+from headwater.core.models import (
+    ColumnInfo,
+    ContractCheckResult,
+    DiscoveryResult,
+    QualityReport,
+    SourceConfig,
+    TableInfo,
+)
+from headwater.services.project_context import load_retrieved_metadata
 
 
 def test_init_creates_tables(meta: MetadataStore):
@@ -28,6 +36,9 @@ def test_init_creates_tables(meta: MetadataStore):
     assert "llm_audit_log" in names
     assert "warehouse_insight_plans" in names
     assert "evidence_records" in names
+    assert "project_context_items" in names
+    assert "project_context_evidence" in names
+    assert "project_context_resources" in names
 
 
 def test_upsert_and_get_source(meta: MetadataStore):
@@ -126,6 +137,33 @@ def test_delete_source_clears_source_scoped_state(meta: MetadataStore):
         source_name="src",
         reviewer="tester",
     )
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "dataset_summary:src",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "dataset_summary",
+                "scope": "project",
+                "name": "dataset_summary",
+                "value": {"table_count": 1},
+                "evidence": [],
+            }
+        ],
+        resources=[
+            {
+                "id": "resource:src:doc",
+                "project_id": "src",
+                "source_name": "src",
+                "resource_type": "markdown",
+                "title": "Doc",
+                "location": "README.md",
+                "metadata": {},
+            }
+        ],
+    )
     meta.con.execute(
         "INSERT INTO contracts (id, model_name, rule_type, expression) "
         "VALUES ('rule_1', 'mart_readings', 'row_count', 'count(*) > 0')"
@@ -139,6 +177,8 @@ def test_delete_source_clears_source_scoped_state(meta: MetadataStore):
     assert meta.get_columns("readings", "src") == []
     assert meta.get_profiles("src") == []
     assert meta.get_relationships("src") == []
+    assert meta.list_project_context_items("src") == []
+    assert meta.list_project_context_resources("src") == []
     assert meta.get_decisions("pk_candidate", "src.readings.reading_id") == []
     assert meta.get_models("src") == []
     contract = meta.con.execute(
@@ -196,6 +236,157 @@ def test_relationship_roundtrip(meta: MetadataStore):
     rels = meta.get_relationships("src")
     assert len(rels) == 1
     assert rels[0]["from_table"] == "sites"
+
+
+def test_project_context_roundtrip_and_preserve_reviewed_items(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.order_id",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "order_id",
+                "table_name": "orders",
+                "column_name": "order_id",
+                "value": {"semantic_type": "id"},
+                "confidence": 0.95,
+                "evidence": [
+                    {
+                        "evidence_type": "profile",
+                        "source": "profiler",
+                        "summary": "Uniqueness ratio is 1.0",
+                        "payload": {"uniqueness_ratio": 1.0},
+                    }
+                ],
+            }
+        ],
+        resources=[
+            {
+                "id": "resource:src:dictionary",
+                "project_id": "src",
+                "source_name": "src",
+                "resource_type": "markdown",
+                "title": "Dictionary",
+                "location": "docs/dictionary.md",
+                "metadata": {"matched_tables": ["orders"]},
+            }
+        ],
+    )
+
+    items = meta.list_project_context_items("src")
+    resources = meta.list_project_context_resources("src")
+    assert len(items) == 1
+    assert items[0]["value"]["semantic_type"] == "id"
+    assert items[0]["evidence"][0]["payload"]["uniqueness_ratio"] == 1.0
+    assert len(resources) == 1
+    assert resources[0]["metadata"]["matched_tables"] == ["orders"]
+
+    meta.con.execute(
+        "UPDATE project_context_items SET status = 'approved' WHERE id = ?",
+        ("column_semantics:orders.order_id",),
+    )
+    meta.con.commit()
+
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.order_id",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "order_id",
+                "table_name": "orders",
+                "column_name": "order_id",
+                "value": {"semantic_type": "foreign_key"},
+                "confidence": 0.2,
+                "evidence": [],
+            }
+        ],
+    )
+
+    refreshed = meta.list_project_context_items("src")[0]
+    assert refreshed["status"] == "approved"
+    assert refreshed["value"]["semantic_type"] == "id"
+
+
+def test_load_retrieved_metadata_uses_store_backed_project_context(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_dataset_context(
+        "src",
+        {
+            "source_name": "src",
+            "row_represents": "an order event",
+        },
+    )
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "lookup:status_lookup",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "lookup",
+                "scope": "table",
+                "name": "status_lookup",
+                "table_name": "status_lookup",
+                "value": {
+                    "key_column": "status_code",
+                    "label_column": "status_label",
+                },
+                "evidence": [],
+            },
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "status": "approved",
+                "value": {
+                    "description": "Order lifecycle status.",
+                    "role": "dimension",
+                },
+                "evidence": [],
+            },
+        ],
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                columns=[ColumnInfo(name="status_code", dtype="varchar")],
+            ),
+            TableInfo(
+                name="status_lookup",
+                columns=[
+                    ColumnInfo(name="status_code", dtype="varchar"),
+                    ColumnInfo(name="status_label", dtype="varchar"),
+                ],
+            ),
+        ],
+    )
+
+    metadata = load_retrieved_metadata(meta, discovery, project_id="src")
+
+    assert metadata.context is not None
+    assert metadata.context.row_represents == "an order event"
+    assert metadata.lookup_tables["status_lookup"]["label_column"] == "status_label"
+    assert metadata.glossary["status_code"] == "Order lifecycle status."
+    assert metadata.locked_roles[("orders", "status_code")] == "dimension"
 
 
 def test_persist_pk_fk_stores_reload_safe_relationship_values(meta: MetadataStore):

@@ -1595,7 +1595,11 @@ def _preflight_question_constraints(
 
 def _project_has_readable_route_dimensions(discovery: DiscoveryResult) -> bool:
     metadata = retrieve_metadata(discovery)
-    semantic_schema = infer_semantic_schema(discovery, metadata.context if metadata else None)
+    semantic_schema = infer_semantic_schema(
+        discovery,
+        metadata.context if metadata else None,
+        metadata=metadata,
+    )
     lookup_index = build_lookup_index(discovery.tables, metadata, discovery.relationships)
     for table in discovery.tables:
         roles = roles_for_table(semantic_schema, table.name)

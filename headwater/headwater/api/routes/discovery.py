@@ -22,6 +22,7 @@ from headwater.core.models import DatasetContext, SourceConfig
 from headwater.core.runtime_state import get_runtime_state
 from headwater.drift.schema import build_snapshot_from_discovery, compare_schemas
 from headwater.profiler.engine import discover
+from headwater.services.context_bootstrap import bootstrap_project_context
 from headwater.services.discovery_persistence import (
     persist_catalog_data,
     persist_discovery_data,
@@ -32,6 +33,7 @@ from headwater.services.model_impacts import (
     invalidated_model_names,
 )
 from headwater.services.pipeline_assets import build_graph_and_index
+from headwater.services.project_context import load_retrieved_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,26 @@ async def run_discovery(
     store = request.app.state.metadata_store
     store.apply_key_decisions_to_discovery(discovery)
     logger.info("Applied persisted key decisions")
+    store.upsert_source(
+        source_name,
+        discovery.source.type,
+        discovery.source.path,
+        discovery.source.uri,
+        mode=discovery.source.mode,
+    )
+
+    project_context = bootstrap_project_context(discovery, project_id=source_name)
+    store.replace_project_context(
+        source_name,
+        source_name=source_name,
+        items=[item.model_dump(mode="json") for item in project_context.items],
+        resources=[resource.model_dump(mode="json") for resource in project_context.resources],
+    )
+    logger.info(
+        "Project context bootstrapped: %d items, %d resources",
+        len(project_context.items),
+        len(project_context.resources),
+    )
 
     # Build semantic catalog (heuristic tier 0)
     catalog = build_catalog(discovery)
@@ -114,6 +136,7 @@ async def run_discovery(
     runtime_state = get_runtime_state(request)
     runtime_state["graph_store"] = assets.graph_store
     runtime_state["vector_store"] = assets.vector_store
+    runtime_state["project_context"] = project_context
 
     # Persist all discovery data to metadata store
     logger.info("Persisting discovery data to metadata store...")
@@ -340,9 +363,13 @@ async def get_semantic_schema(request: Request, project_id: str | None = None):
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
     store = request.app.state.metadata_store
-    context_row = store.get_dataset_context(discovery.source.name)
-    context = DatasetContext(**context_row) if context_row else None
-    schema = infer_semantic_schema(discovery, context, project_id=project_id)
+    metadata = load_retrieved_metadata(store, discovery, project_id=project_id)
+    schema = infer_semantic_schema(
+        discovery,
+        metadata.context,
+        project_id=project_id,
+        metadata=metadata,
+    )
     return {
         **schema.model_dump(mode="json"),
         "ambiguous_count": len(ambiguous_roles(schema)),
@@ -361,9 +388,13 @@ async def confirm_semantic_schema(
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
     store = request.app.state.metadata_store
-    context_row = store.get_dataset_context(discovery.source.name)
-    context = DatasetContext(**context_row) if context_row else None
-    schema = infer_semantic_schema(discovery, context, project_id=project_id)
+    metadata = load_retrieved_metadata(store, discovery, project_id=project_id)
+    schema = infer_semantic_schema(
+        discovery,
+        metadata.context,
+        project_id=project_id,
+        metadata=metadata,
+    )
 
     confirmed = 0
     updates_by_table: dict[str, list[dict]] = {}

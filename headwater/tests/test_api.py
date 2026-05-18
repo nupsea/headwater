@@ -11,12 +11,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from headwater.api.app import create_app
-from headwater.core.models import ExplorationResult
 from headwater.api.routes.explore import (
     _diversify_statistical_insights,
     _rank_statistical_insights,
 )
-from headwater.core.models import StatisticalInsight
+from headwater.core.models import ExplorationResult, StatisticalInsight
 
 SAMPLE_DATA = str(Path(__file__).resolve().parent.parent.parent / "data" / "sample")
 
@@ -43,6 +42,43 @@ class TestStatus:
         data = resp.json()
         assert data["discovered"] is True
         assert data["tables"] == 8
+
+
+class TestProjectContext:
+    def test_discovery_bootstraps_project_context(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        resp = client.get("/api/projects/source/context")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["project_id"] == "source"
+        assert body["summary"]["item_count"] > 0
+        assert body["summary"]["item_types"]["dataset_summary"] == 1
+        assert "column_semantics" in body["summary"]["item_types"]
+
+    def test_user_can_add_context_resource(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "url",
+                "title": "Business glossary",
+                "location": "https://example.com/glossary",
+                "metadata": {"use_for": ["glossary"]},
+            },
+        )
+        assert create.status_code == 200
+        created = create.json()
+        assert created["source"] == "user"
+
+        resp = client.get("/api/projects/source/context")
+        resources = resp.json()["resources"]
+        titles = {resource["title"] for resource in resources}
+        assert "Business glossary" in titles
 
 
 class TestInsightRanking:
@@ -454,7 +490,11 @@ class TestSourcesCatalog:
             r["status"] == "succeeded" and r["payload"]["dry_run"] is False
             for r in evidence
         )
-        assert all("rows" not in r["payload"] for r in evidence if isinstance(r.get("payload"), dict))
+        assert all(
+            "rows" not in r["payload"]
+            for r in evidence
+            if isinstance(r.get("payload"), dict)
+        )
         assert any(r["query_id"] == "fake-query-id-123" for r in evidence)
         saved_plan = client.get("/api/warehouse-insight-plans", params={"source": "snow"}).json()[
             "plans"

@@ -19,6 +19,7 @@ from headwater.analyzer.heuristics import (
     generate_table_description,
 )
 from headwater.analyzer.llm import NoLLMProvider, _parse_json_response, make_cache_key
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
 from headwater.analyzer.semantic import analyze
 from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.connectors.json_loader import JsonLoader
@@ -305,6 +306,49 @@ roles:
         assert roles["lifecycle_end_ts"].column_name == "dropoff_datetime"
         assert roles["origin_id"].column_name == "pulocationid"
         assert roles["amount"].column_name == "fare"
+
+    def test_project_context_can_confirm_semantic_roles(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="source", type="json"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    columns=[ColumnInfo(name="occurred_at", dtype="timestamp")],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="events",
+                    column_name="occurred_at",
+                    dtype="timestamp",
+                    distinct_count=10,
+                )
+            ],
+            relationships=[],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "column_semantics:events.occurred_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "occurred_at",
+                    "table_name": "events",
+                    "column_name": "occurred_at",
+                    "status": "approved",
+                    "value": {"role": "event_ts"},
+                }
+            ],
+        )
+
+        schema = infer_semantic_schema(discovery, metadata=metadata)
+        roles = roles_for_table(schema, "events")
+
+        assert roles["event_ts"].column_name == "occurred_at"
+        assert roles["event_ts"].source == "context"
 
 
 # -- LLM provider -----------------------------------------------------------

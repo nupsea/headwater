@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from headwater.analyzer.llm import NoLLMProvider, get_provider
-from headwater.analyzer.metadata_retrieval import retrieve_metadata
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata, retrieve_metadata
 from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.insights import compute_semantic_highlights, compute_top_insights
 from headwater.core.config import get_settings
@@ -25,6 +25,7 @@ from headwater.explorer.statistical import (
     insight_type_priority_weights,
 )
 from headwater.explorer.suggestions import generate_suggestions
+from headwater.services.project_context import load_retrieved_metadata
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -92,17 +93,29 @@ def _serialize_diagnostics(diagnostics) -> list[dict]:
     return [d.model_dump() for d in diagnostics]
 
 
-def _dataset_context_for_pipeline(request: Request, pipeline: dict) -> DatasetContext | None:
+def _metadata_for_pipeline(
+    request: Request,
+    pipeline: dict,
+    project_id: str | None = None,
+) -> RetrievedMetadata:
     store = getattr(request.app.state, "metadata_store", None)
     discovery = pipeline.get("discovery")
-    if store is None or discovery is None:
-        return None
+    if discovery is None:
+        raise HTTPException(status_code=400, detail="No discovery run yet.")
     try:
-        row = store.get_dataset_context(discovery.source.name)
-        return DatasetContext(**row) if row else None
+        if store is not None:
+            return load_retrieved_metadata(store, discovery, project_id=project_id)
     except Exception:
-        logger.debug("Dataset context unavailable for insights")
-        return None
+        logger.debug("Project context unavailable for explore")
+    return retrieve_metadata(discovery)
+
+
+def _dataset_context_for_pipeline(
+    request: Request,
+    pipeline: dict,
+    project_id: str | None = None,
+) -> DatasetContext | None:
+    return _metadata_for_pipeline(request, pipeline, project_id).context
 
 
 def _load_confirmed_relationships(
@@ -177,8 +190,8 @@ async def get_suggestions(request: Request, project_id: str | None = None):
 
     catalog = pipeline.get("catalog")
     extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
-    context = _dataset_context_for_pipeline(request, pipeline)
-    metadata = retrieve_metadata(discovery, context)
+    metadata = _metadata_for_pipeline(request, pipeline, project_id)
+    context = metadata.context
     business_insights = compute_top_insights(
         request.app.state.duckdb_con,
         discovery.tables,
@@ -188,9 +201,10 @@ async def get_suggestions(request: Request, project_id: str | None = None):
     semantic_highlights = compute_semantic_highlights(
         request.app.state.duckdb_con,
         discovery,
-        _dataset_context_for_pipeline(request, pipeline),
+        context,
         all_models,
         project_id=project_id,
+        metadata=metadata,
     )
     suggestions = generate_suggestions(
         discovery=discovery,
@@ -254,8 +268,7 @@ async def ask_question(request: Request, body: AskRequest, project_id: str | Non
 
     # Load confirmed relationships and merge into discovery for richer suggestions
     extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
-    context = _dataset_context_for_pipeline(request, pipeline)
-    metadata = retrieve_metadata(discovery, context)
+    metadata = _metadata_for_pipeline(request, pipeline, project_id)
 
     # Generate suggestions for matching (with confirmed relationships)
     suggestions = generate_suggestions(
@@ -327,8 +340,8 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
     con = request.app.state.duckdb_con
     discovery = pipeline["discovery"]
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
-    context = _dataset_context_for_pipeline(request, pipeline)
-    metadata = retrieve_metadata(discovery, context)
+    metadata = _metadata_for_pipeline(request, pipeline, project_id)
+    context = metadata.context
     business_insights = compute_top_insights(con, discovery.tables, discovery.profiles, metadata)
     semantic_highlights = compute_semantic_highlights(
         con,

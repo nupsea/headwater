@@ -11,7 +11,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from headwater.core.models import DatasetContext, DiscoveryResult, Relationship, TableInfo
+from headwater.core.models import (
+    DatasetContext,
+    DiscoveryResult,
+    ProjectContextItem,
+    ProjectContextResource,
+    Relationship,
+    TableInfo,
+)
 
 _LOOKUP_ID_RE = re.compile(r"(^id$|_id$|code$|key$|_num$|number$)", re.I)
 _TEXTUAL_DTYPES = ("varchar", "char", "text", "string")
@@ -26,25 +33,151 @@ class RetrievedMetadata:
     lookup_tables: dict[str, dict[str, str]] = field(default_factory=dict)
     enum_mappings: dict[str, dict[str, str]] = field(default_factory=dict)
     locked_roles: dict[tuple[str, str], str] = field(default_factory=dict)
+    context_items: list[ProjectContextItem] = field(default_factory=list)
+    resources: list[ProjectContextResource] = field(default_factory=list)
+    open_questions: list[dict] = field(default_factory=list)
+    table_profiles: dict[str, dict] = field(default_factory=dict)
+    column_hints: dict[tuple[str, str], dict] = field(default_factory=dict)
 
 
 def retrieve_metadata(
     discovery: DiscoveryResult,
     context: DatasetContext | None = None,
+    *,
+    context_items: list[ProjectContextItem | dict] | None = None,
+    resources: list[ProjectContextResource | dict] | None = None,
 ) -> RetrievedMetadata:
     """Return local metadata signals for a discovery result."""
+    normalized_items = _normalize_context_items(context_items)
+    normalized_resources = _normalize_context_resources(resources)
+    glossary = _glossary_from_docs(discovery)
+    glossary.update(_glossary_from_context_items(normalized_items))
+    lookup_tables = _lookup_candidates(discovery)
+    lookup_tables.update(_lookup_candidates_from_context_items(normalized_items))
+    locked_roles = {
+        (table.name, col.name): col.role or col.semantic_type or ""
+        for table in discovery.tables
+        for col in table.columns
+        if col.locked and (col.role or col.semantic_type)
+    }
+    locked_roles.update(_locked_roles_from_context_items(normalized_items))
     return RetrievedMetadata(
         context=context,
-        glossary=_glossary_from_docs(discovery),
-        lookup_tables=_lookup_candidates(discovery),
+        glossary=glossary,
+        lookup_tables=lookup_tables,
         enum_mappings=_enum_mappings_from_docs(discovery),
-        locked_roles={
-            (table.name, col.name): col.role or col.semantic_type or ""
-            for table in discovery.tables
-            for col in table.columns
-            if col.locked and (col.role or col.semantic_type)
-        },
+        locked_roles=locked_roles,
+        context_items=normalized_items,
+        resources=normalized_resources,
+        open_questions=_open_questions_from_context_items(normalized_items),
+        table_profiles=_table_profiles_from_context_items(normalized_items),
+        column_hints=_column_hints_from_context_items(normalized_items),
     )
+
+
+def _normalize_context_items(
+    context_items: list[ProjectContextItem | dict] | None,
+) -> list[ProjectContextItem]:
+    items: list[ProjectContextItem] = []
+    for item in context_items or []:
+        if isinstance(item, ProjectContextItem):
+            items.append(item)
+        else:
+            items.append(ProjectContextItem.model_validate(item))
+    return items
+
+
+def _normalize_context_resources(
+    resources: list[ProjectContextResource | dict] | None,
+) -> list[ProjectContextResource]:
+    normalized: list[ProjectContextResource] = []
+    for resource in resources or []:
+        if isinstance(resource, ProjectContextResource):
+            normalized.append(resource)
+        else:
+            normalized.append(ProjectContextResource.model_validate(resource))
+    return normalized
+
+
+def _glossary_from_context_items(items: list[ProjectContextItem]) -> dict[str, str]:
+    glossary: dict[str, str] = {}
+    for item in items:
+        if item.item_type != "column_semantics":
+            continue
+        description = str(item.value.get("description") or "").strip()
+        if item.column_name and description:
+            normalized = _normalize_glossary_description(description)
+            if normalized:
+                glossary.setdefault(item.column_name.lower(), normalized)
+    return glossary
+
+
+def _lookup_candidates_from_context_items(
+    items: list[ProjectContextItem],
+) -> dict[str, dict[str, str]]:
+    lookups: dict[str, dict[str, str]] = {}
+    for item in items:
+        if item.item_type != "lookup" or not item.table_name:
+            continue
+        key_column = item.value.get("key_column")
+        label_column = item.value.get("label_column")
+        if isinstance(key_column, str) and isinstance(label_column, str):
+            lookups[item.table_name] = {
+                "id_column": key_column,
+                "label_column": label_column,
+            }
+    return lookups
+
+
+def _locked_roles_from_context_items(items: list[ProjectContextItem]) -> dict[tuple[str, str], str]:
+    locked_roles: dict[tuple[str, str], str] = {}
+    for item in items:
+        if item.item_type != "column_semantics":
+            continue
+        if item.status not in {"approved", "locked"}:
+            continue
+        if not item.table_name or not item.column_name:
+            continue
+        role = item.value.get("role") or item.value.get("semantic_type")
+        if isinstance(role, str) and role.strip():
+            locked_roles[(item.table_name, item.column_name)] = role.strip()
+    return locked_roles
+
+
+def _open_questions_from_context_items(items: list[ProjectContextItem]) -> list[dict]:
+    return [
+        {
+            "id": item.id,
+            "table_name": item.table_name,
+            "column_name": item.column_name,
+            "title": item.title,
+            "question": item.value.get("question"),
+            "confidence": item.confidence,
+        }
+        for item in items
+        if item.item_type == "open_question"
+    ]
+
+
+def _table_profiles_from_context_items(items: list[ProjectContextItem]) -> dict[str, dict]:
+    return {
+        item.table_name: dict(item.value)
+        for item in items
+        if item.item_type == "table_profile" and item.table_name
+    }
+
+
+def _column_hints_from_context_items(
+    items: list[ProjectContextItem],
+) -> dict[tuple[str, str], dict]:
+    hints: dict[tuple[str, str], dict] = {}
+    for item in items:
+        if item.item_type != "column_semantics":
+            continue
+        if not item.table_name or not item.column_name:
+            continue
+        hints[(item.table_name, item.column_name)] = dict(item.value)
+    return hints
 
 
 def _glossary_from_docs(discovery: DiscoveryResult) -> dict[str, str]:

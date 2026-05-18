@@ -253,6 +253,58 @@ CREATE TABLE IF NOT EXISTS dataset_contexts (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS project_context_items (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL,
+    source_name TEXT REFERENCES sources(name),
+    item_type   TEXT NOT NULL,
+    scope       TEXT NOT NULL DEFAULT 'project',
+    name        TEXT NOT NULL,
+    title       TEXT,
+    table_name  TEXT,
+    column_name TEXT,
+    value_json  TEXT NOT NULL DEFAULT '{}',
+    status      TEXT NOT NULL DEFAULT 'proposed',
+    confidence  REAL NOT NULL DEFAULT 0.0,
+    source      TEXT NOT NULL DEFAULT 'bootstrap',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_context_items_project
+    ON project_context_items(project_id, item_type, status);
+CREATE INDEX IF NOT EXISTS idx_project_context_items_source
+    ON project_context_items(source_name, item_type, status);
+
+CREATE TABLE IF NOT EXISTS project_context_evidence (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id      TEXT NOT NULL REFERENCES project_context_items(id) ON DELETE CASCADE,
+    evidence_type TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    summary      TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_context_evidence_item
+    ON project_context_evidence(item_id);
+
+CREATE TABLE IF NOT EXISTS project_context_resources (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL,
+    source_name TEXT REFERENCES sources(name),
+    resource_type TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    location    TEXT,
+    status      TEXT NOT NULL DEFAULT 'active',
+    source      TEXT NOT NULL DEFAULT 'bootstrap',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_context_resources_project
+    ON project_context_resources(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_project_context_resources_source
+    ON project_context_resources(source_name, status);
+
 CREATE TABLE IF NOT EXISTS projects (
     id              TEXT PRIMARY KEY,
     slug            TEXT NOT NULL UNIQUE,
@@ -556,6 +608,57 @@ CREATE TABLE IF NOT EXISTS dataset_contexts (
     context_json TEXT NOT NULL,
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS project_context_items (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL,
+    source_name TEXT REFERENCES sources(name),
+    item_type   TEXT NOT NULL,
+    scope       TEXT NOT NULL DEFAULT 'project',
+    name        TEXT NOT NULL,
+    title       TEXT,
+    table_name  TEXT,
+    column_name TEXT,
+    value_json  TEXT NOT NULL DEFAULT '{}',
+    status      TEXT NOT NULL DEFAULT 'proposed',
+    confidence  REAL NOT NULL DEFAULT 0.0,
+    source      TEXT NOT NULL DEFAULT 'bootstrap',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_context_items_project
+    ON project_context_items(project_id, item_type, status);
+CREATE INDEX IF NOT EXISTS idx_project_context_items_source
+    ON project_context_items(source_name, item_type, status);
+
+CREATE TABLE IF NOT EXISTS project_context_evidence (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id      TEXT NOT NULL REFERENCES project_context_items(id) ON DELETE CASCADE,
+    evidence_type TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    summary      TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_context_evidence_item
+    ON project_context_evidence(item_id);
+
+CREATE TABLE IF NOT EXISTS project_context_resources (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL,
+    source_name TEXT REFERENCES sources(name),
+    resource_type TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    location    TEXT,
+    status      TEXT NOT NULL DEFAULT 'active',
+    source      TEXT NOT NULL DEFAULT 'bootstrap',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_context_resources_project
+    ON project_context_resources(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_project_context_resources_source
+    ON project_context_resources(source_name, status);
 
 CREATE TABLE IF NOT EXISTS model_reviews (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -730,6 +833,10 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         self.con.execute("DELETE FROM table_semantic_details WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM companion_docs WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM dataset_contexts WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM project_context_resources WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM project_context_items WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM project_context_resources WHERE project_id = ?", (name,))
+        self.con.execute("DELETE FROM project_context_items WHERE project_id = ?", (name,))
         self.con.execute("DELETE FROM relationships WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM profiles WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM columns WHERE source_name = ?", (name,))
@@ -792,6 +899,217 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         payload["source_name"] = source_name
         payload["updated_at"] = row["updated_at"]
         return payload
+
+    def replace_project_context(
+        self,
+        project_id: str,
+        *,
+        source_name: str | None = None,
+        items: list[dict] | None = None,
+        resources: list[dict] | None = None,
+    ) -> None:
+        """Replace generated project context proposals while preserving reviewed state."""
+        self.con.execute(
+            """
+            DELETE FROM project_context_items
+            WHERE project_id = ?
+              AND (? IS NULL OR source_name = ?)
+              AND source = 'bootstrap'
+              AND status IN ('proposed', 'needs_review')
+            """,
+            (project_id, source_name, source_name),
+        )
+        self.con.execute(
+            """
+            DELETE FROM project_context_resources
+            WHERE project_id = ?
+              AND (? IS NULL OR source_name = ?)
+              AND source = 'bootstrap'
+            """,
+            (project_id, source_name, source_name),
+        )
+        for item in items or []:
+            self.upsert_project_context_item(**item)
+        for resource in resources or []:
+            self.upsert_project_context_resource(**resource)
+        self.con.commit()
+
+    def upsert_project_context_item(
+        self,
+        *,
+        id: str,
+        project_id: str,
+        item_type: str,
+        name: str,
+        value: dict,
+        source_name: str | None = None,
+        scope: str = "project",
+        title: str | None = None,
+        table_name: str | None = None,
+        column_name: str | None = None,
+        status: str = "proposed",
+        confidence: float = 0.0,
+        source: str = "bootstrap",
+        evidence: list[dict] | None = None,
+        created_at=None,
+        updated_at=None,
+    ) -> None:
+        self.con.execute(
+            """
+            INSERT INTO project_context_items
+                (id, project_id, source_name, item_type, scope, name, title,
+                 table_name, column_name, value_json, status, confidence, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                project_id = excluded.project_id,
+                source_name = excluded.source_name,
+                item_type = excluded.item_type,
+                scope = excluded.scope,
+                name = excluded.name,
+                title = excluded.title,
+                table_name = excluded.table_name,
+                column_name = excluded.column_name,
+                value_json = CASE
+                    WHEN project_context_items.status IN ('approved', 'locked')
+                        THEN project_context_items.value_json
+                    ELSE excluded.value_json
+                END,
+                status = CASE
+                    WHEN project_context_items.status IN ('approved', 'locked')
+                        THEN project_context_items.status
+                    ELSE excluded.status
+                END,
+                confidence = CASE
+                    WHEN project_context_items.status IN ('approved', 'locked')
+                        THEN project_context_items.confidence
+                    ELSE excluded.confidence
+                END,
+                source = CASE
+                    WHEN project_context_items.status IN ('approved', 'locked')
+                        THEN project_context_items.source
+                    ELSE excluded.source
+                END,
+                updated_at = datetime('now')
+            """,
+            (
+                id,
+                project_id,
+                source_name,
+                item_type,
+                scope,
+                name,
+                title,
+                table_name,
+                column_name,
+                json.dumps(value),
+                status,
+                confidence,
+                source,
+            ),
+        )
+        self.con.execute("DELETE FROM project_context_evidence WHERE item_id = ?", (id,))
+        for record in evidence or []:
+            self.con.execute(
+                """
+                INSERT INTO project_context_evidence
+                    (item_id, evidence_type, source, summary, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    id,
+                    record.get("evidence_type", "profile"),
+                    record.get("source", source),
+                    record.get("summary", ""),
+                    json.dumps(record.get("payload") or {}),
+                ),
+            )
+
+    def list_project_context_items(
+        self,
+        project_id: str,
+        *,
+        source_name: str | None = None,
+        item_type: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        sql = "SELECT * FROM project_context_items WHERE project_id = ?"
+        params: list = [project_id]
+        if source_name is not None:
+            sql += " AND source_name = ?"
+            params.append(source_name)
+        if item_type is not None:
+            sql += " AND item_type = ?"
+            params.append(item_type)
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY item_type, table_name, column_name, name, id"
+        rows = self.con.execute(sql, params).fetchall()
+        return [self._decode_project_context_item(dict(row)) for row in rows]
+
+    def upsert_project_context_resource(
+        self,
+        *,
+        id: str,
+        project_id: str,
+        resource_type: str,
+        title: str,
+        source_name: str | None = None,
+        location: str | None = None,
+        status: str = "active",
+        source: str = "bootstrap",
+        metadata: dict | None = None,
+        created_at=None,
+        updated_at=None,
+    ) -> None:
+        self.con.execute(
+            """
+            INSERT INTO project_context_resources
+                (id, project_id, source_name, resource_type, title, location,
+                 status, source, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                project_id = excluded.project_id,
+                source_name = excluded.source_name,
+                resource_type = excluded.resource_type,
+                title = excluded.title,
+                location = excluded.location,
+                status = excluded.status,
+                source = excluded.source,
+                metadata_json = excluded.metadata_json,
+                updated_at = datetime('now')
+            """,
+            (
+                id,
+                project_id,
+                source_name,
+                resource_type,
+                title,
+                location,
+                status,
+                source,
+                json.dumps(metadata or {}),
+            ),
+        )
+
+    def list_project_context_resources(
+        self,
+        project_id: str,
+        *,
+        source_name: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        sql = "SELECT * FROM project_context_resources WHERE project_id = ?"
+        params: list = [project_id]
+        if source_name is not None:
+            sql += " AND source_name = ?"
+            params.append(source_name)
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY title, id"
+        rows = self.con.execute(sql, params).fetchall()
+        return [self._decode_project_context_resource(dict(row)) for row in rows]
 
     # -- Warehouse evidence and insight plans -----------------------------
 
@@ -964,6 +1282,41 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
             payload = dict(payload)
             payload.pop("rows", None)
             row["payload"] = payload
+        return row
+
+    def _decode_project_context_item(self, row: dict) -> dict:
+        try:
+            row["value"] = json.loads(row.get("value_json") or "{}")
+        except (TypeError, ValueError):
+            row["value"] = {}
+        evidence_rows = self.con.execute(
+            "SELECT * FROM project_context_evidence WHERE item_id = ? ORDER BY id ASC",
+            (row["id"],),
+        ).fetchall()
+        evidence = []
+        for record in evidence_rows:
+            entry = dict(record)
+            try:
+                payload = json.loads(entry.get("payload_json") or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            evidence.append(
+                {
+                    "evidence_type": entry.get("evidence_type"),
+                    "source": entry.get("source"),
+                    "summary": entry.get("summary"),
+                    "payload": payload,
+                    "created_at": entry.get("created_at"),
+                }
+            )
+        row["evidence"] = evidence
+        return row
+
+    def _decode_project_context_resource(self, row: dict) -> dict:
+        try:
+            row["metadata"] = json.loads(row.get("metadata_json") or "{}")
+        except (TypeError, ValueError):
+            row["metadata"] = {}
         return row
 
     # -- Sync events -------------------------------------------------------
@@ -2841,6 +3194,11 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         self.con.commit()
 
     def delete_project(self, project_id: str) -> bool:
+        self.con.execute(
+            "DELETE FROM project_context_resources WHERE project_id = ?",
+            (project_id,),
+        )
+        self.con.execute("DELETE FROM project_context_items WHERE project_id = ?", (project_id,))
         cur = self.con.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         self.con.commit()
         return cur.rowcount > 0

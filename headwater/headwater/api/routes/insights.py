@@ -31,12 +31,28 @@ from headwater.explorer.statistical import (
     insight_type_priority_weights,
 )
 from headwater.explorer.utils import resolve_table_ref
+from headwater.services.project_context import load_retrieved_metadata
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _RAW_ROUTE_RE = re.compile(r"route is (?P<origin>.+?) -> (?P<dest>.+?):", re.IGNORECASE)
 _RAW_GEO_RE = re.compile(r"^(?P<label>.+?) has the longest high-volume ", re.IGNORECASE)
+
+
+def _metadata_for_project(
+    request: Request,
+    discovery,
+    project_id: str | None = None,
+) -> RetrievedMetadata:
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        return retrieve_metadata(discovery)
+    try:
+        return load_retrieved_metadata(store, discovery, project_id=project_id)
+    except Exception:
+        logger.debug("Project context unavailable for insights")
+        return retrieve_metadata(discovery)
 
 
 @router.get("/insights")
@@ -242,10 +258,8 @@ async def get_insights(request: Request, project_id: str | None = None):
     data_profile = _compute_data_profile(
         tables, profiles, relationships, completeness_pct, quality_report
     )
-    store = request.app.state.metadata_store
-    context_row = store.get_dataset_context(discovery.source.name) if store else None
-    context = DatasetContext(**context_row) if context_row else None
-    metadata = retrieve_metadata(discovery, context)
+    metadata = _metadata_for_project(request, discovery, project_id)
+    context = metadata.context
     top_insights = _compute_top_insights(
         request.app.state.duckdb_con,
         tables,
@@ -257,6 +271,7 @@ async def get_insights(request: Request, project_id: str | None = None):
         discovery,
         context,
         staging_models + mart_models,
+        metadata=metadata,
     )
 
     # --- Workflow state ---
@@ -1297,10 +1312,16 @@ def compute_semantic_highlights(
     models,
     limit: int = 5,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[dict]:
     """Convert semantic-family insights into business-facing findings."""
-    metadata = retrieve_metadata(discovery, context)
-    semantic_schema = infer_semantic_schema(discovery, context, project_id=project_id)
+    metadata = metadata or retrieve_metadata(discovery, context)
+    semantic_schema = infer_semantic_schema(
+        discovery,
+        context,
+        project_id=project_id,
+        metadata=metadata,
+    )
     semantic_roles = {
         table.name: roles_for_table(semantic_schema, table.name)
         for table in discovery.tables
@@ -1380,7 +1401,8 @@ def compute_semantic_highlights(
         if candidate is not None:
             append_highlight(candidate)
         if len(selected) >= limit:
-            return selected[:limit]
+            break
+    return selected[:limit]
 
     for insight in ranked_candidates:
         if seen_tables.get(insight.table_name, 0) >= max_per_table:

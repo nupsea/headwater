@@ -713,6 +713,7 @@ def _from_semantic_roles(
         discovery,
         metadata.context if metadata else None,
         project_id=project_id,
+        metadata=metadata,
     )
     lookup_index = build_lookup_index(
         discovery.tables,

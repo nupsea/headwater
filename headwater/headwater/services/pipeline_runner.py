@@ -21,6 +21,7 @@ from headwater.generator.staging import generate_staging_models
 from headwater.profiler.engine import discover
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
+from headwater.services.context_bootstrap import bootstrap_project_context
 from headwater.services.contract_lifecycle import apply_contract_statuses
 from headwater.services.discovery_persistence import (
     persist_catalog_data,
@@ -37,7 +38,16 @@ from headwater.services.pipeline_state import (
 
 logger = logging.getLogger(__name__)
 
-DB_SCHEMES = {"postgresql", "postgres", "mysql", "mysql+pymysql", "sqlite", "snowflake", "redshift", "redshift+iam"}
+DB_SCHEMES = {
+    "postgresql",
+    "postgres",
+    "mysql",
+    "mysql+pymysql",
+    "sqlite",
+    "snowflake",
+    "redshift",
+    "redshift+iam",
+}
 DEFAULT_MAX_TABLES = 50
 DEFAULT_SAMPLE_ROWS = 10_000
 MAX_TABLES_CAP = 500
@@ -163,8 +173,25 @@ def run_pipeline(
 
     analyze(discovery_result, store=metadata_store, source_name=source_name)
     if metadata_store is not None:
+        metadata_store.upsert_source(
+            source_name,
+            discovery_result.source.type,
+            discovery_result.source.path,
+            discovery_result.source.uri,
+            mode=discovery_result.source.mode,
+        )
         metadata_store.apply_key_decisions_to_discovery(discovery_result)
     pipeline["discovery"] = discovery_result
+
+    project_context = bootstrap_project_context(discovery_result, project_id=source_name)
+    pipeline["project_context"] = project_context
+    if metadata_store is not None:
+        metadata_store.replace_project_context(
+            source_name,
+            source_name=source_name,
+            items=[item.model_dump(mode="json") for item in project_context.items],
+            resources=[resource.model_dump(mode="json") for resource in project_context.resources],
+        )
 
     catalog = build_catalog(discovery_result)
     pipeline["catalog"] = catalog

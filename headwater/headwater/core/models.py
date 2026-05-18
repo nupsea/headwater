@@ -65,6 +65,62 @@ class DatasetContext(BaseModel):
     updated_at: datetime | None = None
 
 
+class ContextEvidence(BaseModel):
+    """Evidence attached to a proposed project-context item."""
+
+    evidence_type: str
+    source: str
+    summary: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectContextItem(BaseModel):
+    """Canonical project-context item produced by bootstrap or review."""
+
+    id: str
+    project_id: str
+    source_name: str | None = None
+    item_type: str
+    scope: str = "project"
+    name: str
+    title: str | None = None
+    table_name: str | None = None
+    column_name: str | None = None
+    value: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["proposed", "approved", "rejected", "locked", "needs_review"] = "proposed"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    source: str = "bootstrap"
+    evidence: list[ContextEvidence] = Field(default_factory=list)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ProjectContextResource(BaseModel):
+    """External or discovered resource that enriches project context."""
+
+    id: str
+    project_id: str
+    source_name: str | None = None
+    resource_type: str
+    title: str
+    location: str | None = None
+    status: Literal["active", "archived"] = "active"
+    source: str = "bootstrap"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ProjectContextBundle(BaseModel):
+    """Reviewable and machine-usable project context payload."""
+
+    project_id: str
+    source_names: list[str] = Field(default_factory=list)
+    dataset_contexts: list[DatasetContext] = Field(default_factory=list)
+    items: list[ProjectContextItem] = Field(default_factory=list)
+    resources: list[ProjectContextResource] = Field(default_factory=list)
+
+
 class SemanticColumnRole(BaseModel):
     """Canonical semantic role inferred for a physical column."""
 

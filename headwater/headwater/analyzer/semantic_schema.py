@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yaml
 
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata
 from headwater.core.models import (
     ColumnProfile,
     DatasetContext,
@@ -134,6 +135,7 @@ def infer_semantic_schema(
     discovery: DiscoveryResult,
     context: DatasetContext | None = None,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> SemanticSchema:
     """Infer canonical roles and derived fields from schema/profile metadata."""
     profile_index = {(p.table_name, p.column_name): p for p in discovery.profiles}
@@ -149,12 +151,20 @@ def infer_semantic_schema(
                 profile,
                 role_patterns,
             )
+            context_role = None
+            if metadata is not None:
+                context_role = metadata.locked_roles.get((table.name, col.name))
 
             if col.locked and col.role:
                 role = _role_from_locked_column(col.role, col.semantic_type) or role
                 confidence = max(confidence, 0.96)
                 source = "human_lock"
                 reason = "Confirmed in the data dictionary"
+            elif context_role:
+                role = _role_from_locked_column(context_role, context_role) or role
+                confidence = max(confidence, 0.94)
+                source = "context"
+                reason = "Confirmed in the project context layer"
             else:
                 source = "name_registry" if confidence >= 0.7 else "profile_stats"
 
@@ -229,6 +239,22 @@ def _infer_column_role(
 
 def _role_from_locked_column(role: str | None, semantic_type: str | None) -> str | None:
     value = " ".join(v for v in (role, semantic_type) if v).lower()
+    if value in {
+        "event_ts",
+        "request_ts",
+        "lifecycle_start_ts",
+        "lifecycle_end_ts",
+        "location_id",
+        "origin_id",
+        "destination_id",
+        "measure",
+        "distance",
+        "duration",
+        "amount",
+        "count",
+        "service_type",
+    }:
+        return value
     if "temporal" in value or "date" in value or "time" in value:
         return "event_ts"
     if "geo" in value or "location" in value:

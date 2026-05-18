@@ -17,6 +17,7 @@ from headwater.connectors.registry import get_connector
 from headwater.core.config import get_settings
 from headwater.core.models import SourceConfig
 from headwater.core.runtime_state import get_runtime_state
+from headwater.services.context_bootstrap import bootstrap_project_context
 from headwater.services.discovery_persistence import (
     persist_catalog_data,
     persist_discovery_data,
@@ -283,7 +284,7 @@ def re_enrich(request: Request, force: bool = False):
         )
 
     # Re-run semantic analysis with per-table checkpointing
-    source_name = "source"
+    source_name = getattr(getattr(discovery, "source", None), "name", "source")
     try:
         analyze(discovery, provider, store=store, source_name=source_name)
     except Exception as exc:
@@ -305,6 +306,8 @@ def re_enrich(request: Request, force: bool = False):
         for col in table.columns
         if col.description or col.semantic_type
     )
+    project_context = bootstrap_project_context(discovery, project_id=source_name)
+    pipeline["project_context"] = project_context
 
     # --- Propagate enrichment downstream ---
     # Rebuild catalog from enriched discovery (new descriptions improve
@@ -338,6 +341,22 @@ def re_enrich(request: Request, force: bool = False):
     # Persist ALL updated data to SQLite
     if store is not None:
         try:
+            store.upsert_source(
+                source_name,
+                discovery.source.type,
+                discovery.source.path,
+                discovery.source.uri,
+                mode=discovery.source.mode,
+            )
+            store.replace_project_context(
+                source_name,
+                source_name=source_name,
+                items=[item.model_dump(mode="json") for item in project_context.items],
+                resources=[
+                    resource.model_dump(mode="json")
+                    for resource in project_context.resources
+                ],
+            )
             persist_discovery_data(store, discovery, source_name)
             persist_semantic_data(store, discovery, source_name)
             persist_catalog_data(store, catalog, evaluation, source_name)

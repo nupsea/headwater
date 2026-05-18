@@ -246,6 +246,69 @@ def test_retrieve_metadata_extracts_enum_mappings_from_dictionary_rows() -> None
     }
 
 
+def test_retrieve_metadata_merges_canonical_project_context_items() -> None:
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="test", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                row_count=10,
+                columns=[ColumnInfo(name="status_code", dtype="varchar")],
+            ),
+            TableInfo(
+                name="status_lookup",
+                row_count=3,
+                columns=[
+                    ColumnInfo(name="status_code", dtype="varchar", semantic_type="id"),
+                    ColumnInfo(name="status_label", dtype="varchar"),
+                ],
+            ),
+        ],
+    )
+
+    metadata = retrieve_metadata(
+        discovery,
+        context_items=[
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "status": "approved",
+                "confidence": 0.97,
+                "value": {
+                    "description": "Order lifecycle status.",
+                    "role": "dimension",
+                },
+            },
+            {
+                "id": "lookup:status_lookup",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "lookup",
+                "scope": "table",
+                "name": "status_lookup",
+                "table_name": "status_lookup",
+                "value": {
+                    "key_column": "status_code",
+                    "label_column": "status_label",
+                },
+            },
+        ],
+    )
+
+    assert metadata.glossary["status_code"] == "Order lifecycle status."
+    assert metadata.lookup_tables["status_lookup"] == {
+        "id_column": "status_code",
+        "label_column": "status_label",
+    }
+    assert metadata.locked_roles[("orders", "status_code")] == "dimension"
+
+
 def test_nonexistent_path_returns_empty() -> None:
     source = SourceConfig(name="test", type="json", path="/nonexistent/path")
     docs = discover_companion_docs(source)

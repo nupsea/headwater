@@ -8,7 +8,7 @@ import re
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from headwater.api.project_scope import (
     catalog_ids_for_project,
@@ -39,6 +39,14 @@ class UpdateProjectRequest(BaseModel):
     display_name: str | None = None
     description: str | None = None
     sources: list[str] | None = None
+
+
+class AddContextResourceRequest(BaseModel):
+    resource_type: str
+    title: str
+    location: str | None = None
+    status: str = "active"
+    metadata: dict = Field(default_factory=dict)
 
 
 def _slugify(name: str) -> str:
@@ -179,6 +187,59 @@ def _compute_progress(
     progress["maturity_blockers"] = _maturity_blockers(progress)
     progress["next_actions"] = _next_actions(progress)
     return progress
+
+
+def _project_context_payload(project: dict, store) -> dict:
+    ids = _source_ids_for_project(project, store)
+    if project["id"] not in ids:
+        ids.insert(0, project["id"])
+
+    dataset_contexts = []
+    items: list[dict] = []
+    resources: list[dict] = []
+    seen_item_ids: set[str] = set()
+    seen_resource_ids: set[str] = set()
+    source_names = []
+
+    for source_name in project_sources(project, store):
+        source_names.append(source_name)
+        context = store.get_dataset_context(source_name)
+        if context:
+            dataset_contexts.append(context)
+
+    for context_id in ids:
+        for item in store.list_project_context_items(context_id):
+            if item["id"] in seen_item_ids:
+                continue
+            seen_item_ids.add(item["id"])
+            items.append(item)
+        for resource in store.list_project_context_resources(context_id):
+            if resource["id"] in seen_resource_ids:
+                continue
+            seen_resource_ids.add(resource["id"])
+            resources.append(resource)
+
+    item_types: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    for item in items:
+        item_types[item["item_type"]] = item_types.get(item["item_type"], 0) + 1
+        status = item.get("status") or "unknown"
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    return {
+        "project_id": project["id"],
+        "source_names": source_names,
+        "dataset_contexts": dataset_contexts,
+        "items": items,
+        "resources": resources,
+        "summary": {
+            "item_count": len(items),
+            "resource_count": len(resources),
+            "dataset_context_count": len(dataset_contexts),
+            "item_types": item_types,
+            "status_counts": status_counts,
+        },
+    }
 
 
 def _compute_maturity(progress: dict) -> tuple[str, float]:
@@ -409,9 +470,18 @@ def _hydrate_project(project: dict, store, *, sources: list[dict] | None = None)
     return hydrated
 
 
-def _persist_project_update(store, project_id: str, project: dict, body: UpdateProjectRequest) -> dict:
+def _persist_project_update(
+    store,
+    project_id: str,
+    project: dict,
+    body: UpdateProjectRequest,
+) -> dict:
     display_name = body.display_name or project["display_name"]
-    description = body.description if body.description is not None else project.get("description", "")
+    description = (
+        body.description
+        if body.description is not None
+        else project.get("description", "")
+    )
     sources = body.sources if body.sources is not None else project.get("sources", [])
     store.upsert_project(
         project_id,
@@ -564,6 +634,50 @@ async def update_project(project_id: str, body: UpdateProjectRequest, request: R
     )
     logger.info("Updated project %s", project_id)
     return updated
+
+
+@router.get("/projects/{project_id}/context")
+async def get_project_context(project_id: str, request: Request):
+    """Return reviewable and machine-usable project context."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    return _project_context_payload(project, store)
+
+
+@router.post("/projects/{project_id}/context/resources")
+async def add_project_context_resource(
+    project_id: str,
+    body: AddContextResourceRequest,
+    request: Request,
+):
+    """Attach an external context resource to a project."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+
+    source_names = project_sources(project, store) or [project_id]
+    resource = {
+        "id": f"resource:{project_id}:{uuid.uuid4().hex}",
+        "project_id": project["id"],
+        "source_name": source_names[0] if source_names else None,
+        "resource_type": body.resource_type,
+        "title": body.title,
+        "location": body.location,
+        "status": body.status,
+        "source": "user",
+        "metadata": body.metadata,
+    }
+    store.upsert_project_context_resource(**resource)
+    store.record_decision(
+        "project_context_resource",
+        resource["id"],
+        "added",
+        payload=resource,
+    )
+    return resource
 
 
 @router.get("/activity")
