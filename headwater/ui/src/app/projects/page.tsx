@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { api, type Project, type ProjectProgress } from "@/lib/api";
+import { useState } from "react";
+import { api, type Project } from "@/lib/api";
 import { useProjects } from "@/lib/project-context";
 import { CreateProjectDialog } from "@/components/create-project-dialog";
 import { EditProjectDialog } from "@/components/edit-project-dialog";
@@ -27,28 +27,8 @@ export default function ProjectsPage() {
     selectProject,
   } = useProjects();
   const [showCreate, setShowCreate] = useState(false);
-  const [progressMap, setProgressMap] = useState<Record<string, ProjectProgress>>({});
   const [editing, setEditing] = useState<Project | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-
-  useEffect(() => {
-    let mounted = true;
-    projects.forEach((project) => {
-      api
-        .projectProgress(project.id)
-        .then((response) => {
-          if (!mounted) return;
-          setProgressMap((current) => ({
-            ...current,
-            [project.id]: response.progress,
-          }));
-        })
-        .catch(() => {});
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [projects]);
 
   const startEdit = (project: Project) => {
     setEditing(project);
@@ -121,7 +101,6 @@ export default function ProjectsPage() {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {projects.map((project) => {
-            const progress = progressMap[project.id];
             const active = project.id === activeProjectId;
             return (
               <div
@@ -160,42 +139,26 @@ export default function ProjectsPage() {
                     label="Catalog"
                     value={`${Math.round(project.catalog_confidence * 100)}%`}
                   />
+                  <Metric label="Sources" value={project.sources.length} />
                   <Metric
-                    label="Tables"
-                    value={progress ? progress.tables_discovered : "-"}
-                  />
-                  <Metric
-                    label="Reviewed"
-                    value={
-                      progress
-                        ? `${progress.tables_reviewed}/${progress.tables_discovered}`
-                        : "-"
-                    }
+                    label="Updated"
+                    value={new Date(project.updated_at).toLocaleDateString()}
                   />
                 </div>
 
-                {progress?.maturity_blockers?.length ? (
-                  <div className="mb-4 border-t border-border pt-3">
-                    <div className="text-[9px] font-bold uppercase tracking-wider text-muted mb-1.5">
-                      Current blockers
-                    </div>
-                    <div className="space-y-1">
-                      {progress.maturity_blockers.slice(0, 2).map((blocker) => (
-                        <Link
-                          key={blocker.title}
-                          href={blocker.route}
-                          onClick={() => selectProject(project.id)}
-                          className="block rounded border border-transparent px-2 py-1 text-[11px] text-muted hover:border-border hover:bg-background"
-                        >
-                          <span className="font-medium text-foreground">
-                            {blocker.title}:
-                          </span>{" "}
-                          {blocker.detail}
-                        </Link>
-                      ))}
-                    </div>
+                <div className="mb-4 border-t border-border pt-3">
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-muted mb-1.5">
+                    Current state
                   </div>
-                ) : null}
+                  <Link
+                    href="/health"
+                    onClick={() => selectProject(project.id)}
+                    className="block rounded border border-transparent px-2 py-1 text-[11px] text-muted hover:border-border hover:bg-background"
+                  >
+                    <span className="font-medium text-foreground">Health view:</span> open the
+                    active project dashboard for live blockers, review counts, and quality details.
+                  </Link>
+                </div>
 
                 <div className="flex flex-wrap gap-2">
                   <button

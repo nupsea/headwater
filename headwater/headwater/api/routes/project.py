@@ -359,7 +359,12 @@ async def list_projects(request: Request):
     """List all projects with summary info."""
     store = request.app.state.metadata_store
     try:
-        projects = [_hydrate_project(project, store) for project in visible_projects(store)]
+        project_rows = store.list_projects()
+        source_rows = store.list_sources()
+        projects = [
+            _hydrate_project(project, store, sources=source_rows)
+            for project in visible_projects(store, projects=project_rows, sources=source_rows)
+        ]
     except Exception:
         logger.exception("Failed to list projects from metadata store")
         raise
@@ -398,9 +403,9 @@ async def get_project(project_id: str, request: Request):
     }
 
 
-def _hydrate_project(project: dict, store) -> dict:
+def _hydrate_project(project: dict, store, *, sources: list[dict] | None = None) -> dict:
     hydrated = dict(project)
-    hydrated["sources"] = project_sources(project, store)
+    hydrated["sources"] = project_sources(project, store, sources=sources)
     return hydrated
 
 

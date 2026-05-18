@@ -32,7 +32,7 @@ def resolve_project(store, project_id: str) -> dict | None:
     return _source_backed_project(source)
 
 
-def project_sources(project: dict, store) -> list[str]:
+def project_sources(project: dict, store, *, sources: list[dict] | None = None) -> list[str]:
     explicit = [
         str(source)
         for source in project.get("sources", [])
@@ -42,7 +42,7 @@ def project_sources(project: dict, store) -> list[str]:
         return explicit
 
     project_id = project.get("id")
-    sources = store.list_sources()
+    sources = list(sources) if sources is not None else store.list_sources()
     if project_id and any(source.get("name") == project_id for source in sources):
         return [project_id]
     if len(sources) == 1:
@@ -59,11 +59,16 @@ def project_sources(project: dict, store) -> list[str]:
     return matches or ([project_id] if project_id else [])
 
 
-def project_for_source(store, source_name: str) -> dict | None:
+def project_for_source(
+    store,
+    source_name: str,
+    *,
+    projects: list[dict] | None = None,
+) -> dict | None:
     """Return the real project linked to a source, if one exists."""
     linked = []
     source_slug = _slugify(source_name)
-    for project in store.list_projects():
+    for project in (projects if projects is not None else store.list_projects()):
         if project.get("id") == source_name:
             continue
         explicit = project.get("sources") or []
@@ -73,22 +78,28 @@ def project_for_source(store, source_name: str) -> dict | None:
     return linked[0] if linked else None
 
 
-def visible_projects(store) -> list[dict]:
+def visible_projects(
+    store,
+    *,
+    projects: list[dict] | None = None,
+    sources: list[dict] | None = None,
+) -> list[dict]:
     """Hide legacy source-name shadow projects when a real project links them."""
-    projects = store.list_projects()
+    projects = list(projects) if projects is not None else store.list_projects()
+    sources = list(sources) if sources is not None else store.list_sources()
     linked_sources = {
         source
         for project in projects
         for source in (project.get("sources") or [])
         if project.get("id") != source
     }
-    source_names = {source["name"] for source in store.list_sources()}
+    source_names = {source["name"] for source in sources}
     for source_name in source_names:
-        if project_for_source(store, source_name):
+        if project_for_source(store, source_name, projects=projects):
             linked_sources.add(source_name)
     visible = [project for project in projects if project.get("id") not in linked_sources]
     visible_ids = {project.get("id") for project in visible}
-    for source in store.list_sources():
+    for source in sources:
         source_name = source.get("name")
         if not source_name or source_name in visible_ids or source_name in linked_sources:
             continue
