@@ -10,7 +10,12 @@ import pytest
 
 from headwater.analyzer.llm import LLMProvider
 from headwater.analyzer.metadata_retrieval import retrieve_metadata
-from headwater.api.routes.insights import compute_semantic_highlights, compute_top_insights
+from headwater.api.routes.insights import (
+    _semantic_highlight_id,
+    compute_semantic_highlights,
+    compute_top_insights,
+)
+from headwater.explorer import statistical as statistical_module
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
@@ -38,6 +43,7 @@ from headwater.explorer.nl_to_sql import (
     _repair_loop,
     ask,
 )
+from headwater.explorer.readability import is_low_signal_dimension
 from headwater.explorer.statistical import (
     _detect_change_points_for_column,
     _detect_correlations,
@@ -1524,6 +1530,38 @@ class TestSuggestions:
         assert not any("access a ride flag" in prompt for prompt in prompts)
         assert any("payment method" in prompt for prompt in prompts)
 
+    def test_business_insight_questions_skip_flag_dimensions_without_profiles(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="fhv_trips",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="sr_flag", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="fare_amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            business_insights=[
+                {
+                    "id": "metric_driver:fhv_trips:sr_flag:fare_amount",
+                    "table": "fhv_trips",
+                    "column": "sr_flag",
+                    "metric": "fare_amount",
+                }
+            ],
+        )
+
+        assert not any("sr flag" in q.question.lower() for q in questions)
+
+    def test_low_signal_dimension_suppresses_flag_without_profile(self):
+        assert is_low_signal_dimension("sr_flag", None) is True
+
     def test_business_volume_questions_use_row_subject_not_table_name(self):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
@@ -2679,10 +2717,10 @@ class TestStatistical:
         )
 
         statuses = {(d.family, d.status) for d in result.diagnostics}
-        assert ("coverage", "generated") in statuses
-        assert ("duration", "skipped") in statuses
-        duration = next(d for d in result.diagnostics if d.family == "duration")
-        assert duration.required_roles == ["duration_min"]
+        assert ("temporal_coverage", "generated") in statuses
+        assert ("duration_distribution", "skipped") in statuses
+        duration = next(d for d in result.diagnostics if d.family == "duration_distribution")
+        assert duration.required_roles == ["lifecycle_start_ts", "lifecycle_end_ts"]
         assert duration.reason
 
     def test_semantic_family_dispatcher_uses_catalog_configuration(self, duckdb_con, monkeypatch):
@@ -2712,10 +2750,10 @@ class TestStatistical:
         )
         monkeypatch.setattr(
             "headwater.explorer.statistical._load_family_spec",
-            lambda: {
+            lambda *args, **kwargs: {
                 "families": [
-                    {"key": "coverage", "required_roles": ["event_ts"]},
-                    {"key": "duration", "required_roles": ["custom_duration_role"]},
+                    {"key": "temporal_coverage", "required_roles": ["event_ts"]},
+                    {"key": "duration_distribution", "required_roles": ["custom_duration_role"]},
                 ]
             },
         )
@@ -2726,21 +2764,42 @@ class TestStatistical:
             discovery=discovery,
         )
 
-        coverage = next(d for d in result.diagnostics if d.family == "coverage")
-        duration = next(d for d in result.diagnostics if d.family == "duration")
+        coverage = next(d for d in result.diagnostics if d.family == "temporal_coverage")
+        duration = next(d for d in result.diagnostics if d.family == "duration_distribution")
 
         configured = {d.family for d in result.diagnostics if d.family != "semantic_schema"}
 
-        assert configured == {"coverage", "duration"}
+        assert configured == {"temporal_coverage", "duration_distribution"}
         assert coverage.required_roles == ["event_ts"]
         assert duration.required_roles == ["custom_duration_role"]
         assert duration.status == "skipped"
 
-    def test_family_catalog_lists_extended_semantic_families(self):
+    def test_family_catalog_lists_generic_builtins_by_default(self):
         family_keys = {family["key"] for family in _load_family_spec()["families"]}
 
-        assert {"coverage", "volume", "peak", "duration", "geo"}.issubset(family_keys)
-        assert {"route", "congestion", "quality", "wait"}.issubset(family_keys)
+        assert family_keys == {
+            "temporal_coverage",
+            "temporal_volume",
+            "duration_distribution",
+            "data_quality",
+        }
+
+    def test_family_catalog_loads_project_metadata_extensions(self):
+        family_keys = {family["key"] for family in _load_family_spec(project_id="nytaxi")["families"]}
+
+        assert {
+            "temporal_coverage",
+            "temporal_volume",
+            "duration_distribution",
+            "data_quality",
+        }.issubset(family_keys)
+        assert {
+            "duration_peak_window",
+            "location_distribution",
+            "path_distribution",
+            "distance_efficiency",
+            "lead_time_pattern",
+        }.issubset(family_keys)
 
     def test_semantic_model_lineage_maps_mart_table(self, duckdb_con):
         duckdb_con.execute(
@@ -2912,6 +2971,7 @@ class TestStatistical:
             duckdb_con,
             schema="staging",
             discovery=discovery,
+            project_id="nytaxi",
         )
         descriptions = " ".join(i.description for i in insights)
         types = {i.insight_type for i in insights}
@@ -2929,7 +2989,12 @@ class TestStatistical:
         assert "FHV location analysis is unreliable" in descriptions
         assert all(i.support_count is not None for i in insights)
 
-    def test_semantic_families_generalize_beyond_taxi_tables(self, duckdb_con):
+    def test_semantic_families_load_from_project_metadata_for_other_domains(
+        self,
+        duckdb_con,
+        monkeypatch,
+        tmp_path,
+    ):
         duckdb_con.execute(
             """
             CREATE TABLE staging.stg_work_orders AS
@@ -2987,11 +3052,31 @@ class TestStatistical:
                 )
             ],
         )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "work-orders"
+        project_dir.mkdir(parents=True)
+        (project_dir / "insight_families.yaml").write_text(
+            """
+version: 1
+families:
+  - key: duration_peak_window
+    required_roles: [lifecycle_start_ts, lifecycle_end_ts]
+    priority: 8
+  - key: location_distribution
+    required_roles: [origin_id, lifecycle_start_ts, lifecycle_end_ts]
+    priority: 7
+  - key: lead_time_pattern
+    required_roles: [request_ts, lifecycle_start_ts]
+    priority: 7
+"""
+        )
+        monkeypatch.setattr(statistical_module, "_metadata_root", lambda: metadata_root)
 
         insights = detect_insights(
             duckdb_con,
             schema="staging",
             discovery=discovery,
+            project_id="work-orders",
         )
         descriptions = " ".join(i.description for i in insights)
         types = {i.insight_type for i in insights}
@@ -3085,6 +3170,7 @@ class TestStatistical:
             discovery,
             context,
             models,
+            project_id="nytaxi",
         )
 
         assert highlights
@@ -3161,6 +3247,7 @@ class TestStatistical:
             discovery,
             context,
             models,
+            project_id="nytaxi",
         )
 
         assert highlights
@@ -3284,11 +3371,27 @@ class TestStatistical:
             discovery,
             context,
             models,
+            project_id="nytaxi",
         )
 
         assert any("Central Hub" in h["detail"] or "Airport" in h["detail"] for h in highlights)
         assert any("Central Hub -> Downtown" in h["detail"] for h in highlights)
         assert all("79 -> 265" not in h["detail"] for h in highlights)
+
+    def test_semantic_highlight_ids_are_unique_for_same_metric(self):
+        insight = StatisticalInsight(
+            metric="latitude",
+            table_name="aqs_monitors",
+            insight_type="data_quality",
+            description="placeholder",
+            magnitude=10.0,
+            severity="warning",
+        )
+
+        first = _semantic_highlight_id(insight, "Latitude is missing for 12% of monitor records.")
+        second = _semantic_highlight_id(insight, "Latitude values outside valid bounds appear in 3 rows.")
+
+        assert first != second
 
     def test_top_insights_skip_opaque_code_segments_without_lookup(self, duckdb_con):
         duckdb_con.execute(
@@ -4254,6 +4357,72 @@ class TestGrounding:
         assert not any("raw codes or ids" in warning.lower() for warning in result.warnings)
         assert {row["dimension"] for row in result.data} == {"Open", "On hold"}
 
+    def test_ranked_dimension_questions_filter_null_dimension_rows(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_payments AS
+            SELECT * FROM (VALUES
+                (1, 15.0),
+                (1, 18.0),
+                (2, 12.0),
+                (NULL, 50.0)
+            ) AS t(payment_type, fare_amount)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="payments",
+                    row_count=4,
+                    columns=[
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="fare_amount", dtype="double", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="payments",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=1,
+                    distinct_count=2,
+                    top_values=[("1", 2), ("2", 1)],
+                ),
+                ColumnProfile(
+                    table_name="payments",
+                    column_name="fare_amount",
+                    dtype="double",
+                    null_count=0,
+                    distinct_count=4,
+                    min_value=12.0,
+                    max_value=50.0,
+                    mean=23.75,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            con=duckdb_con,
+        )
+        question = next(
+            q
+            for q in questions
+            if "highest fare amount" in q.question.lower() and "payment method" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert all(row["dimension"] is not None for row in result.data)
+
     def test_route_question_without_lookup_returns_guided_error(self, duckdb_con):
         duckdb_con.execute(
             """
@@ -4881,6 +5050,20 @@ class TestVisualization:
         ]
         viz = recommend_visualization(["value", "score"], data)
         assert viz.chart_type == "scatter"
+
+    def test_numeric_dimension_codes_stay_bar_for_ranked_answers(self):
+        data = [
+            {"dimension": 1, "fare_amount": 42.0, "records": 120},
+            {"dimension": 2, "fare_amount": 38.5, "records": 90},
+            {"dimension": 3, "fare_amount": 35.0, "records": 70},
+        ]
+        viz = recommend_visualization(
+            ["dimension", "fare_amount", "records"],
+            data,
+            "Which trip type has the highest fare amount in tlc raw green tripdata 2026?",
+        )
+        assert viz.chart_type == "bar"
+        assert viz.x_axis == "dimension"
 
     def test_heatmap_for_matrix_style_question(self):
         data = [

@@ -142,6 +142,12 @@ def is_low_signal_dimension(column_name: str, profile: Any | None) -> bool:
     business_named = any(token in lower for token in BUSINESS_DIMENSION_TOKENS)
     technical_named = any(token in lower for token in LOW_SIGNAL_DIMENSION_TOKENS)
 
+    if technical_named and not business_named:
+        if profile is None:
+            return True
+        if distinct <= 5:
+            return True
+
     if technical_named and distinct <= 3:
         return True
 

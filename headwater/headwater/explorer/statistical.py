@@ -55,15 +55,40 @@ _P_VALUE_THRESHOLD = 0.05  # 95% confidence
 _MAX_POLARS_LOAD_ROWS = 1_000_000
 
 _INSIGHT_TYPE_TO_FAMILY = {
-    "coverage_period": "coverage",
-    "volume_distribution": "volume",
-    "peak_period": "peak",
-    "duration_distribution": "duration",
-    "wait_time_pattern": "wait",
-    "geographic_hotspot": "geo",
-    "route_pair": "route",
-    "congestion_proxy": "congestion",
-    "data_quality": "quality",
+    "coverage_period": "temporal_coverage",
+    "volume_distribution": "temporal_volume",
+    "peak_period": "duration_peak_window",
+    "duration_distribution": "duration_distribution",
+    "wait_time_pattern": "lead_time_pattern",
+    "geographic_hotspot": "location_distribution",
+    "route_pair": "path_distribution",
+    "congestion_proxy": "distance_efficiency",
+    "data_quality": "data_quality",
+}
+_DEFAULT_FAMILY_SPEC = {
+    "version": 1,
+    "families": [
+        {
+            "key": "temporal_coverage",
+            "required_roles": ["event_ts"],
+            "priority": 5,
+        },
+        {
+            "key": "temporal_volume",
+            "required_roles": ["event_ts"],
+            "priority": 8,
+        },
+        {
+            "key": "duration_distribution",
+            "required_roles": ["lifecycle_start_ts", "lifecycle_end_ts"],
+            "priority": 7,
+        },
+        {
+            "key": "data_quality",
+            "required_roles": [],
+            "priority": 9,
+        },
+    ],
 }
 _GENERIC_INSIGHT_TYPE_PRIORITY = {
     "period_comparison": 3.0,
@@ -80,6 +105,7 @@ def detect_insights(
     discovery: DiscoveryResult | None = None,
     dataset_context: DatasetContext | None = None,
     models: list[GeneratedModel] | None = None,
+    project_id: str | None = None,
 ) -> list[StatisticalInsight]:
     """Scan all materialized tables in a schema for statistical patterns.
 
@@ -96,6 +122,7 @@ def detect_insights(
         discovery=discovery,
         dataset_context=dataset_context,
         models=models,
+        project_id=project_id,
     ).insights
 
 
@@ -105,6 +132,7 @@ def detect_insights_with_diagnostics(
     discovery: DiscoveryResult | None = None,
     dataset_context: DatasetContext | None = None,
     models: list[GeneratedModel] | None = None,
+    project_id: str | None = None,
 ) -> InsightDetectionResult:
     """Detect insights and return per-table/family execution diagnostics."""
     insights: list[StatisticalInsight] = []
@@ -113,6 +141,10 @@ def detect_insights_with_diagnostics(
     tables = _filter_tables_for_models(_list_tables(con, schema), schema, scoped_models)
 
     if discovery is not None:
+        family_spec = _load_family_spec(
+            source_name=discovery.source.name,
+            project_id=project_id,
+        )
         semantic_schema = infer_semantic_schema(discovery, dataset_context)
         for table_name in tables:
             source_table = _source_table_for_physical_table(table_name, discovery, scoped_models)
@@ -139,13 +171,14 @@ def detect_insights_with_diagnostics(
                     source_table.name,
                     roles_for_table(semantic_schema, source_table.name),
                 ),
+                family_spec,
             )
             insights.extend(result.insights)
             diagnostics.extend(result.diagnostics)
 
         if insights:
             return InsightDetectionResult(
-                insights=_rank_family_insights(insights),
+                insights=_rank_family_insights(insights, family_spec),
                 diagnostics=diagnostics,
             )
 
@@ -260,6 +293,7 @@ def _detect_family_insights(
     physical_table: str,
     source_table: str,
     roles: dict[str, SemanticColumnRole],
+    family_spec: dict,
 ) -> InsightDetectionResult:
     """Run semantic insight families with DuckDB-side aggregations."""
     found_roles = sorted(roles)
@@ -279,7 +313,6 @@ def _detect_family_insights(
         )
 
     table_ref = f"{quote_ident(schema)}.{quote_ident(physical_table)}"
-    family_spec = _load_family_spec()
     configured_families = {
         str(family.get("key")): family
         for family in family_spec.get("families", [])
@@ -395,42 +428,42 @@ def _detect_family_insights(
             )
 
     family_handlers = {
-        "coverage": (
+        "temporal_coverage": (
             bool(start and start_expr),
             lambda: _coverage_family(con, table_ref, source_table, start, start_expr),
             "Requires a temporal role that can be cast to TIMESTAMP.",
         ),
-        "volume": (
+        "temporal_volume": (
             bool(start and start_expr),
             lambda: _volume_family(con, table_ref, source_table, start, start_expr, duration_expr),
             "Requires a temporal role that can be cast to TIMESTAMP.",
         ),
-        "peak": (
+        "duration_peak_window": (
             bool(start_expr and duration_expr),
             lambda: _peak_family(con, table_ref, source_table, start_expr, duration_expr),
             "Requires temporal start and lifecycle end roles to derive duration.",
         ),
-        "duration": (
+        "duration_distribution": (
             bool(duration_expr),
             lambda: _duration_family(con, table_ref, source_table, start_expr, duration_expr),
             "Requires lifecycle start and end roles to derive duration.",
         ),
-        "geo": (
+        "location_distribution": (
             bool(origin and duration_expr),
             lambda: _geo_family(con, table_ref, source_table, origin, duration_expr),
             "Requires origin/location and duration roles.",
         ),
-        "route": (
+        "path_distribution": (
             bool(origin and dest and duration_expr),
             lambda: _route_family(con, table_ref, source_table, origin, dest, duration_expr),
             "Requires origin, destination, and duration roles.",
         ),
-        "congestion": (
+        "distance_efficiency": (
             bool(distance and duration_expr),
             lambda: _congestion_family(con, table_ref, source_table, distance, duration_expr),
             "Requires distance and duration roles.",
         ),
-        "quality": (
+        "data_quality": (
             True,
             lambda: _quality_family(
                 con,
@@ -444,7 +477,7 @@ def _detect_family_insights(
             ),
             "Quality family is always eligible.",
         ),
-        "wait": (
+        "lead_time_pattern": (
             bool(start_expr and wait_expr),
             lambda: _wait_family(con, table_ref, source_table, start_expr, wait_expr, service),
             "Requires request and event/lifecycle start roles.",
@@ -1101,12 +1134,13 @@ def _wait_family(
     ]
 
 
-def insight_type_priority_weights() -> dict[str, float]:
+def insight_type_priority_weights(family_spec: dict | None = None) -> dict[str, float]:
     """Return ranking priorities by insight type, backed by the family catalog."""
     priorities = dict(_GENERIC_INSIGHT_TYPE_PRIORITY)
+    family_spec = family_spec or _load_family_spec()
     configured = {
         str(family.get("key")): float(family.get("priority", 1.0))
-        for family in _load_family_spec().get("families", [])
+        for family in family_spec.get("families", [])
         if isinstance(family, dict) and family.get("key")
     }
     for insight_type, family in _INSIGHT_TYPE_TO_FAMILY.items():
@@ -1114,9 +1148,12 @@ def insight_type_priority_weights() -> dict[str, float]:
     return priorities
 
 
-def _rank_family_insights(insights: list[StatisticalInsight]) -> list[StatisticalInsight]:
+def _rank_family_insights(
+    insights: list[StatisticalInsight],
+    family_spec: dict | None = None,
+) -> list[StatisticalInsight]:
     severity_weight = {"critical": 3.0, "warning": 2.0, "info": 1.0}
-    type_weight = insight_type_priority_weights()
+    type_weight = insight_type_priority_weights(family_spec)
     return sorted(
         insights,
         key=lambda i: (
@@ -1728,8 +1765,18 @@ def _detect_correlations(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load_family_spec() -> dict:
-    path = Path(__file__).resolve().parents[1] / "analyzer" / "insight_families.yaml"
+def _metadata_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "metadata"
+
+
+def _slugify_metadata_key(value: str) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized.strip("-")
+
+
+def _parse_family_spec(path: Path) -> dict | None:
     try:
         parsed = yaml.safe_load(path.read_text()) or {}
         if isinstance(parsed, dict):
@@ -1737,21 +1784,67 @@ def _load_family_spec() -> dict:
     except Exception:
         pass
     try:
-        return json.loads(path.read_text())
+        parsed = json.loads(path.read_text())
+        if isinstance(parsed, dict):
+            return parsed
     except Exception:
+        return None
+    return None
+
+
+def _merge_family_specs(base: dict, override: dict) -> dict:
+    if override.get("replace_defaults"):
         return {
-            "families": [
-                {"key": "coverage"},
-                {"key": "volume"},
-                {"key": "peak"},
-                {"key": "duration"},
-                {"key": "geo"},
-                {"key": "route"},
-                {"key": "congestion"},
-                {"key": "quality"},
-                {"key": "wait"},
-            ]
+            "version": override.get("version", base.get("version", 1)),
+            "families": list(override.get("families", [])),
         }
+    merged = {
+        "version": override.get("version", base.get("version", 1)),
+        "families": [],
+    }
+    by_key = {
+        str(family.get("key")): dict(family)
+        for family in base.get("families", [])
+        if isinstance(family, dict) and family.get("key")
+    }
+    for family in override.get("families", []):
+        if not isinstance(family, dict) or not family.get("key"):
+            continue
+        key = str(family["key"])
+        by_key[key] = {**by_key.get(key, {}), **family}
+    merged["families"] = list(by_key.values())
+    return merged
+
+
+def _candidate_family_spec_paths(source_name: str | None, project_id: str | None) -> list[Path]:
+    metadata_root = _metadata_root()
+    candidates: list[Path] = []
+    for name in [project_id, source_name]:
+        if not name:
+            continue
+        for candidate in [str(name), _slugify_metadata_key(str(name))]:
+            path = metadata_root / candidate / "insight_families.yaml"
+            if path not in candidates:
+                candidates.append(path)
+    return candidates
+
+
+def _load_family_spec(
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> dict:
+    spec = {
+        "version": _DEFAULT_FAMILY_SPEC["version"],
+        "families": [dict(family) for family in _DEFAULT_FAMILY_SPEC["families"]],
+    }
+    for path in _candidate_family_spec_paths(source_name, project_id):
+        if not path.exists():
+            continue
+        parsed = _parse_family_spec(path)
+        if parsed:
+            spec = _merge_family_specs(spec, parsed)
+            break
+    return spec
 
 
 def _source_table_for_physical_table(

@@ -18,7 +18,8 @@ _TEMPORAL_PATTERNS = re.compile(
 
 # Column names that indicate categorical/dimension data
 _DIMENSION_PATTERNS = re.compile(
-    r"(name|type|category|status|zone|site|region|level|priority|severity|_type$)", re.IGNORECASE
+    r"(dimension|name|type|category|status|zone|site|region|level|priority|severity|segment|group|label|code|id|_type$|_id$|^id$)",
+    re.IGNORECASE,
 )
 _PIE_QUESTION_PATTERNS = re.compile(
     r"(distribution of|share of|split by|breakdown of|composition of|how many .+ by)",

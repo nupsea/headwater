@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from datetime import date, datetime
@@ -1275,12 +1276,27 @@ def _semantic_highlight_score(insight) -> float:
     return score
 
 
+def _semantic_highlight_id(insight, detail: str) -> str:
+    payload = "|".join(
+        [
+            insight.table_name,
+            insight.insight_type,
+            insight.metric,
+            detail,
+            str(insight.support_count or ""),
+        ]
+    )
+    suffix = hashlib.blake2s(payload.encode("utf-8"), digest_size=6).hexdigest()
+    return f"semantic:{insight.table_name}:{insight.insight_type}:{insight.metric}:{suffix}"
+
+
 def compute_semantic_highlights(
     con,
     discovery,
     context: DatasetContext | None,
     models,
     limit: int = 5,
+    project_id: str | None = None,
 ) -> list[dict]:
     """Convert semantic-family insights into business-facing findings."""
     metadata = retrieve_metadata(discovery, context)
@@ -1297,6 +1313,7 @@ def compute_semantic_highlights(
         discovery=discovery,
         dataset_context=context,
         models=models,
+        project_id=project_id,
     )
     highlight_types = set(_SEMANTIC_HIGHLIGHT_ORDER) | {"coverage_period"}
     candidates = [
@@ -1334,7 +1351,7 @@ def compute_semantic_highlights(
             detail = f"{detail} Relevant for {lens.lower()} decisions."
         selected.append(
             {
-                "id": f"semantic:{insight.table_name}:{insight.insight_type}:{insight.metric}",
+                "id": _semantic_highlight_id(insight, detail),
                 "title": _semantic_highlight_title(detail),
                 "detail": detail,
                 "table": insight.table_name,
@@ -1405,10 +1422,7 @@ def compute_semantic_highlights(
             if context and context.decisions:
                 detail = f"{detail} Relevant for {lens.lower()} decisions."
             wait_item = {
-                "id": (
-                    f"semantic:{wait_candidate.table_name}:"
-                    f"{wait_candidate.insight_type}:{wait_candidate.metric}"
-                ),
+                "id": _semantic_highlight_id(wait_candidate, detail),
                 "title": _semantic_highlight_title(detail),
                 "detail": detail,
                 "table": wait_candidate.table_name,

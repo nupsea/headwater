@@ -190,6 +190,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         discovery,
         _dataset_context_for_pipeline(request, pipeline),
         all_models,
+        project_id=project_id,
     )
     suggestions = generate_suggestions(
         discovery=discovery,
@@ -209,6 +210,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         discovery=discovery,
         dataset_context=context,
         models=all_models,
+        project_id=project_id,
     )
     marts_result = detect_insights_with_diagnostics(
         con,
@@ -216,6 +218,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         discovery=discovery,
         dataset_context=context,
         models=all_models,
+        project_id=project_id,
     )
     statistical_insights = staging_result.insights + marts_result.insights
     diagnostics = staging_result.diagnostics + marts_result.diagnostics
@@ -324,13 +327,20 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
     context = _dataset_context_for_pipeline(request, pipeline)
     metadata = retrieve_metadata(discovery, context)
     business_insights = compute_top_insights(con, discovery.tables, discovery.profiles, metadata)
-    semantic_highlights = compute_semantic_highlights(con, discovery, context, all_models)
+    semantic_highlights = compute_semantic_highlights(
+        con,
+        discovery,
+        context,
+        all_models,
+        project_id=project_id,
+    )
     staging_result = detect_insights_with_diagnostics(
         con,
         schema="staging",
         discovery=discovery,
         dataset_context=context,
         models=all_models,
+        project_id=project_id,
     )
     marts_result = detect_insights_with_diagnostics(
         con,
@@ -338,6 +348,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
         discovery=discovery,
         dataset_context=context,
         models=all_models,
+        project_id=project_id,
     )
     insights = staging_result.insights + marts_result.insights
     diagnostics = staging_result.diagnostics + marts_result.diagnostics

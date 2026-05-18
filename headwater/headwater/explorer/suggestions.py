@@ -648,7 +648,8 @@ def _from_business_insights(
                 f"COUNT(*) AS records "
                 f"FROM {ref} fact "
                 f"{join_sql} "
-                f'WHERE {group_expr} IS NOT NULL AND fact."{insight["metric"]}" IS NOT NULL '
+                f'WHERE {_dimension_not_null_predicate(select_expr)} '
+                f'AND fact."{insight["metric"]}" IS NOT NULL '
                 f"GROUP BY {group_expr} ORDER BY total_value DESC LIMIT 20"
             )
         elif insight_id.startswith("segment_concentration:") and column:
@@ -670,7 +671,7 @@ def _from_business_insights(
                 f"SELECT {select_expr} AS dimension, COUNT(*) AS records "
                 f"FROM {ref} fact "
                 f"{join_sql} "
-                f"WHERE {group_expr} IS NOT NULL "
+                f"WHERE {_dimension_not_null_predicate(select_expr)} "
                 f"GROUP BY {group_expr} ORDER BY records DESC LIMIT 20"
             )
         elif chart_type == "histogram" and column:
@@ -829,7 +830,7 @@ def _from_semantic_roles(
                                     f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
                                     f"FROM {ref} fact "
                                     f"{join_sql} "
-                                    f"WHERE {group_expr} IS NOT NULL "
+                                    f"WHERE {_dimension_not_null_predicate(select_expr)} "
                                     f"AND {duration_expr} >= 0 "
                                     f"GROUP BY {group_expr} ORDER BY avg_duration_min DESC LIMIT 20"
                                 ),
@@ -925,7 +926,7 @@ def _from_semantic_roles(
                                     f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
                                     f"FROM {ref} fact "
                                     f"{join_sql} "
-                                    f"WHERE {group_expr} IS NOT NULL "
+                                    f"WHERE {_dimension_not_null_predicate(select_expr)} "
                                     f"AND {duration_expr} >= 0 "
                                     f"GROUP BY {group_expr} ORDER BY avg_wait_min DESC LIMIT 20"
                                 ),
@@ -960,7 +961,8 @@ def _from_semantic_roles(
                                 f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
                                 f"FROM {ref} fact "
                                 f"{join_sql} "
-                                f"WHERE {group_expr} IS NOT NULL AND {start_expr} IS NOT NULL "
+                                f"WHERE {_dimension_not_null_predicate(select_expr)} "
+                                f"AND {start_expr} IS NOT NULL "
                                 f"GROUP BY {group_expr} ORDER BY 2 DESC LIMIT 20"
                             ),
                         ),
@@ -1137,6 +1139,7 @@ def _from_schema_graph(
                     f"FROM {fact_ref} t0 "
                     + " ".join(join_clauses)
                     + f" {dim_join_sql} "
+                    + f" WHERE {_dimension_not_null_predicate(select_expr)} "
                     + f"GROUP BY {group_expr} "
                     f"ORDER BY avg_{metric_col} DESC LIMIT 20"
                 )
@@ -1151,6 +1154,7 @@ def _from_schema_graph(
                     f"FROM {fact_ref} t0 "
                     + " ".join(join_clauses)
                     + f" {dim_join_sql} "
+                    + f" WHERE {_dimension_not_null_predicate(select_expr)} "
                     + f"GROUP BY {group_expr} "
                     f"ORDER BY {count_alias} DESC LIMIT 20"
                 )
@@ -1689,6 +1693,7 @@ def _from_relationships(
                 f"FROM {from_ref} f "
                 f'JOIN {to_ref} t ON f."{rel.from_column}" = t."{rel.to_column}" '
                 f"{join_sql} "
+                f"WHERE {_dimension_not_null_predicate(select_expr)} "
                 f"GROUP BY {group_expr} "
                 f"ORDER BY {from_label}_count DESC LIMIT 20"
             )
@@ -1698,6 +1703,7 @@ def _from_relationships(
                 f"FROM {from_ref} f "
                 f'JOIN {to_ref} t ON f."{rel.from_column}" = t."{rel.to_column}" '
                 f"{join_sql} "
+                f"WHERE {_dimension_not_null_predicate(select_expr)} "
                 f"GROUP BY {group_expr} "
                 f"ORDER BY {from_label}_count DESC LIMIT 20"
             )
@@ -1800,7 +1806,7 @@ def _from_table_structure(
                             f"FROM {ref} fact "
                             f"{join_sql} "
                             f'WHERE "{t_col}" IS NOT NULL '
-                            f"AND {group_expr} IS NOT NULL "
+                            f"AND {_dimension_not_null_predicate(select_expr)} "
                             f"GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 120"
                         ),
                     )
@@ -1836,6 +1842,7 @@ def _from_table_structure(
                             f'MAX("{m_col}") AS max_{m_col} '
                             f"FROM {ref} fact "
                             f"{join_sql} "
+                            f"WHERE {_dimension_not_null_predicate(select_expr)} "
                             f"GROUP BY {group_expr} "
                             f"ORDER BY avg_{m_col} DESC LIMIT 20"
                         ),
@@ -1866,7 +1873,7 @@ def _from_table_structure(
                         f"COUNT(*) AS records "
                         f"FROM {ref} fact "
                         f"{join_sql} "
-                        f"WHERE {group_expr} IS NOT NULL "
+                        f"WHERE {_dimension_not_null_predicate(select_expr)} "
                         f"GROUP BY {group_expr} ORDER BY records DESC LIMIT 6"
                     ),
                 )
@@ -2532,6 +2539,10 @@ def _dimension_projection(
         )
 
     return raw_expr, raw_expr, "", _column_label(column_name, metadata)
+
+
+def _dimension_not_null_predicate(select_expr: str) -> str:
+    return f"({select_expr}) IS NOT NULL"
 
 
 def _timestamp_expression(table: TableInfo, column_name: str) -> str:
