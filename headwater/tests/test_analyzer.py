@@ -227,6 +227,58 @@ class TestHeuristics:
         """Type columns with numeric suffixes are still dimensions."""
         assert classify_semantic_type("incident_type_2", project_id="sample") == "dimension"
 
+    def test_enrich_tables_applies_approved_project_context_hints(self):
+        tables = [
+            TableInfo(
+                name="tickets",
+                row_count=1000,
+                columns=[ColumnInfo(name="ticket_reference", dtype="varchar")],
+            )
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="tickets",
+                column_name="ticket_reference",
+                dtype="varchar",
+                distinct_count=800,
+                uniqueness_ratio=0.8,
+            )
+        ]
+        metadata = retrieve_metadata(
+            DiscoveryResult(
+                source=SourceConfig(name="source", type="json"),
+                tables=tables,
+                profiles=profiles,
+                relationships=[],
+            ),
+            context_items=[
+                {
+                    "id": "column_semantics:tickets.ticket_reference",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "ticket_reference",
+                    "table_name": "tickets",
+                    "column_name": "ticket_reference",
+                    "status": "approved",
+                    "value": {
+                        "description": "Analyst-assigned ticket reference.",
+                        "role": "dimension",
+                        "semantic_type": "dimension",
+                    },
+                }
+            ],
+        )
+
+        enrich_tables(tables, profiles, [], metadata=metadata)
+
+        column = tables[0].columns[0]
+        assert column.description == "Analyst-assigned ticket reference."
+        assert column.semantic_type == "dimension"
+        assert column.role == "dimension"
+        assert column.confidence >= 0.95
+
 
 class TestSemanticSchema:
     def test_generic_schema_does_not_hardcode_taxi_aliases(self):

@@ -88,13 +88,7 @@ async def run_discovery(
         discovery.companion_docs = companion_docs
     logger.info("Companion docs: %d found", len(discovery.companion_docs))
 
-    # Semantic analysis (heuristic-only in discovery route)
-    analyze(discovery)
-    logger.info("Semantic analysis complete")
-
     store = request.app.state.metadata_store
-    store.apply_key_decisions_to_discovery(discovery)
-    logger.info("Applied persisted key decisions")
     store.upsert_source(
         source_name,
         discovery.source.type,
@@ -102,6 +96,20 @@ async def run_discovery(
         discovery.source.uri,
         mode=discovery.source.mode,
     )
+    metadata = load_retrieved_metadata(store, discovery, project_id=source_name)
+
+    # Semantic analysis (heuristic-only in discovery route)
+    analyze(
+        discovery,
+        store=store,
+        source_name=source_name,
+        project_id=source_name,
+        metadata=metadata,
+    )
+    logger.info("Semantic analysis complete")
+
+    store.apply_key_decisions_to_discovery(discovery)
+    logger.info("Applied persisted key decisions")
 
     project_context = bootstrap_project_context(discovery, project_id=source_name)
     store.replace_project_context(

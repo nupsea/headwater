@@ -286,8 +286,20 @@ def re_enrich(request: Request, force: bool = False):
 
     # Re-run semantic analysis with per-table checkpointing
     source_name = getattr(getattr(discovery, "source", None), "name", "source")
+    metadata = (
+        load_retrieved_metadata(store, discovery, project_id=source_name)
+        if store is not None
+        else None
+    )
     try:
-        analyze(discovery, provider, store=store, source_name=source_name)
+        analyze(
+            discovery,
+            provider,
+            store=store,
+            source_name=source_name,
+            project_id=source_name,
+            metadata=metadata,
+        )
     except Exception as exc:
         logger.exception("Re-enrich analysis failed")
         raise HTTPException(

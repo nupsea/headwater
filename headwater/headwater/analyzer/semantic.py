@@ -15,6 +15,7 @@ from headwater.analyzer.heuristics import (
     generate_deep_table_description,
 )
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider, make_cache_key
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
@@ -35,6 +36,7 @@ def analyze(
     store: object | None = None,
     source_name: str = "source",
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> DiscoveryResult:
     """Enrich a DiscoveryResult with semantic descriptions and domain classification.
 
@@ -51,6 +53,7 @@ def analyze(
             discovery,
             source_name=resolved_source_name,
             project_id=project_id,
+            metadata=metadata,
         )
 
     # LLM mode: run async enrichment
@@ -61,6 +64,7 @@ def analyze(
             store=store,
             source_name=resolved_source_name,
             project_id=project_id,
+            metadata=metadata,
         )
     )
 
@@ -70,6 +74,7 @@ def _analyze_heuristic(
     *,
     source_name: str | None = None,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> DiscoveryResult:
     """Enrich using heuristics only -- no LLM calls."""
     enrich_tables(
@@ -78,6 +83,7 @@ def _analyze_heuristic(
         discovery.relationships,
         source_name=source_name or discovery.source.name,
         project_id=project_id,
+        metadata=metadata,
     )
     discovery.domains = build_domain_map(discovery.tables)
 
@@ -94,6 +100,7 @@ async def _analyze_with_llm(
     store: object | None = None,
     source_name: str = "source",
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> DiscoveryResult:
     """Enrich using LLM with heuristic fallback per table.
 
@@ -107,6 +114,7 @@ async def _analyze_with_llm(
         discovery.relationships,
         source_name=source_name or discovery.source.name,
         project_id=project_id,
+        metadata=metadata,
     )
 
     # Build profile lookup

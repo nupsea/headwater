@@ -172,7 +172,6 @@ def run_pipeline(
         match_docs_to_tables(companion_docs, table_names)
         discovery_result.companion_docs = companion_docs
 
-    analyze(discovery_result, store=metadata_store, source_name=source_name)
     if metadata_store is not None:
         metadata_store.upsert_source(
             source_name,
@@ -181,6 +180,21 @@ def run_pipeline(
             discovery_result.source.uri,
             mode=discovery_result.source.mode,
         )
+        existing_metadata = load_retrieved_metadata(
+            metadata_store,
+            discovery_result,
+            project_id=source_name,
+        )
+    else:
+        existing_metadata = None
+    analyze(
+        discovery_result,
+        store=metadata_store,
+        source_name=source_name,
+        project_id=source_name,
+        metadata=existing_metadata,
+    )
+    if metadata_store is not None:
         metadata_store.apply_key_decisions_to_discovery(discovery_result)
     pipeline["discovery"] = discovery_result
 

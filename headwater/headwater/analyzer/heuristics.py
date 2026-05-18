@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
@@ -530,6 +531,7 @@ def enrich_tables(
     *,
     source_name: str | None = None,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[TableInfo]:
     """Enrich tables with heuristic descriptions, domains, semantic types, and confidence.
 
@@ -572,7 +574,14 @@ def enrich_tables(
         for col in table.columns:
             if col.locked:
                 continue
-            col.description = generate_column_description(col.name, table.name)
+            context_hint = metadata.column_hints.get((table.name, col.name), {}) if metadata else {}
+            approved_role = metadata.locked_roles.get((table.name, col.name)) if metadata else None
+            col.description = _context_description_override(
+                col.name,
+                table.name,
+                metadata,
+                context_hint,
+            )
             sem_type, name_conf = classify_semantic_type_with_confidence(
                 col.name,
                 source_name=source_name,
@@ -596,6 +605,14 @@ def enrich_tables(
                 )
 
             col.role = _classify_role(col, profile)
+            context_semantic = _context_semantic_override(approved_role, context_hint)
+            context_role = _context_role_override(approved_role, context_hint)
+            if context_semantic:
+                col.semantic_type = context_semantic
+                col.confidence = max(col.confidence, 0.95)
+            if context_role:
+                col.role = context_role
+                col.confidence = max(col.confidence, 0.95)
 
         # Pass 2: sibling consistency -- align columns with similar names
         _apply_sibling_consistency(table, profile_index)
@@ -603,6 +620,87 @@ def enrich_tables(
         enriched.append(table)
 
     return enriched
+
+
+def _context_description_override(
+    col_name: str,
+    table_name: str,
+    metadata: RetrievedMetadata | None,
+    context_hint: dict,
+) -> str:
+    description = context_hint.get("description")
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+    if metadata is not None:
+        glossary = metadata.glossary.get(col_name.lower())
+        if glossary:
+            return glossary
+    return generate_column_description(col_name, table_name)
+
+
+def _context_semantic_override(approved_role: str | None, context_hint: dict) -> str | None:
+    explicit = [
+        context_hint.get("semantic_type"),
+        context_hint.get("role"),
+        approved_role,
+    ]
+    for value in explicit:
+        normalized = _normalize_context_semantic_type(value)
+        if normalized:
+            return normalized
+    return None
+
+
+def _context_role_override(approved_role: str | None, context_hint: dict) -> str | None:
+    explicit = [
+        context_hint.get("role"),
+        context_hint.get("semantic_type"),
+        approved_role,
+    ]
+    for value in explicit:
+        normalized = _normalize_context_role(value)
+        if normalized:
+            return normalized
+    return None
+
+
+def _normalize_context_semantic_type(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"id", "foreign_key", "primary_key", "dimension", "metric", "text", "pii"}:
+        return normalized
+    if normalized in {"measure", "amount", "count", "distance", "duration", "kpi"}:
+        return "metric"
+    if normalized in {"event_ts", "request_ts", "lifecycle_start_ts", "lifecycle_end_ts"}:
+        return "temporal"
+    if normalized == "service_type":
+        return "dimension"
+    return None
+
+
+def _normalize_context_role(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"metric", "dimension", "temporal", "identifier", "text"}:
+        return normalized
+    if normalized in {"measure", "amount", "count", "distance", "duration", "kpi"}:
+        return "metric"
+    if normalized in {"event_ts", "request_ts", "lifecycle_start_ts", "lifecycle_end_ts"}:
+        return "temporal"
+    if normalized == "service_type":
+        return "dimension"
+    if normalized in {
+        "id",
+        "foreign_key",
+        "primary_key",
+        "location_id",
+        "origin_id",
+        "destination_id",
+    }:
+        return "identifier"
+    return None
 
 
 def _apply_sibling_consistency(
