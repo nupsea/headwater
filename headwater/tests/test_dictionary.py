@@ -190,17 +190,23 @@ class TestConfidenceScoring:
         assert conf >= 0.85
 
     def test_score_metric_high_confidence(self):
-        sem, conf = classify_semantic_type_with_confidence("total_count")
+        sem, conf = classify_semantic_type_with_confidence(
+            "total_count",
+            project_id="sample",
+        )
         assert sem == "metric"
         assert conf >= 0.85
 
     def test_standalone_dim_moderate_confidence(self):
-        sem, conf = classify_semantic_type_with_confidence("county")
+        sem, conf = classify_semantic_type_with_confidence("county", project_id="sample")
         assert sem == "dimension"
         assert conf >= 0.7
 
     def test_broad_pattern_moderate_confidence(self):
-        sem, conf = classify_semantic_type_with_confidence("complaint_type")
+        sem, conf = classify_semantic_type_with_confidence(
+            "complaint_type",
+            project_id="sample",
+        )
         assert sem == "dimension"
         assert conf >= 0.6
 
@@ -214,7 +220,7 @@ class TestEnrichmentWithConfidence:
     """Test that enrich_tables populates confidence and role fields."""
 
     def test_enrichment_sets_confidence(self, tables, profiles, relationships):
-        enriched = enrich_tables(tables, profiles, relationships)
+        enriched = enrich_tables(tables, profiles, relationships, project_id="sample")
         complaints = enriched[0]
 
         # complaint_id: PK pattern -> high confidence

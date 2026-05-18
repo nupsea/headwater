@@ -400,28 +400,28 @@ class TestHelpers:
 
     def test_infer_agg_type_count(self):
         col = ColumnInfo(name="total_count", dtype="int64")
-        assert _infer_agg_type(col) == "count"
+        assert _infer_agg_type(col, project_id="riverton") == "count"
 
     def test_infer_agg_type_amount(self):
         col = ColumnInfo(name="total_amount", dtype="float64")
-        assert _infer_agg_type(col) == "sum"
+        assert _infer_agg_type(col, project_id="riverton") == "sum"
 
     def test_infer_agg_type_rate(self):
         col = ColumnInfo(name="resolution_rate", dtype="float64")
-        assert _infer_agg_type(col) == "avg"
+        assert _infer_agg_type(col, project_id="riverton") == "avg"
 
     def test_expand_synonyms_geographic(self):
-        syns = _expand_synonyms("county", "The county name", [])
+        syns = _expand_synonyms("county", "The county name", [], project_id="riverton")
         assert "borough" in syns
         assert "district" in syns
 
     def test_expand_synonyms_categorical(self):
-        syns = _expand_synonyms("category", "Category of complaint", [])
+        syns = _expand_synonyms("category", "Category of complaint", [], project_id="riverton")
         assert "type" in syns
         assert "kind" in syns
 
     def test_expand_synonyms_temporal(self):
-        syns = _expand_synonyms("month", "Month of the year", [])
+        syns = _expand_synonyms("month", "Month of the year", [], project_id="riverton")
         assert "period" in syns
 
 

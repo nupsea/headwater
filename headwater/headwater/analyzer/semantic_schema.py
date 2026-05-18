@@ -1,14 +1,17 @@
 """Semantic role inference for insight generation.
 
-The inference layer is intentionally generic: it maps physical columns onto
-canonical lifecycle, metric, location, and quality roles that insight families
-can use without embedding a domain-specific code path.
+Core inference stays domain-neutral. Project or source vocabularies are loaded
+from ``metadata/<project>/semantic_schema.yaml``.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
+from pathlib import Path
+
+import yaml
 
 from headwater.core.models import (
     ColumnProfile,
@@ -32,94 +35,120 @@ def _role_pattern(
     return role, re.compile(pattern, re.I), confidence, reason
 
 
-_ROLE_PATTERNS: list[tuple[str, re.Pattern[str], float, str]] = [
-    _role_pattern(
-        "lifecycle_start_ts",
-        r"(pickup|start|begin|opened|created|order(ed)?|event).*"
-        r"(_?date|_?time|_?ts|datetime)|(^|_)pickup_datetime$|^started_at$",
-        0.92,
-        "lifecycle start timestamp",
-    ),
-    _role_pattern(
-        "lifecycle_end_ts",
-        r"(dropoff|end|finish|closed|resolved|delivered|completed).*"
-        r"((_?date|_?time|_?ts|datetime)|_at)$|(^|_)dropoff_datetime$|^ended_at$",
-        0.92,
-        "lifecycle end timestamp",
-    ),
-    _role_pattern(
-        "request_ts",
-        r"(request|dispatch|book|created).*((_?date|_?time|_?ts|datetime)|_at)$",
-        0.86,
-        "request or dispatch timestamp",
-    ),
-    _role_pattern(
-        "event_ts",
-        r"(^|_)(date|datetime|timestamp|time|ts|period|event_date|created_at|updated_at)$",
-        0.72,
-        "event timestamp",
-    ),
-    _role_pattern(
-        "origin_id",
-        r"(^|_)(origin|source|from|pickup|pu|start|departure).*"
-        r"(_?id|location|zone|station|site|place)|^pulocationid$",
-        0.88,
-        "origin/location identifier",
-    ),
-    _role_pattern(
-        "destination_id",
-        r"(^|_)(destination|dest|target|to|dropoff|do|end|arrival).*"
-        r"(_?id|location|zone|station|site|place)|^dolocationid$",
-        0.88,
-        "destination/location identifier",
-    ),
-    _role_pattern(
-        "location_id",
-        r"(^|_)(location|zone|site|place|station|region).*(_?id|code)?$",
-        0.68,
-        "location identifier",
-    ),
-    _role_pattern("distance", r"(distance|miles|kilometers|km|mi)$", 0.9, "distance measure"),
-    _role_pattern(
-        "duration",
-        r"(duration|elapsed|trip_time|travel_time|time_seconds|time_min)",
-        0.88,
-        "duration measure",
-    ),
-    _role_pattern(
-        "amount",
-        r"(amount|fare|price|cost|charge|revenue|sales|total|payment|pay)$",
-        0.78,
-        "monetary amount",
-    ),
-    _role_pattern("tip_amount", r"(tip|gratuity)", 0.9, "tip amount"),
-    _role_pattern(
-        "count",
-        r"(^|_)(count|qty|quantity|units|passenger_count|num_)",
-        0.72,
-        "count measure",
-    ),
-    _role_pattern(
-        "service_type",
-        r"(service|provider|vendor|type|category|class|mode)$",
-        0.72,
-        "service or category",
-    ),
-]
+_DEFAULT_ROLE_SPEC: list[dict[str, str | float]] = []
+
+
+def _metadata_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "metadata"
+
+
+def _slugify_metadata_key(value: str) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized.strip("-")
+
+
+def _compact_metadata_key(value: str) -> str:
+    return "".join(ch.lower() for ch in value if ch.isalnum())
+
+
+def _candidate_role_spec_paths(source_name: str | None, project_id: str | None) -> list[Path]:
+    candidates: list[Path] = []
+    metadata_root = _metadata_root()
+    for name in [project_id, source_name]:
+        if not name:
+            continue
+        variants = [
+            str(name),
+            _slugify_metadata_key(str(name)),
+            _compact_metadata_key(str(name)),
+        ]
+        for variant in variants:
+            if not variant:
+                continue
+            path = metadata_root / variant / "semantic_schema.yaml"
+            if path not in candidates:
+                candidates.append(path)
+    return candidates
+
+
+def _parse_role_spec(path: Path) -> dict | None:
+    try:
+        parsed = yaml.safe_load(path.read_text()) or {}
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    try:
+        parsed = json.loads(path.read_text())
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        return None
+    return None
+
+
+def _merge_role_specs(
+    base: list[dict[str, str | float]],
+    override: dict,
+) -> list[dict[str, str | float]]:
+    roles = override.get("roles")
+    if not isinstance(roles, list):
+        return list(base)
+    normalized = [
+        role
+        for role in roles
+        if isinstance(role, dict)
+        and isinstance(role.get("role"), str)
+        and isinstance(role.get("pattern"), str)
+    ]
+    if override.get("replace_defaults"):
+        return normalized
+    return normalized + list(base)
+
+
+def _role_patterns(
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> list[tuple[str, re.Pattern[str], float, str]]:
+    spec = list(_DEFAULT_ROLE_SPEC)
+    for path in _candidate_role_spec_paths(source_name, project_id):
+        if not path.exists():
+            continue
+        parsed = _parse_role_spec(path)
+        if parsed:
+            spec = _merge_role_specs(spec, parsed)
+            break
+    patterns: list[tuple[str, re.Pattern[str], float, str]] = []
+    for entry in spec:
+        role = str(entry["role"])
+        pattern = str(entry["pattern"])
+        confidence = float(entry.get("confidence", 0.7))
+        reason = str(entry.get("reason") or role.replace("_", " "))
+        patterns.append(_role_pattern(role, pattern, confidence, reason))
+    return patterns
 
 
 def infer_semantic_schema(
     discovery: DiscoveryResult,
     context: DatasetContext | None = None,
+    project_id: str | None = None,
 ) -> SemanticSchema:
     """Infer canonical roles and derived fields from schema/profile metadata."""
     profile_index = {(p.table_name, p.column_name): p for p in discovery.profiles}
+    role_patterns = _role_patterns(discovery.source.name, project_id)
     roles: list[SemanticColumnRole] = []
 
     for table in discovery.tables:
         for col in table.columns:
             profile = profile_index.get((table.name, col.name))
-            role, confidence, reason = _infer_column_role(col.name, col.dtype, profile)
+            role, confidence, reason = _infer_column_role(
+                col.name,
+                col.dtype,
+                profile,
+                role_patterns,
+            )
 
             if col.locked and col.role:
                 role = _role_from_locked_column(col.role, col.semantic_type) or role
@@ -174,8 +203,9 @@ def _infer_column_role(
     name: str,
     dtype: str,
     profile: ColumnProfile | None,
+    role_patterns: list[tuple[str, re.Pattern[str], float, str]],
 ) -> tuple[str | None, float, str | None]:
-    for role, pattern, confidence, reason in _ROLE_PATTERNS:
+    for role, pattern, confidence, reason in role_patterns:
         if pattern.search(name):
             if role.endswith("_ts") and not _TEMPORAL_DTYPE.search(dtype):
                 confidence -= 0.18

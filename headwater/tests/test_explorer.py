@@ -8,6 +8,7 @@ import duckdb
 import polars as pl
 import pytest
 
+from headwater.analyzer import semantic_schema as semantic_schema_module
 from headwater.analyzer.llm import LLMProvider
 from headwater.analyzer.metadata_retrieval import retrieve_metadata
 from headwater.api.routes.insights import (
@@ -15,7 +16,6 @@ from headwater.api.routes.insights import (
     compute_semantic_highlights,
     compute_top_insights,
 )
-from headwater.explorer import statistical as statistical_module
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
@@ -33,6 +33,7 @@ from headwater.core.models import (
     TableInfo,
     VisualizationSpec,
 )
+from headwater.explorer import statistical as statistical_module
 from headwater.explorer.nl_to_sql import (
     _build_vocabulary,
     _check_grounding,
@@ -416,7 +417,7 @@ class TestSuggestions:
 
     def test_semantic_suggestions_include_heatmap_scatter_and_share_prompts(self):
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="orders",
@@ -539,9 +540,13 @@ class TestSuggestions:
         assert questions[0].sql_hint is not None
         assert any("changed over time" in q.question.lower() for q in questions)
 
-    def test_semantic_role_questions_are_generated_for_operational_workflows(self):
+    def test_semantic_role_questions_are_generated_for_operational_workflows(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="work_orders", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="work_orders",
@@ -573,6 +578,36 @@ class TestSuggestions:
                 ),
             ],
         )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "work-orders"
+        project_dir.mkdir(parents=True)
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: request_ts
+    pattern: "^requested_at$"
+    confidence: 0.9
+    reason: work order request timestamp
+  - role: lifecycle_start_ts
+    pattern: "^started_at$"
+    confidence: 0.92
+    reason: work order start timestamp
+  - role: lifecycle_end_ts
+    pattern: "^resolved_at$"
+    confidence: 0.92
+    reason: work order resolution timestamp
+  - role: origin_id
+    pattern: "^site_id$"
+    confidence: 0.88
+    reason: work site identifier
+  - role: service_type
+    pattern: "^work_type$"
+    confidence: 0.82
+    reason: work order type
+"""
+        )
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
         metadata = retrieve_metadata(
             discovery,
             DatasetContext(
@@ -582,7 +617,11 @@ class TestSuggestions:
             ),
         )
 
-        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+        questions = generate_suggestions(
+            discovery=discovery,
+            metadata=metadata,
+            project_id="work-orders",
+        )
         business_qs = [q for q in questions if q.source == "business"]
 
         assert business_qs
@@ -604,7 +643,7 @@ class TestSuggestions:
             """
         )
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="yellow_trips",
@@ -678,7 +717,7 @@ class TestSuggestions:
             """
         )
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="orders",
@@ -776,7 +815,7 @@ class TestSuggestions:
             """
         )
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="service_events",
@@ -901,7 +940,7 @@ class TestSuggestions:
             """
         )
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="tlc_trips",
@@ -974,7 +1013,7 @@ class TestSuggestions:
 
     def test_route_questions_are_suppressed_without_readable_lookup(self):
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="tlc_trips",
@@ -1437,7 +1476,7 @@ class TestSuggestions:
 
         assert not any("which hour has the highest" in q.question.lower() for q in questions)
 
-    def test_duration_questions_allow_multi_day_programs(self):
+    def test_duration_questions_allow_multi_day_programs(self, monkeypatch, tmp_path):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
             tables=[
@@ -1453,8 +1492,30 @@ class TestSuggestions:
                 )
             ],
         )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "programs"
+        project_dir.mkdir(parents=True)
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: lifecycle_start_ts
+    pattern: "^start_date$"
+    confidence: 0.9
+    reason: program start date
+  - role: lifecycle_end_ts
+    pattern: "^end_date$"
+    confidence: 0.9
+    reason: program end date
+  - role: service_type
+    pattern: "^type$"
+    confidence: 0.8
+    reason: program type
+"""
+        )
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
 
-        questions = generate_suggestions(discovery=discovery)
+        questions = generate_suggestions(discovery=discovery, project_id="programs")
         question = next(
             q
             for q in questions
@@ -1869,7 +1930,11 @@ class TestSuggestions:
         assert len(trend_questions) <= 3
         assert any("highest value" in q.question.lower() for q in questions)
 
-    def test_decision_questions_rank_ahead_of_generic_volume_prompts(self):
+    def test_decision_questions_rank_ahead_of_generic_volume_prompts(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
             tables=[
@@ -1941,12 +2006,50 @@ class TestSuggestions:
                 ),
             ],
         )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "service-events"
+        project_dir.mkdir(parents=True)
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: request_ts
+    pattern: "^requested_at$"
+    confidence: 0.9
+    reason: service request timestamp
+  - role: lifecycle_start_ts
+    pattern: "^started_at$"
+    confidence: 0.92
+    reason: service start timestamp
+  - role: lifecycle_end_ts
+    pattern: "^resolved_at$"
+    confidence: 0.92
+    reason: service resolution timestamp
+  - role: origin_id
+    pattern: "^origin_id$"
+    confidence: 0.88
+    reason: service origin
+  - role: destination_id
+    pattern: "^destination_id$"
+    confidence: 0.88
+    reason: service destination
+  - role: service_type
+    pattern: "^service_type$"
+    confidence: 0.82
+    reason: service type
+"""
+        )
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
         metadata = retrieve_metadata(
             discovery,
             DatasetContext(source_name="test", row_represents="service event"),
         )
 
-        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+        questions = generate_suggestions(
+            discovery=discovery,
+            metadata=metadata,
+            project_id="service-events",
+        )
         top_questions = [q.question.lower() for q in questions[:3]]
 
         assert any("changed over time" in q for q in top_questions)
@@ -3070,7 +3173,34 @@ families:
     priority: 7
 """
         )
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: request_ts
+    pattern: "^requested_at$"
+    confidence: 0.9
+    reason: work order request timestamp
+  - role: lifecycle_start_ts
+    pattern: "^started_at$"
+    confidence: 0.92
+    reason: work order start timestamp
+  - role: lifecycle_end_ts
+    pattern: "^resolved_at$"
+    confidence: 0.92
+    reason: work order resolution timestamp
+  - role: origin_id
+    pattern: "^site_id$"
+    confidence: 0.88
+    reason: work site identifier
+  - role: service_type
+    pattern: "^work_type$"
+    confidence: 0.82
+    reason: work order type
+"""
+        )
         monkeypatch.setattr(statistical_module, "_metadata_root", lambda: metadata_root)
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
 
         insights = detect_insights(
             duckdb_con,

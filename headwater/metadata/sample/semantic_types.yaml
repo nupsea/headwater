@@ -1,0 +1,35 @@
+version: 1
+patterns:
+  - semantic_type: dimension
+    pattern: ".*name$|.*_name$|.*_type($|_\\d+$)|.*type$|.*category.*|.*status.*"
+    confidence: 0.7
+  - semantic_type: dimension
+    pattern: ".*_code$|.*code$|.*flag$|.*indicator$|.*number$|.*_num$|.*_no$"
+    confidence: 0.7
+  - semantic_type: temporal
+    pattern: "^year$|^month$|.*date.*|.*_at$|.*timestamp.*"
+    confidence: 0.85
+  - semantic_type: metric
+    pattern: ".*_count$|^count$|.*score.*|.*_rate$|^rate$|.*pct_.*|.*_value$|^value$|.*_measure$|.*measure_.*"
+    confidence: 0.85
+  - semantic_type: metric
+    pattern: ".*_days$|^days_.*|.*percentile.*|.*median.*|.*_total$|^total_.*|.*_avg$|.*_average$|.*_max$|.*_min$|^max_.*|^min_.*|.*_sum$|^sum_.*"
+    confidence: 0.85
+  - semantic_type: text
+    pattern: ".*description.*|.*narrative.*|.*notes.*"
+    confidence: 0.7
+  - semantic_type: dimension
+    pattern: "^county$|^borough$|^city$|^state$|^country$|^region$|^district$|^ward$|^province$|^department$|^zone$|^sector$"
+    confidence: 0.8
+  - semantic_type: dimension
+    pattern: "^priority$|^severity$|^channel$|^source$|^platform$|^tier$|^level$|^class$|^group$|^gender$|^race$|^ethnicity$"
+    confidence: 0.8
+  - semantic_type: dimension
+    pattern: ".*_tract$|^tract$|.*_board$|^board$"
+    confidence: 0.8
+  - semantic_type: metric
+    pattern: ".*amount.*|.*budget.*"
+    confidence: 0.85
+  - semantic_type: geographic
+    pattern: ".*latitude.*|.*longitude.*|^lat$|^lon$|.*address.*"
+    confidence: 0.85

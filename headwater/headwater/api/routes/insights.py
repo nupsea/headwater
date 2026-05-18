@@ -1300,7 +1300,7 @@ def compute_semantic_highlights(
 ) -> list[dict]:
     """Convert semantic-family insights into business-facing findings."""
     metadata = retrieve_metadata(discovery, context)
-    semantic_schema = infer_semantic_schema(discovery, context)
+    semantic_schema = infer_semantic_schema(discovery, context, project_id=project_id)
     semantic_roles = {
         table.name: roles_for_table(semantic_schema, table.name)
         for table in discovery.tables

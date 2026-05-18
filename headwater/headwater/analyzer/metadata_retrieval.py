@@ -13,11 +13,7 @@ from dataclasses import dataclass, field
 
 from headwater.core.models import DatasetContext, DiscoveryResult, Relationship, TableInfo
 
-_LOOKUP_ID_RE = re.compile(r"(^id$|_id$|locationid$|code$|key$|_num$|number$)", re.I)
-_LOOKUP_LABEL_RE = re.compile(
-    r"(name|label|description|zone|borough|region|title|status|category|type|display|text|value)",
-    re.I,
-)
+_LOOKUP_ID_RE = re.compile(r"(^id$|_id$|code$|key$|_num$|number$)", re.I)
 _TEXTUAL_DTYPES = ("varchar", "char", "text", "string")
 
 
@@ -114,7 +110,10 @@ def infer_lookup_candidate(table: TableInfo) -> dict[str, str] | None:
         return None
 
     label_candidates = [
-        (col.name, _lookup_label_score(col.name, col.dtype, col.semantic_type or "", col.role or ""))
+        (
+            col.name,
+            _lookup_label_score(col.name, col.dtype, col.semantic_type or "", col.role or ""),
+        )
         for col in table.columns
     ]
     label_candidates = [item for item in label_candidates if item[1] > 0]
@@ -128,7 +127,7 @@ def infer_lookup_candidate(table: TableInfo) -> dict[str, str] | None:
     if not label_options:
         return None
     label_column, label_score = max(label_options, key=lambda item: item[1])
-    if label_score < 6:
+    if label_score < 6 and len(table.columns) > 2:
         return None
 
     return {"id_column": id_column, "label_column": label_column}
@@ -151,11 +150,6 @@ def lookup_match_keys(name: str) -> list[str]:
 
     suffix_tokens = {"id", "code", "key"}
     directional_prefixes = {
-        "pu",
-        "do",
-        "pickup",
-        "dropoff",
-        "drop",
         "origin",
         "destination",
         "dest",
@@ -273,13 +267,10 @@ def _lookup_id_score(name: str, semantic_type: str, role: str) -> int:
 
 
 def _lookup_label_score(name: str, dtype: str, semantic_type: str, role: str) -> int:
-    lower = name.lower()
     if _LOOKUP_ID_RE.search(name):
         return -1
 
     score = 0
-    if _LOOKUP_LABEL_RE.search(name):
-        score += 6
     if any(token in (dtype or "").lower() for token in _TEXTUAL_DTYPES):
         score += 4
     if semantic_type == "dimension":

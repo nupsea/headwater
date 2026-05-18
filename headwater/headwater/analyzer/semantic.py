@@ -34,6 +34,7 @@ def analyze(
     *,
     store: object | None = None,
     source_name: str = "source",
+    project_id: str | None = None,
 ) -> DiscoveryResult:
     """Enrich a DiscoveryResult with semantic descriptions and domain classification.
 
@@ -44,18 +45,40 @@ def analyze(
     checkpointed to SQLite immediately after LLM processing so partial work
     survives timeouts and restarts.
     """
+    resolved_source_name = source_name if source_name != "source" else discovery.source.name
     if provider is None or isinstance(provider, NoLLMProvider):
-        return _analyze_heuristic(discovery)
+        return _analyze_heuristic(
+            discovery,
+            source_name=resolved_source_name,
+            project_id=project_id,
+        )
 
     # LLM mode: run async enrichment
     return asyncio.run(
-        _analyze_with_llm(discovery, provider, store=store, source_name=source_name)
+        _analyze_with_llm(
+            discovery,
+            provider,
+            store=store,
+            source_name=resolved_source_name,
+            project_id=project_id,
+        )
     )
 
 
-def _analyze_heuristic(discovery: DiscoveryResult) -> DiscoveryResult:
+def _analyze_heuristic(
+    discovery: DiscoveryResult,
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> DiscoveryResult:
     """Enrich using heuristics only -- no LLM calls."""
-    enrich_tables(discovery.tables, discovery.profiles, discovery.relationships)
+    enrich_tables(
+        discovery.tables,
+        discovery.profiles,
+        discovery.relationships,
+        source_name=source_name or discovery.source.name,
+        project_id=project_id,
+    )
     discovery.domains = build_domain_map(discovery.tables)
 
     # Deep semantic descriptions
@@ -70,6 +93,7 @@ async def _analyze_with_llm(
     *,
     store: object | None = None,
     source_name: str = "source",
+    project_id: str | None = None,
 ) -> DiscoveryResult:
     """Enrich using LLM with heuristic fallback per table.
 
@@ -77,7 +101,13 @@ async def _analyze_with_llm(
     after successful LLM enrichment so partial work survives failures.
     """
     # First apply heuristics as baseline
-    enrich_tables(discovery.tables, discovery.profiles, discovery.relationships)
+    enrich_tables(
+        discovery.tables,
+        discovery.profiles,
+        discovery.relationships,
+        source_name=source_name or discovery.source.name,
+        project_id=project_id,
+    )
 
     # Build profile lookup
     profile_map: dict[str, list[ColumnProfile]] = {}
@@ -282,7 +312,7 @@ Respond as JSON:
   "description": "Concise 1-2 sentence summary",
   "domain": "Business domain",
   "narrative": "3-5 sentence narrative: what this table is, its purpose, related tables",
-  "row_semantics": "What each row represents (e.g., 'Each row is a daily air quality reading')",
+  "row_semantics": "What each row represents",
   "business_process": "The business process this table captures",
   "temporal_grain": "daily|monthly|yearly|event-based|snapshot|none",
   "key_dimensions": ["primary grouping columns"],
@@ -518,7 +548,7 @@ def derive_relationships_from_llm(
     """Discover new FK relationships from LLM semantic_type=foreign_key.
 
     For columns the LLM tagged as 'foreign_key', try to match them to
-    PK columns in other tables using name patterns (e.g. zone_id -> zones.id).
+    PK columns in other tables using generic *_id name patterns.
     Returns only NEW relationships not already in discovery.relationships.
     """
     existing = {
@@ -577,13 +607,12 @@ def _infer_fk_target(
 ) -> tuple[str, str] | None:
     """Infer FK target from column name pattern.
 
-    zone_id -> zones.zone_id or zones.id
-    site_id -> sites.site_id or sites.id
+    <entity>_id -> <entities>.<entity>_id or <entities>.id
     """
     name = col_name.lower()
     if not name.endswith("_id"):
         return None
-    stem = name[: -len("_id")]  # "zone"
+    stem = name[: -len("_id")]
 
     # Try plural forms
     for candidate in [stem + "s", stem + "es", stem]:

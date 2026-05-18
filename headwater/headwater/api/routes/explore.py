@@ -202,6 +202,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         extra_relationships=extra_rels,
         business_insights=business_insights,
         metadata=metadata,
+        project_id=project_id,
     )
     con = request.app.state.duckdb_con
     staging_result = detect_insights_with_diagnostics(
@@ -271,6 +272,7 @@ async def ask_question(request: Request, body: AskRequest, project_id: str | Non
             metadata,
         ),
         metadata=metadata,
+        project_id=project_id,
     )
 
     # Get LLM provider if configured
@@ -309,6 +311,7 @@ async def ask_question(request: Request, body: AskRequest, project_id: str | Non
         provider=provider,
         catalog=catalog,
         vector_store=vector_store,
+        project_id=project_id,
     )
 
     return result.model_dump()

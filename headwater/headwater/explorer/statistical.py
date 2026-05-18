@@ -145,7 +145,11 @@ def detect_insights_with_diagnostics(
             source_name=discovery.source.name,
             project_id=project_id,
         )
-        semantic_schema = infer_semantic_schema(discovery, dataset_context)
+        semantic_schema = infer_semantic_schema(
+            discovery,
+            dataset_context,
+            project_id=project_id,
+        )
         for table_name in tables:
             source_table = _source_table_for_physical_table(table_name, discovery, scoped_models)
             if source_table is None:

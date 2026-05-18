@@ -48,8 +48,8 @@ from headwater.explorer.readability import (
     LOW_SIGNAL_DIMENSION_TOKENS,
     enum_case_expression,
     enum_dimension_label,
-    is_readable_dimension,
     is_low_signal_dimension,
+    is_readable_dimension,
 )
 from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.utils import resolve_table_ref, table_exists
@@ -96,6 +96,7 @@ def generate_suggestions(
     extra_relationships: list[Relationship] | None = None,
     business_insights: list[dict] | None = None,
     metadata: RetrievedMetadata | None = None,
+    project_id: str | None = None,
 ) -> list[SuggestedQuestion]:
     """Generate suggested questions from all available metadata.
 
@@ -145,6 +146,7 @@ def generate_suggestions(
             all_models,
             con,
             metadata,
+            project_id=project_id,
         ) + _from_business_insights(
             business_insights,
             con,
@@ -704,9 +706,14 @@ def _from_semantic_roles(
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
     metadata: RetrievedMetadata | None,
+    project_id: str | None = None,
 ) -> list[SuggestedQuestion]:
     suggestions: list[SuggestedQuestion] = []
-    semantic_schema = infer_semantic_schema(discovery, metadata.context if metadata else None)
+    semantic_schema = infer_semantic_schema(
+        discovery,
+        metadata.context if metadata else None,
+        project_id=project_id,
+    )
     lookup_index = build_lookup_index(
         discovery.tables,
         metadata,

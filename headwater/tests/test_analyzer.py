@@ -7,6 +7,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from headwater.analyzer import semantic_schema as semantic_schema_module
 from headwater.analyzer.heuristics import (
     _refine_semantic_type,
     build_domain_map,
@@ -19,8 +20,15 @@ from headwater.analyzer.heuristics import (
 )
 from headwater.analyzer.llm import NoLLMProvider, _parse_json_response, make_cache_key
 from headwater.analyzer.semantic import analyze
+from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.connectors.json_loader import JsonLoader
-from headwater.core.models import ColumnInfo, ColumnProfile, SourceConfig, TableInfo
+from headwater.core.models import (
+    ColumnInfo,
+    ColumnProfile,
+    DiscoveryResult,
+    SourceConfig,
+    TableInfo,
+)
 from headwater.profiler.engine import discover
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sample"
@@ -191,32 +199,112 @@ class TestHeuristics:
         assert classify_semantic_type("zone_id") == "id"
 
     def test_semantic_type_metric(self):
-        assert classify_semantic_type("violation_count") == "metric"
+        assert classify_semantic_type("violation_count", project_id="sample") == "metric"
 
     def test_semantic_type_temporal(self):
-        assert classify_semantic_type("created_at") == "temporal"
+        assert classify_semantic_type("created_at", project_id="sample") == "temporal"
 
     def test_semantic_type_geographic(self):
-        assert classify_semantic_type("latitude") == "geographic"
+        assert classify_semantic_type("latitude", project_id="sample") == "geographic"
 
     def test_complaint_type_311_is_dimension(self):
-        assert classify_semantic_type("complaint_type_311") == "dimension"
+        assert classify_semantic_type("complaint_type_311", project_id="sample") == "dimension"
 
     def test_census_tract_is_dimension(self):
-        assert classify_semantic_type("census_tract") == "dimension"
+        assert classify_semantic_type("census_tract", project_id="sample") == "dimension"
 
     def test_site_num_is_dimension(self):
-        assert classify_semantic_type("site_num") == "dimension"
+        assert classify_semantic_type("site_num", project_id="sample") == "dimension"
 
     def test_community_board_is_dimension(self):
-        assert classify_semantic_type("community_board") == "dimension"
+        assert classify_semantic_type("community_board", project_id="sample") == "dimension"
 
     def test_complaint_no_is_dimension(self):
-        assert classify_semantic_type("complaint_no") == "dimension"
+        assert classify_semantic_type("complaint_no", project_id="sample") == "dimension"
 
     def test_type_suffix_with_version(self):
         """Type columns with numeric suffixes are still dimensions."""
-        assert classify_semantic_type("incident_type_2") == "dimension"
+        assert classify_semantic_type("incident_type_2", project_id="sample") == "dimension"
+
+
+class TestSemanticSchema:
+    def test_generic_schema_does_not_hardcode_taxi_aliases(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="adhoc", type="csv"),
+            tables=[
+                TableInfo(
+                    name="rides",
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="pulocationid", dtype="varchar"),
+                        ColumnInfo(name="fare", dtype="double"),
+                    ],
+                )
+            ],
+            profiles=[],
+            relationships=[],
+        )
+
+        schema = infer_semantic_schema(discovery)
+        roles = roles_for_table(schema, "rides")
+
+        assert "lifecycle_start_ts" not in roles
+        assert "lifecycle_end_ts" not in roles
+        assert "origin_id" not in roles
+        assert "amount" not in roles
+
+    def test_project_metadata_can_restore_dataset_specific_aliases(self, monkeypatch, tmp_path):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="ny_taxi_postgres", type="postgres"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="pulocationid", dtype="varchar"),
+                        ColumnInfo(name="fare", dtype="double"),
+                    ],
+                )
+            ],
+            profiles=[],
+            relationships=[],
+        )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "nytaxi"
+        project_dir.mkdir(parents=True)
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: lifecycle_start_ts
+    pattern: "(^|_)pickup_datetime$"
+    confidence: 0.92
+    reason: lifecycle start timestamp
+  - role: lifecycle_end_ts
+    pattern: "(^|_)dropoff_datetime$"
+    confidence: 0.92
+    reason: lifecycle end timestamp
+  - role: origin_id
+    pattern: "^pulocationid$"
+    confidence: 0.88
+    reason: origin/location identifier
+  - role: amount
+    pattern: "^fare$"
+    confidence: 0.78
+    reason: monetary amount
+"""
+        )
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
+
+        schema = infer_semantic_schema(discovery, project_id="nytaxi")
+        roles = roles_for_table(schema, "trips")
+
+        assert roles["lifecycle_start_ts"].column_name == "pickup_datetime"
+        assert roles["lifecycle_end_ts"].column_name == "dropoff_datetime"
+        assert roles["origin_id"].column_name == "pulocationid"
+        assert roles["amount"].column_name == "fare"
 
 
 # -- LLM provider -----------------------------------------------------------
@@ -464,7 +552,7 @@ class TestRefineSemanticType:
                 mean=5.2,
             ),
         ]
-        enriched = enrich_tables([table], profiles, [])
+        enriched = enrich_tables([table], profiles, [], project_id="sample")
 
         cols = {c.name: c for c in enriched[0].columns}
         # complaint_number: .*number$ -> dimension -> refined to id

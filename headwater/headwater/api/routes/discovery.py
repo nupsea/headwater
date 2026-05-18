@@ -342,7 +342,7 @@ async def get_semantic_schema(request: Request, project_id: str | None = None):
     store = request.app.state.metadata_store
     context_row = store.get_dataset_context(discovery.source.name)
     context = DatasetContext(**context_row) if context_row else None
-    schema = infer_semantic_schema(discovery, context)
+    schema = infer_semantic_schema(discovery, context, project_id=project_id)
     return {
         **schema.model_dump(mode="json"),
         "ambiguous_count": len(ambiguous_roles(schema)),
@@ -363,7 +363,7 @@ async def confirm_semantic_schema(
     store = request.app.state.metadata_store
     context_row = store.get_dataset_context(discovery.source.name)
     context = DatasetContext(**context_row) if context_row else None
-    schema = infer_semantic_schema(discovery, context)
+    schema = infer_semantic_schema(discovery, context, project_id=project_id)
 
     confirmed = 0
     updates_by_table: dict[str, list[dict]] = {}
