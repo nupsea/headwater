@@ -115,9 +115,10 @@ async def run_discovery(
         len(project_context.items),
         len(project_context.resources),
     )
+    metadata = load_retrieved_metadata(store, discovery, project_id=source_name)
 
     # Build semantic catalog (heuristic tier 0)
-    catalog = build_catalog(discovery)
+    catalog = build_catalog(discovery, project_id=source_name, metadata=metadata)
     logger.info(
         "Catalog built: %d metrics, %d dimensions, %d entities (confidence=%.2f)",
         len(catalog.metrics),

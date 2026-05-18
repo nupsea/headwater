@@ -11,6 +11,7 @@ from headwater.analyzer.catalog import (
     build_catalog,
 )
 from headwater.analyzer.eval import evaluate_catalog
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
@@ -513,6 +514,84 @@ class TestBuildCatalog:
         dim_cols = [(d.table, d.column) for d in catalog.dimensions]
         assert ("complaints", "complaint_id") not in dim_cols
         assert ("zones", "zone_id") not in dim_cols
+
+    def test_catalog_uses_context_descriptions_for_dimensions(self, riverton_discovery):
+        metadata = retrieve_metadata(
+            riverton_discovery,
+            context_items=[
+                {
+                    "id": "column_semantics:complaints.status",
+                    "project_id": "riverton",
+                    "source_name": "riverton",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "status",
+                    "table_name": "complaints",
+                    "column_name": "status",
+                    "status": "approved",
+                    "value": {
+                        "description": "Lifecycle status of the complaint.",
+                        "role": "dimension",
+                        "semantic_type": "dimension",
+                    },
+                }
+            ],
+        )
+
+        catalog = build_catalog(riverton_discovery, metadata=metadata)
+        status_dim = next(d for d in catalog.dimensions if d.name == "complaints_status")
+
+        assert status_dim.description == "Lifecycle status of the complaint."
+        assert status_dim.source == "human"
+
+    def test_catalog_can_include_approved_high_cardinality_dimension(self, riverton_source):
+        discovery = DiscoveryResult(
+            source=riverton_source,
+            tables=[
+                TableInfo(
+                    name="tickets",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(name="ticket_id", dtype="varchar", is_primary_key=True),
+                        ColumnInfo(name="ticket_reference", dtype="varchar"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="tickets",
+                    column_name="ticket_reference",
+                    dtype="varchar",
+                    distinct_count=800,
+                    uniqueness_ratio=0.8,
+                )
+            ],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "column_semantics:tickets.ticket_reference",
+                    "project_id": "riverton",
+                    "source_name": "riverton",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "ticket_reference",
+                    "table_name": "tickets",
+                    "column_name": "ticket_reference",
+                    "status": "approved",
+                    "value": {
+                        "description": "Analyst-assigned ticket reference.",
+                        "role": "dimension",
+                        "semantic_type": "dimension",
+                    },
+                }
+            ],
+        )
+
+        catalog = build_catalog(discovery, metadata=metadata)
+
+        assert any(d.name == "tickets_ticket_reference" for d in catalog.dimensions)
 
 
 class TestBuildCatalogEdgeCases:

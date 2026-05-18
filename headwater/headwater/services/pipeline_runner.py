@@ -35,6 +35,7 @@ from headwater.services.pipeline_state import (
     persist_models,
     persist_quality_report,
 )
+from headwater.services.project_context import load_retrieved_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +186,7 @@ def run_pipeline(
 
     project_context = bootstrap_project_context(discovery_result, project_id=source_name)
     pipeline["project_context"] = project_context
+    metadata = None
     if metadata_store is not None:
         metadata_store.replace_project_context(
             source_name,
@@ -192,8 +194,17 @@ def run_pipeline(
             items=[item.model_dump(mode="json") for item in project_context.items],
             resources=[resource.model_dump(mode="json") for resource in project_context.resources],
         )
+        metadata = load_retrieved_metadata(
+            metadata_store,
+            discovery_result,
+            project_id=source_name,
+        )
 
-    catalog = build_catalog(discovery_result)
+    catalog = build_catalog(
+        discovery_result,
+        project_id=source_name,
+        metadata=metadata,
+    )
     pipeline["catalog"] = catalog
     logger.info(
         "Catalog built: %d metrics, %d dimensions, %d entities (confidence=%.2f)",

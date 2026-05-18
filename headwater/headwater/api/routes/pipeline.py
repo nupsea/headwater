@@ -39,6 +39,7 @@ from headwater.services.pipeline_runner import (
 from headwater.services.pipeline_runner import (
     run_pipeline,
 )
+from headwater.services.project_context import load_retrieved_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -308,11 +309,35 @@ def re_enrich(request: Request, force: bool = False):
     )
     project_context = bootstrap_project_context(discovery, project_id=source_name)
     pipeline["project_context"] = project_context
+    metadata = None
+    if store is not None:
+        store.upsert_source(
+            source_name,
+            discovery.source.type,
+            discovery.source.path,
+            discovery.source.uri,
+            mode=discovery.source.mode,
+        )
+        store.replace_project_context(
+            source_name,
+            source_name=source_name,
+            items=[item.model_dump(mode="json") for item in project_context.items],
+            resources=[
+                resource.model_dump(mode="json")
+                for resource in project_context.resources
+            ],
+        )
 
     # --- Propagate enrichment downstream ---
     # Rebuild catalog from enriched discovery (new descriptions improve
     # metric/dimension extraction and entity narratives)
-    catalog = build_catalog(discovery)
+    if store is not None:
+        metadata = load_retrieved_metadata(store, discovery, project_id=source_name)
+    catalog = build_catalog(
+        discovery,
+        project_id=source_name,
+        metadata=metadata,
+    )
     pipeline["catalog"] = catalog
     logger.info(
         "Re-enrich: rebuilt catalog: %d metrics, %d dims, %d entities",
@@ -341,22 +366,6 @@ def re_enrich(request: Request, force: bool = False):
     # Persist ALL updated data to SQLite
     if store is not None:
         try:
-            store.upsert_source(
-                source_name,
-                discovery.source.type,
-                discovery.source.path,
-                discovery.source.uri,
-                mode=discovery.source.mode,
-            )
-            store.replace_project_context(
-                source_name,
-                source_name=source_name,
-                items=[item.model_dump(mode="json") for item in project_context.items],
-                resources=[
-                    resource.model_dump(mode="json")
-                    for resource in project_context.resources
-                ],
-            )
             persist_discovery_data(store, discovery, source_name)
             persist_semantic_data(store, discovery, source_name)
             persist_catalog_data(store, catalog, evaluation, source_name)

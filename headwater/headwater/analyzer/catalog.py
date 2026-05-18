@@ -20,6 +20,7 @@ from pathlib import Path
 
 import yaml
 
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata
 from headwater.core.classification import is_dimension_column, is_metric_column
 from headwater.core.models import (
     ColumnInfo,
@@ -182,6 +183,7 @@ def build_catalog(
     relationships: list[Relationship] | None = None,
     *,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> SemanticCatalog:
     """Build a SemanticCatalog from an enriched DiscoveryResult.
 
@@ -210,6 +212,7 @@ def build_catalog(
             profile_map,
             source_name=discovery.source.name,
             project_id=project_id,
+            metadata=metadata,
         )
         table_dimensions = _extract_dimensions(
             table,
@@ -218,6 +221,7 @@ def build_catalog(
             pk_tables,
             source_name=discovery.source.name,
             project_id=project_id,
+            metadata=metadata,
         )
 
         metrics.extend(table_metrics)
@@ -273,6 +277,7 @@ def _extract_metrics(
     *,
     source_name: str | None = None,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[MetricDefinition]:
     """Extract metric definitions from a table's columns."""
     logger.debug("Extracting metrics from table %s (%d columns)", table.name, len(table.columns))
@@ -299,7 +304,8 @@ def _extract_metrics(
 
     for col in table.columns:
         profile = table_profiles.get(col.name)
-        if not is_metric_column(col, profile):
+        role_hint, semantic_hint = _context_column_hints(metadata, table.name, col.name)
+        if not _is_metric_candidate(col, profile, role_hint, semantic_hint):
             continue
 
         agg_type = _infer_agg_type(col, source_name=source_name, project_id=project_id)
@@ -315,11 +321,20 @@ def _extract_metrics(
             expression = f'{agg_type.upper()}("{col.name}")'
 
         # Null-aware: if column has significant nulls, note in description
-        desc_parts = [col.description or f"{col.name} from {table.name}"]
+        desc_parts = [
+            _context_description(
+                metadata,
+                table.name,
+                col.name,
+                col.description,
+                table.name,
+            )
+        ]
         if profile and profile.null_rate > 0.1:
             desc_parts.append(f"Note: {profile.null_rate:.0%} of values are NULL")
 
         confidence = col.confidence if col.confidence > 0 else 0.5
+        source = "human" if role_hint or semantic_hint else "heuristic"
 
         metrics.append(
             MetricDefinition(
@@ -332,7 +347,7 @@ def _extract_metrics(
                 agg_type=agg_type,
                 synonyms=_metric_synonyms(col.name, agg_type),
                 confidence=round(confidence, 3),
-                source="heuristic",
+                source=source,
             )
         )
 
@@ -369,6 +384,7 @@ def _extract_dimensions(
     *,
     source_name: str | None = None,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[DimensionDefinition]:
     """Extract dimension definitions from a table's columns."""
     logger.debug("Extracting dimensions from table %s", table.name)
@@ -377,6 +393,7 @@ def _extract_dimensions(
 
     for col in table.columns:
         profile = table_profiles.get(col.name)
+        role_hint, semantic_hint = _context_column_hints(metadata, table.name, col.name)
 
         # Skip FK columns -- they become join paths, not dimensions themselves
         if col.semantic_type == "foreign_key":
@@ -385,7 +402,7 @@ def _extract_dimensions(
         if col.is_primary_key or col.semantic_type in ("id", "primary_key"):
             continue
 
-        if not is_dimension_column(col, profile):
+        if not _is_dimension_candidate(col, profile, role_hint, semantic_hint):
             continue
 
         # Get sample values from profile
@@ -419,7 +436,13 @@ def _extract_dimensions(
             DimensionDefinition(
                 name=name,
                 display_name=_to_display_name(col.name),
-                description=col.description or f"{col.name} from {table.name}",
+                description=_context_description(
+                    metadata,
+                    table.name,
+                    col.name,
+                    col.description,
+                    table.name,
+                ),
                 column=col.name,
                 table=table.name,
                 dtype=col.dtype,
@@ -427,7 +450,7 @@ def _extract_dimensions(
                 sample_values=sample_values,
                 cardinality=cardinality,
                 confidence=round(confidence, 3),
-                source="heuristic",
+                source="human" if role_hint or semantic_hint else "heuristic",
                 join_path=join_path,
                 join_nullable=join_nullable,
             )
@@ -521,6 +544,74 @@ def _build_profile_map(
     for p in profiles:
         result.setdefault(p.table_name, {})[p.column_name] = p
     return result
+
+
+def _context_column_hints(
+    metadata: RetrievedMetadata | None,
+    table_name: str,
+    column_name: str,
+) -> tuple[str | None, str | None]:
+    if metadata is None:
+        return None, None
+    hint = metadata.column_hints.get((table_name, column_name), {})
+    role = hint.get("role")
+    semantic_type = hint.get("semantic_type")
+    locked = metadata.locked_roles.get((table_name, column_name))
+    if locked and not role and not semantic_type:
+        role = locked
+        semantic_type = locked
+    return (
+        str(role).strip() if isinstance(role, str) and role.strip() else None,
+        str(semantic_type).strip()
+        if isinstance(semantic_type, str) and semantic_type.strip()
+        else None,
+    )
+
+
+def _is_metric_candidate(
+    col: ColumnInfo,
+    profile: ColumnProfile | None,
+    role_hint: str | None,
+    semantic_hint: str | None,
+) -> bool:
+    explicit = {value for value in (role_hint, semantic_hint) if value}
+    if explicit & {"dimension", "event_ts", "service_type"}:
+        return False
+    if explicit & {"metric", "measure", "kpi", "amount", "count", "distance", "duration"}:
+        return True
+    return is_metric_column(col, profile)
+
+
+def _is_dimension_candidate(
+    col: ColumnInfo,
+    profile: ColumnProfile | None,
+    role_hint: str | None,
+    semantic_hint: str | None,
+) -> bool:
+    explicit = {value for value in (role_hint, semantic_hint) if value}
+    if explicit & {"metric", "measure", "kpi", "amount", "count"}:
+        return False
+    if "dimension" in explicit:
+        return not col.is_primary_key
+    return is_dimension_column(col, profile)
+
+
+def _context_description(
+    metadata: RetrievedMetadata | None,
+    table_name: str,
+    column_name: str,
+    fallback: str | None,
+    fallback_table: str,
+) -> str:
+    if metadata is not None:
+        hint = metadata.column_hints.get((table_name, column_name), {})
+        description = hint.get("description")
+        if isinstance(description, str) and description.strip():
+            return description.strip()
+        glossary = metadata.glossary.get(column_name.lower())
+        if glossary:
+            return glossary
+    return fallback or f"{column_name} from {fallback_table}"
 
 
 def _build_rel_map(
