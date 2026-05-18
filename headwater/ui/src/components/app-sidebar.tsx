@@ -5,10 +5,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   api,
-  type Project,
   type ProjectProgress,
   type StatusResponse,
 } from "@/lib/api";
+import { useProjects } from "@/lib/project-context";
 
 const NAV_GROUPS: {
   label: string;
@@ -17,7 +17,7 @@ const NAV_GROUPS: {
   {
     label: "Today",
     items: [
-      { href: "/", label: "Briefing" },
+      { href: "/projects", label: "Projects" },
       { href: "/health", label: "Project Health" },
     ],
   },
@@ -58,41 +58,27 @@ const MATURITY_PCT: Record<string, number> = {
 
 export function AppSidebar() {
   const pathname = usePathname();
-  const [project, setProject] = useState<Project | null>(null);
-  const [progress, setProgress] = useState<ProjectProgress | null>(null);
+  const [progressState, setProgressState] = useState<{
+    projectId: string;
+    progress: ProjectProgress;
+  } | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [briefingCounts, setBriefingCounts] = useState<{
-    high: number;
-    total: number;
-  }>({ high: 0, total: 0 });
+  const { activeProject } = useProjects();
 
   useEffect(() => {
-    api
-      .projects()
-      .then((res) => {
-        const p = res.projects?.[0] ?? null;
-        setProject(p);
-        if (p) {
-          api
-            .projectProgress(p.id)
-            .then((r) => setProgress(r.progress))
-            .catch(() => {});
-        }
-      })
-      .catch(() => {});
-    api.status().then(setStatus).catch(() => {});
-    fetch("/api/briefing/today")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((b) => {
-        if (b) {
-          setBriefingCounts({
-            high: b.summary.attention_count,
-            total: b.priorities.length,
-          });
-        }
-      })
-      .catch(() => {});
-  }, [pathname]);
+    if (activeProject) {
+      api
+        .projectProgress(activeProject.id)
+        .then((r) =>
+          setProgressState({
+            projectId: activeProject.id,
+            progress: r.progress,
+          })
+        )
+        .catch(() => {});
+    }
+    api.status(activeProject?.id).then(setStatus).catch(() => {});
+  }, [activeProject, pathname]);
 
   const martsPending = status
     ? Math.max(0, (status.mart_models ?? 0) - (status.executed ?? 0))
@@ -101,9 +87,13 @@ export function AppSidebar() {
     ? Math.max(0, (status.tables ?? 0) - (status.dictionary_reviewed ?? 0))
     : 0;
   const contractsCount = status?.contracts ?? 0;
-  const maturityPct = project
-    ? MATURITY_PCT[project.maturity ?? "raw"] ?? 20
+  const maturityPct = activeProject
+    ? MATURITY_PCT[activeProject.maturity ?? "raw"] ?? 20
     : 0;
+  const progress =
+    activeProject && progressState?.projectId === activeProject.id
+      ? progressState.progress
+      : null;
 
   return (
     <aside className="w-56 shrink-0 border-r border-border bg-card flex flex-col overflow-hidden">
@@ -135,16 +125,6 @@ export function AppSidebar() {
           tone="success"
           active={pathname === "/quality"}
         />
-        {briefingCounts.high > 0 && (
-          <QueueRow
-            href="/"
-            label="Briefing priorities"
-            sub={`${briefingCounts.high} high · ${briefingCounts.total} total`}
-            count={briefingCounts.high}
-            tone="danger"
-            active={pathname === "/"}
-          />
-        )}
       </div>
 
       <nav className="px-2 py-3 flex-1 overflow-y-auto">
@@ -173,14 +153,14 @@ export function AppSidebar() {
         ))}
       </nav>
 
-      {project && (
+      {activeProject ? (
         <div className="m-3 p-3 bg-background border border-border rounded-lg">
           <div className="flex items-baseline justify-between mb-1.5">
             <span className="text-xs font-semibold text-foreground truncate">
-              {project.display_name}
+              {activeProject.display_name}
             </span>
             <span className="text-[9px] uppercase tracking-wider text-muted bg-card border border-border rounded px-1.5 py-0.5">
-              {project.maturity ?? "raw"}
+              {activeProject.maturity ?? "raw"}
             </span>
           </div>
           <div className="h-1 bg-border rounded-full overflow-hidden mb-1">
@@ -195,6 +175,13 @@ export function AppSidebar() {
               ` · ${progress.tables_reviewed}/${progress.tables_discovered} tables reviewed`}
           </div>
         </div>
+      ) : (
+        <Link
+          href="/projects"
+          className="m-3 p-3 bg-background border border-border rounded-lg text-xs text-muted hover:text-foreground"
+        >
+          Create or select a project
+        </Link>
       )}
     </aside>
   );

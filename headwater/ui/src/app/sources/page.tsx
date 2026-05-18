@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   api,
   type ConnectorType,
@@ -9,6 +10,7 @@ import {
 } from "@/lib/api";
 import { useToast } from "@/components/toast";
 import { ConnectorWizard } from "@/components/connector-wizard";
+import { useProjects } from "@/lib/project-context";
 
 const STATUS_STYLES: Record<
   string,
@@ -59,8 +61,25 @@ const FILTER_LABEL: Record<string, string> = {
   idle: "Idle",
 };
 
+const WORKLOAD_LABEL: Record<string, string> = {
+  files: "Files",
+  oltp: "OLTP",
+  olap: "OLAP",
+  unknown: "Unknown",
+};
+
+const READINESS_LABEL: Record<string, string> = {
+  ready: "Ready",
+  needs_sync: "Needs sync",
+  needs_review: "Needs review",
+  limited: "Limited",
+  preview: "Preview",
+  planned: "Planned",
+};
+
 export default function SourcesPage() {
   const { toast } = useToast();
+  const { activeProject } = useProjects();
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [events, setEvents] = useState<SystemEvent[]>([]);
   const [connectors, setConnectors] = useState<ConnectorType[]>([]);
@@ -70,16 +89,19 @@ export default function SourcesPage() {
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState<Set<string>>(new Set());
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
+    setSources([]);
+    setSelected(null);
+    setError(null);
     api
-      .sources()
+      .sources(activeProject?.id)
       .then((r) => setSources(r.sources))
       .catch((e: Error) => setError(e.message));
     api
       .events(20)
       .then((r) => setEvents(r.events))
       .catch(() => {});
-  };
+  }, [activeProject?.id]);
 
   useEffect(() => {
     refresh();
@@ -87,7 +109,7 @@ export default function SourcesPage() {
       .connectorCatalog()
       .then((r) => setConnectors(r.connectors))
       .catch(() => {});
-  }, []);
+  }, [refresh]);
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: sources.length };
@@ -287,6 +309,20 @@ export default function SourcesPage() {
 
                 <div className="grid grid-cols-3 gap-2 mb-3">
                   <Cell
+                    label="Workload"
+                    value={WORKLOAD_LABEL[src.evaluation.workload] ?? src.evaluation.workload}
+                  />
+                  <Cell
+                    label="Evaluation"
+                    value={
+                      `${READINESS_LABEL[src.evaluation.readiness] ?? src.evaluation.readiness}`
+                    }
+                  />
+                  <Cell label="Score" value={`${src.evaluation.score}%`} />
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 mb-3">
+                  <Cell
                     label="Quality"
                     value={
                       src.quality_score === null
@@ -335,6 +371,20 @@ export default function SourcesPage() {
                       </div>
                     )}
                     <div className="flex flex-wrap gap-2">
+                    <Link
+                      href="/data"
+                      onClick={(e) => e.stopPropagation()}
+                      className="px-2.5 py-1 bg-card border border-border rounded text-[11px] font-medium hover:bg-background"
+                    >
+                      Browse data
+                    </Link>
+                    <Link
+                      href="/discovery"
+                      onClick={(e) => e.stopPropagation()}
+                      className="px-2.5 py-1 bg-card border border-border rounded text-[11px] font-medium hover:bg-background"
+                    >
+                      Review catalog
+                    </Link>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -355,6 +405,26 @@ export default function SourcesPage() {
                       Disconnect
                     </button>
                     </div>
+                    {src.evaluation.recommended_actions.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-border">
+                        <div className="text-[9px] font-bold text-muted uppercase tracking-wider mb-1.5">
+                          Evaluation actions
+                        </div>
+                        <div className="space-y-1.5">
+                          {src.evaluation.recommended_actions.slice(0, 2).map((action) => (
+                            <div
+                              key={action.title}
+                              className="text-[11px] text-muted leading-snug"
+                            >
+                              <span className="font-semibold text-foreground">
+                                {action.title}:
+                              </span>{" "}
+                              {action.detail}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

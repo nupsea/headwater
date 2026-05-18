@@ -5,10 +5,11 @@ import { api, type PKFKSuggestions } from "@/lib/api";
 
 interface PKFKManagerProps {
   tableName: string;
+  projectId?: string | null;
   onChanged?: () => void | Promise<void>;
 }
 
-export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
+export function PKFKManager({ tableName, projectId, onChanged }: PKFKManagerProps) {
   const [suggestions, setSuggestions] = useState<PKFKSuggestions | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -18,7 +19,7 @@ export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
     setLoading(true);
     setError("");
     api
-      .pkfkSuggestions(tableName)
+      .pkfkSuggestions(tableName, projectId)
       .then(setSuggestions)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
@@ -27,11 +28,11 @@ export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tableName]);
+  }, [tableName, projectId]);
 
   const handleConfirmPK = async (column: string) => {
     try {
-      await api.persistKeys(tableName, { confirm_pks: [column] });
+      await api.persistKeys(tableName, { confirm_pks: [column] }, projectId);
       setMessage(`PK confirmed: ${column}`);
       load();
       await onChanged?.();
@@ -42,7 +43,7 @@ export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
 
   const handleRejectPK = async (column: string) => {
     try {
-      await api.persistKeys(tableName, { reject_pks: [column] });
+      await api.persistKeys(tableName, { reject_pks: [column] }, projectId);
       setMessage(`PK rejected: ${column}`);
       load();
       await onChanged?.();
@@ -53,9 +54,13 @@ export function PKFKManager({ tableName, onChanged }: PKFKManagerProps) {
 
   const handleConfirmFK = async (fromCol: string, toTable: string, toCol: string) => {
     try {
-      await api.persistKeys(tableName, {
-        confirm_fks: [{ from_col: fromCol, to_table: toTable, to_col: toCol }],
-      });
+      await api.persistKeys(
+        tableName,
+        {
+          confirm_fks: [{ from_col: fromCol, to_table: toTable, to_col: toCol }],
+        },
+        projectId
+      );
       setMessage(`FK confirmed: ${fromCol} -> ${toTable}.${toCol}`);
       load();
       await onChanged?.();

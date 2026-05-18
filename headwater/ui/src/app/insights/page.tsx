@@ -5,7 +5,9 @@ import {
   api,
   type DataInsight,
   type InsightsResponse,
+  type SemanticHighlight,
 } from "@/lib/api";
+import { useProjects } from "@/lib/project-context";
 
 const SEVERITY_STYLE: Record<
   DataInsight["severity"],
@@ -215,6 +217,32 @@ function InsightCard({ insight, rank }: { insight: DataInsight; rank: number }) 
   );
 }
 
+function SemanticHighlightCard({ highlight }: { highlight: SemanticHighlight }) {
+  return (
+    <article className="rounded-lg border border-border bg-card p-4 shadow-sm">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="text-[10px] font-bold uppercase tracking-wide text-muted">
+          {highlight.decision_lens}
+        </span>
+        <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] uppercase text-muted">
+          {highlight.insight_type.replaceAll("_", " ")}
+        </span>
+      </div>
+      <h2 className="text-base font-semibold leading-snug text-foreground">
+        {highlight.title}
+      </h2>
+      <p className="mt-2 text-sm leading-6 text-muted">{highlight.detail}</p>
+      <div className="mt-3 flex flex-wrap gap-3 text-xs text-muted">
+        <span className="font-mono">{highlight.table}</span>
+        {highlight.confidence_level && <span>{highlight.confidence_level}</span>}
+        {highlight.support_count !== null && (
+          <span>{highlight.support_count.toLocaleString()} rows</span>
+        )}
+      </div>
+    </article>
+  );
+}
+
 function SummaryTile({
   label,
   value,
@@ -236,16 +264,34 @@ function SummaryTile({
 }
 
 export default function InsightsPage() {
+  const { activeProjectId } = useProjects();
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [error, setError] = useState("");
   const [moreGenerated, setMoreGenerated] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setInsights(null);
+      setError("");
+      setMoreGenerated(false);
+    });
+    if (!activeProjectId) return;
     api
-      .insights()
-      .then(setInsights)
-      .catch(() => setError("Run the pipeline from the Dashboard first."));
-  }, []);
+      .insights(activeProjectId)
+      .then((nextInsights) => {
+        if (cancelled) return;
+        setError("");
+        setInsights(nextInsights);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Run the pipeline from the Dashboard first.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId]);
 
   if (error) {
     return (
@@ -280,6 +326,7 @@ export default function InsightsPage() {
   const overview = insights.overview;
   const profile = insights.data_profile;
   const topInsights = insights.top_insights || [];
+  const semanticHighlights = insights.semantic_highlights || [];
   const visibleInsights = moreGenerated ? topInsights.slice(0, 10) : topInsights.slice(0, 5);
   const strongest = visibleInsights[0];
   const secondaryInsights = visibleInsights.slice(1);
@@ -306,6 +353,19 @@ export default function InsightsPage() {
           and measurable drivers.
         </p>
       </header>
+
+      {semanticHighlights.length > 0 && (
+        <section className="mb-6">
+          <div className="mb-3 text-[10px] font-bold uppercase tracking-wide text-muted">
+            Semantic Findings
+          </div>
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            {semanticHighlights.map((highlight) => (
+              <SemanticHighlightCard key={highlight.id} highlight={highlight} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {strongest && (
         <section className="mb-5 rounded-lg border border-border bg-card p-5">

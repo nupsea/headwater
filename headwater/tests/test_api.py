@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 from fastapi.testclient import TestClient
 
 from headwater.api.app import create_app
+from headwater.core.models import ExplorationResult
+from headwater.api.routes.explore import (
+    _diversify_statistical_insights,
+    _rank_statistical_insights,
+)
+from headwater.core.models import StatisticalInsight
 
 SAMPLE_DATA = str(Path(__file__).resolve().parent.parent.parent / "data" / "sample")
 
@@ -37,6 +45,108 @@ class TestStatus:
         assert data["tables"] == 8
 
 
+class TestInsightRanking:
+    def test_semantic_insights_rank_before_generic_anomaly(self):
+        anomaly = StatisticalInsight(
+            metric="row_count",
+            table_name="mart_events_by_period",
+            insight_type="temporal_anomaly",
+            description="Generic row-count anomaly",
+            magnitude=5000,
+            p_value=0.0,
+            severity="critical",
+            support_count=1000,
+        )
+        semantic = StatisticalInsight(
+            metric="duration_min",
+            table_name="events",
+            insight_type="peak_period",
+            description="Weekday events take longer than weekend events",
+            magnitude=2.3,
+            severity="info",
+            support_count=50_000,
+        )
+
+        ranked = _rank_statistical_insights([anomaly, semantic])
+
+        assert ranked[0] is semantic
+
+    def test_statistical_ranking_uses_configured_type_priorities(self, monkeypatch):
+        coverage = StatisticalInsight(
+            metric="event_date",
+            table_name="events",
+            insight_type="coverage_period",
+            description="Coverage window",
+            magnitude=30,
+            severity="info",
+            support_count=1_000,
+        )
+        quality = StatisticalInsight(
+            metric="pickup_location_id",
+            table_name="events",
+            insight_type="data_quality",
+            description="Location IDs are missing",
+            magnitude=30,
+            severity="info",
+            support_count=1_000,
+        )
+        monkeypatch.setattr(
+            "headwater.api.routes.explore.insight_type_priority_weights",
+            lambda: {
+                "coverage_period": 10,
+                "data_quality": 1,
+            },
+        )
+
+        ranked = _rank_statistical_insights([quality, coverage])
+
+        assert ranked[0] is coverage
+
+    def test_insight_surfacing_limits_repetitive_types_and_tables(self):
+        insights = [
+            StatisticalInsight(
+                metric=f"row_count_{idx}",
+                table_name="mart_events_by_period",
+                insight_type="temporal_anomaly",
+                description=f"Anomaly {idx}",
+                magnitude=5000 - idx,
+                p_value=0.0,
+                severity="critical",
+                support_count=1000,
+            )
+            for idx in range(6)
+        ]
+        insights.extend(
+            [
+                StatisticalInsight(
+                    metric="record_count",
+                    table_name="events",
+                    insight_type="volume_distribution",
+                    description="Busiest hour",
+                    magnitude=1200,
+                    severity="info",
+                    support_count=1200,
+                ),
+                StatisticalInsight(
+                    metric="duration_min",
+                    table_name="events",
+                    insight_type="peak_period",
+                    description="Weekday vs weekend",
+                    magnitude=2.3,
+                    severity="info",
+                    support_count=50_000,
+                ),
+            ]
+        )
+
+        surfaced = _diversify_statistical_insights(insights, 10)
+
+        assert sum(i.insight_type == "temporal_anomaly" for i in surfaced) <= 2
+        assert len({(i.table_name, i.insight_type) for i in surfaced}) == len(surfaced)
+        assert any(i.insight_type == "volume_distribution" for i in surfaced)
+        assert any(i.insight_type == "peak_period" for i in surfaced)
+
+
 class TestSourcesCatalog:
     def test_connector_catalog_exposes_support_status(self, client):
         resp = client.get("/api/connector-catalog")
@@ -49,13 +159,30 @@ class TestSourcesCatalog:
         assert connectors["duckdb"]["status"] == "supported"
         assert connectors["sqlite"]["status"] == "supported"
         assert connectors["mysql"]["status"] == "preview"
+        assert connectors["snowflake"]["status"] == "preview"
         assert connectors["mysql"]["supported"] is False
+        assert connectors["snowflake"]["supported"] is True
         assert connectors["json"]["capabilities"]["list_tables"] is True
         assert connectors["duckdb"]["capabilities"]["load_to_duckdb"] is True
         assert connectors["sqlite"]["capabilities"]["load_to_duckdb"] is True
         assert connectors["postgres"]["capabilities"]["execute_readonly"] is True
         assert connectors["mysql"]["capabilities"]["test"] is True
         assert connectors["mysql"]["capabilities"]["load_to_duckdb"] is False
+        assert connectors["snowflake"]["capabilities"]["execute_readonly"] is True
+        assert connectors["snowflake"]["capabilities"]["estimate_row_count"] is True
+
+    def test_source_evaluations_expose_oltp_and_olap_templates(self, client):
+        resp = client.get("/api/source-evaluations")
+
+        assert resp.status_code == 200
+        evaluations = {e["source_type"]: e for e in resp.json()["evaluations"]}
+        assert evaluations["postgres"]["workload"] == "oltp"
+        assert evaluations["postgres"]["maturity_mode"] == "oltp_heuristic"
+        assert evaluations["duckdb"]["workload"] == "olap"
+        assert evaluations["duckdb"]["profiling_policy"]["mode"] == "observe"
+        assert evaluations["snowflake"]["workload"] == "olap"
+        assert evaluations["snowflake"]["readiness"] == "preview"
+        assert evaluations["redshift"]["readiness"] == "preview"
 
     def test_create_source_rejects_preview_connector(self, client):
         resp = client.post(
@@ -69,6 +196,101 @@ class TestSourcesCatalog:
 
         assert resp.status_code == 400
         assert "preview" in resp.json()["detail"]
+
+    def test_create_source_allows_preview_supported_snowflake_connector(self, client):
+        resp = client.post(
+            "/api/sources",
+            json={
+                "name": "future_snowflake",
+                "type": "snowflake",
+                "uri": "snowflake://account/db/schema",
+            },
+        )
+
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["type"] == "snowflake"
+        assert body["evaluation"]["workload"] == "olap"
+        assert body["evaluation"]["readiness"] == "preview"
+
+    def test_snowflake_connection_test_reports_missing_optional_driver(self, client, monkeypatch):
+        import headwater.connectors.snowflake_loader as snowflake_loader
+
+        def missing_driver(name: str):
+            if name == "snowflake.connector":
+                raise ImportError("missing")
+            return None
+
+        monkeypatch.setattr(snowflake_loader.importlib, "import_module", missing_driver)
+
+        resp = client.post(
+            "/api/pipeline/test-connection",
+            params={"source_path": "snowflake://account/db/schema"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "error"
+        assert resp.json()["source_type"] == "snowflake"
+        assert "snowflake-connector-python" in resp.json()["detail"]
+
+    def test_connection_test_accepts_json_body(self, client):
+        resp = client.post(
+            "/api/pipeline/test-connection",
+            json={"source_path": "/definitely/missing/path", "source_type": "json"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "error"
+        assert resp.json()["source_type"] == "file"
+
+    def test_create_project_secret_roundtrip(self, client, tmp_path, monkeypatch):
+        monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+        from headwater.core.config import get_settings
+
+        get_settings.cache_clear()
+        try:
+            save = client.put(
+                "/api/settings/setup-drafts/create-project-secret",
+                json={"password": "top-secret"},
+            )
+            assert save.status_code == 200
+            assert save.json()["saved"] is True
+
+            load = client.get("/api/settings/setup-drafts/create-project-secret")
+            assert load.status_code == 200
+            assert load.json() == {"saved": True}
+
+            delete = client.delete("/api/settings/setup-drafts/create-project-secret")
+            assert delete.status_code == 200
+            assert delete.json()["deleted"] is True
+
+            load_after = client.get("/api/settings/setup-drafts/create-project-secret")
+            assert load_after.status_code == 200
+            assert load_after.json() == {"saved": False}
+        finally:
+            get_settings.cache_clear()
+
+    def test_source_detail_redacts_credentials(self, client):
+        create = client.post(
+            "/api/sources",
+            json={
+                "name": "snow",
+                "type": "snowflake",
+                "uri": "snowflake://analyst:top-secret@acme-xy123/analytics/public?warehouse=WH",
+                "config": {
+                    "connection": {"host": "acme-xy123", "password": "top-secret"},
+                    "secret_access_key": "very-secret",
+                },
+            },
+        )
+        assert create.status_code == 201
+
+        detail = client.get("/api/sources/snow")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["uri"] == "snowflake://analyst:***@acme-xy123/analytics/public?warehouse=WH"
+        assert body["config"]["connection"]["password"] == "***"
+        assert body["config"]["secret_access_key"] == "***"
 
     def test_source_test_endpoint_verifies_supported_source(self, client):
         create = client.post(
@@ -87,6 +309,164 @@ class TestSourcesCatalog:
 
         events = client.get("/api/events").json()["events"]
         assert any(e["event_type"] == "connection_tested" for e in events)
+
+    def test_source_summary_includes_data_source_evaluation(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+        assert create.json()["evaluation"]["workload"] == "files"
+        assert create.json()["evaluation"]["readiness"] == "needs_sync"
+
+        evaluation = client.get("/api/sources/sample_json/evaluation")
+        assert evaluation.status_code == 200
+        assert evaluation.json()["source_name"] == "sample_json"
+        actions = evaluation.json()["recommended_actions"]
+        assert any(a["title"] == "Run source sync" for a in actions)
+
+    def test_snowflake_insight_plan_dry_run_is_cost_gated(self, client):
+        create = client.post(
+            "/api/sources",
+            json={
+                "name": "snow",
+                "type": "snowflake",
+                "uri": "snowflake://account/db/schema",
+            },
+        )
+        assert create.status_code == 201
+        store = client.app.state.metadata_store
+        store.upsert_table("small_orders", "snow", schema_name="PUBLIC", row_count=100_000)
+        store.upsert_table("large_events", "snow", schema_name="PUBLIC", row_count=100_000_000)
+
+        resp = client.post(
+            "/api/sources/snow/insight-plan/dry-run",
+            json={
+                "max_queries": 5,
+                "max_tables": 5,
+                "require_time_filter_above_rows": 1_000_000,
+                "allow_full_scan": False,
+            },
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["mode"] == "dry_run"
+        assert body["policy"]["execute_queries"] is False
+        assert body["planned_queries"] == 1
+        assert body["skipped_queries"] == 1
+        assert body["plan_id"]
+        planned = [c for c in body["candidates"] if c["status"] == "planned" and c.get("sql")]
+        skipped = [c for c in body["candidates"] if c["status"] == "skipped"]
+        assert planned[0]["table_name"] == "small_orders"
+        assert 'FROM "PUBLIC"."small_orders"' in planned[0]["sql"]
+        assert skipped[0]["table_name"] == "large_events"
+        assert "exceeds cost gate" in skipped[0]["skipped_reason"]
+
+        evidence = client.get("/api/evidence", params={"source": "snow"}).json()["records"]
+        assert any(r["plan_id"] == body["plan_id"] for r in evidence)
+        plans = client.get("/api/warehouse-insight-plans", params={"source": "snow"}).json()[
+            "plans"
+        ]
+        assert plans[0]["id"] == body["plan_id"]
+
+    def test_approved_insight_plan_executes_readonly_queries(self, client, monkeypatch):
+        import headwater.services.warehouse_insights as warehouse_insights
+
+        class FakeWarehouseConnector:
+            def __init__(self):
+                self.connected = False
+                self.query_tag = None
+                self.statement_timeout = None
+                self.closed = False
+                self.sql = []
+                self._query_id = "fake-query-id-123"
+
+            def connect(self, config):
+                self.connected = True
+                self.config = config
+
+            def set_query_tag(self, query_tag):
+                self.query_tag = query_tag
+
+            def set_statement_timeout(self, seconds):
+                self.statement_timeout = seconds
+
+            def execute_readonly(self, sql):
+                self.sql.append(sql)
+                return pa.table({"row_count": [100_000]})
+
+            def last_query_id(self):
+                return self._query_id
+
+            def close(self):
+                self.closed = True
+
+        connector = FakeWarehouseConnector()
+        monkeypatch.setattr(warehouse_insights, "get_connector", lambda _source_type: connector)
+        create = client.post(
+            "/api/sources",
+            json={
+                "name": "snow",
+                "type": "snowflake",
+                "uri": "snowflake://account/db/schema",
+            },
+        )
+        assert create.status_code == 201
+        store = client.app.state.metadata_store
+        store.upsert_table("small_orders", "snow", schema_name="PUBLIC", row_count=100_000)
+        plan = client.post("/api/sources/snow/insight-plan/dry-run", json={"max_queries": 5})
+        plan_id = plan.json()["plan_id"]
+
+        rejected = client.post(
+            f"/api/warehouse-insight-plans/{plan_id}/execute",
+            json={"approved": False},
+        )
+        assert rejected.status_code == 400
+
+        resp = client.post(
+            f"/api/warehouse-insight-plans/{plan_id}/execute",
+            json={
+                "approved": True,
+                "query_tag": "headwater-test",
+                "statement_timeout_seconds": 42,
+            },
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "succeeded"
+        assert body["executed_queries"] == 1
+        assert body["query_tag"] == "headwater-test"
+        assert body["statement_timeout_seconds"] == 42
+        assert body["results"][0]["rows"] == [{"row_count": 100_000}]
+        assert connector.connected is True
+        assert connector.query_tag == "headwater-test"
+        assert connector.statement_timeout == 42
+        assert connector.closed is True
+        assert connector.sql == ['SELECT COUNT(*) AS row_count FROM "PUBLIC"."small_orders"']
+
+        evidence = client.get(
+            "/api/evidence",
+            params={"source": "snow", "plan_id": plan_id},
+        ).json()["records"]
+        assert any(
+            r["status"] == "succeeded" and r["payload"]["dry_run"] is False
+            for r in evidence
+        )
+        assert all("rows" not in r["payload"] for r in evidence if isinstance(r.get("payload"), dict))
+        assert any(r["query_id"] == "fake-query-id-123" for r in evidence)
+        saved_plan = client.get("/api/warehouse-insight-plans", params={"source": "snow"}).json()[
+            "plans"
+        ][0]
+        assert saved_plan["status"] == "succeeded"
+        assert saved_plan["plan"]["last_execution"]["executed_queries"] == 1
+        assert saved_plan["plan"]["last_execution"]["statement_timeout_seconds"] == 42
+
+    def test_insight_plan_requires_existing_source(self, client):
+        resp = client.post("/api/sources/missing/insight-plan/dry-run", json={})
+
+        assert resp.status_code == 404
 
     def test_source_sync_runs_full_pipeline_for_json_source(self, client):
         create = client.post(
@@ -120,6 +500,58 @@ class TestSourcesCatalog:
         assert latest_quality["score"] == result["quality_score"]
         assert latest_quality["sync_run_id"] == result["run_id"]
 
+    def test_source_preview_returns_discovery_summary(self, client):
+        create = client.post(
+            "/api/sources",
+            json={
+                "name": "preview_json",
+                "type": "json",
+                "path": SAMPLE_DATA,
+                "config": {"max_tables": 3, "sample_rows": 500},
+            },
+        )
+        assert create.status_code == 201
+
+        resp = client.post("/api/sources/preview_json/preview")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["source_name"] == "preview_json"
+        assert body["source_type"] == "json"
+        assert body["tables_found"] == 8
+        assert body["tables_considered"] == 3
+        assert body["tables_skipped"] == 5
+        assert body["config"]["max_tables"] == 3
+        assert body["config"]["sample_rows"] == 500
+        assert body["sample_rows_per_table"] == 500
+        assert len(body["tables"]) == 3
+        for t in body["tables"]:
+            assert "name" in t
+            assert "estimated_rows" in t
+
+    def test_source_preview_not_found(self, client):
+        resp = client.post("/api/sources/nonexistent/preview")
+        assert resp.status_code == 404
+
+    def test_synced_source_can_be_browsed_in_data_viewer(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+        sync = client.post("/api/sources/sample_json/sync")
+        assert sync.status_code == 200
+
+        catalog = client.get("/api/data/catalog")
+        assert catalog.status_code == 200
+        tables = {row["qualified_name"] for row in catalog.json()["tables"]}
+        assert "src_sample_json.zones" in tables
+
+        preview = client.get("/api/data/src_sample_json.zones/preview")
+        assert preview.status_code == 200
+        body = preview.json()
+        assert body["row_count"] > 0
+        assert "zone_id" in body["columns"]
+
     def test_delete_source_resets_active_source_state(self, client):
         create = client.post(
             "/api/sources",
@@ -136,6 +568,19 @@ class TestSourcesCatalog:
         assert client.app.state.pipeline["discovery"] is None
         assert client.app.state.pipeline["staging_models"] == []
         assert client.app.state.metadata_store.get_source("sample_json") is None
+
+    def test_delete_source_backed_project_removes_underlying_source(self, client):
+        create = client.post(
+            "/api/sources",
+            json={"name": "sample", "type": "json", "path": SAMPLE_DATA},
+        )
+        assert create.status_code == 201
+
+        delete = client.delete("/api/projects/sample")
+
+        assert delete.status_code == 200
+        assert delete.json() == {"deleted": "sample"}
+        assert client.app.state.metadata_store.get_source("sample") is None
         assert client.app.state.metadata_store.get_tables("sample_json") == []
 
     def test_duckdb_source_can_be_registered_and_synced(self, client, tmp_path):
@@ -200,6 +645,55 @@ class TestSourcesCatalog:
         detail = client.get("/api/sources/sample_sqlite").json()
         assert detail["tables"] == 2
         assert detail["latest_run_status"] == "succeeded"
+
+    def test_database_pipeline_respects_large_source_sampling_policy(self, client, monkeypatch):
+        import headwater.api.routes.pipeline as pipeline_route
+
+        class FakeWarehouseConnector:
+            def __init__(self):
+                self.sample_limits = []
+
+            def connect(self, _config):
+                return None
+
+            def list_tables(self):
+                return ["public.users", "public.orders", "public.events"]
+
+            def sample(self, table_name, n=10_000):
+                self.sample_limits.append((table_name, n))
+                return pa.table(
+                    {
+                        "id": [1],
+                        "value": [f"{table_name}-sample"],
+                    }
+                )
+
+            def close(self):
+                return None
+
+        connector = FakeWarehouseConnector()
+        monkeypatch.setattr(pipeline_route, "get_connector", lambda _source_type: connector)
+
+        resp = client.post(
+            "/api/pipeline/run",
+            params={
+                "source_path": "postgresql://fake.local/warehouse",
+                "source_type": "postgres",
+                "source_name": "bounded_warehouse",
+                "max_tables": 2,
+                "sample_rows": 100,
+            },
+        )
+
+        assert resp.status_code == 200
+        result = resp.json()
+        assert result["tables_loaded"] == 2
+        assert result["tables_discovered"] == 2
+        assert result["tables_skipped_count"] == 1
+        assert result["tables_skipped"] == ["public.events"]
+        assert result["profiling_policy"]["max_tables"] == 2
+        assert result["profiling_policy"]["sample_rows"] == 100
+        assert connector.sample_limits == [("public.users", 100), ("public.orders", 100)]
 
 
 class TestDiscovery:
@@ -274,6 +768,8 @@ class TestDiscovery:
         assert any(i["id"].startswith(business_prefixes) for i in top_insights)
         assert sum(1 for i in top_insights[:5] if i["chart_type"] == "line") <= 2
         assert len({i["table"] for i in top_insights}) >= 2
+        assert "semantic_highlights" in data
+        assert isinstance(data["semantic_highlights"], list)
         for insight in top_insights:
             assert insight["category"] == "Did You Know"
             assert insight["title"]
@@ -701,6 +1197,16 @@ class TestProjectCreation:
         names = [p["display_name"] for p in resp.json()["projects"]]
         assert "Listed Project" in names
 
+    def test_source_only_entry_appears_in_project_list(self, client):
+        client.app.state.metadata_store.upsert_source("sample", "json", "/data/sample", None)
+
+        resp = client.get("/api/projects")
+
+        assert resp.status_code == 200
+        projects = {p["id"]: p for p in resp.json()["projects"]}
+        assert "sample" in projects
+        assert projects["sample"]["sources"] == ["sample"]
+
 
 class TestProjectRename:
     """PATCH /api/projects/{id}/rename -- update name or description."""
@@ -735,6 +1241,88 @@ class TestProjectRename:
         )
         assert resp.status_code == 200
         assert resp.json()["description"] == "Updated desc"
+
+
+class TestProjectUpdate:
+    def test_update_project_sources(self, client):
+        client.post(
+            "/api/sources",
+            json={
+                "name": "warehouse_a",
+                "type": "json",
+                "path": SAMPLE_DATA,
+                "config": {"include_schemas": ["data.dim*", "prst.*"]},
+            },
+        )
+        project = client.post("/api/projects", json={"display_name": "Retail"}).json()
+        resp = client.patch(
+            f"/api/projects/{project['id']}",
+            json={
+                "display_name": "Retail Ops",
+                "description": "Updated",
+                "sources": ["warehouse_a"],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["display_name"] == "Retail Ops"
+        assert data["sources"] == ["warehouse_a"]
+
+
+class TestSourceUpdate:
+    def test_update_source_config(self, client):
+        client.post(
+            "/api/sources",
+            json={"name": "sample_json", "type": "json", "path": SAMPLE_DATA},
+        )
+        resp = client.patch(
+            "/api/sources/sample_json",
+            json={
+                "display_name": "Sample JSON",
+                "config": {
+                    "include_schemas": ["data.dim*", "prst.*", "view.*"],
+                    "max_tables": 25,
+                },
+                "auto_sync": True,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["display_name"] == "Sample JSON"
+        assert data["config"]["include_schemas"] == ["data.dim*", "prst.*", "view.*"]
+        assert data["config"]["max_tables"] == 25
+        assert data["auto_sync"] is True
+
+
+class TestProjectGraph:
+    """Project-scoped graph API payload shape."""
+
+    def test_project_graph_data_includes_erd_fields(self, client):
+        client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        project_resp = client.post(
+            "/api/projects",
+            json={"display_name": "Graph Project", "sources": ["source"]},
+        )
+        project_id = project_resp.json()["id"]
+
+        resp = client.get("/api/graph/data", params={"project_id": project_id})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["nodes"]
+        for node in data["nodes"]:
+            assert set(node) >= {"id", "row_count", "domain", "description"}
+            assert isinstance(node["row_count"], int)
+        for edge in data["edges"]:
+            assert set(edge) >= {
+                "source",
+                "target",
+                "from_column",
+                "to_column",
+                "rel_type",
+                "confidence",
+                "ref_integrity",
+                "nullable",
+            }
 
 
 class TestActivityFeed:
@@ -989,6 +1577,25 @@ class TestExplorerE2E:
                 f"Suggestion missing SQL hint: {s['question']}"
             )
 
+    def test_suggestions_include_insight_diagnostics(self, client):
+        """Explore suggestions should expose family diagnostics for validation."""
+        self._run_pipeline(client)
+        resp = client.get("/api/explore/suggestions")
+        assert resp.status_code == 200
+        diagnostics = resp.json().get("diagnostics")
+        assert isinstance(diagnostics, list)
+        assert diagnostics, "Expected insight family diagnostics"
+        assert {
+            "schema_name",
+            "physical_table",
+            "family",
+            "status",
+            "required_roles",
+            "found_roles",
+            "generated_count",
+            "reason",
+        }.issubset(diagnostics[0])
+
     def test_suggestions_cover_multiple_sources(self, client):
         """Suggestions should come from multiple sources, not just one."""
         self._run_pipeline(client)
@@ -998,6 +1605,25 @@ class TestExplorerE2E:
         assert len(sources) >= 2, (
             f"Suggestions only from {sources}. Expected at least 2 sources."
         )
+
+    def test_explore_surfaces_business_insights_and_questions(self, client):
+        self._run_pipeline(client)
+        suggestions_resp = client.get("/api/explore/suggestions")
+        assert suggestions_resp.status_code == 200
+        suggestions_payload = suggestions_resp.json()
+        assert suggestions_payload["business_insights"]
+        assert "semantic_highlights" in suggestions_payload
+        assert any(s["source"] == "business" for s in suggestions_payload["suggestions"])
+        assert any(
+            "changed over time" in s["question"].lower()
+            for s in suggestions_payload["suggestions"]
+        )
+
+        insights_resp = client.get("/api/explore/insights")
+        assert insights_resp.status_code == 200
+        insights_payload = insights_resp.json()
+        assert insights_payload["business_insights"]
+        assert "semantic_highlights" in insights_payload
 
     def test_ask_with_suggested_question(self, client):
         """Clicking a suggested question should produce actual data."""
@@ -1017,6 +1643,27 @@ class TestExplorerE2E:
         assert result.get("data") or result.get("sql"), (
             f"Asking '{question}' produced no data and no SQL"
         )
+
+    def test_ask_route_runs_sync_explorer_off_event_loop(self, client, monkeypatch):
+        """The async API route must not call sync ask() on the running event loop."""
+        self._run_pipeline(client)
+
+        def fake_ask(**kwargs):
+            return asyncio.run(asyncio.sleep(0, result=ExplorationResult(
+                question=kwargs["question"],
+                sql="SELECT 1 AS ok",
+                data=[{"ok": 1}],
+                row_count=1,
+                error=None,
+            )))
+
+        monkeypatch.setattr("headwater.api.routes.explore.ask", fake_ask)
+
+        resp = client.post("/api/explore/ask", json={"question": "Does threading work?"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["error"] is None
+        assert payload["data"] == [{"ok": 1}]
 
     def test_pk_fk_suggestions_after_discovery(self, client):
         """PK/FK detection should produce suggestions for tables with _id columns."""

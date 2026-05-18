@@ -2,20 +2,47 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
+from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
+from headwater.analyzer.metadata_retrieval import (
+    RetrievedMetadata,
+    build_lookup_index,
+    lookup_for_column,
+    retrieve_metadata,
+)
+from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
+from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.project import _compute_maturity, _compute_progress
+from headwater.core.models import DatasetContext
+from headwater.explorer.readability import (
+    enum_case_expression,
+    enum_dimension_label,
+    enum_mapping_for_column,
+    is_low_signal_dimension,
+    is_opaque_business_value,
+)
+from headwater.explorer.statistical import (
+    detect_insights_with_diagnostics,
+    insight_type_priority_weights,
+)
+from headwater.explorer.utils import resolve_table_ref
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_RAW_ROUTE_RE = re.compile(r"route is (?P<origin>.+?) -> (?P<dest>.+?):", re.IGNORECASE)
+_RAW_GEO_RE = re.compile(r"^(?P<label>.+?) has the longest high-volume ", re.IGNORECASE)
+
 
 @router.get("/insights")
-async def get_insights(request: Request):
+async def get_insights(request: Request, project_id: str | None = None):
     """Compute aggregated data insights from the discovery and quality pipeline."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -215,7 +242,22 @@ async def get_insights(request: Request):
     data_profile = _compute_data_profile(
         tables, profiles, relationships, completeness_pct, quality_report
     )
-    top_insights = _compute_top_insights(request.app.state.duckdb_con, tables, profiles)
+    store = request.app.state.metadata_store
+    context_row = store.get_dataset_context(discovery.source.name) if store else None
+    context = DatasetContext(**context_row) if context_row else None
+    metadata = retrieve_metadata(discovery, context)
+    top_insights = _compute_top_insights(
+        request.app.state.duckdb_con,
+        tables,
+        profiles,
+        metadata,
+    )
+    semantic_highlights = compute_semantic_highlights(
+        request.app.state.duckdb_con,
+        discovery,
+        context,
+        staging_models + mart_models,
+    )
 
     # --- Workflow state ---
     workflow = _compute_workflow_state(
@@ -262,7 +304,7 @@ async def get_insights(request: Request):
 
     # --- Catalog health (v2) ---
     try:
-        catalog_health = _compute_catalog_health(request, discovery)
+        catalog_health = _compute_catalog_health(request, discovery, pipeline)
     except Exception:
         logger.exception("Failed to compute catalog health")
         catalog_health = {
@@ -280,6 +322,7 @@ async def get_insights(request: Request):
     return {
         "data_profile": data_profile,
         "top_insights": top_insights,
+        "semantic_highlights": semantic_highlights,
         "workflow": workflow,
         "advisory_actions": advisory_actions,
         "overview": {
@@ -446,11 +489,17 @@ def _is_dimension_column(column, profile) -> bool:
     name = column.name.lower()
     if column.is_primary_key or name == "id" or name.endswith("_id"):
         return False
+    if profile and profile.distinct_count <= 1:
+        return False
     if column.role == "dimension" or column.semantic_type in {"dimension", "geographic"}:
         return True
     if not profile or not profile.top_values:
         return False
     return 2 <= profile.distinct_count <= 40
+
+
+def _is_low_signal_dimension(column, profile) -> bool:
+    return is_low_signal_dimension(column.name, profile)
 
 
 def _period_expression(column) -> str | None:
@@ -462,6 +511,57 @@ def _period_expression(column) -> str | None:
     if "date" in dtype or "time" in dtype or "date" in name or name.endswith("_at"):
         return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y')"
     return None
+
+
+def _time_series_spec(con, ref: str, column) -> tuple[str, str, str] | None:
+    quoted = _quote_ident(column.name)
+    name = column.name.lower()
+    dtype = column.dtype.lower()
+    if name == "year" or name.endswith("_year"):
+        return f"CAST({quoted} AS VARCHAR)", "year", column.name
+    if name == "month" or name.endswith("_month"):
+        return f"CAST({quoted} AS VARCHAR)", "month", column.name
+    if not ("date" in dtype or "time" in dtype or "date" in name or name.endswith("_at")):
+        return None
+
+    rows = _query_rows(
+        con,
+        f"""
+        SELECT MIN(CAST({quoted} AS TIMESTAMP)) AS min_ts,
+               MAX(CAST({quoted} AS TIMESTAMP)) AS max_ts
+        FROM {ref}
+        WHERE {quoted} IS NOT NULL
+        """,
+    )
+    if not rows or rows[0][0] is None or rows[0][1] is None:
+        return None
+
+    min_ts, max_ts = rows[0]
+    if isinstance(min_ts, date) and not isinstance(min_ts, datetime):
+        min_ts = datetime.combine(min_ts, datetime.min.time())
+    if isinstance(max_ts, date) and not isinstance(max_ts, datetime):
+        max_ts = datetime.combine(max_ts, datetime.min.time())
+    span_days = max(1.0, (max_ts - min_ts).total_seconds() / 86400.0)
+
+    if span_days <= 3:
+        return (
+            f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m-%d %H:00')",
+            "hour",
+            column.name,
+        )
+    if span_days <= 120:
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m-%d')", "day", column.name
+    if span_days <= 900:
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m')", "month", column.name
+    return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y')", "year", column.name
+
+
+def _time_preposition(grain: str) -> str:
+    if grain == "hour":
+        return "at"
+    if grain == "day":
+        return "on"
+    return "in"
 
 
 def _query_rows(con, sql: str, params: list | None = None):
@@ -478,9 +578,10 @@ def _compute_temporal_peak_insights(con, table, temporal_cols, metric_cols) -> l
     table_label = _humanize_name(table.name)
 
     for temporal in temporal_cols[:2]:
-        period_expr = _period_expression(temporal)
-        if not period_expr:
+        period_spec = _time_series_spec(con, ref, temporal)
+        if not period_spec:
             continue
+        period_expr, period_grain, group_by_column = period_spec
 
         rows = _query_rows(
             con,
@@ -507,13 +608,18 @@ def _compute_temporal_peak_insights(con, table, temporal_cols, metric_cols) -> l
                         "id": f"temporal_peak:{table.name}:{temporal.name}",
                         "category": "Did You Know",
                         "severity": "info",
-                        "title": f"{table_label} peaked in {peak['label']}",
+                        "title": (
+                            f"{table_label} peaked "
+                            f"{_time_preposition(period_grain)} {peak['label']}"
+                        ),
                         "detail": (
                             f"{peak['label']} had {peak['value']:,.0f} records, "
-                            f"{(lift - 1) * 100:.0f}% above the period average."
+                            f"{(lift - 1) * 100:.0f}% above the typical {period_grain}."
                         ),
                         "table": table.name,
                         "column": temporal.name,
+                        "group_by_column": group_by_column,
+                        "group_by_grain": period_grain,
                         "metric": "record_volume",
                         "value": round(lift, 2),
                         "unit": "x",
@@ -552,14 +658,19 @@ def _compute_temporal_peak_insights(con, table, temporal_cols, metric_cols) -> l
                         "id": f"metric_peak:{table.name}:{temporal.name}:{metric.name}",
                         "category": "Did You Know",
                         "severity": "warning" if lift >= 1.5 else "info",
-                        "title": f"{metric_label} peaked in {peak['label']}",
+                        "title": (
+                            f"{metric_label} peaked "
+                            f"{_time_preposition(period_grain)} {peak['label']}"
+                        ),
                         "detail": (
                             f"{table_label} recorded {peak['value']:,.0f} total "
                             f"{metric_label.lower()} in {peak['label']}, "
-                            f"{(lift - 1) * 100:.0f}% above its typical period."
+                            f"{(lift - 1) * 100:.0f}% above a typical {period_grain}."
                         ),
                         "table": table.name,
                         "column": metric.name,
+                        "group_by_column": group_by_column,
+                        "group_by_grain": period_grain,
                         "metric": "period_total",
                         "value": round(lift, 2),
                         "unit": "x",
@@ -572,19 +683,80 @@ def _compute_temporal_peak_insights(con, table, temporal_cols, metric_cols) -> l
     return insights
 
 
-def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[dict]:
+def _is_code_like_column(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith(("_id", "_code", "_key", "_num")) or any(
+        token in lower for token in ("base_num", "vendor_id", "locationid")
+    )
+
+
+def _is_opaque_value(value: object) -> bool:
+    return is_opaque_business_value(value)
+
+
+def _resolve_dimension_projection(
+    table,
+    dimension,
+    lookup_index: dict[str, dict[str, str]],
+    metadata: RetrievedMetadata | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    enum_expr = enum_case_expression(dimension.name, f'fact."{dimension.name}"', metadata)
+    if enum_expr:
+        return (
+            None,
+            enum_expr,
+            enum_dimension_label(dimension.name, _humanize_name(dimension.name)),
+        )
+    if not _is_code_like_column(dimension.name):
+        return None, dimension.name, _humanize_name(dimension.name)
+
+    lookup = lookup_for_column(table.name, dimension.name, lookup_index)
+    if lookup and lookup["table_name"] != table.name:
+        alias = "lu"
+        lookup_ref = _quote_ident(lookup["table_name"])
+        if lookup.get("schema_name"):
+            lookup_ref = f'{_quote_ident(lookup["schema_name"])}.{lookup_ref}'
+        join_sql = (
+            f"LEFT JOIN {lookup_ref} {alias} "
+            f'ON fact."{dimension.name}" = {alias}."{lookup["id_column"]}"'
+        )
+        return (
+            join_sql,
+            f'{alias}."{lookup["label_column"]}"',
+            _humanize_name(lookup["label_column"]),
+        )
+
+    return None, None, None
+
+
+def _compute_segment_insights(
+    con,
+    table,
+    dimension_cols,
+    metric_cols,
+    lookup_index: dict[str, dict[str, str]],
+    metadata: RetrievedMetadata | None = None,
+) -> list[dict]:
     insights = []
     ref = _table_ref(table)
     table_label = _humanize_name(table.name)
 
     for dimension in dimension_cols[:4]:
-        dim_label = _humanize_name(dimension.name)
+        join_sql, dimension_expr, dim_label = _resolve_dimension_projection(
+            table,
+            dimension,
+            lookup_index,
+            metadata,
+        )
+        if dimension_expr is None or dim_label is None:
+            continue
         rows = _query_rows(
             con,
             f"""
-            SELECT CAST({_quote_ident(dimension.name)} AS VARCHAR) AS segment, COUNT(*) AS value
-            FROM {ref}
-            WHERE {_quote_ident(dimension.name)} IS NOT NULL
+            SELECT CAST({dimension_expr} AS VARCHAR) AS segment, COUNT(*) AS value
+            FROM {ref} fact
+            {join_sql or ""}
+            WHERE {dimension_expr} IS NOT NULL
             GROUP BY 1
             ORDER BY value DESC
             LIMIT 8
@@ -599,6 +771,8 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
         if chart and total > 0:
             leader = chart[0]
             share = _safe_ratio(leader["value"], total)
+            if _is_opaque_value(leader["label"]):
+                continue
             if share >= 0.25:
                 insights.append(
                     {
@@ -615,6 +789,7 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
                         ),
                         "table": table.name,
                         "column": dimension.name,
+                        "group_by_column": dimension.name,
                         "metric": "segment_share",
                         "value": round(share * 100, 1),
                         "unit": "%",
@@ -629,11 +804,12 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
             rows = _query_rows(
                 con,
                 f"""
-                SELECT CAST({_quote_ident(dimension.name)} AS VARCHAR) AS segment,
-                       SUM({_quote_ident(metric.name)}) AS value
-                FROM {ref}
-                WHERE {_quote_ident(dimension.name)} IS NOT NULL
-                  AND {_quote_ident(metric.name)} IS NOT NULL
+                SELECT CAST({dimension_expr} AS VARCHAR) AS segment,
+                       SUM(fact.{_quote_ident(metric.name)}) AS value
+                FROM {ref} fact
+                {join_sql or ""}
+                WHERE {dimension_expr} IS NOT NULL
+                  AND fact.{_quote_ident(metric.name)} IS NOT NULL
                 GROUP BY 1
                 ORDER BY value DESC
                 LIMIT 8
@@ -649,6 +825,8 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
                 continue
             leader = chart[0]
             share = _safe_ratio(leader["value"], total)
+            if _is_opaque_value(leader["label"]):
+                continue
             if share >= 0.3:
                 insights.append(
                     {
@@ -662,6 +840,7 @@ def _compute_segment_insights(con, table, dimension_cols, metric_cols) -> list[d
                         ),
                         "table": table.name,
                         "column": dimension.name,
+                        "group_by_column": dimension.name,
                         "metric": metric.name,
                         "value": round(share * 100, 1),
                         "unit": "%",
@@ -738,6 +917,7 @@ def _compute_distribution_insights(con, table, metric_cols, column_profiles) -> 
                 ),
                 "table": table.name,
                 "column": metric.name,
+                "group_by_column": metric.name,
                 "metric": "value_distribution",
                 "value": round(share * 100, 1),
                 "unit": "%",
@@ -759,7 +939,7 @@ def _select_diverse_insights(insights: list[dict], limit: int = 10) -> list[dict
     max_by_chart = {"line": 4}
     max_by_table = 3
     initial_line_cap = 2
-    preferred_chart_order = ("bar", "pie", "histogram")
+    preferred_chart_order = ("pie", "bar", "histogram")
 
     def can_add(insight: dict) -> bool:
         chart_type = insight["chart_type"]
@@ -836,7 +1016,43 @@ def _select_diverse_insights(insights: list[dict], limit: int = 10) -> list[dict
     return cleaned
 
 
-def _compute_top_insights(con, tables, profiles) -> list[dict]:
+def _rank_dimension_column(column) -> tuple[int, int]:
+    lower = column.name.lower()
+    if any(token in lower for token in ("_name", "name_", "label", "description")):
+        return (0, 0)
+    if any(token in lower for token in ("borough", "zone", "site", "region", "category", "type")):
+        return (0, 1)
+    if _is_code_like_column(lower):
+        return (1, 2)
+    return (0, 2)
+
+
+def _is_business_dimension_column(
+    table,
+    column,
+    profile,
+    lookup_index,
+    metadata: RetrievedMetadata | None = None,
+) -> bool:
+    if _is_dimension_column(column, profile):
+        return True
+    if column.role not in {"dimension", "geographic"} and column.semantic_type not in {
+        "dimension",
+        "geographic",
+    }:
+        return False
+    if enum_mapping_for_column(column.name, metadata):
+        return True
+    lookup = lookup_for_column(table.name, column.name, lookup_index)
+    return bool(lookup and lookup["table_name"] != table.name)
+
+
+def _compute_top_insights(
+    con,
+    tables,
+    profiles,
+    metadata: RetrievedMetadata | None = None,
+) -> list[dict]:
     """Find CXO-readable patterns from actual records.
 
     The output avoids schema-quality commentary and favors business outcome
@@ -844,6 +1060,7 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
     drive measurable totals.
     """
     insights: list[dict] = []
+    lookup_index = build_lookup_index(tables, metadata)
     for table in sorted(tables, key=lambda t: t.row_count, reverse=True):
         column_profiles = {
             c.name: _column_profile(profiles, table.name, c.name)
@@ -859,14 +1076,373 @@ def _compute_top_insights(con, tables, profiles) -> list[dict]:
         ]
         dimension_cols = [
             c for c in table.columns
-            if _is_dimension_column(c, column_profiles.get(c.name))
+            if (
+                _is_business_dimension_column(
+                    table,
+                    c,
+                    column_profiles.get(c.name),
+                    lookup_index,
+                    metadata,
+                )
+                and not _is_low_signal_dimension(c, column_profiles.get(c.name))
+            )
         ]
+        dimension_cols = sorted(dimension_cols, key=_rank_dimension_column)
 
         insights.extend(_compute_temporal_peak_insights(con, table, temporal_cols, metric_cols))
-        insights.extend(_compute_segment_insights(con, table, dimension_cols, metric_cols))
+        insights.extend(
+            _compute_segment_insights(
+                con,
+                table,
+                dimension_cols,
+                metric_cols,
+                lookup_index,
+                metadata,
+            )
+        )
         insights.extend(_compute_distribution_insights(con, table, metric_cols, column_profiles))
 
     return _select_diverse_insights(insights)
+
+
+def compute_top_insights(
+    con,
+    tables,
+    profiles,
+    metadata: RetrievedMetadata | None = None,
+) -> list[dict]:
+    """Public helper for business-readable insights reused by Explore."""
+    return _compute_top_insights(con, tables, profiles, metadata)
+
+
+_SEMANTIC_HIGHLIGHT_ORDER = [
+    "data_quality",
+    "duration_distribution",
+    "wait_time_pattern",
+    "geographic_hotspot",
+    "peak_period",
+    "route_pair",
+    "volume_distribution",
+    "congestion_proxy",
+]
+
+
+def _decision_lens(context: DatasetContext | None, insight) -> str:
+    text = " ".join(
+        value
+        for value in (
+            context.decisions if context else None,
+            context.quality_caveats if context else None,
+        )
+        if value
+    ).lower()
+    if insight.insight_type == "data_quality":
+        return "Data Quality"
+    if any(token in insight.metric.lower() for token in ("amount", "fare", "revenue", "price")):
+        return "Revenue"
+    if any(token in text for token in ("compliance", "audit", "regulation", "risk")):
+        return "Compliance"
+    if any(token in text for token in ("pricing", "margin", "revenue", "sales")):
+        return "Revenue"
+    return "Operations"
+
+
+def _replace_record_label(text: str, row_represents: str | None) -> str:
+    if not row_represents:
+        return text
+    phrase = row_represents.strip().lower()
+    if not phrase:
+        return text
+    plural = phrase if phrase.endswith("s") else f"{phrase}s"
+    return text.replace(" records", f" {plural}")
+
+
+def _semantic_highlight_title(description: str) -> str:
+    base = description.strip().rstrip(".")
+    for separator in (":", ". "):
+        if separator in base:
+            return base.split(separator, 1)[0].strip()
+    return base
+
+
+def _lookup_label_for_value(
+    con,
+    lookup: dict[str, str] | None,
+    raw_value: str,
+    models,
+    cache: dict[tuple[str, str, str, str], str | None],
+) -> str | None:
+    if lookup is None or not raw_value:
+        return None
+    ref = resolve_table_ref(lookup["table_name"], con, models)
+    cache_key = (
+        ref,
+        lookup["id_column"],
+        lookup["label_column"],
+        raw_value,
+    )
+    if cache_key in cache:
+        return cache[cache_key]
+    try:
+        row = con.execute(
+            f"""
+            SELECT CAST({_quote_ident(lookup["label_column"])} AS VARCHAR)
+            FROM {ref}
+            WHERE CAST({_quote_ident(lookup["id_column"])} AS VARCHAR) = ?
+              AND {_quote_ident(lookup["label_column"])} IS NOT NULL
+            LIMIT 1
+            """,
+            [raw_value],
+        ).fetchone()
+    except Exception:
+        cache[cache_key] = None
+        return None
+    label = str(row[0]).strip() if row and row[0] is not None else None
+    cache[cache_key] = label or None
+    return cache[cache_key]
+
+
+def _semantic_highlight_detail(
+    con,
+    insight,
+    detail: str,
+    roles: dict[str, object],
+    lookup_index: dict[str, dict[str, str]],
+    models,
+    lookup_cache: dict[tuple[str, str, str, str], str | None],
+) -> str | None:
+    if insight.insight_type == "geographic_hotspot":
+        match = _RAW_GEO_RE.match(detail)
+        if not match:
+            return detail
+        raw_label = match.group("label").strip()
+        if not _is_opaque_value(raw_label):
+            return detail
+        origin = roles.get("origin_id") or roles.get("location_id")
+        if origin is None:
+            return None
+        lookup = lookup_for_column(insight.table_name, origin.column_name, lookup_index)
+        resolved = _lookup_label_for_value(con, lookup, raw_label, models, lookup_cache)
+        if not resolved or _is_opaque_value(resolved):
+            return None
+        return detail.replace(raw_label, resolved, 1)
+
+    if insight.insight_type == "route_pair":
+        match = _RAW_ROUTE_RE.search(detail)
+        if not match:
+            return detail
+        raw_origin = match.group("origin").strip()
+        raw_dest = match.group("dest").strip()
+        origin = roles.get("origin_id") or roles.get("location_id")
+        dest = roles.get("destination_id")
+        if origin is None or dest is None:
+            return None if _is_opaque_value(raw_origin) or _is_opaque_value(raw_dest) else detail
+        origin_lookup = lookup_for_column(insight.table_name, origin.column_name, lookup_index)
+        dest_lookup = lookup_for_column(insight.table_name, dest.column_name, lookup_index)
+        resolved_origin = raw_origin
+        resolved_dest = raw_dest
+        if _is_opaque_value(raw_origin):
+            resolved_origin = (
+                _lookup_label_for_value(con, origin_lookup, raw_origin, models, lookup_cache)
+                or raw_origin
+            )
+        if _is_opaque_value(raw_dest):
+            resolved_dest = (
+                _lookup_label_for_value(con, dest_lookup, raw_dest, models, lookup_cache)
+                or raw_dest
+            )
+        if _is_opaque_value(resolved_origin) or _is_opaque_value(resolved_dest):
+            return None
+        return detail.replace(
+            f"{raw_origin} -> {raw_dest}",
+            f"{resolved_origin} -> {resolved_dest}",
+            1,
+        )
+
+    return detail
+
+
+def _semantic_highlight_score(insight) -> float:
+    severity_weight = {"critical": 3.0, "warning": 2.0, "info": 1.0}
+    type_weight = insight_type_priority_weights()
+    score = (
+        type_weight.get(insight.insight_type, 1)
+        * severity_weight.get(insight.severity, 1.0)
+        * max(abs(insight.magnitude), 1.0)
+        * max((insight.support_count or 0) ** 0.25, 1.0)
+    )
+    if insight.metric == "wait_min" or "wait time" in insight.description.lower():
+        score *= 1.5
+    return score
+
+
+def _semantic_highlight_id(insight, detail: str) -> str:
+    payload = "|".join(
+        [
+            insight.table_name,
+            insight.insight_type,
+            insight.metric,
+            detail,
+            str(insight.support_count or ""),
+        ]
+    )
+    suffix = hashlib.blake2s(payload.encode("utf-8"), digest_size=6).hexdigest()
+    return f"semantic:{insight.table_name}:{insight.insight_type}:{insight.metric}:{suffix}"
+
+
+def compute_semantic_highlights(
+    con,
+    discovery,
+    context: DatasetContext | None,
+    models,
+    limit: int = 5,
+    project_id: str | None = None,
+) -> list[dict]:
+    """Convert semantic-family insights into business-facing findings."""
+    metadata = retrieve_metadata(discovery, context)
+    semantic_schema = infer_semantic_schema(discovery, context)
+    semantic_roles = {
+        table.name: roles_for_table(semantic_schema, table.name)
+        for table in discovery.tables
+    }
+    lookup_index = build_lookup_index(discovery.tables, metadata, discovery.relationships)
+    lookup_cache: dict[tuple[str, str, str, str], str | None] = {}
+    result = detect_insights_with_diagnostics(
+        con,
+        schema="staging",
+        discovery=discovery,
+        dataset_context=context,
+        models=models,
+        project_id=project_id,
+    )
+    highlight_types = set(_SEMANTIC_HIGHLIGHT_ORDER) | {"coverage_period"}
+    candidates = [
+        insight
+        for insight in result.insights
+        if insight.insight_type in highlight_types
+        and insight.insight_type != "coverage_period"
+    ]
+    selected: list[dict] = []
+    seen_tables: dict[str, int] = {}
+    max_per_table = 5 if len({insight.table_name for insight in candidates}) <= 1 else 2
+    ranked_candidates = sorted(candidates, key=_semantic_highlight_score, reverse=True)
+    seen_types: set[str] = set()
+
+    def append_highlight(insight) -> bool:
+        if seen_tables.get(insight.table_name, 0) >= max_per_table:
+            return False
+        detail = _replace_record_label(
+            insight.description,
+            context.row_represents if context else None,
+        )
+        detail = _semantic_highlight_detail(
+            con,
+            insight,
+            detail,
+            semantic_roles.get(insight.table_name, {}),
+            lookup_index,
+            models,
+            lookup_cache,
+        )
+        if detail is None:
+            return False
+        lens = _decision_lens(context, insight)
+        if context and context.decisions:
+            detail = f"{detail} Relevant for {lens.lower()} decisions."
+        selected.append(
+            {
+                "id": _semantic_highlight_id(insight, detail),
+                "title": _semantic_highlight_title(detail),
+                "detail": detail,
+                "table": insight.table_name,
+                "metric": insight.metric,
+                "insight_type": insight.insight_type,
+                "severity": insight.severity,
+                "confidence_level": insight.confidence_level,
+                "support_count": insight.support_count,
+                "decision_lens": lens,
+                "metadata_signals": {
+                    "has_context": metadata.context is not None,
+                    "glossary_terms": len(metadata.glossary),
+                    "lookup_tables": len(metadata.lookup_tables),
+                },
+            }
+        )
+        seen_tables[insight.table_name] = seen_tables.get(insight.table_name, 0) + 1
+        seen_types.add(insight.insight_type)
+        return True
+
+    for insight_type in _SEMANTIC_HIGHLIGHT_ORDER:
+        candidate = next(
+            (item for item in ranked_candidates if item.insight_type == insight_type),
+            None,
+        )
+        if candidate is not None:
+            append_highlight(candidate)
+        if len(selected) >= limit:
+            return selected[:limit]
+
+    for insight in ranked_candidates:
+        if seen_tables.get(insight.table_name, 0) >= max_per_table:
+            continue
+        if (
+            insight.insight_type in {"volume_distribution", "peak_period"}
+            and insight.insight_type in seen_types
+        ):
+            continue
+        append_highlight(insight)
+        if len(selected) >= limit:
+            break
+    if not any(item["metric"] == "wait_min" for item in selected):
+        wait_candidate = next(
+            (
+                insight
+                for insight in ranked_candidates
+                if insight.metric == "wait_min" or "wait time" in insight.description.lower()
+            ),
+            None,
+        )
+        if wait_candidate is not None:
+            detail = _replace_record_label(
+                wait_candidate.description,
+                context.row_represents if context else None,
+            )
+            detail = _semantic_highlight_detail(
+                con,
+                wait_candidate,
+                detail,
+                semantic_roles.get(wait_candidate.table_name, {}),
+                lookup_index,
+                models,
+                lookup_cache,
+            )
+            if detail is None:
+                return selected[:limit]
+            lens = _decision_lens(context, wait_candidate)
+            if context and context.decisions:
+                detail = f"{detail} Relevant for {lens.lower()} decisions."
+            wait_item = {
+                "id": _semantic_highlight_id(wait_candidate, detail),
+                "title": _semantic_highlight_title(detail),
+                "detail": detail,
+                "table": wait_candidate.table_name,
+                "metric": wait_candidate.metric,
+                "insight_type": wait_candidate.insight_type,
+                "severity": wait_candidate.severity,
+                "confidence_level": wait_candidate.confidence_level,
+                "support_count": wait_candidate.support_count,
+                "decision_lens": lens,
+                "metadata_signals": {
+                    "has_context": metadata.context is not None,
+                    "glossary_terms": len(metadata.glossary),
+                    "lookup_tables": len(metadata.lookup_tables),
+                },
+            }
+            if len(selected) >= limit:
+                selected[-1] = wait_item
+            else:
+                selected.append(wait_item)
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -1334,10 +1910,10 @@ def _compute_model_suggestions(tables, profiles, relationships, pipeline):
 # ---------------------------------------------------------------------------
 
 
-def _compute_catalog_health(request: Request, discovery) -> dict:
+def _compute_catalog_health(request: Request, discovery, pipeline: dict | None = None) -> dict:
     """Return catalog health metrics for the insights dashboard."""
     store = request.app.state.metadata_store
-    pipeline = request.app.state.pipeline
+    pipeline = pipeline or request.app.state.pipeline
     source = getattr(discovery, "source", None)
     if source is None:
         logger.warning("Discovery has no source attribute -- cannot compute catalog health")
@@ -1350,11 +1926,11 @@ def _compute_catalog_health(request: Request, discovery) -> dict:
     entities = store.get_catalog_entities(source_name)
 
     # Progress and maturity
-    progress = _compute_progress(discovery, pipeline, store, source_name)
+    progress = _compute_progress(discovery, pipeline, store, pipeline.get("project") or source_name)
     maturity, maturity_score = _compute_maturity(progress)
 
     # Project info
-    project = store.get_project(source_name)
+    project = pipeline.get("project") or store.get_project(source_name)
     catalog_confidence = project.get("catalog_confidence", 0.0) if project else 0.0
 
     return {

@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 import traceback
 from contextlib import asynccontextmanager
-from typing import Any
 
 import duckdb
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes import (
     briefing,
     confidence,
@@ -30,9 +30,11 @@ from headwater.api.routes import (
     quality,
     settings,
     sources,
+    warehouse,
 )
 from headwater.core.config import get_settings
 from headwater.core.metadata import MetadataStore
+from headwater.core.runtime_state import PipelineRuntimeState, set_runtime_state
 
 # Ensure headwater loggers are visible at INFO level
 logging.basicConfig(
@@ -114,7 +116,11 @@ async def lifespan(app: FastAPI):
     restored_catalog = None
     if restored_discovery and not in_memory:
         try:
-            source_name = sources[0]["name"]
+            source_name = (
+                restored_discovery.source.name
+                if getattr(restored_discovery, "source", None)
+                else sources[0]["name"]
+            )
             metrics_raw = store.get_catalog_metrics(source_name)
             dims_raw = store.get_catalog_dimensions(source_name)
             ents_raw = store.get_catalog_entities(source_name)
@@ -163,15 +169,16 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to restore pipeline state from metadata")
 
-    app.state.pipeline: dict[str, Any] = {
-        "discovery": restored_discovery,
-        "catalog": restored_catalog,
-        "staging_models": restored_staging,
-        "mart_models": restored_marts,
-        "contracts": restored_contracts,
-        "execution_results": restored_exec_results,
-        "quality_report": None,
-    }
+    runtime_state = PipelineRuntimeState(
+        discovery=restored_discovery,
+        catalog=restored_catalog,
+        staging_models=restored_staging,
+        mart_models=restored_marts,
+        contracts=restored_contracts,
+        execution_results=restored_exec_results,
+        quality_report=None,
+    )
+    set_runtime_state(app, runtime_state)
     yield
     app.state.duckdb_con.close()
     app.state.metadata_store.close()
@@ -340,10 +347,11 @@ def create_app(*, in_memory: bool = False) -> FastAPI:
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(sources.router, prefix="/api", tags=["sources"])
     app.include_router(briefing.router, prefix="/api", tags=["briefing"])
+    app.include_router(warehouse.router, prefix="/api", tags=["warehouse"])
 
     @app.get("/api/status")
-    async def api_status():
-        pipeline = app.state.pipeline
+    async def api_status(request: Request, project_id: str | None = None):
+        pipeline = scoped_pipeline(request, project_id)
         has_discovery = pipeline["discovery"] is not None
         tables = pipeline["discovery"].tables if has_discovery else []
         reviewed = sum(1 for t in tables if t.review_status == "reviewed")

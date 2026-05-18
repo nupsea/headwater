@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from headwater.api.project_scope import scoped_pipeline
 from headwater.core.config import get_settings
 from headwater.core.graph_store import GraphStore
 
@@ -31,8 +32,35 @@ def _get_graph_store(request: Request) -> GraphStore:
 
 
 @router.get("/graph/data")
-async def get_graph_data(request: Request):
+async def get_graph_data(request: Request, project_id: str | None = None):
     """Return full graph data (nodes + edges) for D3 visualization."""
+    if project_id:
+        discovery = scoped_pipeline(request, project_id).get("discovery")
+        if not discovery:
+            return {"nodes": [], "edges": []}
+        nodes = [
+            {
+                "id": table.name,
+                "row_count": table.row_count or 0,
+                "domain": table.domain or "Unclassified",
+                "description": table.description or "",
+            }
+            for table in discovery.tables
+        ]
+        edges = [
+            {
+                "source": rel.from_table,
+                "target": rel.to_table,
+                "from_column": rel.from_column,
+                "to_column": rel.to_column,
+                "rel_type": rel.type,
+                "confidence": rel.confidence,
+                "ref_integrity": rel.referential_integrity,
+                "nullable": False,
+            }
+            for rel in discovery.relationships
+        ]
+        return {"nodes": nodes, "edges": edges}
     graph = _get_graph_store(request)
     try:
         data = graph.get_graph_data()
@@ -43,8 +71,15 @@ async def get_graph_data(request: Request):
 
 
 @router.get("/graph/patterns")
-async def get_graph_patterns(request: Request):
+async def get_graph_patterns(request: Request, project_id: str | None = None):
     """Return discovered graph patterns: conformed dims, star schemas, chains, warnings."""
+    if project_id:
+        return {
+            "conformed_dimensions": [],
+            "star_schemas": [],
+            "chains": [],
+            "nullable_warnings": [],
+        }
     graph = _get_graph_store(request)
     try:
         conformed = graph.find_conformed_dimensions()

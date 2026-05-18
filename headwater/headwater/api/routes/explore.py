@@ -7,41 +7,108 @@ blocks execution (I-4).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from headwater.analyzer.llm import NoLLMProvider, get_provider
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
+from headwater.api.project_scope import scoped_pipeline
+from headwater.api.routes.insights import compute_semantic_highlights, compute_top_insights
 from headwater.core.config import get_settings
-from headwater.core.models import Relationship
+from headwater.core.models import DatasetContext, Relationship
 from headwater.explorer.nl_to_sql import ask
-from headwater.explorer.statistical import detect_insights
+from headwater.explorer.statistical import (
+    detect_insights_with_diagnostics,
+    insight_type_priority_weights,
+)
 from headwater.explorer.suggestions import generate_suggestions
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _INSIGHTS_ENDPOINT_LIMIT = 50
+_INSIGHT_TYPE_LIMITS = {
+    "temporal_anomaly": 2,
+    "change_point": 2,
+    "correlation": 2,
+    "coverage_period": 2,
+    "volume_distribution": 3,
+    "peak_period": 3,
+    "duration_distribution": 3,
+    "wait_time_pattern": 3,
+    "geographic_hotspot": 3,
+    "route_pair": 3,
+    "congestion_proxy": 2,
+    "data_quality": 3,
+}
 
 
 def _rank_statistical_insights(insights):
-    severity_rank = {"critical": 0, "warning": 1, "info": 2}
+    severity_weight = {"critical": 3, "warning": 2, "info": 1}
+    type_weight = insight_type_priority_weights()
     return sorted(
         insights,
         key=lambda insight: (
-            severity_rank.get(insight.severity, 3),
-            insight.p_value if insight.p_value is not None else 1.0,
+            -type_weight.get(insight.insight_type, 0),
+            -severity_weight.get(insight.severity, 0),
+            -(insight.support_count or 0),
             -abs(insight.magnitude),
+            insight.p_value if insight.p_value is not None else 1.0,
+            insight.table_name,
+            insight.metric,
         ),
     )
 
 
 def _serialize_statistical_insights(insights, limit: int) -> list[dict]:
-    return [i.model_dump() for i in _rank_statistical_insights(insights)[:limit]]
+    return [i.model_dump() for i in _diversify_statistical_insights(insights, limit)]
 
 
-def _load_confirmed_relationships(request: Request) -> list[Relationship]:
+def _diversify_statistical_insights(insights, limit: int):
+    result = []
+    type_counts: dict[str, int] = {}
+    seen_table_type: set[tuple[str, str]] = set()
+
+    for insight in _rank_statistical_insights(insights):
+        table_type = (insight.table_name, insight.insight_type)
+        if table_type in seen_table_type:
+            continue
+        type_limit = _INSIGHT_TYPE_LIMITS.get(insight.insight_type, 3)
+        if type_counts.get(insight.insight_type, 0) >= type_limit:
+            continue
+        result.append(insight)
+        seen_table_type.add(table_type)
+        type_counts[insight.insight_type] = type_counts.get(insight.insight_type, 0) + 1
+        if len(result) >= limit:
+            break
+
+    return result
+
+
+def _serialize_diagnostics(diagnostics) -> list[dict]:
+    return [d.model_dump() for d in diagnostics]
+
+
+def _dataset_context_for_pipeline(request: Request, pipeline: dict) -> DatasetContext | None:
+    store = getattr(request.app.state, "metadata_store", None)
+    discovery = pipeline.get("discovery")
+    if store is None or discovery is None:
+        return None
+    try:
+        row = store.get_dataset_context(discovery.source.name)
+        return DatasetContext(**row) if row else None
+    except Exception:
+        logger.debug("Dataset context unavailable for insights")
+        return None
+
+
+def _load_confirmed_relationships(
+    request: Request,
+    source_names: list[str] | None = None,
+) -> list[Relationship]:
     """Load human-confirmed FK relationships from metadata store.
 
     These supplement auto-detected relationships for richer cross-table
@@ -51,10 +118,19 @@ def _load_confirmed_relationships(request: Request) -> list[Relationship]:
     if store is None:
         return []
     try:
-        rows = store._exec(
-            "SELECT from_table, from_column, to_table, to_column "
-            "FROM relationships WHERE detection_source = 'confirmed'"
-        )
+        if source_names:
+            placeholders = ", ".join("?" for _ in source_names)
+            rows = store.con.execute(
+                "SELECT from_table, from_column, to_table, to_column "
+                "FROM relationships WHERE detection_source = 'confirmed' "
+                f"AND source_name IN ({placeholders})",
+                tuple(source_names),
+            ).fetchall()
+        else:
+            rows = store.con.execute(
+                "SELECT from_table, from_column, to_table, to_column "
+                "FROM relationships WHERE detection_source = 'confirmed'"
+            ).fetchall()
         rels: list[Relationship] = []
         for row in rows:
             rels.append(
@@ -80,13 +156,13 @@ class AskRequest(BaseModel):
 
 
 @router.get("/explore/suggestions")
-async def get_suggestions(request: Request):
+async def get_suggestions(request: Request, project_id: str | None = None):
     """Return auto-generated suggested questions and statistical insights.
 
     v2: No review gate. Suggestions are always returned. If few tables
     are reviewed, a soft signal is included but exploration is not blocked.
     """
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -100,7 +176,22 @@ async def get_suggestions(request: Request):
     quality_results = quality_report.results if quality_report else []
 
     catalog = pipeline.get("catalog")
-    extra_rels = _load_confirmed_relationships(request)
+    extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
+    context = _dataset_context_for_pipeline(request, pipeline)
+    metadata = retrieve_metadata(discovery, context)
+    business_insights = compute_top_insights(
+        request.app.state.duckdb_con,
+        discovery.tables,
+        discovery.profiles,
+        metadata,
+    )
+    semantic_highlights = compute_semantic_highlights(
+        request.app.state.duckdb_con,
+        discovery,
+        _dataset_context_for_pipeline(request, pipeline),
+        all_models,
+        project_id=project_id,
+    )
     suggestions = generate_suggestions(
         discovery=discovery,
         models=all_models,
@@ -109,23 +200,47 @@ async def get_suggestions(request: Request):
         con=request.app.state.duckdb_con,
         catalog=catalog,
         extra_relationships=extra_rels,
+        business_insights=business_insights,
+        metadata=metadata,
     )
+    con = request.app.state.duckdb_con
+    staging_result = detect_insights_with_diagnostics(
+        con,
+        schema="staging",
+        discovery=discovery,
+        dataset_context=context,
+        models=all_models,
+        project_id=project_id,
+    )
+    marts_result = detect_insights_with_diagnostics(
+        con,
+        schema="marts",
+        discovery=discovery,
+        dataset_context=context,
+        models=all_models,
+        project_id=project_id,
+    )
+    statistical_insights = staging_result.insights + marts_result.insights
+    diagnostics = staging_result.diagnostics + marts_result.diagnostics
 
     return {
         "suggestions": [s.model_dump() for s in suggestions],
-        "insights": [],
+        "business_insights": business_insights,
+        "semantic_highlights": semantic_highlights,
+        "insights": _serialize_statistical_insights(statistical_insights, 10),
+        "diagnostics": _serialize_diagnostics(diagnostics),
         "review_pct": round(review_pct, 1),
     }
 
 
 @router.post("/explore/ask")
-async def ask_question(request: Request, body: AskRequest):
+async def ask_question(request: Request, body: AskRequest, project_id: str | None = None):
     """Answer a natural language question by generating and executing SQL.
 
     v2: No review gate. Questions are always processed. Low-confidence
     answers show warnings rather than errors.
     """
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -137,7 +252,9 @@ async def ask_question(request: Request, body: AskRequest):
     quality_results = quality_report.results if quality_report else []
 
     # Load confirmed relationships and merge into discovery for richer suggestions
-    extra_rels = _load_confirmed_relationships(request)
+    extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
+    context = _dataset_context_for_pipeline(request, pipeline)
+    metadata = retrieve_metadata(discovery, context)
 
     # Generate suggestions for matching (with confirmed relationships)
     suggestions = generate_suggestions(
@@ -147,6 +264,13 @@ async def ask_question(request: Request, body: AskRequest):
         quality_results=quality_results,
         con=con,
         extra_relationships=extra_rels,
+        business_insights=compute_top_insights(
+            con,
+            discovery.tables,
+            discovery.profiles,
+            metadata,
+        ),
+        metadata=metadata,
     )
 
     # Get LLM provider if configured
@@ -175,7 +299,8 @@ async def ask_question(request: Request, body: AskRequest):
                 update={"relationships": list(discovery.relationships) + new_rels}
             )
 
-    result = ask(
+    result = await asyncio.to_thread(
+        ask,
         question=body.question,
         con=con,
         discovery=enriched_discovery,
@@ -190,17 +315,48 @@ async def ask_question(request: Request, body: AskRequest):
 
 
 @router.get("/explore/insights")
-async def get_statistical_insights(request: Request):
+async def get_statistical_insights(request: Request, project_id: str | None = None):
     """Return only statistical insights from materialized data."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     if not pipeline["discovery"]:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
 
     con = request.app.state.duckdb_con
-    insights = detect_insights(con, schema="staging")
-    insights.extend(detect_insights(con, schema="marts"))
+    discovery = pipeline["discovery"]
+    all_models = pipeline["staging_models"] + pipeline["mart_models"]
+    context = _dataset_context_for_pipeline(request, pipeline)
+    metadata = retrieve_metadata(discovery, context)
+    business_insights = compute_top_insights(con, discovery.tables, discovery.profiles, metadata)
+    semantic_highlights = compute_semantic_highlights(
+        con,
+        discovery,
+        context,
+        all_models,
+        project_id=project_id,
+    )
+    staging_result = detect_insights_with_diagnostics(
+        con,
+        schema="staging",
+        discovery=discovery,
+        dataset_context=context,
+        models=all_models,
+        project_id=project_id,
+    )
+    marts_result = detect_insights_with_diagnostics(
+        con,
+        schema="marts",
+        discovery=discovery,
+        dataset_context=context,
+        models=all_models,
+        project_id=project_id,
+    )
+    insights = staging_result.insights + marts_result.insights
+    diagnostics = staging_result.diagnostics + marts_result.diagnostics
 
     return {
+        "business_insights": business_insights,
+        "semantic_highlights": semantic_highlights,
         "insights": _serialize_statistical_insights(insights, _INSIGHTS_ENDPOINT_LIMIT),
+        "diagnostics": _serialize_diagnostics(diagnostics),
         "total": len(insights),
     }

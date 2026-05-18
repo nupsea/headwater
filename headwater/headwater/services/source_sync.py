@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import UTC, datetime
 
 import duckdb
@@ -13,6 +15,8 @@ from headwater.core.events import EventType
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 from headwater.core.redaction import redact_secrets
+from headwater.core.runtime_state import get_runtime_state
+from headwater.services.pipeline_runner import run_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,9 @@ class SourceSyncService:
                 uri=row.get("uri"),
             )
             connector.connect(config)
+            connector_config = _source_config(row)
+            if connector_config and hasattr(connector, "set_schema_filter"):
+                connector.set_schema_filter(connector_config)
             table_count = None
             if hasattr(connector, "list_tables"):
                 try:
@@ -171,37 +178,49 @@ class SourceSyncService:
         return row
 
     def _run_pipeline(self, row: dict, name: str) -> dict:
-        from headwater.api.routes.pipeline import _run_pipeline_inner
+        from headwater.api.routes.pipeline import _auto_confirm
 
         source_path = _source_value(row)
-        pipeline = self.request.app.state.pipeline
+        pipeline = get_runtime_state(self.request)
         source_schema = _default_source_schema(row)
         target_schema = "staging"
+        config = _source_config(row)
+        max_tables = config.get("max_tables")
+        sample_rows = config.get("sample_rows")
+        schema_filter_config = _extract_schema_filter(config)
 
         if getattr(self.request.app.state, "_in_memory", False):
-            return _run_pipeline_inner(
+            return run_pipeline(
                 self.request.app.state.duckdb_con,
-                self.request,
-                pipeline,
-                source_path,
-                row["type"],
-                name,
-                source_schema,
-                target_schema,
+                pipeline=pipeline,
+                metadata_store=self.store,
+                source_path=source_path,
+                source_type=row["type"],
+                source_name=name,
+                source_schema=source_schema,
+                target_schema=target_schema,
+                max_tables=max_tables,
+                sample_rows=sample_rows,
+                schema_filter_config=schema_filter_config,
+                auto_confirm=_auto_confirm,
             )
 
         settings = get_settings()
         con = duckdb.connect(str(settings.analytical_db_path))
         try:
-            return _run_pipeline_inner(
+            return run_pipeline(
                 con,
-                self.request,
-                pipeline,
-                source_path,
-                row["type"],
-                name,
-                source_schema,
-                target_schema,
+                pipeline=pipeline,
+                metadata_store=self.store,
+                source_path=source_path,
+                source_type=row["type"],
+                source_name=name,
+                source_schema=source_schema,
+                target_schema=target_schema,
+                max_tables=max_tables,
+                sample_rows=sample_rows,
+                schema_filter_config=schema_filter_config,
+                auto_confirm=_auto_confirm,
             )
         finally:
             con.close()
@@ -231,4 +250,42 @@ def _source_value(row: dict) -> str:
 
 
 def _default_source_schema(row: dict) -> str:
-    return "public" if row.get("uri") else "env_health"
+    source_name = str(row.get("name") or "source")
+    normalized = re.sub(r"[^a-z0-9_]+", "_", source_name.lower()).strip("_")
+    if not normalized:
+        normalized = "source"
+    if normalized[0].isdigit():
+        normalized = f"s_{normalized}"
+    return f"src_{normalized}"
+
+
+def _source_config(row: dict) -> dict:
+    raw = row.get("config_json")
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+_SCHEMA_FILTER_KEYS = frozenset({
+    "include_schemas", "exclude_schemas",
+    "include_tables", "exclude_tables",
+    "case_sensitive",
+})
+
+
+def _extract_schema_filter(config: dict) -> dict | None:
+    """Extract schema/table filter fields from a source config dict.
+
+    Returns a dict suitable for ``connector.set_schema_filter()`` or None
+    when no filter fields are present.
+    """
+    if not config:
+        return None
+    subset = {k: config[k] for k in _SCHEMA_FILTER_KEYS if k in config}
+    return subset or None

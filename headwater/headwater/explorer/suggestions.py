@@ -24,8 +24,16 @@ import re
 
 import duckdb
 
+from headwater.analyzer.metadata_retrieval import (
+    RetrievedMetadata,
+    build_lookup_index,
+    lookup_for_column,
+    retrieve_metadata,
+)
+from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.core.classification import is_dimension_column, is_metric_column
 from headwater.core.models import (
+    ColumnInfo,
     ColumnProfile,
     ContractCheckResult,
     ContractRule,
@@ -35,6 +43,14 @@ from headwater.core.models import (
     SuggestedQuestion,
     TableInfo,
 )
+from headwater.explorer.readability import (
+    BUSINESS_DIMENSION_TOKENS,
+    LOW_SIGNAL_DIMENSION_TOKENS,
+    enum_case_expression,
+    enum_dimension_label,
+    is_readable_dimension,
+    is_low_signal_dimension,
+)
 from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.utils import resolve_table_ref, table_exists
 
@@ -42,6 +58,9 @@ logger = logging.getLogger(__name__)
 
 MAX_TOTAL_SUGGESTIONS = 15
 MAX_QUALITY_SUGGESTIONS = 3
+MAX_TREND_SUGGESTIONS = 3
+MAX_AVERAGE_SUGGESTIONS = 5
+MAX_COUNT_SUGGESTIONS = 5
 
 # Numeric dtypes that represent measurable quantities
 _NUMERIC_DTYPES = ("int", "float", "double", "decimal", "numeric", "real", "bigint", "hugeint")
@@ -57,7 +76,11 @@ _ID_NAME_RE = re.compile(
     r"(_id|_key|_fk|_pk|^id$|^key$|^uuid$|code$|flag$|indicator$)", re.IGNORECASE
 )
 
-
+_AGGREGATE_METRIC_RE = re.compile(
+    r"^(avg|average|mean|median|min|max|p\d+|pct|percent|rate|ratio|share|count|total|sum)_",
+    re.IGNORECASE,
+)
+_SUMMARY_NAME_RE = re.compile(r"(summary|overview|snapshot|totals?)", re.IGNORECASE)
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -71,6 +94,8 @@ def generate_suggestions(
     con: duckdb.DuckDBPyConnection | None = None,
     catalog=None,
     extra_relationships: list[Relationship] | None = None,
+    business_insights: list[dict] | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[SuggestedQuestion]:
     """Generate suggested questions from all available metadata.
 
@@ -85,6 +110,7 @@ def generate_suggestions(
     Returns at most MAX_TOTAL_SUGGESTIONS questions in priority order.
     """
     all_models = models or []
+    metadata = metadata or retrieve_metadata(discovery)
     profile_index = {(p.table_name, p.column_name): p for p in discovery.profiles}
 
     # Merge confirmed PK/FK relationships with discovered ones
@@ -114,13 +140,41 @@ def generate_suggestions(
     graph = SchemaGraph(discovery, all_models)
 
     buckets: dict[str, list[SuggestedQuestion]] = {
-        "catalog": _from_catalog(catalog, con, all_models) if catalog else [],
-        "mart": _from_mart_models(all_models, con),
-        "cross_table": _from_schema_graph(graph, all_relationships, all_models, con),
-        "relationship": _from_relationships(
-            discovery.tables, all_relationships, all_models, con
+        "business": _from_semantic_roles(
+            discovery,
+            all_models,
+            con,
+            metadata,
+        ) + _from_business_insights(
+            business_insights,
+            con,
+            discovery.tables,
+            profile_index,
+            all_relationships,
+            all_models,
+            metadata,
         ),
-        "semantic": _from_table_structure(discovery.tables, profile_index, all_models, con),
+        "catalog": _from_catalog(catalog, con, all_models) if catalog else [],
+        "mart": _from_mart_models(all_models, con, metadata),
+        "cross_table": _from_schema_graph(
+            graph,
+            discovery.tables,
+            profile_index,
+            all_relationships,
+            all_models,
+            con,
+            metadata,
+        ),
+        "relationship": _from_relationships(
+            discovery.tables, all_relationships, profile_index, all_models, con, metadata
+        ),
+        "semantic": _from_table_structure(
+            discovery.tables,
+            profile_index,
+            all_models,
+            con,
+            metadata,
+        ),
         "quality": _from_quality_findings(
             contracts or [],
             quality_results or [],
@@ -131,18 +185,30 @@ def generate_suggestions(
 
     result: list[SuggestedQuestion] = []
     seen: set[str] = set()
-
-    for source in ("catalog", "mart", "cross_table", "relationship", "semantic", "quality"):
+    candidates: list[SuggestedQuestion] = []
+    for source in (
+        "business",
+        "catalog",
+        "mart",
+        "cross_table",
+        "semantic",
+        "relationship",
+        "quality",
+    ):
         for q in buckets[source]:
             key = " ".join(q.question.lower().split())
-            if key not in seen:
-                seen.add(key)
-                result.append(q)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(q)
+
+    result = _select_diverse_questions(candidates, metadata)
 
     logger.info(
-        "Generated %d suggestions: catalog=%d, mart=%d, cross_table=%d, "
+        "Generated %d suggestions: business=%d, catalog=%d, mart=%d, cross_table=%d, "
         "relationship=%d, semantic=%d, quality=%d",
         len(result),
+        len(buckets["business"]),
         len(buckets["catalog"]),
         len(buckets["mart"]),
         len(buckets["cross_table"]),
@@ -151,6 +217,759 @@ def generate_suggestions(
         len(buckets["quality"]),
     )
     return result[:MAX_TOTAL_SUGGESTIONS]
+
+
+def _select_diverse_questions(
+    candidates: list[SuggestedQuestion],
+    metadata: RetrievedMetadata | None = None,
+) -> list[SuggestedQuestion]:
+    source_limits = {
+        "business": 5,
+        "catalog": 3,
+        "mart": 3,
+        "cross_table": 3,
+        "semantic": 5,
+        "relationship": 2,
+        "quality": 2,
+    }
+    shape_limits = {
+        "trend": 2,
+        "average": 2,
+        "count": 2,
+        "ranking": 4,
+        "distribution": 3,
+        "quality": 2,
+        "other": 3,
+    }
+    source_priority = {
+        "business": 0,
+        "catalog": 1,
+        "mart": 2,
+        "cross_table": 3,
+        "semantic": 4,
+        "relationship": 5,
+        "quality": 6,
+    }
+
+    selected: list[SuggestedQuestion] = []
+    selected_keys: set[str] = set()
+    source_counts: dict[str, int] = {}
+    shape_counts: dict[str, int] = {}
+    table_counts: dict[str, int] = {}
+    template_counts: dict[str, int] = {}
+    family_template_counts: dict[tuple[str, str], int] = {}
+    family_template_focus_counts: dict[tuple[str, str, str], int] = {}
+    focus_counts: dict[str, int] = {}
+    primary_tables = {
+        (question.relevant_tables or [question.category])[0]
+        for question in candidates
+    }
+    if len(primary_tables) <= 1:
+        per_table_limit = 5
+    elif len(primary_tables) <= 3:
+        per_table_limit = 3
+    else:
+        per_table_limit = 2
+
+    ranked = sorted(
+        candidates,
+        key=lambda q: (
+            -_question_value_score(q, metadata),
+            source_priority.get(q.source, 99),
+            len(q.relevant_tables or []),
+            len(q.question),
+        ),
+    )
+
+    def can_add(question: SuggestedQuestion) -> bool:
+        key = " ".join(question.question.lower().split())
+        if key in selected_keys:
+            return False
+        shape = _question_shape(question.question)
+        template = _question_template(question.question)
+        family = _question_family(question)
+        focus = _question_focus(question.question)
+        if source_counts.get(question.source, 0) >= source_limits.get(question.source, 3):
+            return False
+        if shape_counts.get(shape, 0) >= shape_limits.get(shape, 3):
+            return False
+        template_limit = _template_limit(template)
+        if template_limit is not None and template_counts.get(template, 0) >= template_limit:
+            return False
+        if len(question.relevant_tables or []) < 2:
+            if focus is None and family_template_counts.get((family, template), 0) >= 1:
+                return False
+            if (
+                focus is not None
+                and family_template_focus_counts.get((family, template, focus), 0) >= 1
+            ):
+                return False
+        if (
+            focus is not None
+            and len(question.relevant_tables or []) < 2
+            and len(primary_tables) > 1
+            and focus_counts.get(focus, 0) >= 1
+        ):
+            return False
+        if len(question.relevant_tables or []) >= 2:
+            return True
+        primary_table = (question.relevant_tables or [question.category])[0]
+        return not table_counts.get(primary_table, 0) >= per_table_limit
+
+    def add(question: SuggestedQuestion) -> None:
+        selected.append(question)
+        selected_keys.add(" ".join(question.question.lower().split()))
+        source_counts[question.source] = source_counts.get(question.source, 0) + 1
+        shape = _question_shape(question.question)
+        shape_counts[shape] = shape_counts.get(shape, 0) + 1
+        template = _question_template(question.question)
+        template_counts[template] = template_counts.get(template, 0) + 1
+        family = _question_family(question)
+        focus = _question_focus(question.question)
+        if focus is None:
+            family_template_counts[(family, template)] = (
+                family_template_counts.get((family, template), 0) + 1
+            )
+        else:
+            family_template_focus_counts[(family, template, focus)] = (
+                family_template_focus_counts.get((family, template, focus), 0) + 1
+            )
+        if focus is not None:
+            focus_counts[focus] = focus_counts.get(focus, 0) + 1
+        primary_table = (question.relevant_tables or [question.category])[0]
+        table_counts[primary_table] = table_counts.get(primary_table, 0) + 1
+
+    lead_order = ("ranking", "comparison", "trend", "distribution", "other", "count", "quality")
+    for shape in lead_order:
+        lead = next(
+            (
+                q
+                for q in ranked
+                if _question_shape(q.question) == shape and can_add(q)
+            ),
+            None,
+        )
+        if lead:
+            add(lead)
+        if len(selected) >= MAX_TOTAL_SUGGESTIONS:
+            return selected
+
+    for question in ranked:
+        if len(selected) >= MAX_TOTAL_SUGGESTIONS:
+            break
+        if can_add(question):
+            add(question)
+
+    return selected
+
+
+def _question_family(question: SuggestedQuestion) -> str:
+    primary = (question.relevant_tables or [question.category])[0]
+    return _canonical_question_family(primary)
+
+
+def _canonical_question_family(value: str) -> str:
+    lower = value.lower().split(".")[-1]
+    for prefix in ("stg_", "mart_"):
+        if lower.startswith(prefix):
+            lower = lower[len(prefix):]
+    lower = re.sub(r"_(by_period|summary|overview|snapshot|totals?)$", "", lower)
+    lower = re.sub(r"_\d{4}(?:_\d{2}){0,2}$", "", lower)
+    lower = re.sub(r"_\d{1,3}$", "", lower)
+    return lower
+
+
+def _question_template(question: str) -> str:
+    q = " ".join(question.lower().split())
+    if q.startswith("which hour has the highest") and "volume" in q:
+        return "peak_hour_volume"
+    if q.startswith("how has ") and "changed over time" in q:
+        return "trend_over_time"
+    if q.startswith("how do ") and " compare" in q:
+        return "comparison"
+    if q.startswith("how does ") and " vary by " in q:
+        return "matrix"
+    if q.startswith("how does ") and " relate to " in q:
+        return "correlation"
+    if q.startswith("which ") and " drives " in q:
+        return "driver"
+    if q.startswith("which ") and " dominates " in q:
+        return "dominance"
+    if q.startswith("which ") and " longest " in q:
+        return "longest"
+    if q.startswith("which ") and " highest " in q:
+        return "ranking"
+    if q.startswith("how many "):
+        return "count"
+    if "distribution of" in q:
+        return "distribution"
+    return "other"
+
+
+def _question_focus(question: str) -> str | None:
+    q = " ".join(question.lower().split()).rstrip("?")
+    patterns = (
+        r"^which (?P<focus>.+?) has the highest .+ in .+$",
+        r"^which (?P<focus>.+?) has the longest .+ in .+$",
+        r"^which (?P<focus>.+?) has the highest .+ volume in .+$",
+        r"^what is the distribution of .+ by (?P<focus>.+?) in .+$",
+        r"^how many .+ are there by (?P<focus>.+?)(?: \(.+\))?$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, q)
+        if not match:
+            continue
+        focus = match.group("focus").strip()
+        if not focus:
+            return None
+        focus = re.sub(r"\s+", " ", focus)
+        return focus
+    return None
+
+
+def _template_limit(template: str) -> int | None:
+    limits = {
+        "peak_hour_volume": 2,
+        "trend_over_time": 2,
+    }
+    return limits.get(template)
+
+
+def _shape_allowed(
+    question: SuggestedQuestion,
+    shape_counts: dict[str, int],
+) -> bool:
+    shape = _question_shape(question.question)
+    limits = {
+        "trend": MAX_TREND_SUGGESTIONS,
+        "average": MAX_AVERAGE_SUGGESTIONS,
+        "count": MAX_COUNT_SUGGESTIONS,
+    }
+    limit = limits.get(shape)
+    if limit is not None and shape_counts.get(shape, 0) >= limit:
+        return False
+    shape_counts[shape] = shape_counts.get(shape, 0) + 1
+    return True
+
+
+def _question_shape(question: str) -> str:
+    q = " ".join(question.lower().split())
+    if "changed over time" in q or q.startswith("how has "):
+        return "trend"
+    if q.startswith("how do ") and " compare" in q:
+        return "comparison"
+    if q.startswith("how does ") and (" relate to " in q or " vary by " in q):
+        return "comparison"
+    if q.startswith("what is the average "):
+        return "average"
+    if q.startswith("how many "):
+        return "count"
+    if q.startswith("which ") and " highest " in q:
+        return "ranking"
+    if "distribution of" in q:
+        return "distribution"
+    if "drives " in q or "dominates " in q or "stand out" in q:
+        return "ranking"
+    if "missing values" in q or "duplicates" in q or "unexpected" in q:
+        return "quality"
+    return "other"
+
+
+def _question_value_score(
+    question: SuggestedQuestion,
+    metadata: RetrievedMetadata | None = None,
+) -> int:
+    score = 0
+    shape = _question_shape(question.question)
+    shape_weight = {
+        "ranking": 8,
+        "trend": 5,
+        "comparison": 6,
+        "count": 4,
+        "average": 3,
+        "quality": 2,
+        "distribution": -4,
+        "other": 0,
+    }
+    score += shape_weight.get(shape, 0)
+    if question.source in {"business", "cross_table", "catalog"}:
+        score += 4
+    elif question.source == "mart":
+        score += 2
+    if len(question.relevant_tables or []) >= 2:
+        score += 2
+    lower = question.question.lower()
+    if "distribution of average" in lower or "distribution of avg " in lower:
+        score -= 8
+    if " summary" in lower:
+        score -= 4
+    if any(token in lower for token in ("highest", "changed over time", "how many")):
+        score += 2
+    if " relate to " in lower:
+        score += 5
+    if " vary by " in lower:
+        score += 4
+    if _is_part_to_whole_distribution_question(lower):
+        score += 8
+    if lower.startswith("which ") and " highest " in lower and " volume " not in lower:
+        score += 5
+    if lower.startswith("which ") and " highest " in lower and " volume " in lower:
+        score -= 3
+    if lower.startswith("how many "):
+        score -= 2
+    score += _decision_question_bonus(lower)
+    score += _context_question_bonus(question.question, metadata)
+    return score
+
+
+def _decision_question_bonus(question: str) -> int:
+    score = 0
+    high_value_patterns = {
+        "wait time": 8,
+        "weekday and weekend": 7,
+        "drives ": 7,
+        "dominates ": 6,
+        "longest ": 6,
+        "routes have the longest": 7,
+        "busiest": 6,
+        "hour has the highest": 5,
+        "highest": 3,
+        "relate to": 5,
+        "vary by": 4,
+        "service": 2,
+        "channel": 2,
+        "payment": 1,
+        "volume": 2,
+    }
+    for pattern, bonus in high_value_patterns.items():
+        if pattern in question:
+            score += bonus
+    low_value_patterns = {
+        "distribution of": -3,
+        "what values stand out": -2,
+    }
+    for pattern, penalty in low_value_patterns.items():
+        if pattern in question:
+            score += penalty
+    if _is_part_to_whole_distribution_question(question):
+        score += 5
+    return score
+
+
+def _is_part_to_whole_distribution_question(question: str) -> bool:
+    if "distribution of" not in question or " by " not in question:
+        return False
+    business_tokens = (
+        "payment",
+        "method",
+        "service",
+        "status",
+        "category",
+        "channel",
+        "segment",
+        "type",
+    )
+    return any(token in question for token in business_tokens)
+
+
+def _from_business_insights(
+    business_insights: list[dict] | None,
+    con: duckdb.DuckDBPyConnection | None,
+    tables: list[TableInfo],
+    profile_index: dict[tuple[str, str], ColumnProfile],
+    relationships: list[Relationship],
+    models: list[GeneratedModel],
+    metadata: RetrievedMetadata | None,
+) -> list[SuggestedQuestion]:
+    suggestions: list[SuggestedQuestion] = []
+    if not business_insights:
+        return suggestions
+
+    table_map = {table.name: table for table in tables}
+    lookup_index = build_lookup_index(tables, metadata, relationships)
+    seen: set[str] = set()
+    for insight in business_insights[:8]:
+        table_name = insight.get("table")
+        if not table_name or table_name not in table_map:
+            continue
+        table = table_map[table_name]
+        ref = resolve_table_ref(table_name, con, models) if con is not None else table_name
+        column = insight.get("column")
+        group_by_column = insight.get("group_by_column")
+        grain = insight.get("group_by_grain")
+        chart_type = insight.get("chart_type")
+        insight_id = str(insight.get("id", ""))
+
+        question = None
+        sql_hint = None
+        if insight_id.startswith(("temporal_peak:", "metric_peak:")) and group_by_column:
+            metric_expr = "COUNT(*)"
+            metric_alias = "records"
+            if insight.get("metric") == "period_total" and column:
+                metric_expr = f'SUM("{column}")'
+                metric_alias = f"total_{column}"
+            period_expr = _time_bucket_expression(
+                group_by_column,
+                _column_dtype(table, group_by_column),
+                grain,
+            )
+            metric_label = _metric_question_label(
+                _business_metric_label(insight, metadata),
+                metadata,
+            )
+            question = (
+                f"How has {metric_label} "
+                f"in {_table_label(table_name, metadata)} changed over time?"
+            )
+            sql_hint = (
+                f"SELECT {period_expr} AS period, {metric_expr} AS {metric_alias} "
+                f"FROM {ref} "
+                f'WHERE "{group_by_column}" IS NOT NULL '
+                f"GROUP BY 1 ORDER BY 1 LIMIT 100"
+            )
+        elif insight_id.startswith("metric_driver:") and column:
+            if _should_skip_business_insight_dimension(table, str(column), profile_index):
+                continue
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                str(column),
+                lookup_index,
+                metadata,
+                con=con,
+                models=models,
+            )
+            question = (
+                f"Which {display_label} drives {_business_metric_label(insight, metadata)} "
+                f"in {_table_label(table_name, metadata)}?"
+            )
+            sql_hint = (
+                f"SELECT {select_expr} AS dimension, "
+                f'ROUND(SUM("{insight["metric"]}"), 2) AS total_value, '
+                f"COUNT(*) AS records "
+                f"FROM {ref} fact "
+                f"{join_sql} "
+                f'WHERE {_dimension_not_null_predicate(select_expr)} '
+                f'AND fact."{insight["metric"]}" IS NOT NULL '
+                f"GROUP BY {group_expr} ORDER BY total_value DESC LIMIT 20"
+            )
+        elif insight_id.startswith("segment_concentration:") and column:
+            if _should_skip_business_insight_dimension(table, str(column), profile_index):
+                continue
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                str(column),
+                lookup_index,
+                metadata,
+                con=con,
+                models=models,
+            )
+            question = (
+                f"Which {display_label} segments dominate "
+                f"{_table_label(table_name, metadata)}?"
+            )
+            sql_hint = (
+                f"SELECT {select_expr} AS dimension, COUNT(*) AS records "
+                f"FROM {ref} fact "
+                f"{join_sql} "
+                f"WHERE {_dimension_not_null_predicate(select_expr)} "
+                f"GROUP BY {group_expr} ORDER BY records DESC LIMIT 20"
+            )
+        elif chart_type == "histogram" and column:
+            question = (
+                f"What is the distribution of {_humanize(column)} "
+                f"in {_table_label(table_name, metadata)}?"
+            )
+            sql_hint = _distribution_sql(ref, str(column))
+
+        if not question or not sql_hint:
+            continue
+        normalized = " ".join(question.lower().split())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        suggestions.append(
+            SuggestedQuestion(
+                question=question,
+                source="business",
+                category="Business Signals",
+                relevant_tables=[table_name],
+                sql_hint=sql_hint,
+            )
+        )
+    return suggestions
+
+
+def _from_semantic_roles(
+    discovery: DiscoveryResult,
+    models: list[GeneratedModel],
+    con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
+) -> list[SuggestedQuestion]:
+    suggestions: list[SuggestedQuestion] = []
+    semantic_schema = infer_semantic_schema(discovery, metadata.context if metadata else None)
+    lookup_index = build_lookup_index(
+        discovery.tables,
+        metadata,
+        discovery.relationships,
+    )
+    seen: set[str] = set()
+
+    for table in discovery.tables:
+        roles = roles_for_table(semantic_schema, table.name)
+        if not roles:
+            continue
+        ref = resolve_table_ref(table.name, con, models) if con is not None else table.name
+        table_label = _table_label(table.name, metadata)
+        row_label = _row_subject_label(metadata, table_label)
+        start = roles.get("lifecycle_start_ts") or roles.get("event_ts")
+        end = roles.get("lifecycle_end_ts")
+        request = roles.get("request_ts")
+        origin = roles.get("origin_id") or roles.get("location_id")
+        dest = roles.get("destination_id")
+        service = roles.get("service_type")
+
+        if start and _supports_hour_grain(table, start.column_name):
+            start_expr = _timestamp_expression(table, start.column_name)
+            suggestions.extend(
+                _add_semantic_questions(
+                    seen,
+                    [
+                        SuggestedQuestion(
+                            question=(
+                                f"Which hour has the highest {row_label} volume "
+                                f"in {table_label}?"
+                            ),
+                            source="business",
+                            category=_decision_category(metadata),
+                            relevant_tables=[table.name],
+                            sql_hint=(
+                                f"SELECT EXTRACT(hour FROM {start_expr}) AS hour_of_day, "
+                                f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                f"FROM {ref} "
+                                f"WHERE {start_expr} IS NOT NULL "
+                                f"GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 24"
+                            ),
+                        ),
+                    ],
+                )
+            )
+
+        if start and end:
+            start_expr = _timestamp_expression(table, start.column_name)
+            duration_expr = _duration_minutes_expression(table, start.column_name, end.column_name)
+            origin_is_readable = bool(
+                origin
+                and is_readable_dimension(
+                    table.name,
+                    origin.column_name,
+                    lookup_index,
+                    metadata,
+                )
+            )
+            dest_is_readable = bool(
+                dest
+                and is_readable_dimension(
+                    table.name,
+                    dest.column_name,
+                    lookup_index,
+                    metadata,
+                )
+            )
+            suggestions.extend(
+                _add_semantic_questions(
+                    seen,
+                    [
+                        SuggestedQuestion(
+                            question=(
+                                f"How do weekday and weekend "
+                                f"{_row_subject_metric(metadata, 'duration')} "
+                                f"compare in {table_label}?"
+                            ),
+                            source="business",
+                            category=_decision_category(metadata),
+                            relevant_tables=[table.name],
+                            sql_hint=(
+                                f"SELECT CASE "
+                                f"WHEN EXTRACT(dow FROM {start_expr}) IN (0, 6) THEN 'Weekend' "
+                                f"ELSE 'Weekday' END AS period_type, "
+                                f"ROUND(AVG({duration_expr}), 2) AS avg_duration_min, "
+                                f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                f"FROM {ref} "
+                                f"WHERE {start_expr} IS NOT NULL "
+                                f"AND {duration_expr} >= 0 "
+                                f"GROUP BY 1 ORDER BY avg_duration_min DESC"
+                            ),
+                        ),
+                    ],
+                )
+            )
+            if origin and origin_is_readable:
+                group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                    table,
+                    origin.column_name,
+                    lookup_index,
+                    metadata,
+                    con=con,
+                    models=models,
+                )
+                suggestions.extend(
+                    _add_semantic_questions(
+                        seen,
+                        [
+                            SuggestedQuestion(
+                                question=(
+                                    f"Which {display_label} has the longest "
+                                    f"{_row_subject_metric(metadata, 'duration')} in {table_label}?"
+                                ),
+                                source="business",
+                                category=_decision_category(metadata),
+                                relevant_tables=[table.name],
+                                sql_hint=(
+                                    f"SELECT {select_expr} AS dimension, "
+                                    f"ROUND(AVG({duration_expr}), 2) AS avg_duration_min, "
+                                    f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                    f"FROM {ref} fact "
+                                    f"{join_sql} "
+                                    f"WHERE {_dimension_not_null_predicate(select_expr)} "
+                                    f"AND {duration_expr} >= 0 "
+                                    f"GROUP BY {group_expr} ORDER BY avg_duration_min DESC LIMIT 20"
+                                ),
+                            ),
+                        ],
+                    )
+                )
+            if origin and dest and origin_is_readable and dest_is_readable:
+                origin_group_expr, origin_select_expr, origin_join_sql, _origin_label = (
+                    _dimension_projection(
+                        table,
+                        origin.column_name,
+                        lookup_index,
+                        metadata,
+                        alias="fact",
+                        lookup_join_alias="origin_lu",
+                        con=con,
+                        models=models,
+                    )
+                )
+                dest_group_expr, dest_select_expr, dest_join_sql, _dest_label = (
+                    _dimension_projection(
+                        table,
+                        dest.column_name,
+                        lookup_index,
+                        metadata,
+                        alias="fact",
+                        lookup_join_alias="dest_lu",
+                        con=con,
+                        models=models,
+                    )
+                )
+                suggestions.extend(
+                    _add_semantic_questions(
+                        seen,
+                        [
+                            SuggestedQuestion(
+                                question=(
+                                    f"Which routes have the longest "
+                                    f"{_row_subject_metric(metadata, 'duration')} in {table_label}?"
+                                ),
+                                source="business",
+                                category=_decision_category(metadata),
+                                relevant_tables=[table.name],
+                                sql_hint=(
+                                    f"SELECT {origin_select_expr} || ' -> ' || "
+                                    f"{dest_select_expr} "
+                                    f"AS route_pair, "
+                                    f"ROUND(AVG({duration_expr}), 2) AS avg_duration_min, "
+                                    f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                    f"FROM {ref} fact "
+                                    f"{origin_join_sql} "
+                                    f"{dest_join_sql} "
+                                    f"WHERE {origin_group_expr} IS NOT NULL "
+                                    f"AND {dest_group_expr} IS NOT NULL "
+                                    f"AND {duration_expr} >= 0 "
+                                    f"GROUP BY 1 ORDER BY avg_duration_min DESC LIMIT 20"
+                                ),
+                            ),
+                        ],
+                    )
+                )
+
+        if request and start and service:
+            duration_expr = _duration_minutes_expression(
+                table,
+                request.column_name,
+                start.column_name,
+            )
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                service.column_name,
+                lookup_index,
+                metadata,
+                con=con,
+                models=models,
+            )
+            suggestions.extend(
+                _add_semantic_questions(
+                    seen,
+                    [
+                        SuggestedQuestion(
+                            question=(
+                                f"Which {display_label} has the highest "
+                                f"{_row_subject_metric(metadata, 'wait time')} in {table_label}?"
+                            ),
+                            source="business",
+                            category=_decision_category(metadata),
+                            relevant_tables=[table.name],
+                            sql_hint=(
+                                f"SELECT {select_expr} AS dimension, "
+                                    f"ROUND(AVG({duration_expr}), 2) AS avg_wait_min, "
+                                    f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                    f"FROM {ref} fact "
+                                    f"{join_sql} "
+                                    f"WHERE {_dimension_not_null_predicate(select_expr)} "
+                                    f"AND {duration_expr} >= 0 "
+                                    f"GROUP BY {group_expr} ORDER BY avg_wait_min DESC LIMIT 20"
+                                ),
+                            ),
+                    ],
+                )
+            )
+        elif start and service:
+            start_expr = _timestamp_expression(table, start.column_name)
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                service.column_name,
+                lookup_index,
+                metadata,
+                con=con,
+                models=models,
+            )
+            suggestions.extend(
+                _add_semantic_questions(
+                    seen,
+                    [
+                        SuggestedQuestion(
+                            question=(
+                                f"Which {display_label} has the highest {row_label} volume "
+                                f"in {table_label}?"
+                            ),
+                            source="business",
+                            category=_decision_category(metadata),
+                            relevant_tables=[table.name],
+                            sql_hint=(
+                                f"SELECT {select_expr} AS dimension, "
+                                f"COUNT(*) AS {row_label.replace(' ', '_')}_count "
+                                f"FROM {ref} fact "
+                                f"{join_sql} "
+                                f"WHERE {_dimension_not_null_predicate(select_expr)} "
+                                f"AND {start_expr} IS NOT NULL "
+                                f"GROUP BY {group_expr} ORDER BY 2 DESC LIMIT 20"
+                            ),
+                        ),
+                    ],
+                )
+            )
+    return suggestions
 
 
 def _from_catalog(
@@ -211,29 +1030,34 @@ def _from_catalog(
 
 def _from_schema_graph(
     graph: SchemaGraph,
+    tables: list[TableInfo],
+    profile_index: dict[tuple[str, str], ColumnProfile],
     relationships: list[Relationship],
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     """Generate cross-table analytical questions using SchemaGraph join paths.
 
-    Finds pairs of tables that can be joined (even indirectly) and generates
-    questions combining metrics from one table with dimensions from another.
-    This produces multi-table questions that _from_relationships misses when
-    the join is indirect (2+ hops) or when relationships are sparse.
+    Finds directly related table pairs and generates questions combining
+    metrics from one table with dimensions from another. Deeper join paths are
+    left to NL-to-SQL planning; surfacing them as suggested questions is too
+    noisy without stronger semantic confirmation.
     """
     suggestions: list[SuggestedQuestion] = []
     if len(graph.tables) < 2:
         return suggestions
 
+    table_map = {table.name: table for table in tables}
+    lookup_index = build_lookup_index(tables, metadata, relationships)
     seen_combos: set[tuple[str, str, str]] = set()
 
     for fact_name, fact_node in graph.tables.items():
         if not fact_node.metrics:
             continue
 
-        metric_col = fact_node.metrics[0]
-        metric_label = _humanize(metric_col)
+        metric_col = _pick_cross_table_metric(fact_node)
+        metric_label = _metric_question_label(metric_col, metadata) if metric_col else None
 
         for dim_name, dim_node in graph.tables.items():
             if dim_name == fact_name:
@@ -245,11 +1069,27 @@ def _from_schema_graph(
             path = graph.find_join_path(fact_name, dim_name)
             if path is None:
                 continue
+            if len(path) > 1:
+                continue
 
-            dim_col_name = dim_node.dimensions[0]
-            dim_label = _humanize(dim_col_name)
-            fact_label = _humanize(fact_name)
-            dim_table_label = _humanize(dim_name)
+            dim_table = table_map.get(dim_name)
+            if dim_table is not None:
+                dim_candidates = _prefer_display_dim(
+                    [
+                        name
+                        for name in _get_dimension_cols(dim_table, profile_index)
+                        if name in dim_node.dimensions
+                    ],
+                    dim_name,
+                )
+            else:
+                dim_candidates = dim_node.dimensions
+            if not dim_candidates:
+                continue
+
+            dim_col_name = dim_candidates[0]
+            fact_label = _table_label(fact_name, metadata)
+            dim_table_label = _table_label(dim_name, metadata)
 
             combo_key = (fact_name, dim_name, dim_col_name)
             if combo_key in seen_combos:
@@ -279,23 +1119,53 @@ def _from_schema_graph(
 
             dim_alias = aliases.get(dim_name, "t0")
             fact_alias = aliases.get(fact_name, "t0")
-
-            sql = (
-                f'SELECT {dim_alias}."{dim_col_name}", '
-                f'COUNT(*) AS {_humanize(fact_name).replace(" ", "_")}_count, '
-                f'ROUND(AVG({fact_alias}."{metric_col}"), 2) AS avg_{metric_col} '
-                f"FROM {fact_ref} t0 "
-                + " ".join(join_clauses)
-                + f' GROUP BY {dim_alias}."{dim_col_name}" '
-                f"ORDER BY avg_{metric_col} DESC LIMIT 20"
+            group_expr, select_expr, dim_join_sql, display_label = _dimension_projection(
+                dim_table,
+                dim_col_name,
+                lookup_index,
+                metadata,
+                alias=dim_alias,
+                lookup_join_alias=f"{dim_alias}_lu",
+                con=con,
+                models=models,
             )
+
+            count_alias = f'{_humanize(fact_name).replace(" ", "_")}_count'
+            if metric_col:
+                sql = (
+                    f"SELECT {select_expr} AS dimension, "
+                    f"COUNT(*) AS {count_alias}, "
+                    f'ROUND(AVG({fact_alias}."{metric_col}"), 2) AS avg_{metric_col} '
+                    f"FROM {fact_ref} t0 "
+                    + " ".join(join_clauses)
+                    + f" {dim_join_sql} "
+                    + f" WHERE {_dimension_not_null_predicate(select_expr)} "
+                    + f"GROUP BY {group_expr} "
+                    f"ORDER BY avg_{metric_col} DESC LIMIT 20"
+                )
+                question = (
+                    f"What is the average {metric_label} in {fact_label} "
+                    f"by {display_label} ({dim_table_label})?"
+                )
+            else:
+                sql = (
+                    f"SELECT {select_expr} AS dimension, "
+                    f"COUNT(*) AS {count_alias} "
+                    f"FROM {fact_ref} t0 "
+                    + " ".join(join_clauses)
+                    + f" {dim_join_sql} "
+                    + f" WHERE {_dimension_not_null_predicate(select_expr)} "
+                    + f"GROUP BY {group_expr} "
+                    f"ORDER BY {count_alias} DESC LIMIT 20"
+                )
+                question = (
+                    f"How many {_row_subject_label(metadata, fact_label)} are there by "
+                    f"{display_label} ({dim_table_label})?"
+                )
 
             suggestions.append(
                 SuggestedQuestion(
-                    question=(
-                        f"What is the average {metric_label} in {fact_label} "
-                        f"by {dim_label} ({dim_table_label})?"
-                    ),
+                    question=question,
                     source="cross_table",
                     category="Cross-Table Analysis",
                     relevant_tables=[fact_name, dim_name],
@@ -307,6 +1177,38 @@ def _from_schema_graph(
                 return suggestions
 
     return suggestions
+
+
+def _pick_cross_table_metric(fact_node) -> str | None:
+    scored: list[tuple[int, str]] = []
+    for metric in fact_node.metrics:
+        score = _metric_question_score(metric)
+        if score > 0:
+            scored.append((score, metric))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][1]
+
+
+def _metric_question_score(column_name: str) -> int:
+    lower = column_name.lower()
+    if any(token in lower for token in ("age", "birth", "year_of_birth", "lat", "lon")):
+        return -5
+    score = 0
+    strong_tokens = (
+        "amount", "total", "cost", "price", "fare", "revenue", "sales", "value",
+        "margin", "profit", "spend", "score", "severity", "duration", "elapsed",
+        "distance", "miles", "rate", "percent", "ratio", "count", "qty", "quantity",
+        "avg", "mean", "p90", "p95",
+    )
+    if any(token in lower for token in strong_tokens):
+        score += 10
+    if any(token in lower for token in ("current", "valid", "net", "gross")):
+        score += 2
+    if lower.endswith("_id") or lower.endswith("_code"):
+        score -= 10
+    return score
 
 
 def _build_catalog_sql(metric, dimension, ref_fn=None) -> str:
@@ -352,6 +1254,7 @@ def _build_catalog_sql(metric, dimension, ref_fn=None) -> str:
 def _from_mart_models(
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     """Generate analytical questions from mart model definitions.
 
@@ -368,21 +1271,355 @@ def _from_mart_models(
         if con is not None and not table_exists(con, "marts", model.name):
             continue
 
-        label = _humanize(model.name)
+        label = _table_label(model.name, metadata)
         ref = f"marts.{model.name}"
+        cols = _mart_columns(con, model.name) if con is not None else []
+        row_count = _mart_row_count(con, model.name) if con is not None else None
+        if row_count is not None and row_count <= 1:
+            continue
+        temporal = _pick_mart_temporal(cols)
+        by_period_model = _looks_like_period_model(model.name, label)
+        metric = _pick_mart_metric(
+            con,
+            model.name,
+            cols,
+            temporal=temporal,
+            prefer_signal=by_period_model,
+        )
+        dimension = _pick_mart_dimension(cols, temporal, metric)
 
-        # One clean question per mart -- no description leakage
+        if temporal and metric:
+            if by_period_model and _mart_metric_is_low_signal(
+                con,
+                model.name,
+                metric,
+                temporal,
+            ):
+                continue
+            temporal_dtype = next((dtype for name, dtype in cols if name == temporal), "")
+            period_expr = _time_bucket_expression(temporal, temporal_dtype)
+            question = (
+                f"How has {_metric_question_label(metric, metadata)} "
+                f"in {label} changed over time?"
+            )
+            sql_hint = (
+                f"SELECT {period_expr} AS period, "
+                f'ROUND(AVG("{metric}"), 2) AS avg_{metric}, '
+                f"COUNT(*) AS records "
+                f"FROM {ref} "
+                f'WHERE "{temporal}" IS NOT NULL '
+                f"GROUP BY 1 ORDER BY 1 LIMIT 100"
+            )
+        elif dimension and metric:
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                None,
+                dimension,
+                {},
+                metadata,
+            )
+            question = (
+                f"Which {display_label} has the highest "
+                f"{_metric_question_label(metric, metadata)} in {label}?"
+            )
+            sql_hint = (
+                f"SELECT {select_expr} AS dimension, "
+                f"COUNT(*) AS records, "
+                f'ROUND(AVG("{metric}"), 2) AS avg_{metric} '
+                f"FROM {ref} fact "
+                f"{join_sql} "
+                f"GROUP BY {group_expr} ORDER BY avg_{metric} DESC LIMIT 20"
+            )
+        elif metric:
+            if _is_aggregate_metric_name(metric) or _looks_like_summary_model(model.name, label):
+                continue
+            question = (
+                f"What is the distribution of {_metric_question_label(metric, metadata)} "
+                f"in {label}?"
+            )
+            sql_hint = _distribution_sql(ref, metric)
+        else:
+            if by_period_model:
+                continue
+            question = _fallback_mart_question(model.name, label)
+            sql_hint = f"SELECT * FROM {ref} LIMIT 50"
+
         questions.append(
             SuggestedQuestion(
-                question=f"What are the key metrics in {label}?",
+                question=question,
                 source="mart",
                 category=label.title(),
                 relevant_tables=model.source_tables,
-                sql_hint=f"SELECT * FROM {ref} LIMIT 50",
+                sql_hint=sql_hint,
             )
         )
 
     return questions
+
+
+def _mart_columns(
+    con: duckdb.DuckDBPyConnection,
+    model_name: str,
+) -> list[tuple[str, str]]:
+    try:
+        rows = con.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'marts' AND table_name = ?
+            ORDER BY ordinal_position
+            """,
+            (model_name,),
+        ).fetchall()
+    except Exception:
+        return []
+    return [(str(row[0]), str(row[1])) for row in rows]
+
+
+def _mart_row_count(
+    con: duckdb.DuckDBPyConnection,
+    model_name: str,
+) -> int | None:
+    try:
+        row = con.execute(f"SELECT COUNT(*) FROM marts.{model_name}").fetchone()
+    except Exception:
+        return None
+    return int(row[0]) if row else None
+
+
+def _pick_mart_temporal(cols: list[tuple[str, str]]) -> str | None:
+    for name, dtype in cols:
+        lower = name.lower()
+        if lower == "period" or any(
+            token in lower for token in ("date", "time", "month", "year")
+        ):
+            return name
+        if any(token in dtype.lower() for token in _TEMPORAL_DTYPES):
+            return name
+    return None
+
+
+def _pick_mart_metric(
+    con: duckdb.DuckDBPyConnection | None,
+    model_name: str,
+    cols: list[tuple[str, str]],
+    temporal: str | None = None,
+    prefer_signal: bool = False,
+) -> str | None:
+    candidates: list[tuple[int, str]] = []
+    for name, dtype in cols:
+        lower = name.lower()
+        if _ID_NAME_RE.search(name) or lower in {"period"}:
+            continue
+        if not any(token in dtype.lower() for token in _NUMERIC_DTYPES):
+            continue
+        score = _mart_metric_score(
+            con,
+            model_name,
+            name,
+            temporal=temporal,
+            prefer_signal=prefer_signal,
+        )
+        candidates.append((score, name))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    best_score, best_name = candidates[0]
+    if prefer_signal and best_score < 6:
+        return None
+    return best_name
+
+
+def _is_aggregate_metric_name(name: str) -> bool:
+    lower = name.lower()
+    return bool(_AGGREGATE_METRIC_RE.match(lower))
+
+
+def _looks_like_summary_model(*parts: str) -> bool:
+    return any(_SUMMARY_NAME_RE.search(part) for part in parts if part)
+
+
+def _looks_like_period_model(*parts: str) -> bool:
+    lowered = [part.lower() for part in parts if part]
+    return any(
+        "_by_period" in part or part.endswith("by_period") or " by period" in part
+        for part in lowered
+    )
+
+
+def _is_low_value_period_metric(name: str) -> bool:
+    lower = name.lower()
+    return lower in {
+        "row_count",
+        "record_count",
+        "records",
+        "records_count",
+        "row_total",
+        "rows",
+        "count",
+    }
+
+
+def _mart_metric_is_low_signal(
+    con: duckdb.DuckDBPyConnection | None,
+    model_name: str,
+    metric: str,
+    temporal: str | None,
+) -> bool:
+    return _mart_metric_score(
+        con,
+        model_name,
+        metric,
+        temporal=temporal,
+        prefer_signal=True,
+    ) < 6
+
+
+def _mart_metric_score(
+    con: duckdb.DuckDBPyConnection | None,
+    model_name: str,
+    metric: str,
+    temporal: str | None = None,
+    prefer_signal: bool = False,
+) -> int:
+    lower = metric.lower()
+    score = _metric_question_score(metric)
+    if _is_low_value_period_metric(metric):
+        return -100
+    if prefer_signal and lower.startswith("current_"):
+        return -100
+    if lower.startswith(("current_avg_", "current_mean_", "current_median_")):
+        score -= 5
+    elif lower.startswith(("current_", "avg_", "mean_")):
+        score -= 2
+    if con is None:
+        return score
+    profile = _mart_metric_profile(con, model_name, metric, temporal if prefer_signal else None)
+    if profile is None:
+        return score
+    distinct_count = int(profile["distinct_count"])
+    if distinct_count <= 1:
+        return -100
+    if distinct_count <= 3:
+        score -= 4
+    elif distinct_count >= 12:
+        score += 4
+    elif distinct_count >= 6:
+        score += 2
+    stddev = profile["stddev"]
+    mean_value = profile["mean_value"]
+    if stddev is None or stddev <= 0:
+        score -= 6
+    elif mean_value not in (None, 0):
+        coefficient = abs(float(stddev) / float(mean_value))
+        if coefficient >= 0.2:
+            score += 4
+        elif coefficient >= 0.08:
+            score += 2
+        elif coefficient <= 0.02:
+            score -= 3
+    turning_points = int(profile["turning_points"])
+    if turning_points >= 2:
+        score += 4
+    elif turning_points == 1:
+        score += 2
+    elif prefer_signal and distinct_count >= 4:
+        score -= 4
+    return score
+
+
+def _mart_metric_profile(
+    con: duckdb.DuckDBPyConnection,
+    model_name: str,
+    metric: str,
+    temporal: str | None = None,
+) -> dict[str, float | int | None] | None:
+    try:
+        row = con.execute(
+            f"""
+            SELECT
+                COUNT(*) AS n,
+                COUNT(DISTINCT "{metric}") AS distinct_count,
+                AVG(CAST("{metric}" AS DOUBLE)) AS mean_value,
+                STDDEV_SAMP(CAST("{metric}" AS DOUBLE)) AS stddev
+            FROM marts.{model_name}
+            WHERE "{metric}" IS NOT NULL
+            """
+        ).fetchone()
+    except Exception:
+        return None
+    if not row or int(row[0] or 0) == 0:
+        return None
+    turning_points = 0
+    if temporal:
+        try:
+            turn_row = con.execute(
+                f"""
+                WITH ordered AS (
+                    SELECT
+                        CAST("{metric}" AS DOUBLE) AS metric_value,
+                        ROW_NUMBER() OVER (ORDER BY "{temporal}") AS seq,
+                        LAG(CAST("{metric}" AS DOUBLE)) OVER (ORDER BY "{temporal}") AS prev_value
+                    FROM marts.{model_name}
+                    WHERE "{metric}" IS NOT NULL AND "{temporal}" IS NOT NULL
+                ),
+                deltas AS (
+                    SELECT
+                        seq,
+                        SIGN(metric_value - prev_value) AS direction
+                    FROM ordered
+                    WHERE prev_value IS NOT NULL AND metric_value <> prev_value
+                ),
+                turns AS (
+                    SELECT
+                        direction,
+                        LAG(direction) OVER (ORDER BY seq) AS prev_direction
+                    FROM deltas
+                )
+                SELECT COUNT(*)
+                FROM turns
+                WHERE prev_direction IS NOT NULL AND direction <> prev_direction
+                """
+            ).fetchone()
+            turning_points = int(turn_row[0] or 0) if turn_row else 0
+        except Exception:
+            turning_points = 0
+    return {
+        "distinct_count": int(row[1] or 0),
+        "mean_value": float(row[2]) if row[2] is not None else None,
+        "stddev": float(row[3]) if row[3] is not None else None,
+        "turning_points": turning_points,
+    }
+
+
+def _pick_mart_dimension(
+    cols: list[tuple[str, str]],
+    temporal: str | None,
+    metric: str | None,
+) -> str | None:
+    for name, dtype in cols:
+        if name in {temporal, metric}:
+            continue
+        lower = name.lower()
+        if "store_and_fwd" in lower or any(token in lower for token in ("flag", "indicator")):
+            continue
+        if _ID_NAME_RE.search(name) and not any(
+            token in lower for token in ("zone", "location", "site")
+        ):
+            continue
+        if any(token in dtype.lower() for token in _NUMERIC_DTYPES):
+            continue
+        return name
+    return None
+
+
+def _fallback_mart_question(model_name: str, label: str) -> str:
+    lower = model_name.lower()
+    if "_by_period" in lower or lower.endswith("by_period"):
+        return f"How has {label.replace(' by period', '')} changed over time?"
+    if "_by_" in lower:
+        dim = lower.rsplit("_by_", 1)[-1]
+        return f"Which {_humanize(dim)} stand out in {label}?"
+    return f"What values stand out in {label}?"
 
 
 # ---------------------------------------------------------------------------
@@ -393,8 +1630,10 @@ def _from_mart_models(
 def _from_relationships(
     tables: list[TableInfo],
     relationships: list[Relationship],
+    profile_index: dict[tuple[str, str], ColumnProfile],
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     """Generate cross-entity questions from detected foreign key relationships.
 
@@ -403,6 +1642,7 @@ def _from_relationships(
     """
     questions: list[SuggestedQuestion] = []
     table_map = {t.name: t for t in tables}
+    lookup_index = build_lookup_index(tables, metadata, relationships)
     seen_pairs: set[frozenset[str]] = set()
 
     for rel in relationships:
@@ -414,8 +1654,7 @@ def _from_relationships(
             continue
         seen_pairs.add(pair)
 
-        from_label = _humanize(rel.from_table)
-        to_label = _humanize(rel.to_table)
+        from_label = _table_label(rel.from_table, metadata)
 
         from_ref = (
             resolve_table_ref(rel.from_table, con, models) if con is not None else rel.from_table
@@ -425,28 +1664,56 @@ def _from_relationships(
         # Find a useful metric from the from_table to aggregate
         from_table_info = table_map[rel.from_table]
         metric_col = _pick_metric_col(from_table_info)
+        to_table_info = table_map[rel.to_table]
+        dim_candidates = _prefer_display_dim(
+            [
+                name
+                for name in _get_dimension_cols(to_table_info, profile_index)
+                if name != rel.to_column
+            ],
+            rel.to_table,
+        )
+        if not dim_candidates:
+            continue
+        target_dim = dim_candidates[0]
+        group_expr, select_expr, join_sql, display_label = _dimension_projection(
+            to_table_info,
+            target_dim,
+            lookup_index,
+            metadata,
+            alias="t",
+            con=con,
+            models=models,
+        )
 
         if metric_col:
             sql = (
-                f'SELECT t."{rel.to_column}", COUNT(*) AS {from_label}_count, '
+                f"SELECT {select_expr} AS dimension, COUNT(*) AS {from_label}_count, "
                 f'AVG(f."{metric_col}") AS avg_{metric_col} '
                 f"FROM {from_ref} f "
                 f'JOIN {to_ref} t ON f."{rel.from_column}" = t."{rel.to_column}" '
-                f'GROUP BY t."{rel.to_column}" '
+                f"{join_sql} "
+                f"WHERE {_dimension_not_null_predicate(select_expr)} "
+                f"GROUP BY {group_expr} "
                 f"ORDER BY {from_label}_count DESC LIMIT 20"
             )
         else:
             sql = (
-                f'SELECT t."{rel.to_column}", COUNT(*) AS {from_label}_count '
+                f"SELECT {select_expr} AS dimension, COUNT(*) AS {from_label}_count "
                 f"FROM {from_ref} f "
                 f'JOIN {to_ref} t ON f."{rel.from_column}" = t."{rel.to_column}" '
-                f'GROUP BY t."{rel.to_column}" '
+                f"{join_sql} "
+                f"WHERE {_dimension_not_null_predicate(select_expr)} "
+                f"GROUP BY {group_expr} "
                 f"ORDER BY {from_label}_count DESC LIMIT 20"
             )
 
         questions.append(
             SuggestedQuestion(
-                question=f"How many {from_label} records are there per {to_label}?",
+                question=(
+                    f"How many {_row_subject_label(metadata, from_label)} "
+                    f"are there per {display_label}?"
+                ),
                 source="relationship",
                 category="Cross-Entity Analysis",
                 relevant_tables=[rel.from_table, rel.to_table],
@@ -467,6 +1734,7 @@ def _from_table_structure(
     profile_index: dict[tuple[str, str], ColumnProfile],
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
+    metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     """Generate analytical questions by inspecting each table's actual column structure.
 
@@ -477,10 +1745,11 @@ def _from_table_structure(
       - metric only        -> summary statistics
     """
     questions: list[SuggestedQuestion] = []
+    lookup_index = build_lookup_index(tables, metadata)
 
     for table in tables:
         ref = resolve_table_ref(table.name, con, models) if con is not None else table.name
-        label = _humanize(table.name)
+        label = _table_label(table.name, metadata)
 
         temporal_cols = _get_temporal_cols(table)
         metric_cols = _get_metric_cols(table, profile_index)
@@ -489,20 +1758,59 @@ def _from_table_structure(
         if temporal_cols and metric_cols:
             t_col = temporal_cols[0]
             m_col = metric_cols[0]
+            t_dtype = next((c.dtype for c in table.columns if c.name == t_col), "")
+            period_expr = _time_bucket_expression(t_col, t_dtype)
             questions.append(
                 SuggestedQuestion(
-                    question=f"How has {_humanize(m_col)} in {label} changed over time?",
+                    question=(
+                        f"How has {_metric_question_label(m_col, metadata)} "
+                        f"in {label} changed over time?"
+                    ),
                     source="semantic",
                     category=label.title(),
                     relevant_tables=[table.name],
                     sql_hint=(
-                        f'SELECT "{t_col}", AVG("{m_col}") AS avg_{m_col}, '
+                        f"SELECT {period_expr} AS period, AVG(\"{m_col}\") AS avg_{m_col}, "
                         f"COUNT(*) AS records "
                         f"FROM {ref} "
-                        f'GROUP BY "{t_col}" ORDER BY "{t_col}" LIMIT 100'
+                        f'WHERE "{t_col}" IS NOT NULL '
+                        f"GROUP BY 1 ORDER BY 1 LIMIT 100"
                     ),
                 )
             )
+
+            if dim_cols:
+                d_col = dim_cols[0]
+                month_expr = _time_bucket_expression(t_col, t_dtype, grain="month")
+                group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                    table,
+                    d_col,
+                    lookup_index,
+                    metadata,
+                    con=con,
+                    models=models,
+                )
+                questions.append(
+                    SuggestedQuestion(
+                        question=(
+                            f"How does {_metric_question_label(m_col, metadata)} vary by "
+                            f"month and {display_label} in {label}?"
+                        ),
+                        source="semantic",
+                        category=label.title(),
+                        relevant_tables=[table.name],
+                        sql_hint=(
+                            f"SELECT {month_expr} AS period, "
+                            f"{select_expr} AS dimension, "
+                            f'ROUND(AVG("{m_col}"), 2) AS avg_{m_col} '
+                            f"FROM {ref} fact "
+                            f"{join_sql} "
+                            f'WHERE "{t_col}" IS NOT NULL '
+                            f"AND {_dimension_not_null_predicate(select_expr)} "
+                            f"GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 120"
+                        ),
+                    )
+                )
 
         if dim_cols and metric_cols:
             # Generate questions for up to 2 distinct dimensions (e.g. county
@@ -510,40 +1818,100 @@ def _from_table_structure(
             dim_limit = min(len(dim_cols), 2)
             for d_col in dim_cols[:dim_limit]:
                 m_col = metric_cols[0]
+                group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                    table,
+                    d_col,
+                    lookup_index,
+                    metadata,
+                    con=con,
+                    models=models,
+                )
                 questions.append(
                     SuggestedQuestion(
                         question=(
-                            f"Which {_humanize(d_col)} has the highest {_humanize(m_col)} "
-                            f"in {label}?"
+                            f"Which {display_label} has the highest "
+                            f"{_metric_question_label(m_col, metadata)} in {label}?"
                         ),
                         source="semantic",
                         category=label.title(),
                         relevant_tables=[table.name],
                         sql_hint=(
-                            f'SELECT "{d_col}", '
+                            f"SELECT {select_expr} AS dimension, "
                             f"COUNT(*) AS records, "
                             f'ROUND(AVG("{m_col}"), 2) AS avg_{m_col}, '
                             f'MAX("{m_col}") AS max_{m_col} '
-                            f"FROM {ref} "
-                            f'GROUP BY "{d_col}" '
+                            f"FROM {ref} fact "
+                            f"{join_sql} "
+                            f"WHERE {_dimension_not_null_predicate(select_expr)} "
+                            f"GROUP BY {group_expr} "
                             f"ORDER BY avg_{m_col} DESC LIMIT 20"
                         ),
                     )
                 )
 
-        if metric_cols and not temporal_cols and not dim_cols:
-            m_col = metric_cols[0]
+        share_dim = _pick_share_dimension(table, dim_cols, profile_index, metadata)
+        if share_dim:
+            group_expr, select_expr, join_sql, display_label = _dimension_projection(
+                table,
+                share_dim,
+                lookup_index,
+                metadata,
+                con=con,
+                models=models,
+            )
             questions.append(
                 SuggestedQuestion(
-                    question=f"What is the distribution of {_humanize(m_col)} in {label}?",
+                    question=(
+                        f"What is the distribution of {_row_subject_label(metadata, label)} "
+                        f"by {display_label} in {label}?"
+                    ),
                     source="semantic",
                     category=label.title(),
                     relevant_tables=[table.name],
                     sql_hint=(
-                        f'SELECT MIN("{m_col}") AS min, MAX("{m_col}") AS max, '
-                        f'ROUND(AVG("{m_col}"), 2) AS mean, COUNT(*) AS records '
-                        f"FROM {ref}"
+                        f"SELECT {select_expr} AS dimension, "
+                        f"COUNT(*) AS records "
+                        f"FROM {ref} fact "
+                        f"{join_sql} "
+                        f"WHERE {_dimension_not_null_predicate(select_expr)} "
+                        f"GROUP BY {group_expr} ORDER BY records DESC LIMIT 6"
                     ),
+                )
+            )
+
+        if len(metric_cols) >= 2:
+            x_col, y_col = metric_cols[:2]
+            questions.append(
+                SuggestedQuestion(
+                    question=(
+                        f"How does {_metric_question_label(x_col, metadata)} relate to "
+                        f"{_metric_question_label(y_col, metadata)} in {label}?"
+                    ),
+                    source="semantic",
+                    category=label.title(),
+                    relevant_tables=[table.name],
+                    sql_hint=(
+                        f'SELECT CAST("{x_col}" AS DOUBLE) AS {x_col}, '
+                        f'CAST("{y_col}" AS DOUBLE) AS {y_col} '
+                        f"FROM {ref} "
+                        f'WHERE "{x_col}" IS NOT NULL AND "{y_col}" IS NOT NULL '
+                        f"LIMIT 200"
+                    ),
+                )
+            )
+
+        if metric_cols and not temporal_cols and not dim_cols:
+            m_col = metric_cols[0]
+            questions.append(
+                SuggestedQuestion(
+                    question=(
+                        f"What is the distribution of {_metric_question_label(m_col, metadata)} "
+                        f"in {label}?"
+                    ),
+                    source="semantic",
+                    category=label.title(),
+                    relevant_tables=[table.name],
+                    sql_hint=_distribution_sql(ref, m_col),
                 )
             )
 
@@ -662,12 +2030,15 @@ def _get_metric_cols(
     table: TableInfo,
     profile_index: dict[tuple[str, str], ColumnProfile],
 ) -> list[str]:
-    cols = []
+    scored: list[tuple[int, str]] = []
     for c in table.columns:
         profile = profile_index.get((table.name, c.name))
         if is_metric_column(c, profile):
-            cols.append(c.name)
-    return cols
+            score = _metric_signal_score(c, profile)
+            if score > 0:
+                scored.append((score, c.name))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _score, name in scored]
 
 
 def _get_dimension_cols(
@@ -675,12 +2046,39 @@ def _get_dimension_cols(
     profile_index: dict[tuple[str, str], ColumnProfile],
 ) -> list[str]:
     """Return low-cardinality columns suitable for GROUP BY."""
-    cols = []
+    scored: list[tuple[int, str]] = []
     for c in table.columns:
         profile = profile_index.get((table.name, c.name))
-        if is_dimension_column(c, profile):
-            cols.append(c.name)
-    return cols
+        if (
+            is_dimension_column(c, profile)
+            and not _is_low_signal_dimension_for_question(c, profile)
+        ):
+            score = _dimension_signal_score(c, profile, table.name)
+            if score > 0:
+                scored.append((score, c.name))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _score, name in scored]
+
+
+def _pick_share_dimension(
+    table: TableInfo,
+    dim_cols: list[str],
+    profile_index: dict[tuple[str, str], ColumnProfile],
+    metadata: RetrievedMetadata | None,
+) -> str | None:
+    scored: list[tuple[int, str]] = []
+    for name in dim_cols:
+        column = next((col for col in table.columns if col.name == name), None)
+        if column is None:
+            continue
+        profile = profile_index.get((table.name, name))
+        score = _share_dimension_score(column, profile, metadata)
+        if score > 0:
+            scored.append((score, name))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][1]
 
 
 def _pick_metric_col(table: TableInfo) -> str | None:
@@ -714,6 +2112,115 @@ def _is_metric_col(
     if profile is None:
         return False
     return any(t in profile.dtype.lower() for t in _NUMERIC_DTYPES)
+
+
+def _is_low_signal_dimension_for_question(
+    column: ColumnInfo,
+    profile: ColumnProfile | None,
+) -> bool:
+    return is_low_signal_dimension(column.name, profile)
+
+
+def _metric_signal_score(
+    column: ColumnInfo,
+    profile: ColumnProfile | None,
+) -> int:
+    score = _metric_question_score(column.name)
+    if score <= 0:
+        return score
+    if profile is None:
+        return score
+    if profile.null_rate >= 0.98:
+        return -10
+    if profile.distinct_count <= 1:
+        return -10
+    if profile.distinct_count <= 3:
+        score -= 4
+    elif profile.distinct_count >= 20:
+        score += 3
+    elif profile.distinct_count >= 5:
+        score += 1
+    if profile.stddev is not None and profile.stddev > 0:
+        score += 2
+    if profile.mean is not None and profile.stddev == 0:
+        score -= 3
+    return score
+
+
+def _dimension_signal_score(
+    column: ColumnInfo,
+    profile: ColumnProfile | None,
+    table_name: str,
+) -> int:
+    lower = column.name.lower()
+    table_words = set(table_name.lower().replace("_", " ").split()) if table_name else set()
+    col_words = set(lower.replace("_", " ").split())
+    score = 0
+
+    if col_words & table_words:
+        score += 4
+    if any(token in lower for token in ("_name", "name_", "label", "description", "title")):
+        score += 4
+    elif any(token in lower for token in ("_code", "code_", "_num", "_id", "_key")):
+        score -= 4
+    if any(token in lower for token in BUSINESS_DIMENSION_TOKENS):
+        score += 3
+
+    if profile is None:
+        return score + 1
+    if profile.null_rate >= 0.98 or profile.distinct_count <= 1:
+        return -10
+    if profile.uniqueness_ratio >= 0.9 and profile.distinct_count >= 8:
+        return -10
+    distinct = profile.distinct_count
+    if 2 <= distinct <= 20:
+        score += 4
+    elif distinct <= 50:
+        score += 3
+    elif distinct <= 200:
+        score += 1
+    else:
+        score -= 2
+    if profile.top_values:
+        total = sum(count for _value, count in profile.top_values[:5])
+        if total > 0:
+            top_share = profile.top_values[0][1] / total
+            if top_share >= 0.95:
+                score -= 5
+            elif top_share >= 0.85:
+                score -= 2
+    return score
+
+
+def _share_dimension_score(
+    column: ColumnInfo,
+    profile: ColumnProfile | None,
+    metadata: RetrievedMetadata | None,
+) -> int:
+    lower = column.name.lower()
+    if any(token in lower for token in LOW_SIGNAL_DIMENSION_TOKENS):
+        return -10
+    if profile is None:
+        return 0
+    distinct = profile.distinct_count
+    if distinct < 2 or distinct > 6:
+        return -10
+    score = 0
+    if any(token in lower for token in BUSINESS_DIMENSION_TOKENS):
+        score += 6
+    if _column_label(column.name, metadata) != _humanize(column.name):
+        score += 2
+    if profile.top_values:
+        total = sum(count for _value, count in profile.top_values[:6])
+        if total > 0:
+            top_share = profile.top_values[0][1] / total
+            if top_share >= 0.95:
+                return -10
+            if top_share >= 0.8:
+                score -= 2
+            elif top_share <= 0.6:
+                score += 2
+    return score + 1
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +2259,224 @@ def _prefer_display_dim(dim_cols: list[str], table_name: str = "") -> list[str]:
     return sorted(dim_cols, key=_rank)
 
 
+def _time_bucket_expression(column_name: str, dtype: str, grain: str | None = None) -> str:
+    quoted = f'"{column_name}"'
+    lower = column_name.lower()
+    dtype_lower = dtype.lower()
+    if lower == "year" or lower.endswith("_year"):
+        return f"CAST({quoted} AS VARCHAR)"
+    if lower == "month" or lower.endswith("_month"):
+        return f"CAST({quoted} AS VARCHAR)"
+    if grain == "hour":
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m-%d %H:00')"
+    if grain == "month":
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y-%m')"
+    if grain == "year":
+        return f"strftime(CAST({quoted} AS TIMESTAMP), '%Y')"
+    if any(token in dtype_lower for token in _TEMPORAL_DTYPES) or bool(
+        _TEMPORAL_NAME_RE.search(column_name)
+    ):
+        return f"CAST({quoted} AS DATE)"
+    return quoted
+
+
+def _column_dtype(table: TableInfo, column_name: str) -> str:
+    column = next((col for col in table.columns if col.name == column_name), None)
+    return column.dtype if column else ""
+
+
+def _supports_hour_grain(table: TableInfo, column_name: str) -> bool:
+    dtype = _column_dtype(table, column_name).lower()
+    lower = column_name.lower()
+    if "timestamp" in dtype or "datetime" in dtype:
+        return True
+    if dtype == "time" or dtype.endswith(" time"):
+        return True
+    return (
+        ("_at" in lower or lower.endswith("_ts") or "timestamp" in lower or "datetime" in lower)
+        and "date" not in lower
+    )
+
+
+def _business_metric_label(insight: dict, metadata: RetrievedMetadata | None = None) -> str:
+    metric = str(insight.get("metric") or "")
+    column = str(insight.get("column") or "")
+    if metric == "record_volume":
+        row_label = _row_subject_label(metadata, "")
+        if row_label:
+            return f"{row_label} volume"
+        return "volume"
+    if metric == "period_total" and column:
+        return _humanize(column)
+    if metric == "segment_share" and column:
+        return _humanize(column)
+    if column:
+        return _humanize(column)
+    return _humanize(str(insight.get("table") or "activity"))
+
+
+def _glossary_label(name: str, metadata: RetrievedMetadata | None) -> str | None:
+    if metadata is None:
+        return None
+    terms = (name.lower(), _humanize(name).lower(), name.lower().replace("_", " "))
+    for term in terms:
+        description = metadata.glossary.get(term)
+        if not description:
+            continue
+        first = re.split(r"[.;(]", description, maxsplit=1)[0].strip()
+        words = first.split()
+        if 1 < len(words) <= 6:
+            return first.lower()
+    return None
+
+
+def _table_label(name: str, metadata: RetrievedMetadata | None) -> str:
+    return _glossary_label(name, metadata) or _humanize(name)
+
+
+def _metric_question_label(name: str, metadata: RetrievedMetadata | None = None) -> str:
+    glossary = _glossary_label(name, metadata)
+    if glossary:
+        return glossary
+    lower = name.lower()
+    if lower.startswith("avg_"):
+        return f"average {_humanize(name[4:])}"
+    if lower.startswith("mean_"):
+        return f"average {_humanize(name[5:])}"
+    if lower.startswith("median_"):
+        return f"median {_humanize(name[7:])}"
+    if re.match(r"^p\d+_", lower):
+        prefix, rest = lower.split("_", 1)
+        return f"{prefix} {_humanize(rest)}"
+    if lower.startswith("total_"):
+        return f"total {_humanize(name[6:])}"
+    if lower.endswith("_count") and len(name) > 6:
+        return f"{_humanize(name[:-6])} count"
+    return _humanize(name)
+
+
+def _column_label(name: str, metadata: RetrievedMetadata | None) -> str:
+    return _glossary_label(name, metadata) or _humanize(name)
+
+
+def _row_subject_label(metadata: RetrievedMetadata | None, fallback: str) -> str:
+    phrase = metadata.context.row_represents if metadata and metadata.context else None
+    if not phrase:
+        return _fallback_row_subject_label(fallback)
+    phrase = phrase.strip().lower()
+    if not phrase:
+        return _fallback_row_subject_label(fallback)
+    return phrase if phrase.endswith("s") else f"{phrase}s"
+
+
+def _context_question_bonus(
+    question: str,
+    metadata: RetrievedMetadata | None,
+) -> int:
+    if metadata is None or metadata.context is None or not metadata.context.decisions:
+        return 0
+    decisions = metadata.context.decisions.lower()
+    q = question.lower()
+    score = 0
+    if (
+        any(token in decisions for token in ("operation", "dispatch", "capacity", "service"))
+        and any(
+            token in q
+            for token in ("changed over time", "how many", "duration", "wait", "hour")
+        )
+    ):
+        score += 3
+    if (
+        any(token in decisions for token in ("revenue", "pricing", "sales", "finance"))
+        and any(token in q for token in ("amount", "fare", "price", "revenue", "tip"))
+    ):
+        score += 3
+    if (
+        any(token in decisions for token in ("compliance", "quality", "audit", "risk"))
+        and any(token in q for token in ("missing values", "unexpected", "duplicates", "status"))
+    ):
+        score += 3
+    return score
+
+
+def _decision_category(metadata: RetrievedMetadata | None) -> str:
+    decisions = (
+        metadata.context.decisions.lower()
+        if metadata and metadata.context and metadata.context.decisions
+        else ""
+    )
+    if any(token in decisions for token in ("revenue", "pricing", "sales", "finance")):
+        return "Revenue Signals"
+    if any(token in decisions for token in ("compliance", "quality", "audit", "risk")):
+        return "Compliance Signals"
+    if any(token in decisions for token in ("operation", "dispatch", "capacity", "service")):
+        return "Operational Signals"
+    return "Decision Signals"
+
+
+def _row_subject_metric(metadata: RetrievedMetadata | None, fallback: str) -> str:
+    phrase = metadata.context.row_represents if metadata and metadata.context else None
+    if not phrase:
+        return fallback
+    phrase = phrase.strip().lower()
+    if not phrase:
+        return fallback
+    return f"{phrase} {fallback}"
+
+
+def _fallback_row_subject_label(fallback: str) -> str:
+    if not fallback:
+        return ""
+    normalized = fallback.lower()
+    preferred = (
+        "trip",
+        "ride",
+        "order",
+        "event",
+        "incident",
+        "inspection",
+        "reading",
+        "payment",
+        "shipment",
+        "ticket",
+        "visit",
+        "request",
+        "booking",
+        "grant",
+        "complaint",
+    )
+    for token in preferred:
+        if token in normalized:
+            return token if token.endswith("s") else f"{token}s"
+    return "records"
+
+
+def _should_skip_business_insight_dimension(
+    table: TableInfo,
+    column_name: str,
+    profile_index: dict[tuple[str, str], ColumnProfile],
+) -> bool:
+    column = next((col for col in table.columns if col.name == column_name), None)
+    if column is None:
+        return False
+    profile = profile_index.get((table.name, column_name))
+    return _is_low_signal_dimension_for_question(column, profile)
+
+
+def _add_semantic_questions(
+    seen: set[str],
+    questions: list[SuggestedQuestion],
+) -> list[SuggestedQuestion]:
+    added: list[SuggestedQuestion] = []
+    for question in questions:
+        key = " ".join(question.question.lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        added.append(question)
+    return added
+
+
 def _humanize(name: str) -> str:
     """Convert snake_case or prefixed model names to readable label."""
     name = name.split(".")[-1]  # drop schema prefix
@@ -766,3 +2491,121 @@ def _humanize(name: str) -> str:
 def _humanize_model(model_name: str) -> str:
     """Convert staging.stg_readings -> readings."""
     return _humanize(model_name)
+def _dimension_projection(
+    table: TableInfo | None,
+    column_name: str,
+    lookup_index: dict[str, dict[str, str]],
+    metadata: RetrievedMetadata | None = None,
+    alias: str = "fact",
+    lookup_join_alias: str | None = None,
+    con: duckdb.DuckDBPyConnection | None = None,
+    models: list[GeneratedModel] | None = None,
+) -> tuple[str, str, str, str]:
+    raw_expr = f'{alias}."{column_name}"'
+    enum_expr = enum_case_expression(column_name, raw_expr, metadata)
+    if enum_expr:
+        return (
+            enum_expr,
+            enum_expr,
+            "",
+            enum_dimension_label(column_name, _column_label(column_name, metadata)),
+        )
+
+    lookup = lookup_for_column(table.name, column_name, lookup_index) if table is not None else None
+    if lookup and table is not None and lookup["table_name"] != table.name:
+        resolved_lookup_alias = lookup_join_alias or f"{alias}_lu"
+        lookup_ref = (
+            resolve_table_ref(lookup["table_name"], con, models or [])
+            if con is not None
+            else (
+                f'"{lookup["schema_name"]}"."{lookup["table_name"]}"'
+                if lookup.get("schema_name")
+                else f'"{lookup["table_name"]}"'
+            )
+        )
+        join_sql = (
+            f"LEFT JOIN {lookup_ref} {resolved_lookup_alias} "
+            f'ON {raw_expr} = {resolved_lookup_alias}."{lookup["id_column"]}"'
+        )
+        label_expr = (
+            f"COALESCE(CAST({resolved_lookup_alias}.\"{lookup['label_column']}\" AS VARCHAR), "
+            f"CAST({raw_expr} AS VARCHAR))"
+        )
+        return (
+            label_expr,
+            label_expr,
+            join_sql,
+            _column_label(lookup["label_column"], metadata),
+        )
+
+    return raw_expr, raw_expr, "", _column_label(column_name, metadata)
+
+
+def _dimension_not_null_predicate(select_expr: str) -> str:
+    return f"({select_expr}) IS NOT NULL"
+
+
+def _timestamp_expression(table: TableInfo, column_name: str) -> str:
+    dtype = _column_dtype(table, column_name).lower()
+    quoted = f'"{column_name}"'
+    if "timestamp" in dtype:
+        return quoted
+    return f"CAST({quoted} AS TIMESTAMP)"
+
+
+def _duration_minutes_expression(
+    table: TableInfo,
+    start_column: str,
+    end_column: str,
+) -> str:
+    start_expr = _timestamp_expression(table, start_column)
+    end_expr = _timestamp_expression(table, end_column)
+    return f"date_diff('second', {start_expr}, {end_expr}) / 60.0"
+
+
+def _distribution_sql(ref: str, metric: str) -> str:
+    value_expr = f'CAST("{metric}" AS DOUBLE)'
+    return f"""
+WITH stats AS (
+    SELECT
+        MIN({value_expr}) AS min_value,
+        MAX({value_expr}) AS max_value
+    FROM {ref}
+    WHERE "{metric}" IS NOT NULL
+),
+bucketed AS (
+    SELECT
+        CASE
+            WHEN stats.max_value = stats.min_value THEN 0
+            ELSE LEAST(
+                9,
+                CAST(
+                    FLOOR(
+                        (
+                            ({value_expr} - stats.min_value)
+                            / NULLIF(stats.max_value - stats.min_value, 0)
+                        ) * 10
+                    ) AS INTEGER
+                )
+            )
+        END AS bucket_idx,
+        stats.min_value,
+        stats.max_value
+    FROM {ref}
+    CROSS JOIN stats
+    WHERE "{metric}" IS NOT NULL
+)
+SELECT
+    CASE
+        WHEN min_value = max_value THEN printf('%.2f', min_value)
+        ELSE printf(
+            '%.2f - %.2f',
+            min_value + bucket_idx * ((max_value - min_value) / 10.0),
+            min_value + (bucket_idx + 1) * ((max_value - min_value) / 10.0)
+        )
+    END AS bucket,
+    COUNT(*) AS records
+FROM bucketed
+GROUP BY bucket_idx, min_value, max_value
+ORDER BY bucket_idx
+""".strip()

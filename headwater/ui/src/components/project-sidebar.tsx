@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
-import { api, type Project, type ProjectProgress } from "@/lib/api";
+import { useState } from "react";
 import { CreateProjectDialog } from "@/components/create-project-dialog";
+import { useProjects } from "@/lib/project-context";
 
 const MATURITY_COLORS: Record<string, string> = {
   raw: "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
@@ -22,32 +21,14 @@ const MATURITY_WIDTHS: Record<string, string> = {
 };
 
 export function ProjectSidebar() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [progressMap, setProgressMap] = useState<
-    Record<string, ProjectProgress>
-  >({});
   const [collapsed, setCollapsed] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
-  const pathname = usePathname();
-
-  useEffect(() => {
-    api
-      .projects()
-      .then((res) => {
-        const projs = res.projects || [];
-        setProjects(projs);
-        // Fetch progress for each project
-        projs.forEach((p) => {
-          api
-            .projectProgress(p.id)
-            .then((r) =>
-              setProgressMap((prev) => ({ ...prev, [p.id]: r.progress }))
-            )
-            .catch(() => {});
-        });
-      })
-      .catch(() => {});
-  }, [pathname]); // refresh on navigation
+  const {
+    projects,
+    activeProjectId,
+    refreshProjects,
+    selectProject,
+  } = useProjects();
 
   if (collapsed) {
     return (
@@ -60,13 +41,18 @@ export function ProjectSidebar() {
           &raquo;
         </button>
         {projects.map((p) => (
-          <div
+          <button
             key={p.id}
-            className="w-6 h-6 rounded-full bg-accent/20 flex items-center justify-center text-[9px] font-bold text-accent mt-2"
+            onClick={() => selectProject(p.id)}
+            className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold mt-2 ${
+              p.id === activeProjectId
+                ? "bg-accent text-white"
+                : "bg-accent/20 text-accent"
+            }`}
             title={p.display_name}
           >
             {p.display_name.charAt(0).toUpperCase()}
-          </div>
+          </button>
         ))}
       </div>
     );
@@ -82,9 +68,9 @@ export function ProjectSidebar() {
           <button
             onClick={() => setShowCreate(true)}
             className="text-accent hover:text-accent/80 text-xs font-medium"
-            title="New project"
+            title="Start setup"
           >
-            [+ New]
+            Start setup
           </button>
           <button
             onClick={() => setCollapsed(true)}
@@ -99,8 +85,9 @@ export function ProjectSidebar() {
       <CreateProjectDialog
         open={showCreate}
         onClose={() => setShowCreate(false)}
-        onCreated={(proj) => {
-          setProjects((prev) => [proj, ...prev]);
+        onCreated={async (proj) => {
+          selectProject(proj.id);
+          await refreshProjects();
           setShowCreate(false);
         }}
       />
@@ -109,22 +96,26 @@ export function ProjectSidebar() {
         <div className="px-3 py-6 text-center">
           <p className="text-xs text-muted">No projects yet.</p>
           <p className="text-xs text-muted mt-1">
-            Click [+ New] or run a pipeline to create one.
+            Click Start setup or run a pipeline to create one.
           </p>
         </div>
       )}
 
       <div className="flex-1 overflow-y-auto">
         {projects.map((p) => {
-          const prog = progressMap[p.id];
           return (
-            <div
+            <button
               key={p.id}
-              className="px-3 py-3 border-b border-border hover:bg-background transition-colors"
+              onClick={() => selectProject(p.id)}
+              className={`w-full px-3 py-3 border-b border-border hover:bg-background transition-colors text-left ${
+                p.id === activeProjectId ? "bg-accent/5" : ""
+              }`}
             >
               <div className="flex items-center justify-between mb-1">
                 <span
-                  className="text-sm font-medium truncate"
+                  className={`text-sm font-medium truncate ${
+                    p.id === activeProjectId ? "text-accent" : ""
+                  }`}
                   title={p.display_name}
                 >
                   {p.display_name}
@@ -147,38 +138,23 @@ export function ProjectSidebar() {
                 />
               </div>
 
-              {/* Progress counters */}
-              {prog ? (
-                <div className="space-y-0.5">
-                  <div className="flex items-center justify-between text-[10px] text-muted">
-                    <span>Tables reviewed</span>
-                    <span className="font-mono">
-                      {prog.tables_reviewed}/{prog.tables_discovered}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-muted">
-                    <span>Catalog</span>
-                    <span className="font-mono">
-                      {Math.round(p.catalog_confidence * 100)}% conf |{" "}
-                      {Math.round(prog.catalog_coverage * 100)}% cov
-                    </span>
-                  </div>
-                  {prog.metrics_defined > 0 && (
-                    <div className="flex items-center justify-between text-[10px] text-muted">
-                      <span>Metrics</span>
-                      <span className="font-mono">
-                        {prog.metrics_confirmed ?? 0}/{prog.metrics_defined}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              ) : (
+              <div className="space-y-0.5">
                 <div className="flex items-center justify-between text-[10px] text-muted">
-                  <span>Confidence: {Math.round(p.catalog_confidence * 100)}%</span>
-                  <span>Score: {Math.round(p.maturity_score * 100)}%</span>
+                  <span>Sources</span>
+                  <span className="font-mono">{p.sources.length}</span>
                 </div>
-              )}
-            </div>
+                <div className="flex items-center justify-between text-[10px] text-muted">
+                  <span>Catalog confidence</span>
+                  <span className="font-mono">{Math.round(p.catalog_confidence * 100)}%</span>
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-muted">
+                  <span>Updated</span>
+                  <span className="font-mono">
+                    {new Date(p.updated_at).toLocaleDateString()}
+                  </span>
+                </div>
+              </div>
+            </button>
           );
         })}
       </div>

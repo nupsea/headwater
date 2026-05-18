@@ -1,0 +1,17 @@
+version: 1
+families:
+  - key: duration_peak_window
+    required_roles: [lifecycle_start_ts, lifecycle_end_ts]
+    priority: 8
+  - key: location_distribution
+    required_roles: [origin_id, lifecycle_start_ts, lifecycle_end_ts]
+    priority: 7
+  - key: path_distribution
+    required_roles: [origin_id, destination_id, lifecycle_start_ts, lifecycle_end_ts]
+    priority: 7
+  - key: distance_efficiency
+    required_roles: [distance, lifecycle_start_ts, lifecycle_end_ts]
+    priority: 6
+  - key: lead_time_pattern
+    required_roles: [request_ts, lifecycle_start_ts]
+    priority: 7

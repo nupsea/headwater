@@ -8,6 +8,7 @@ import re
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from headwater.api.project_scope import scoped_pipeline
 from headwater.core.models import Relationship
 from headwater.explorer.utils import resolve_table_ref, table_exists
 
@@ -95,20 +96,21 @@ class KeyPersistRequest(BaseModel):
     reject_fk_ids: list[int] = Field(default_factory=list)
 
 
-def _require_discovery(request: Request):
+def _require_discovery(request: Request, project_id: str | None = None):
     """Raise 400 if no discovery has been run."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     if pipeline.get("discovery") is None:
         raise HTTPException(
             status_code=400,
             detail="No discovery data available. Run the pipeline first.",
         )
+    return pipeline
 
 
-def _find_table(table_name: str, request: Request) -> str | None:
+def _find_table(table_name: str, request: Request, pipeline: dict | None = None) -> str | None:
     """Return the schema-qualified ref if the table exists, else None."""
     con = request.app.state.duckdb_con
-    pipeline = request.app.state.pipeline
+    pipeline = pipeline or request.app.state.pipeline
     models = pipeline.get("staging_models", []) + pipeline.get("mart_models", [])
 
     if "." in table_name:
@@ -147,13 +149,21 @@ def _find_table(table_name: str, request: Request) -> str | None:
 
 
 @router.get("/data/catalog")
-def get_catalog(request: Request):
+def get_catalog(request: Request, project_id: str | None = None):
     """Return all tables across all schemas in DuckDB with column info.
 
     Unlike insights (which only shows enriched/discovered tables), this
     lists every table that physically exists in the analytical database.
     """
     con = request.app.state.duckdb_con
+    project_tables: set[tuple[str | None, str]] | None = None
+    if project_id:
+        discovery = scoped_pipeline(request, project_id).get("discovery")
+        project_tables = (
+            {(table.schema_name, table.name) for table in discovery.tables}
+            if discovery
+            else set()
+        )
 
     rows = con.execute(
         "SELECT table_schema, table_name "
@@ -165,6 +175,8 @@ def get_catalog(request: Request):
     tables = []
     for schema, tname in rows:
         if schema in _INTERNAL_SCHEMAS:
+            continue
+        if project_tables is not None and (schema, tname) not in project_tables:
             continue
 
         # Get column info
@@ -200,16 +212,21 @@ def get_catalog(request: Request):
 
 
 @router.get("/data/{table_name}/preview")
-def preview_table(request: Request, table_name: str, limit: int = 100):
+def preview_table(
+    request: Request,
+    table_name: str,
+    limit: int = 100,
+    project_id: str | None = None,
+):
     """Return the first N rows from a staging or mart table.
 
     Query params:
         limit: number of rows (default 100, max 500).
     """
-    _require_discovery(request)
+    pipeline = _require_discovery(request, project_id)
     limit = min(max(limit, 1), _MAX_ROWS)
 
-    ref = _find_table(table_name, request)
+    ref = _find_table(table_name, request, pipeline)
     if ref is None:
         raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
 
@@ -243,13 +260,13 @@ def preview_table(request: Request, table_name: str, limit: int = 100):
 
 
 @router.post("/data/query")
-def run_query(request: Request, body: QueryRequest):
+def run_query(request: Request, body: QueryRequest, project_id: str | None = None):
     """Execute a read-only SQL query against DuckDB and return results.
 
     Returns error information in the response body rather than raising HTTP errors,
     so the UI can display the message inline.
     """
-    _require_discovery(request)
+    _require_discovery(request, project_id)
 
     sql = _normalize_sql(body.sql)
     if not sql:
@@ -296,10 +313,14 @@ def run_query(request: Request, body: QueryRequest):
 
 
 @router.get("/tables/{table_name}/pk-fk-suggestions")
-def get_pk_fk_suggestions(request: Request, table_name: str):
+def get_pk_fk_suggestions(
+    request: Request,
+    table_name: str,
+    project_id: str | None = None,
+):
     """Auto-detect PK/FK candidates from data profiles."""
-    _require_discovery(request)
-    discovery = request.app.state.pipeline["discovery"]
+    pipeline = _require_discovery(request, project_id)
+    discovery = pipeline["discovery"]
 
     # Find row_count for tables
     table_row_counts = {t.name: t.row_count for t in discovery.tables}
@@ -390,10 +411,15 @@ def get_pk_fk_suggestions(request: Request, table_name: str):
 
 
 @router.patch("/tables/{table_name}/keys")
-def persist_keys(request: Request, table_name: str, body: KeyPersistRequest):
+def persist_keys(
+    request: Request,
+    table_name: str,
+    body: KeyPersistRequest,
+    project_id: str | None = None,
+):
     """Confirm or reject PK/FK suggestions, persisting to metadata."""
-    _require_discovery(request)
-    discovery = request.app.state.pipeline["discovery"]
+    pipeline = _require_discovery(request, project_id)
+    discovery = pipeline["discovery"]
     source_name = discovery.source.name if discovery.source else ""
 
     if not source_name:

@@ -85,6 +85,14 @@ class HeadwaterSettings(BaseSettings):
     def settings_file_path(self) -> Path:
         return self.data_dir / "settings.json"
 
+    @property
+    def setup_drafts_path(self) -> Path:
+        return self.data_dir / "setup_drafts"
+
+    @property
+    def setup_draft_key_path(self) -> Path:
+        return self.data_dir / "setup_drafts.key"
+
     def ensure_dirs(self) -> None:
         """Create data directory if it doesn't exist."""
         self.data_dir.mkdir(parents=True, exist_ok=True)

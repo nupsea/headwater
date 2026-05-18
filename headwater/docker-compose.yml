@@ -35,6 +35,18 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  postgres_taxi:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: headwater_taxi
+      POSTGRES_PASSWORD: headwater_taxi
+      POSTGRES_DB: ny_taxi
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_taxi_data:/var/lib/postgresql/data
+
 volumes:
   headwater-data:
   postgres_data:
+  postgres_taxi_data:

@@ -9,11 +9,20 @@ import polars as pl
 import pytest
 
 from headwater.analyzer.llm import LLMProvider
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
+from headwater.api.routes.insights import (
+    _semantic_highlight_id,
+    compute_semantic_highlights,
+    compute_top_insights,
+)
+from headwater.explorer import statistical as statistical_module
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
+    CompanionDoc,
     ContractCheckResult,
     ContractRule,
+    DatasetContext,
     DiscoveryResult,
     ExplorationResult,
     GeneratedModel,
@@ -34,15 +43,18 @@ from headwater.explorer.nl_to_sql import (
     _repair_loop,
     ask,
 )
+from headwater.explorer.readability import is_low_signal_dimension
 from headwater.explorer.statistical import (
     _detect_change_points_for_column,
     _detect_correlations,
     _detect_temporal_anomalies,
     _find_metric_columns,
     _find_temporal_columns,
+    _load_family_spec,
     detect_insights,
+    detect_insights_with_diagnostics,
 )
-from headwater.explorer.suggestions import generate_suggestions
+from headwater.explorer.suggestions import _select_diverse_questions, generate_suggestions
 from headwater.explorer.visualization import _classify_columns, recommend_visualization
 
 # ---------------------------------------------------------------------------
@@ -248,6 +260,7 @@ class TestSuggestions:
         assert len(mart_qs) > 0
         assert all(q.sql_hint is not None for q in mart_qs)
         assert all(q.category for q in mart_qs)
+        assert not any("key metrics" in q.question.lower() for q in mart_qs)
 
     def test_mart_suggestions_available_when_proposed(self, sample_discovery):
         """Mart questions should appear even when mart status is proposed."""
@@ -267,6 +280,1682 @@ class TestSuggestions:
         mart_qs = [q for q in questions if q.source == "mart"]
         assert len(mart_qs) > 0
         assert any("air quality" in q.question.lower() for q in mart_qs)
+        assert not any("key metrics" in q.question.lower() for q in mart_qs)
+
+    def test_mart_suggestions_use_materialized_columns(self, sample_discovery, sample_models):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_air_quality_daily AS "
+                "SELECT * FROM (VALUES "
+                "(DATE '2026-01-01', 10.0), "
+                "(DATE '2026-01-02', 12.0)"
+                ") AS t(period, avg_value)"
+            )
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=sample_models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        mart_qs = [q for q in questions if q.source == "mart"]
+        assert any("changed over time" in q.question.lower() for q in mart_qs)
+        assert any("average value" in q.question.lower() for q in mart_qs)
+        assert not any("key metrics" in q.question.lower() for q in mart_qs)
+
+    def test_mart_summary_distribution_questions_are_suppressed(self, sample_discovery):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_green_trip_summary AS "
+                "SELECT * FROM (VALUES (2.1, 1.4)) AS t(avg_passenger_count, p90_trip_miles)"
+            )
+            models = [
+                GeneratedModel(
+                    name="mart_green_trip_summary",
+                    model_type="mart",
+                    sql="SELECT ...",
+                    description="Green trip summary",
+                    status="executed",
+                ),
+            ]
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        assert not any(
+            "distribution of average passenger count" in q.question.lower()
+            for q in questions
+        )
+        assert not any("green trip summary" in q.question.lower() for q in questions)
+
+    def test_mart_by_period_row_count_trends_are_suppressed(self, sample_discovery):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_trip_volume_by_period AS "
+                "SELECT * FROM (VALUES "
+                "(DATE '2026-01-01', 100), "
+                "(DATE '2026-01-02', 120)"
+                ") AS t(period, row_count)"
+            )
+            models = [
+                GeneratedModel(
+                    name="mart_trip_volume_by_period",
+                    model_type="mart",
+                    sql="SELECT ...",
+                    description="Trip volume by period",
+                    status="executed",
+                ),
+            ]
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        assert not any(
+            q.source == "mart"
+            and "row count" in q.question.lower()
+            and "changed over time" in q.question.lower()
+            for q in questions
+        )
+
+    def test_mart_by_period_prefers_more_variable_business_metric(self, sample_discovery):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_trip_kpis_by_period AS "
+                "SELECT * FROM (VALUES "
+                "(DATE '2026-01-01', 1.00, 15.0), "
+                "(DATE '2026-01-02', 1.01, 32.0), "
+                "(DATE '2026-01-03', 1.02, 18.0), "
+                "(DATE '2026-01-04', 1.03, 40.0)"
+                ") AS t(period, current_avg_passenger_count, fare_amount)"
+            )
+            models = [
+                GeneratedModel(
+                    name="mart_trip_kpis_by_period",
+                    model_type="mart",
+                    sql="SELECT ...",
+                    description="Trip KPIs by period",
+                    status="executed",
+                ),
+            ]
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        mart_trends = [
+            q.question.lower()
+            for q in questions
+            if q.source == "mart" and "changed over time" in q.question.lower()
+        ]
+        assert any("fare amount" in q for q in mart_trends)
+        assert not any("passenger count" in q for q in mart_trends)
+
+    def test_semantic_suggestions_include_heatmap_scatter_and_share_prompts(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=2000,
+                    columns=[
+                        ColumnInfo(name="order_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="order_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="region", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="revenue", dtype="float64", semantic_type="metric"),
+                        ColumnInfo(name="margin", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="region",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=4,
+                    top_values=[("North", 700), ("South", 600), ("East", 400)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="revenue",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=1200,
+                    mean=145.0,
+                    stddev=35.0,
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="margin",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=900,
+                    mean=24.0,
+                    stddev=9.0,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        prompts = [q.question.lower() for q in questions]
+
+        assert any("vary by month and region in orders" in q for q in prompts)
+        assert any(
+            " relate to " in q and "revenue" in q and "margin" in q and "in orders" in q
+            for q in prompts
+        )
+        assert any("distribution of " in q and "by region in orders" in q for q in prompts)
+
+    def test_low_signal_current_average_period_mart_is_suppressed(self, sample_discovery):
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("CREATE SCHEMA marts")
+            con.execute(
+                "CREATE TABLE marts.mart_trip_passenger_count_by_period AS "
+                "SELECT * FROM (VALUES "
+                "(DATE '2026-01-01', 1.00), "
+                "(DATE '2026-01-02', 1.01), "
+                "(DATE '2026-01-03', 1.02), "
+                "(DATE '2026-01-04', 1.03)"
+                ") AS t(period, current_avg_passenger_count)"
+            )
+            models = [
+                GeneratedModel(
+                    name="mart_trip_passenger_count_by_period",
+                    model_type="mart",
+                    sql="SELECT ...",
+                    description="Trip passenger count by period",
+                    status="executed",
+                ),
+            ]
+
+            questions = generate_suggestions(
+                discovery=sample_discovery,
+                models=models,
+                con=con,
+            )
+        finally:
+            con.close()
+
+        assert not any(
+            q.source == "mart"
+            and "passenger count" in q.question.lower()
+            and "changed over time" in q.question.lower()
+            for q in questions
+        )
+
+    def test_business_signal_questions_are_prioritized(self, sample_discovery):
+        business_insights = [
+            {
+                "id": "temporal_peak:readings:timestamp",
+                "table": "readings",
+                "column": "value",
+                "group_by_column": "timestamp",
+                "group_by_grain": "day",
+                "metric": "period_total",
+                "chart_type": "line",
+            },
+            {
+                "id": "metric_driver:readings:sensor_type:value",
+                "table": "readings",
+                "column": "sensor_type",
+                "group_by_column": "sensor_type",
+                "metric": "value",
+                "chart_type": "bar",
+            },
+        ]
+
+        questions = generate_suggestions(
+            discovery=sample_discovery,
+            business_insights=business_insights,
+        )
+
+        assert questions
+        assert questions[0].source == "business"
+        assert questions[0].sql_hint is not None
+        assert any("changed over time" in q.question.lower() for q in questions)
+
+    def test_semantic_role_questions_are_generated_for_operational_workflows(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="work_orders",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="requested_at", dtype="timestamp"),
+                        ColumnInfo(name="started_at", dtype="timestamp"),
+                        ColumnInfo(name="resolved_at", dtype="timestamp"),
+                        ColumnInfo(name="site_id", dtype="varchar"),
+                        ColumnInfo(name="work_type", dtype="varchar"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="work_orders",
+                    column_name="site_id",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=5,
+                ),
+                ColumnProfile(
+                    table_name="work_orders",
+                    column_name="work_type",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("Emergency", 200), ("Routine", 180), ("Inspection", 120)],
+                ),
+            ],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            DatasetContext(
+                source_name="test",
+                row_represents="work order",
+                decisions="Operations and service planning",
+            ),
+        )
+
+        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+        business_qs = [q for q in questions if q.source == "business"]
+
+        assert business_qs
+        prompts = [q.question.lower() for q in business_qs]
+        assert any("which hour has the highest work orders volume" in q for q in prompts)
+        assert any("weekday and weekend work order duration compare" in q for q in prompts)
+        assert any("highest work order wait time" in q for q in prompts)
+
+    def test_encoded_dimension_questions_use_readable_labels(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_yellow_trips AS
+            SELECT * FROM (VALUES
+                (1, 2),
+                (1, 3),
+                (2, 1),
+                (2, 4)
+            ) AS t(payment_type, passenger_count)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="yellow_trips",
+                    row_count=4,
+                    columns=[
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="passenger_count", dtype="int64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=2,
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="passenger_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=4,
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_yellow_trips",
+                model_type="staging",
+                sql="SELECT * FROM yellow_trips",
+                description="Yellow trips staging",
+                source_tables=["yellow_trips"],
+                status="executed",
+            )
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q for q in questions if "payment method" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.data
+        assert result.data[0]["dimension"] in {"Credit card", "Cash"}
+        assert all(not isinstance(row["dimension"], int) for row in result.data)
+
+    def test_companion_enum_mappings_drive_question_labels_and_results(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_orders AS
+            SELECT * FROM (VALUES
+                ('P', 120.0),
+                ('P', 80.0),
+                ('S', 200.0),
+                ('C', 20.0)
+            ) AS t(status_code, amount)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=4,
+                    columns=[
+                        ColumnInfo(name="status_code", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="status_code",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("P", 2), ("S", 1), ("C", 1)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=4,
+                ),
+            ],
+            companion_docs=[
+                CompanionDoc(
+                    filename="dictionary.csv",
+                    content=(
+                        "column_name: status_code | "
+                        "description: order status. P=Pending; S=Shipped; C=Cancelled"
+                    ),
+                    doc_type="csv",
+                    matched_tables=["orders"],
+                    confidence=0.9,
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_orders",
+                model_type="staging",
+                sql="SELECT * FROM orders",
+                description="Orders staging",
+                source_tables=["orders"],
+                status="executed",
+            )
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+
+        assert any("order status" in q.question.lower() for q in questions)
+        assert not any("status code" in q.question.lower() for q in questions)
+
+        question = next(q for q in questions if "order status" in q.question.lower())
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.data
+        assert result.data[0]["dimension"] in {"Pending", "Shipped", "Cancelled"}
+        assert all(row["dimension"] not in {"P", "S", "C"} for row in result.data)
+
+    def test_route_pair_questions_use_lookup_labels(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_service_events AS
+            SELECT * FROM (VALUES
+                ('A', 'B', TIMESTAMP '2026-01-01 08:00:00', TIMESTAMP '2026-01-01 08:45:00'),
+                ('A', 'B', TIMESTAMP '2026-01-01 09:00:00', TIMESTAMP '2026-01-01 09:55:00'),
+                ('B', 'C', TIMESTAMP '2026-01-01 10:00:00', TIMESTAMP '2026-01-01 10:20:00')
+            ) AS t(origin_id, destination_id, started_at, resolved_at)
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_locations AS
+            SELECT * FROM (VALUES
+                ('A', 'North Hub'),
+                ('B', 'Central Depot'),
+                ('C', 'South Clinic')
+            ) AS t(location_id, location_name)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="service_events",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="origin_id", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="destination_id",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(
+                            name="started_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="resolved_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                ),
+                TableInfo(
+                    name="locations",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="location_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(
+                            name="location_name",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="service_events",
+                    from_column="origin_id",
+                    to_table="locations",
+                    to_column="location_id",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                ),
+                Relationship(
+                    from_table="service_events",
+                    from_column="destination_id",
+                    to_table="locations",
+                    to_column="location_id",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_service_events",
+                model_type="staging",
+                sql="SELECT * FROM service_events",
+                description="Service events staging",
+                source_tables=["service_events"],
+                status="executed",
+            ),
+            GeneratedModel(
+                name="stg_locations",
+                model_type="staging",
+                sql="SELECT * FROM locations",
+                description="Locations staging",
+                source_tables=["locations"],
+                status="executed",
+            ),
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q for q in questions if "which routes have the longest duration" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.data
+        assert "North Hub -> Central Depot" in {row["route_pair"] for row in result.data}
+        assert all("A -> B" not in str(row["route_pair"]) for row in result.data)
+
+    def test_route_pair_questions_use_lookup_labels_without_explicit_relationships(
+        self, duckdb_con
+    ):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_tlc_trips AS
+            SELECT * FROM (VALUES
+                (101, 202, TIMESTAMP '2026-01-01 08:00:00', TIMESTAMP '2026-01-01 08:45:00'),
+                (101, 202, TIMESTAMP '2026-01-01 09:00:00', TIMESTAMP '2026-01-01 09:55:00'),
+                (202, 303, TIMESTAMP '2026-01-01 10:00:00', TIMESTAMP '2026-01-01 10:20:00')
+            ) AS t(PULocationID, DOLocationID, pickup_datetime, dropoff_datetime)
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_taxi_zones AS
+            SELECT * FROM (VALUES
+                (101, 'North Hub'),
+                (202, 'Central Depot'),
+                (303, 'South Clinic')
+            ) AS t(LocationID, Zone)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_trips",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="PULocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="DOLocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="dropoff_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                ),
+                TableInfo(
+                    name="taxi_zones",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="LocationID", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="Zone", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_tlc_trips",
+                model_type="staging",
+                sql="SELECT * FROM tlc_trips",
+                description="TLC trips staging",
+                source_tables=["tlc_trips"],
+                status="executed",
+            ),
+            GeneratedModel(
+                name="stg_taxi_zones",
+                model_type="staging",
+                sql="SELECT * FROM taxi_zones",
+                description="Taxi zones staging",
+                source_tables=["taxi_zones"],
+                status="executed",
+            ),
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q for q in questions if "which routes have the longest duration" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.data
+        assert "North Hub -> Central Depot" in {row["route_pair"] for row in result.data}
+        assert all("101 -> 202" not in str(row["route_pair"]) for row in result.data)
+
+    def test_route_questions_are_suppressed_without_readable_lookup(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_trips",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(name="PULocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="DOLocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="dropoff_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        prompts = [q.question.lower() for q in questions]
+
+        assert not any("which routes have the longest duration" in q for q in prompts)
+        assert not any("which pulocation" in q for q in prompts)
+        assert any("weekday and weekend" in q for q in prompts)
+
+    def test_distribution_questions_return_bucketed_results(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_measurements AS
+            SELECT i AS value
+            FROM range(1, 101) AS t(i)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="measurements",
+                    row_count=100,
+                    columns=[
+                        ColumnInfo(name="value", dtype="int64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="measurements",
+                    column_name="value",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=100,
+                    min_value=1,
+                    max_value=100,
+                    mean=50.5,
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_measurements",
+                model_type="staging",
+                sql="SELECT * FROM measurements",
+                description="Measurements staging",
+                source_tables=["measurements"],
+                status="executed",
+            )
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q for q in questions if "distribution of value" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.row_count > 1
+        assert result.visualization is not None
+        assert result.visualization.chart_type == "bar"
+        assert {"bucket", "records"} <= set(result.data[0])
+
+    def test_constant_metric_does_not_generate_distribution_question(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="summary_values",
+                    row_count=100,
+                    columns=[
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="summary_values",
+                    column_name="value",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=1,
+                    mean=5.0,
+                    stddev=0.0,
+                    min_value=5.0,
+                    max_value=5.0,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert not any("distribution of value" in q.question.lower() for q in questions)
+
+    def test_question_generation_prefers_variable_metric_over_constant_metric(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="yellow_trips",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="trip_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="passenger_count",
+                            dtype="int64",
+                            semantic_type="metric",
+                        ),
+                        ColumnInfo(
+                            name="fare_amount",
+                            dtype="float64",
+                            semantic_type="metric",
+                        ),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="passenger_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=1,
+                    mean=1.0,
+                    stddev=0.0,
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="fare_amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=120,
+                    mean=18.5,
+                    stddev=6.2,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        prompts = [q.question.lower() for q in questions]
+
+        assert any("fare amount" in q for q in prompts)
+        assert not any("passenger count" in q and "changed over time" in q for q in prompts)
+        assert not any("passenger count" in q and "payment method" in q for q in prompts)
+
+    def test_binary_technical_flags_are_suppressed_from_lead_questions(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="yellow_trips",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(name="trip_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(
+                            name="store_and_fwd_flag",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="passenger_count",
+                            dtype="int64",
+                            semantic_type="metric",
+                        ),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="store_and_fwd_flag",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("N", 700), ("Y", 300)],
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="passenger_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=6,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert not any("store and fwd flag" in q.question.lower() for q in questions)
+        assert any("payment method" in q.question.lower() for q in questions)
+
+    def test_payment_method_distribution_question_renders_as_pie(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_yellow_trips AS
+            SELECT * FROM (VALUES
+                (1, 2),
+                (1, 1),
+                (2, 3),
+                (2, 1),
+                (1, 2)
+            ) AS t(payment_type, passenger_count)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="yellow_trips",
+                    row_count=5,
+                    columns=[
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="passenger_count",
+                            dtype="int64",
+                            semantic_type="metric",
+                        ),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("1", 3), ("2", 2)],
+                ),
+                ColumnProfile(
+                    table_name="yellow_trips",
+                    column_name="passenger_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_yellow_trips",
+                model_type="staging",
+                sql="SELECT * FROM yellow_trips",
+                description="Yellow trips staging",
+                source_tables=["yellow_trips"],
+                status="executed",
+            )
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q
+            for q in questions
+            if "distribution of trips by payment method" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert result.visualization is not None
+        assert result.visualization.chart_type == "pie"
+        assert {row["dimension"] for row in result.data} == {"Credit card", "Cash"}
+
+    def test_generic_booleanish_operational_flags_are_suppressed(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="order_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="quality_flag", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="channel", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="quality_flag",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("Y", 450), ("N", 50)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="channel",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("Retail", 200), ("Online", 180), ("Partner", 120)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=100,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert not any("quality flag" in q.question.lower() for q in questions)
+        assert any("channel" in q.question.lower() for q in questions)
+
+    def test_relationship_questions_skip_high_uniqueness_name_dimensions(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="sensors",
+                    row_count=24,
+                    columns=[
+                        ColumnInfo(name="sensor_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=12,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="site_type", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="name",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=12,
+                    uniqueness_ratio=1.0,
+                ),
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="site_type",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("park", 5), ("clinic", 4), ("school", 3)],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="sensors",
+                    from_column="site_id",
+                    to_table="sites",
+                    to_column="site_id",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        prompts = [q.question.lower() for q in questions]
+
+        assert not any("per name" in prompt for prompt in prompts)
+        assert any("per site type" in prompt for prompt in prompts)
+
+    def test_date_only_fields_do_not_generate_hour_prompts(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="sites",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="commissioned_date",
+                            dtype="varchar",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="commissioned_date",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=400,
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert not any("which hour has the highest" in q.question.lower() for q in questions)
+
+    def test_duration_questions_allow_multi_day_programs(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="programs",
+                    row_count=10,
+                    columns=[
+                        ColumnInfo(name="program_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="start_date", dtype="varchar", semantic_type="temporal"),
+                        ColumnInfo(name="end_date", dtype="varchar", semantic_type="temporal"),
+                        ColumnInfo(name="type", dtype="varchar", semantic_type="dimension"),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        question = next(
+            q
+            for q in questions
+            if "weekday and weekend duration compare in programs" in q.question.lower()
+        )
+
+        assert "BETWEEN 0 AND 1440" not in (question.sql_hint or "")
+        assert ">= 0" in (question.sql_hint or "")
+
+    def test_business_insight_questions_skip_low_signal_flags(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(
+                            name="access_a_ride_flag",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="trip_miles", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="trips",
+                    column_name="access_a_ride_flag",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("N", 480), ("Y", 20)],
+                ),
+                ColumnProfile(
+                    table_name="trips",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+                ColumnProfile(
+                    table_name="trips",
+                    column_name="trip_miles",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=100,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            business_insights=[
+                {
+                    "id": "segment_concentration:access_a_ride_flag",
+                    "table": "trips",
+                    "column": "access_a_ride_flag",
+                    "metric": "segment_share",
+                },
+                {
+                    "id": "segment_concentration:payment_type",
+                    "table": "trips",
+                    "column": "payment_type",
+                    "metric": "segment_share",
+                },
+            ],
+        )
+
+        prompts = [q.question.lower() for q in questions]
+        assert not any("access a ride flag" in prompt for prompt in prompts)
+        assert any("payment method" in prompt for prompt in prompts)
+
+    def test_business_insight_questions_skip_flag_dimensions_without_profiles(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="fhv_trips",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="sr_flag", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="fare_amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            business_insights=[
+                {
+                    "id": "metric_driver:fhv_trips:sr_flag:fare_amount",
+                    "table": "fhv_trips",
+                    "column": "sr_flag",
+                    "metric": "fare_amount",
+                }
+            ],
+        )
+
+        assert not any("sr flag" in q.question.lower() for q in questions)
+
+    def test_low_signal_dimension_suppresses_flag_without_profile(self):
+        assert is_low_signal_dimension("sr_flag", None) is True
+
+    def test_business_volume_questions_use_row_subject_not_table_name(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_raw_fhvhv_tripdata_2026",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(name="trip_miles", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            business_insights=[
+                {
+                    "id": "temporal_peak:pickup_datetime",
+                    "table": "tlc_raw_fhvhv_tripdata_2026",
+                    "group_by_column": "pickup_datetime",
+                    "group_by_grain": "hour",
+                    "metric": "record_volume",
+                }
+            ],
+        )
+
+        prompts = [q.question.lower() for q in questions]
+        assert any(
+            "how has volume in tlc raw fhvhv tripdata changed over time?" in p
+            for p in prompts
+        )
+        assert not any(
+            "tlc raw fhvhv tripdata volume in tlc raw fhvhv tripdata" in p
+            for p in prompts
+        )
+
+    def test_generate_suggestions_deduplicates_identical_prompts(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_raw_fhvhv_tripdata_2026",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(name="trip_miles", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            business_insights=[
+                {
+                    "id": "temporal_peak:pickup_datetime",
+                    "table": "tlc_raw_fhvhv_tripdata_2026",
+                    "group_by_column": "pickup_datetime",
+                    "group_by_grain": "hour",
+                    "metric": "record_volume",
+                }
+            ],
+        )
+
+        prompts = [q.question.lower() for q in questions]
+        assert len(prompts) == len(set(prompts))
+
+    def test_diverse_selection_limits_repetitive_sibling_templates(self):
+        candidates = [
+            SuggestedQuestion(
+                question="Which hour has the highest trips volume in tlc raw fhv tripdata 2026?",
+                source="business",
+                category="Decision Signals",
+                relevant_tables=["tlc_raw_fhv_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question="Which hour has the highest trips volume in tlc raw fhv tripdata 2026 02?",
+                source="business",
+                category="Decision Signals",
+                relevant_tables=["tlc_raw_fhv_tripdata_2026_02"],
+            ),
+            SuggestedQuestion(
+                question="How has volume in tlc raw fhv tripdata 2026 changed over time?",
+                source="business",
+                category="Business Signals",
+                relevant_tables=["tlc_raw_fhv_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question=(
+                    "How do weekday and weekend trip times compare "
+                    "in tlc raw yellow tripdata 2026?"
+                ),
+                source="business",
+                category="Decision Signals",
+                relevant_tables=["tlc_raw_yellow_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question=(
+                    "Which payment method has the highest fare amount "
+                    "in tlc raw yellow tripdata 2026?"
+                ),
+                source="semantic",
+                category="Tlc Raw Yellow Tripdata 2026",
+                relevant_tables=["tlc_raw_yellow_tripdata_2026_01"],
+            ),
+        ]
+
+        selected = _select_diverse_questions(candidates)
+        prompts = [q.question.lower() for q in selected]
+
+        assert sum("which hour has the highest trips volume" in prompt for prompt in prompts) == 1
+        assert any("weekday and weekend" in prompt for prompt in prompts)
+        assert any("payment method" in prompt for prompt in prompts)
+
+    def test_diverse_selection_limits_repeated_focus_across_question_shapes(self):
+        candidates = [
+            SuggestedQuestion(
+                question=(
+                    "What is the distribution of trips by payment method "
+                    "in tlc raw green tripdata 2026?"
+                ),
+                source="semantic",
+                category="Tlc Raw Green Tripdata 2026",
+                relevant_tables=["tlc_raw_green_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question=(
+                    "Which payment method has the highest fare amount "
+                    "in tlc raw yellow tripdata 2026?"
+                ),
+                source="semantic",
+                category="Tlc Raw Yellow Tripdata 2026",
+                relevant_tables=["tlc_raw_yellow_tripdata_2026_01"],
+            ),
+            SuggestedQuestion(
+                question=(
+                    "How do weekday and weekend duration compare "
+                    "in tlc raw yellow tripdata 2026?"
+                ),
+                source="business",
+                category="Decision Signals",
+                relevant_tables=["tlc_raw_yellow_tripdata_2026_01"],
+            ),
+        ]
+
+        selected = _select_diverse_questions(candidates)
+        prompts = [q.question.lower() for q in selected]
+
+        assert sum("payment method" in prompt for prompt in prompts) == 1
+        assert any("weekday and weekend" in prompt for prompt in prompts)
+
+    def test_companion_glossary_improves_question_labels(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="order_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(
+                            name="fulfillment_mode",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="fulfillment_mode",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("pickup", 200), ("delivery", 180), ("ship", 120)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=100,
+                ),
+            ],
+            companion_docs=[
+                CompanionDoc(
+                    filename="glossary.md",
+                    content="fulfillment_mode: service channel\namount: order value",
+                    doc_type="markdown",
+                    matched_tables=["orders"],
+                    confidence=0.9,
+                )
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+
+        assert any("service channel" in q.question.lower() for q in questions)
+        assert any("order value" in q.question.lower() for q in questions)
+
+    def test_dataset_context_row_represents_changes_count_phrasing(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="trip_events",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(
+                            name="service_zone_id",
+                            dtype="int64",
+                            semantic_type="foreign_key",
+                        ),
+                    ],
+                ),
+                TableInfo(
+                    name="zones",
+                    row_count=5,
+                    columns=[
+                        ColumnInfo(name="service_zone_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="name", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="trip_events",
+                    from_column="service_zone_id",
+                    to_table="zones",
+                    to_column="service_zone_id",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                ),
+            ],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            DatasetContext(source_name="test", row_represents="trip"),
+        )
+
+        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+
+        assert any("how many trips are there per name" in q.question.lower() for q in questions)
+        assert not any("records are there per name" in q.question.lower() for q in questions)
+
+    def test_suggestions_diversify_repetitive_trends(self):
+        tables = []
+        profiles = []
+        for idx in range(8):
+            table_name = f"events_{idx}"
+            tables.append(
+                TableInfo(
+                    name=table_name,
+                    row_count=100,
+                    columns=[
+                        ColumnInfo(name="event_date", dtype="date", semantic_type="temporal"),
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                        ColumnInfo(name="category", dtype="varchar", semantic_type="dimension"),
+                    ],
+                )
+            )
+            profiles.extend(
+                [
+                    ColumnProfile(
+                        table_name=table_name,
+                        column_name="value",
+                        dtype="float64",
+                        null_count=0,
+                        distinct_count=80,
+                    ),
+                    ColumnProfile(
+                        table_name=table_name,
+                        column_name="category",
+                        dtype="varchar",
+                        null_count=0,
+                        distinct_count=5,
+                    ),
+                ]
+            )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=tables,
+            profiles=profiles,
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        trend_questions = [
+            q for q in questions if "changed over time" in q.question.lower()
+        ]
+
+        assert len(trend_questions) <= 3
+        assert any("highest value" in q.question.lower() for q in questions)
+
+    def test_decision_questions_rank_ahead_of_generic_volume_prompts(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="service_events",
+                    row_count=1000,
+                    columns=[
+                        ColumnInfo(
+                            name="requested_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="started_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="resolved_at",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="service_type",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="origin_id", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="destination_id",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="ticket_count", dtype="int64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="service_events",
+                    column_name="service_type",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("Emergency", 400), ("Routine", 350), ("Follow-up", 250)],
+                ),
+                ColumnProfile(
+                    table_name="service_events",
+                    column_name="origin_id",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=12,
+                ),
+                ColumnProfile(
+                    table_name="service_events",
+                    column_name="destination_id",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=12,
+                ),
+                ColumnProfile(
+                    table_name="service_events",
+                    column_name="ticket_count",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=20,
+                    mean=18.0,
+                    stddev=4.0,
+                ),
+            ],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            DatasetContext(source_name="test", row_represents="service event"),
+        )
+
+        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+        top_questions = [q.question.lower() for q in questions[:3]]
+
+        assert any("changed over time" in q for q in top_questions)
+        assert any(
+            token in q
+            for q in top_questions
+            for token in ("wait time", "weekday and weekend", "longest")
+        )
+        assert not all(q.startswith("how many ") for q in top_questions)
 
     def test_generates_domain_questions(self, sample_discovery):
         questions = generate_suggestions(discovery=sample_discovery)
@@ -470,6 +2159,298 @@ class TestCrossTableSuggestions:
         assert all(q.sql_hint is not None for q in cross_qs)
         assert all(len(q.relevant_tables) == 2 for q in cross_qs)
 
+    def test_cross_table_uses_count_when_only_weak_numeric_attribute_exists(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="incidents",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(name="incident_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="patient_age", dtype="int64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="complaints",
+                    row_count=200,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="category", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="patient_age",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=90,
+                    min_value=1,
+                    max_value=95,
+                    mean=42,
+                ),
+                ColumnProfile(
+                    table_name="complaints",
+                    column_name="category",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=8,
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="incidents",
+                    from_column="complaint_id",
+                    to_table="complaints",
+                    to_column="complaint_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+
+        assert cross_qs
+        assert not any("average patient age" in q.question.lower() for q in cross_qs)
+        assert any("how many incidents are there" in q.question.lower() for q in cross_qs)
+
+    def test_cross_table_suggestions_require_direct_join(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="incidents",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(name="incident_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="zone_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="patient_age", dtype="int64", semantic_type="metric"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="zones",
+                    row_count=20,
+                    columns=[
+                        ColumnInfo(name="zone_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="site_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="borough", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=200,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="unit", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="patient_age",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=90,
+                ),
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="severity_score",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=400,
+                ),
+                ColumnProfile(
+                    table_name="zones",
+                    column_name="borough",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=5,
+                ),
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="unit",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=20,
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="incidents",
+                    from_column="zone_id",
+                    to_table="zones",
+                    to_column="zone_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+                Relationship(
+                    from_table="zones",
+                    from_column="site_id",
+                    to_table="sites",
+                    to_column="site_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+
+        assert any("by borough" in q.question.lower() for q in cross_qs)
+        assert not any("by unit" in q.question.lower() for q in cross_qs)
+
+    def test_cross_table_skips_unique_name_dimensions(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="sensors",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(name="sensor_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="foreign_key"),
+                        ColumnInfo(name="value", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="sites",
+                    row_count=500,
+                    columns=[
+                        ColumnInfo(name="site_id", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="name", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="site_type", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="sensors",
+                    column_name="value",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=4000,
+                    mean=37.5,
+                    stddev=8.2,
+                ),
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="name",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=500,
+                    uniqueness_ratio=1.0,
+                ),
+                ColumnProfile(
+                    table_name="sites",
+                    column_name="site_type",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=7,
+                    uniqueness_ratio=0.014,
+                    top_values=[("Roadside", 150), ("Urban", 120), ("Industrial", 80)],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="sensors",
+                    from_column="site_id",
+                    to_table="sites",
+                    to_column="site_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+
+        assert cross_qs
+        assert any("by site type" in q.question.lower() for q in cross_qs)
+        assert not any("by name (sites)" in q.question.lower() for q in cross_qs)
+
+    def test_cross_table_prefers_business_metric_over_age(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="incidents",
+                    row_count=5000,
+                    columns=[
+                        ColumnInfo(name="incident_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="foreign_key"),
+                        ColumnInfo(name="patient_age", dtype="int64", semantic_type="metric"),
+                        ColumnInfo(name="severity_score", dtype="float64", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="complaints",
+                    row_count=200,
+                    columns=[
+                        ColumnInfo(name="complaint_id", dtype="int64", semantic_type="id"),
+                        ColumnInfo(name="category", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="patient_age",
+                    dtype="int64",
+                    null_count=0,
+                    distinct_count=90,
+                ),
+                ColumnProfile(
+                    table_name="incidents",
+                    column_name="severity_score",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=500,
+                ),
+                ColumnProfile(
+                    table_name="complaints",
+                    column_name="category",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=8,
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="incidents",
+                    from_column="complaint_id",
+                    to_table="complaints",
+                    to_column="complaint_id",
+                    type="many_to_one",
+                    confidence=0.95,
+                    referential_integrity=0.98,
+                    source="inferred_name",
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(discovery=discovery)
+        cross_qs = [q for q in questions if q.source == "cross_table"]
+
+        assert any("average severity score" in q.question.lower() for q in cross_qs)
+        assert not any("average patient age" in q.question.lower() for q in cross_qs)
+
     def test_cross_table_no_join_path_no_suggestions(self):
         """Cross-table suggestions should not be generated without join paths."""
         discovery = DiscoveryResult(
@@ -650,6 +2631,1092 @@ class TestStatistical:
             assert i.severity in ("info", "warning", "critical")
             if i.p_value is not None:
                 assert 0 <= i.p_value <= 1
+
+    def test_semantic_temporal_roles_cast_string_and_year_columns(self, duckdb_con):
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_string_dates AS "
+            "SELECT * FROM (VALUES "
+            "('2026-01-01', 1.0), ('2026-01-02', 2.0)"
+            ") AS t(date_filed, amount)"
+        )
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_years AS "
+            "SELECT * FROM (VALUES (2025, 10.0), (2026, 11.0)) AS t(year, value)"
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="string_dates",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="date_filed",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="amount", dtype="double"),
+                    ],
+                ),
+                TableInfo(
+                    name="years",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="year",
+                            dtype="bigint",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="value", dtype="double"),
+                    ],
+                ),
+            ],
+        )
+
+        insights = detect_insights(duckdb_con, schema="staging", discovery=discovery)
+
+        coverage_tables = {
+            insight.table_name
+            for insight in insights
+            if insight.insight_type == "coverage_period"
+        }
+        assert {"string_dates", "years"}.issubset(coverage_tables)
+
+    def test_semantic_diagnostics_report_generated_and_skipped_families(self, duckdb_con):
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_events AS "
+            "SELECT * FROM (VALUES "
+            "('2026-01-01', 1.0), ('2026-01-02', 2.0)"
+            ") AS t(event_date, value)"
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="event_date",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="value", dtype="double"),
+                    ],
+                )
+            ],
+        )
+
+        result = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+        )
+
+        statuses = {(d.family, d.status) for d in result.diagnostics}
+        assert ("temporal_coverage", "generated") in statuses
+        assert ("duration_distribution", "skipped") in statuses
+        duration = next(d for d in result.diagnostics if d.family == "duration_distribution")
+        assert duration.required_roles == ["lifecycle_start_ts", "lifecycle_end_ts"]
+        assert duration.reason
+
+    def test_semantic_family_dispatcher_uses_catalog_configuration(self, duckdb_con, monkeypatch):
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_events AS "
+            "SELECT * FROM (VALUES "
+            "('2026-01-01', 1.0), ('2026-01-02', 2.0)"
+            ") AS t(event_date, value)"
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="event_date",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="value", dtype="double"),
+                    ],
+                )
+            ],
+        )
+        monkeypatch.setattr(
+            "headwater.explorer.statistical._load_family_spec",
+            lambda *args, **kwargs: {
+                "families": [
+                    {"key": "temporal_coverage", "required_roles": ["event_ts"]},
+                    {"key": "duration_distribution", "required_roles": ["custom_duration_role"]},
+                ]
+            },
+        )
+
+        result = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+        )
+
+        coverage = next(d for d in result.diagnostics if d.family == "temporal_coverage")
+        duration = next(d for d in result.diagnostics if d.family == "duration_distribution")
+
+        configured = {d.family for d in result.diagnostics if d.family != "semantic_schema"}
+
+        assert configured == {"temporal_coverage", "duration_distribution"}
+        assert coverage.required_roles == ["event_ts"]
+        assert duration.required_roles == ["custom_duration_role"]
+        assert duration.status == "skipped"
+
+    def test_family_catalog_lists_generic_builtins_by_default(self):
+        family_keys = {family["key"] for family in _load_family_spec()["families"]}
+
+        assert family_keys == {
+            "temporal_coverage",
+            "temporal_volume",
+            "duration_distribution",
+            "data_quality",
+        }
+
+    def test_family_catalog_loads_project_metadata_extensions(self):
+        family_keys = {family["key"] for family in _load_family_spec(project_id="nytaxi")["families"]}
+
+        assert {
+            "temporal_coverage",
+            "temporal_volume",
+            "duration_distribution",
+            "data_quality",
+        }.issubset(family_keys)
+        assert {
+            "duration_peak_window",
+            "location_distribution",
+            "path_distribution",
+            "distance_efficiency",
+            "lead_time_pattern",
+        }.issubset(family_keys)
+
+    def test_semantic_model_lineage_maps_mart_table(self, duckdb_con):
+        duckdb_con.execute(
+            "CREATE TABLE marts.mart_event_summary AS "
+            "SELECT * FROM (VALUES "
+            "('2026-01-01', 1.0), ('2026-01-02', 2.0)"
+            ") AS t(event_date, value)"
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="event_date",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                        ColumnInfo(name="value", dtype="double"),
+                    ],
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="mart_event_summary",
+                model_type="mart",
+                sql="SELECT event_date, value FROM staging.stg_events",
+                description="Event summary",
+                source_tables=["events"],
+                status="executed",
+            )
+        ]
+
+        result = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="marts",
+            discovery=discovery,
+            models=models,
+        )
+
+        assert not any(
+            d.reason == "No matching discovered source table for physical table."
+            for d in result.diagnostics
+            if d.physical_table == "mart_event_summary"
+        )
+        assert any(
+            d.physical_table == "mart_event_summary" and d.table_name == "events"
+            for d in result.diagnostics
+        )
+
+    def test_semantic_diagnostics_ignore_tables_outside_model_scope(self, duckdb_con):
+        duckdb_con.execute(
+            "CREATE TABLE staging.stg_events AS "
+            "SELECT * FROM (VALUES ('2026-01-01'), ('2026-01-02')) AS t(event_date)"
+        )
+        duckdb_con.execute("CREATE TABLE staging.stg_stale_table AS SELECT 1 AS id")
+        duckdb_con.execute("CREATE TABLE staging.stg_other AS SELECT 1 AS id")
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(
+                            name="event_date",
+                            dtype="varchar",
+                            role="temporal",
+                            locked=True,
+                        ),
+                    ],
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_events",
+                model_type="staging",
+                sql="SELECT event_date FROM events",
+                description="Events staging",
+                source_tables=["events"],
+                status="executed",
+            ),
+            GeneratedModel(
+                name="stg_other",
+                model_type="staging",
+                sql="SELECT id FROM other",
+                description="Other stale model",
+                source_tables=["other"],
+                status="executed",
+            ),
+        ]
+
+        result = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+            models=models,
+        )
+
+        assert "stg_stale_table" not in {d.physical_table for d in result.diagnostics}
+        assert "stg_other" not in {d.physical_table for d in result.diagnostics}
+
+    def test_semantic_families_generate_actionable_lifecycle_insights(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 140 THEN TIMESTAMP '2026-01-05 18:00:00'
+                        WHEN i < 220 THEN TIMESTAMP '2026-01-06 04:00:00'
+                        WHEN i < 260 THEN TIMESTAMP '2026-01-06 07:00:00'
+                        ELSE TIMESTAMP '2026-01-04 10:00:00'
+                    END AS pickup_datetime,
+                    CASE WHEN i < 260 THEN 24 ELSE 12 END AS duration_min,
+                    CASE
+                        WHEN i < 140 THEN 4
+                        WHEN i < 260 THEN 12
+                        ELSE 3
+                    END AS wait_min,
+                    CASE
+                        WHEN i < 140 THEN 'JFK'
+                        WHEN i < 260 THEN 'Downtown'
+                        ELSE NULL
+                    END AS pu_location_id
+                FROM range(300) AS t(i)
+            )
+            SELECT
+                pickup_datetime,
+                pickup_datetime + duration_min * INTERVAL 1 MINUTE AS dropoff_datetime,
+                pickup_datetime - wait_min * INTERVAL 1 MINUTE AS request_datetime,
+                pu_location_id,
+                'Manhattan' AS do_location_id,
+                CASE
+                    WHEN i < 140 THEN 'Yellow'
+                    WHEN i < 260 THEN 'HVFHV'
+                    ELSE 'FHV'
+                END AS service_type,
+                10.0 AS trip_miles
+            FROM base
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=300,
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="request_datetime", dtype="timestamp"),
+                        ColumnInfo(name="pu_location_id", dtype="varchar"),
+                        ColumnInfo(name="do_location_id", dtype="varchar"),
+                        ColumnInfo(name="service_type", dtype="varchar"),
+                        ColumnInfo(name="trip_miles", dtype="double"),
+                    ],
+                )
+            ],
+        )
+
+        insights = detect_insights(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+            project_id="nytaxi",
+        )
+        descriptions = " ".join(i.description for i in insights)
+        types = {i.insight_type for i in insights}
+
+        assert "volume_distribution" in types
+        assert "peak_period" in types
+        assert "geographic_hotspot" in types
+        assert "duration_distribution" in types
+        assert "wait_time_pattern" in types
+        assert "data_quality" in types
+        assert "6 PM is the busiest" in descriptions
+        assert "Weekday trips average" in descriptions
+        assert "JFK has the longest high-volume" in descriptions
+        assert "HVFHV wait time is highest around 4 AM and 7 AM" in descriptions
+        assert "FHV location analysis is unreliable" in descriptions
+        assert all(i.support_count is not None for i in insights)
+
+    def test_semantic_families_load_from_project_metadata_for_other_domains(
+        self,
+        duckdb_con,
+        monkeypatch,
+        tmp_path,
+    ):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_work_orders AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 120 THEN TIMESTAMP '2026-02-02 08:00:00'
+                        WHEN i < 200 THEN TIMESTAMP '2026-02-03 15:00:00'
+                        ELSE TIMESTAMP '2026-02-01 11:00:00'
+                    END AS started_at,
+                    CASE
+                        WHEN i < 120 THEN 70
+                        WHEN i < 200 THEN 30
+                        ELSE 20
+                    END AS duration_min,
+                    CASE
+                        WHEN i < 120 THEN 18
+                        WHEN i < 200 THEN 7
+                        ELSE 4
+                    END AS wait_min,
+                    CASE
+                        WHEN i < 140 THEN 'Plant A'
+                        WHEN i < 220 THEN 'Plant B'
+                        ELSE 'Plant C'
+                    END AS site_id,
+                    CASE
+                        WHEN i < 150 THEN 'Emergency'
+                        ELSE 'Routine'
+                    END AS work_type
+                FROM range(260) AS t(i)
+            )
+            SELECT
+                started_at - wait_min * INTERVAL 1 MINUTE AS requested_at,
+                started_at,
+                started_at + duration_min * INTERVAL 1 MINUTE AS resolved_at,
+                site_id,
+                work_type
+            FROM base
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="work_orders",
+                    row_count=260,
+                    columns=[
+                        ColumnInfo(name="requested_at", dtype="timestamp"),
+                        ColumnInfo(name="started_at", dtype="timestamp"),
+                        ColumnInfo(name="resolved_at", dtype="timestamp"),
+                        ColumnInfo(name="site_id", dtype="varchar"),
+                        ColumnInfo(name="work_type", dtype="varchar"),
+                    ],
+                )
+            ],
+        )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "work-orders"
+        project_dir.mkdir(parents=True)
+        (project_dir / "insight_families.yaml").write_text(
+            """
+version: 1
+families:
+  - key: duration_peak_window
+    required_roles: [lifecycle_start_ts, lifecycle_end_ts]
+    priority: 8
+  - key: location_distribution
+    required_roles: [origin_id, lifecycle_start_ts, lifecycle_end_ts]
+    priority: 7
+  - key: lead_time_pattern
+    required_roles: [request_ts, lifecycle_start_ts]
+    priority: 7
+"""
+        )
+        monkeypatch.setattr(statistical_module, "_metadata_root", lambda: metadata_root)
+
+        insights = detect_insights(
+            duckdb_con,
+            schema="staging",
+            discovery=discovery,
+            project_id="work-orders",
+        )
+        descriptions = " ".join(i.description for i in insights)
+        types = {i.insight_type for i in insights}
+
+        assert "volume_distribution" in types
+        assert "geographic_hotspot" in types
+        assert "duration_distribution" in types
+        assert "wait_time_pattern" in types
+        assert "8 AM is the busiest" in descriptions
+        assert "Plant A has the longest high-volume" in descriptions
+        assert "Emergency wait time is highest around 8 AM and 3 PM" in descriptions
+        assert all(i.support_count is not None for i in insights)
+
+    def test_semantic_highlights_use_context_and_value_oriented_findings(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 140 THEN TIMESTAMP '2026-01-05 18:00:00'
+                        WHEN i < 220 THEN TIMESTAMP '2026-01-06 04:00:00'
+                        WHEN i < 260 THEN TIMESTAMP '2026-01-06 07:00:00'
+                        ELSE TIMESTAMP '2026-01-04 10:00:00'
+                    END AS pickup_datetime,
+                    CASE WHEN i < 260 THEN 24 ELSE 12 END AS duration_min,
+                    CASE
+                        WHEN i < 140 THEN 4
+                        WHEN i < 260 THEN 12
+                        ELSE 3
+                    END AS wait_min,
+                    CASE
+                        WHEN i < 140 THEN 'JFK'
+                        WHEN i < 260 THEN 'Downtown'
+                        ELSE NULL
+                    END AS pu_location_id
+                FROM range(300) AS t(i)
+            )
+            SELECT
+                pickup_datetime,
+                pickup_datetime + duration_min * INTERVAL 1 MINUTE AS dropoff_datetime,
+                pickup_datetime - wait_min * INTERVAL 1 MINUTE AS request_datetime,
+                pu_location_id,
+                'Manhattan' AS do_location_id,
+                CASE
+                    WHEN i < 140 THEN 'Yellow'
+                    WHEN i < 260 THEN 'HVFHV'
+                    ELSE 'FHV'
+                END AS service_type,
+                10.0 AS trip_miles
+            FROM base
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=300,
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="request_datetime", dtype="timestamp"),
+                        ColumnInfo(name="pu_location_id", dtype="varchar"),
+                        ColumnInfo(name="do_location_id", dtype="varchar"),
+                        ColumnInfo(name="service_type", dtype="varchar"),
+                        ColumnInfo(name="trip_miles", dtype="double"),
+                    ],
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_trips",
+                model_type="staging",
+                sql="SELECT * FROM trips",
+                description="Trips staging",
+                source_tables=["trips"],
+                status="executed",
+            )
+        ]
+        context = DatasetContext(
+            source_name="test",
+            row_represents="trip",
+            decisions="Operations and dispatch planning",
+        )
+
+        highlights = compute_semantic_highlights(
+            duckdb_con,
+            discovery,
+            context,
+            models,
+            project_id="nytaxi",
+        )
+
+        assert highlights
+        assert any(h["decision_lens"] == "Operations" for h in highlights)
+        assert any("HVFHV wait time is highest" in h["detail"] for h in highlights)
+        assert any("FHV location analysis is unreliable" in h["title"] for h in highlights)
+        assert len({h["insight_type"] for h in highlights}) >= 3
+
+    def test_semantic_highlights_skip_unreadable_route_and_location_ids(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 160 THEN TIMESTAMP '2026-02-01 08:00:00'
+                        WHEN i < 260 THEN TIMESTAMP '2026-02-01 18:00:00'
+                        ELSE TIMESTAMP '2026-02-02 05:00:00'
+                    END AS pickup_datetime,
+                    CASE WHEN i < 160 THEN 52 WHEN i < 260 THEN 38 ELSE 18 END AS duration_min,
+                    CASE WHEN i < 260 THEN 12 ELSE 4 END AS wait_min,
+                    CASE WHEN i < 160 THEN 79 WHEN i < 260 THEN 132 ELSE 205 END AS PULocationID,
+                    CASE WHEN i < 160 THEN 265 WHEN i < 260 THEN 201 ELSE 88 END AS DOLocationID
+                FROM range(320) AS t(i)
+            )
+            SELECT
+                pickup_datetime,
+                pickup_datetime + duration_min * INTERVAL 1 MINUTE AS dropoff_datetime,
+                pickup_datetime - wait_min * INTERVAL 1 MINUTE AS request_datetime,
+                PULocationID,
+                DOLocationID,
+                CASE WHEN i < 220 THEN 'HVFHV' ELSE 'FHV' END AS service_type,
+                10.0 AS trip_miles
+            FROM base
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=320,
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="request_datetime", dtype="timestamp"),
+                        ColumnInfo(name="PULocationID", dtype="int64"),
+                        ColumnInfo(name="DOLocationID", dtype="int64"),
+                        ColumnInfo(name="service_type", dtype="varchar"),
+                        ColumnInfo(name="trip_miles", dtype="double"),
+                    ],
+                )
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_trips",
+                model_type="staging",
+                sql="SELECT * FROM trips",
+                description="Trips staging",
+                source_tables=["trips"],
+                status="executed",
+            )
+        ]
+        context = DatasetContext(
+            source_name="test",
+            row_represents="trip",
+            decisions="Operations and dispatch planning",
+        )
+
+        highlights = compute_semantic_highlights(
+            duckdb_con,
+            discovery,
+            context,
+            models,
+            project_id="nytaxi",
+        )
+
+        assert highlights
+        assert not any(
+            h["insight_type"] in {"geographic_hotspot", "route_pair"} for h in highlights
+        )
+        assert all("79 -> 265" not in h["detail"] for h in highlights)
+        assert any(
+            h["insight_type"] in {"peak_period", "duration_distribution", "wait_time_pattern"}
+            for h in highlights
+        )
+
+    def test_semantic_highlights_resolve_route_and_location_labels_from_lookup(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            WITH base AS (
+                SELECT
+                    i,
+                    CASE
+                        WHEN i < 160 THEN TIMESTAMP '2026-02-01 08:00:00'
+                        WHEN i < 260 THEN TIMESTAMP '2026-02-01 18:00:00'
+                        ELSE TIMESTAMP '2026-02-02 05:00:00'
+                    END AS pickup_datetime,
+                    CASE WHEN i < 160 THEN 52 WHEN i < 260 THEN 38 ELSE 18 END AS duration_min,
+                    CASE WHEN i < 260 THEN 12 ELSE 4 END AS wait_min,
+                    CASE WHEN i < 160 THEN 79 WHEN i < 260 THEN 132 ELSE 205 END AS PULocationID,
+                    CASE WHEN i < 160 THEN 265 WHEN i < 260 THEN 201 ELSE 88 END AS DOLocationID
+                FROM range(320) AS t(i)
+            )
+            SELECT
+                pickup_datetime,
+                pickup_datetime + duration_min * INTERVAL 1 MINUTE AS dropoff_datetime,
+                pickup_datetime - wait_min * INTERVAL 1 MINUTE AS request_datetime,
+                PULocationID,
+                DOLocationID,
+                CASE WHEN i < 220 THEN 'HVFHV' ELSE 'FHV' END AS service_type,
+                10.0 AS trip_miles
+            FROM base
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_taxi_zones AS
+            SELECT * FROM (VALUES
+                (79, 'Central Hub'),
+                (132, 'Airport'),
+                (205, 'North Terminal'),
+                (265, 'Downtown'),
+                (201, 'Harbor'),
+                (88, 'Midtown')
+            ) AS t(LocationID, Zone)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="csv"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=320,
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="request_datetime", dtype="timestamp"),
+                        ColumnInfo(name="PULocationID", dtype="int64"),
+                        ColumnInfo(name="DOLocationID", dtype="int64"),
+                        ColumnInfo(name="service_type", dtype="varchar"),
+                        ColumnInfo(name="trip_miles", dtype="double"),
+                    ],
+                ),
+                TableInfo(
+                    name="taxi_zones",
+                    row_count=6,
+                    columns=[
+                        ColumnInfo(name="LocationID", dtype="int64"),
+                        ColumnInfo(name="Zone", dtype="varchar"),
+                    ],
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="trips",
+                    from_column="PULocationID",
+                    to_table="taxi_zones",
+                    to_column="LocationID",
+                    type="many_to_one",
+                    confidence=0.99,
+                    referential_integrity=1.0,
+                    source="inferred_name",
+                ),
+                Relationship(
+                    from_table="trips",
+                    from_column="DOLocationID",
+                    to_table="taxi_zones",
+                    to_column="LocationID",
+                    type="many_to_one",
+                    confidence=0.99,
+                    referential_integrity=1.0,
+                    source="inferred_name",
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_trips",
+                model_type="staging",
+                sql="SELECT * FROM trips",
+                description="Trips staging",
+                source_tables=["trips"],
+                status="executed",
+            )
+        ]
+        context = DatasetContext(
+            source_name="test",
+            row_represents="trip",
+            decisions="Operations and dispatch planning",
+        )
+
+        highlights = compute_semantic_highlights(
+            duckdb_con,
+            discovery,
+            context,
+            models,
+            project_id="nytaxi",
+        )
+
+        assert any("Central Hub" in h["detail"] or "Airport" in h["detail"] for h in highlights)
+        assert any("Central Hub -> Downtown" in h["detail"] for h in highlights)
+        assert all("79 -> 265" not in h["detail"] for h in highlights)
+
+    def test_semantic_highlight_ids_are_unique_for_same_metric(self):
+        insight = StatisticalInsight(
+            metric="latitude",
+            table_name="aqs_monitors",
+            insight_type="data_quality",
+            description="placeholder",
+            magnitude=10.0,
+            severity="warning",
+        )
+
+        first = _semantic_highlight_id(insight, "Latitude is missing for 12% of monitor records.")
+        second = _semantic_highlight_id(insight, "Latitude values outside valid bounds appear in 3 rows.")
+
+        assert first != second
+
+    def test_top_insights_skip_opaque_code_segments_without_lookup(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trip_codes AS
+            SELECT * FROM (VALUES
+                ('B03404', 100.0, TIMESTAMP '2026-02-01 08:00:00'),
+                ('B03404', 120.0, TIMESTAMP '2026-02-01 09:00:00'),
+                ('B09999', 80.0, TIMESTAMP '2026-02-01 10:00:00')
+            ) AS t(originating_base_num, trip_miles, pickup_datetime)
+            """
+        )
+        tables = [
+            TableInfo(
+                name="stg_trip_codes",
+                schema_name="staging",
+                row_count=3,
+                columns=[
+                    ColumnInfo(
+                        name="originating_base_num",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                    ColumnInfo(name="trip_miles", dtype="double", semantic_type="metric"),
+                    ColumnInfo(name="pickup_datetime", dtype="timestamp", semantic_type="temporal"),
+                ],
+            )
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="stg_trip_codes",
+                column_name="originating_base_num",
+                dtype="varchar",
+                null_count=0,
+                distinct_count=2,
+                top_values=[("B03404", 2), ("B09999", 1)],
+            ),
+            ColumnProfile(
+                table_name="stg_trip_codes",
+                column_name="trip_miles",
+                dtype="double",
+                null_count=0,
+                distinct_count=3,
+                min_value=80.0,
+                max_value=120.0,
+                mean=100.0,
+            ),
+        ]
+
+        insights = compute_top_insights(duckdb_con, tables, profiles)
+
+        assert not any("B03404" in insight["title"] for insight in insights)
+        assert not any("B03404" in insight["detail"] for insight in insights)
+
+    def test_top_insights_resolve_generic_location_lookup_without_relationship(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_service_events AS
+            SELECT * FROM (VALUES
+                ('A', 45.0, TIMESTAMP '2026-02-01 08:00:00'),
+                ('A', 35.0, TIMESTAMP '2026-02-01 09:00:00'),
+                ('B', 12.0, TIMESTAMP '2026-02-01 10:00:00')
+            ) AS t(origin_location_id, trip_miles, started_at)
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_locations AS
+            SELECT * FROM (VALUES
+                ('A', 'North Hub'),
+                ('B', 'Central Depot'),
+                ('C', 'South Clinic'),
+                ('D', 'West Yard'),
+                ('E', 'East Gate')
+            ) AS t(location_id, location_name)
+            """
+        )
+        tables = [
+            TableInfo(
+                name="stg_service_events",
+                schema_name="staging",
+                row_count=3,
+                columns=[
+                    ColumnInfo(
+                        name="origin_location_id",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                    ColumnInfo(name="trip_miles", dtype="double", semantic_type="metric"),
+                    ColumnInfo(name="started_at", dtype="timestamp", semantic_type="temporal"),
+                ],
+            ),
+            TableInfo(
+                name="stg_locations",
+                schema_name="staging",
+                row_count=5,
+                columns=[
+                    ColumnInfo(name="location_id", dtype="varchar", semantic_type="id"),
+                    ColumnInfo(
+                        name="location_name",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                ],
+            ),
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="stg_service_events",
+                column_name="origin_location_id",
+                dtype="varchar",
+                null_count=0,
+                distinct_count=2,
+                top_values=[("A", 2), ("B", 1)],
+            ),
+            ColumnProfile(
+                table_name="stg_service_events",
+                column_name="trip_miles",
+                dtype="double",
+                null_count=0,
+                distinct_count=3,
+                min_value=12.0,
+                max_value=45.0,
+                mean=30.67,
+            ),
+        ]
+
+        insights = compute_top_insights(duckdb_con, tables, profiles)
+        origin_insights = [
+            insight for insight in insights if insight.get("column") == "origin_location_id"
+        ]
+
+        assert origin_insights
+        assert any("North Hub" in insight["title"] or "North Hub" in insight["detail"] for insight in origin_insights)
+        assert all("A drives" not in insight["title"] for insight in origin_insights)
+        assert all("A represents" not in insight["detail"] for insight in origin_insights)
+
+    def test_top_insights_use_companion_enum_labels(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_orders AS
+            SELECT * FROM (VALUES
+                ('P', 120.0),
+                ('P', 80.0),
+                ('P', 60.0),
+                ('S', 200.0),
+                ('C', 20.0)
+            ) AS t(status_code, amount)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="stg_orders",
+                    schema_name="staging",
+                    row_count=5,
+                    columns=[
+                        ColumnInfo(name="status_code", dtype="varchar", semantic_type="dimension"),
+                        ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="stg_orders",
+                    column_name="status_code",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=3,
+                    top_values=[("P", 3), ("S", 1), ("C", 1)],
+                ),
+                ColumnProfile(
+                    table_name="stg_orders",
+                    column_name="amount",
+                    dtype="float64",
+                    null_count=0,
+                    distinct_count=5,
+                    min_value=20.0,
+                    max_value=200.0,
+                    mean=96.0,
+                ),
+            ],
+            companion_docs=[
+                CompanionDoc(
+                    filename="dictionary.csv",
+                    content=(
+                        "column_name: status_code | "
+                        "description: order status. P=Pending; S=Shipped; C=Cancelled"
+                    ),
+                    doc_type="csv",
+                    matched_tables=["stg_orders"],
+                    confidence=0.9,
+                )
+            ],
+        )
+
+        insights = compute_top_insights(
+            duckdb_con,
+            discovery.tables,
+            discovery.profiles,
+            retrieve_metadata(discovery),
+        )
+        status_insights = [insight for insight in insights if insight.get("column") == "status_code"]
+
+        assert status_insights
+        assert any("Pending" in insight["title"] or "Pending" in insight["detail"] for insight in status_insights)
+        assert all(not insight["title"].startswith("P ") for insight in status_insights)
+        assert all("P accounts for" not in insight["detail"] for insight in status_insights)
+
+    def test_top_insights_skip_constant_dimensions(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_daily_pm25 AS
+            SELECT * FROM (VALUES
+                ('PM2.5 - Local Conditions', 12.0),
+                ('PM2.5 - Local Conditions', 9.5),
+                ('PM2.5 - Local Conditions', 16.2)
+            ) AS t(parameter_name, arithmetic_mean)
+            """
+        )
+        tables = [
+            TableInfo(
+                name="stg_daily_pm25",
+                schema_name="staging",
+                row_count=3,
+                columns=[
+                    ColumnInfo(
+                        name="parameter_name",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                    ColumnInfo(
+                        name="arithmetic_mean",
+                        dtype="double",
+                        semantic_type="metric",
+                    ),
+                ],
+            )
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="stg_daily_pm25",
+                column_name="parameter_name",
+                dtype="varchar",
+                null_count=0,
+                distinct_count=1,
+                top_values=[("PM2.5 - Local Conditions", 3)],
+            ),
+            ColumnProfile(
+                table_name="stg_daily_pm25",
+                column_name="arithmetic_mean",
+                dtype="double",
+                null_count=0,
+                distinct_count=3,
+                min_value=9.5,
+                max_value=16.2,
+                mean=12.57,
+            ),
+        ]
+
+        insights = compute_top_insights(duckdb_con, tables, profiles)
+
+        assert not any(insight.get("column") == "parameter_name" for insight in insights)
+
+    def test_top_insights_skip_low_signal_flag_segments(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trip_flags AS
+            SELECT * FROM (VALUES
+                ('N', 12.0, TIMESTAMP '2026-02-01 08:00:00'),
+                ('N', 14.0, TIMESTAMP '2026-02-01 09:00:00'),
+                ('Y', 18.0, TIMESTAMP '2026-02-01 10:00:00'),
+                ('Cash', 25.0, TIMESTAMP '2026-02-01 11:00:00'),
+                ('Card', 30.0, TIMESTAMP '2026-02-01 12:00:00'),
+                ('Cash', 28.0, TIMESTAMP '2026-02-01 13:00:00')
+            ) AS t(access_a_ride_flag, trip_miles, pickup_datetime)
+            """
+        )
+        tables = [
+            TableInfo(
+                name="stg_trip_flags",
+                schema_name="staging",
+                row_count=6,
+                columns=[
+                    ColumnInfo(
+                        name="access_a_ride_flag",
+                        dtype="varchar",
+                        semantic_type="dimension",
+                    ),
+                    ColumnInfo(name="trip_miles", dtype="double", semantic_type="metric"),
+                    ColumnInfo(name="pickup_datetime", dtype="timestamp", semantic_type="temporal"),
+                ],
+            )
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="stg_trip_flags",
+                column_name="access_a_ride_flag",
+                dtype="varchar",
+                null_count=0,
+                distinct_count=2,
+                top_values=[("N", 4), ("Y", 2)],
+            ),
+            ColumnProfile(
+                table_name="stg_trip_flags",
+                column_name="trip_miles",
+                dtype="double",
+                null_count=0,
+                distinct_count=6,
+                min_value=12.0,
+                max_value=30.0,
+                mean=21.17,
+            ),
+        ]
+
+        insights = compute_top_insights(duckdb_con, tables, profiles)
+
+        assert not any("access a ride flag" in insight["title"].lower() for insight in insights)
+        assert not any("access a ride flag" in insight["detail"].lower() for insight in insights)
+        assert not any(
+            insight.get("column") == "access_a_ride_flag"
+            and insight["metric"] in {"segment_share", "trip_miles"}
+            for insight in insights
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -897,6 +3964,67 @@ class TestAutoRepair:
         assert len(r.repair_history) == 1
         assert r.repair_history[0]["error"] == "table not found"
 
+    def test_heuristic_sql_sanitizes_aliases_for_hyphenated_columns(self, duckdb_con):
+        duckdb_con.execute("CREATE SCHEMA IF NOT EXISTS staging")
+        duckdb_con.execute(
+            """
+            CREATE OR REPLACE TABLE staging.stg_prst_audience_profile_pivot_history AS
+            SELECT * FROM (
+                VALUES
+                    ('direct_debit', 120.0),
+                    ('credit_card', 240.0),
+                    ('credit_card', 180.0)
+            ) AS t(
+                "subscription-general-detail-latest billing channel",
+                "account-financial-summary-total payments"
+            )
+            """
+        )
+
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="prst_audience_profile_pivot_history",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(
+                            name="subscription-general-detail-latest billing channel",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(
+                            name="account-financial-summary-total payments",
+                            dtype="float64",
+                            semantic_type="metric",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_prst_audience_profile_pivot_history",
+                model_type="staging",
+                sql="SELECT * FROM prst_audience_profile_pivot_history",
+                description="staging",
+                source_tables=["prst_audience_profile_pivot_history"],
+                status="executed",
+            )
+        ]
+
+        sql = _heuristic_sql(
+            "Which subscription-general-detail-latest billing channel has the highest account-financial-summary-total payments in prst audience profile pivot history?",
+            discovery,
+            models,
+            con=duckdb_con,
+        )
+
+        assert sql is not None
+        assert "max_account_financial_summary_total_payments" in sql
+        result = duckdb_con.execute(sql).fetchall()
+        assert result
+
 
 # ---------------------------------------------------------------------------
 # Grounding check tests
@@ -992,6 +4120,378 @@ class TestGrounding:
         )
         assert result.error is None
         assert len(result.warnings) == 0
+
+    def test_route_questions_with_stale_raw_id_sql_are_blocked_preflight(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_tlc_trips AS
+            SELECT * FROM (VALUES
+                (101, 202, 45.0),
+                (101, 202, 55.0),
+                (202, 303, 20.0)
+            ) AS t(PULocationID, DOLocationID, trip_time)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_trips",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="PULocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="DOLocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="trip_time", dtype="double", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+        suggestions = [
+            SuggestedQuestion(
+                question="Which routes have the longest trip time in tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+                sql_hint=(
+                    'SELECT CAST("PULocationID" AS VARCHAR) || \' -> \' || '
+                    'CAST("DOLocationID" AS VARCHAR) AS route_pair, '
+                    'AVG(trip_time) AS avg_trip_time '
+                    'FROM staging.stg_tlc_trips '
+                    'GROUP BY 1 ORDER BY avg_trip_time DESC'
+                ),
+            ),
+            SuggestedQuestion(
+                question="How has trip time in tlc trips changed over time?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+            SuggestedQuestion(
+                question="Which hours have the highest trip volume in tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+        ]
+
+        result = ask(
+            question="Which routes have the longest trip time in tlc trips?",
+            con=duckdb_con,
+            discovery=discovery,
+            suggestions=suggestions,
+        )
+
+        assert result.error is not None
+        assert "readable lookup" in result.error.lower()
+        assert result.suggestions
+        assert all("route" not in suggestion.lower() for suggestion in result.suggestions)
+
+    def test_code_heavy_answers_return_readability_warning(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_trips AS
+            SELECT * FROM (VALUES
+                ('B03404', 100.0),
+                ('B03404', 120.0),
+                ('B09999', 80.0)
+            ) AS t(originating_base_num, trip_miles)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(
+                            name="originating_base_num",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="trip_miles", dtype="double", semantic_type="metric"),
+                    ],
+                )
+            ],
+        )
+        suggestions = [
+            SuggestedQuestion(
+                question="Which base has the highest trip miles in trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["trips"],
+                sql_hint=(
+                    'SELECT "originating_base_num" AS dimension, '
+                    'SUM(trip_miles) AS total_trip_miles '
+                    "FROM staging.stg_trips "
+                    'GROUP BY 1 ORDER BY total_trip_miles DESC'
+                ),
+            )
+        ]
+
+        result = ask(
+            question="Which base has the highest trip miles in trips?",
+            con=duckdb_con,
+            discovery=discovery,
+            suggestions=suggestions,
+        )
+
+        assert result.error is None
+        assert any("raw codes or ids" in warning.lower() for warning in result.warnings)
+
+    def test_generic_status_lookup_makes_answers_business_readable(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_orders AS
+            SELECT * FROM (VALUES
+                ('OPEN', 125.0),
+                ('OPEN', 95.0),
+                ('HOLD', 210.0)
+            ) AS t(status_code, amount)
+            """
+        )
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_order_status AS
+            SELECT * FROM (VALUES
+                ('OPEN', 'Open'),
+                ('HOLD', 'On hold')
+            ) AS t(status_code, status)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="orders",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(
+                            name="status_code",
+                            dtype="varchar",
+                            semantic_type="dimension",
+                        ),
+                        ColumnInfo(name="amount", dtype="double", semantic_type="metric"),
+                    ],
+                ),
+                TableInfo(
+                    name="order_status",
+                    row_count=2,
+                    columns=[
+                        ColumnInfo(name="status_code", dtype="varchar", semantic_type="id"),
+                        ColumnInfo(name="status", dtype="varchar", semantic_type="dimension"),
+                    ],
+                ),
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="status_code",
+                    dtype="varchar",
+                    null_count=0,
+                    distinct_count=2,
+                    top_values=[("OPEN", 2), ("HOLD", 1)],
+                ),
+                ColumnProfile(
+                    table_name="orders",
+                    column_name="amount",
+                    dtype="double",
+                    null_count=0,
+                    distinct_count=3,
+                ),
+            ],
+            relationships=[
+                Relationship(
+                    from_table="orders",
+                    from_column="status_code",
+                    to_table="order_status",
+                    to_column="status_code",
+                    type="many_to_one",
+                    confidence=1.0,
+                    referential_integrity=1.0,
+                    source="declared",
+                ),
+            ],
+        )
+        models = [
+            GeneratedModel(
+                name="stg_orders",
+                model_type="staging",
+                sql="SELECT * FROM orders",
+                description="Orders staging",
+                source_tables=["orders"],
+                status="executed",
+            ),
+            GeneratedModel(
+                name="stg_order_status",
+                model_type="staging",
+                sql="SELECT * FROM order_status",
+                description="Order status lookup",
+                source_tables=["order_status"],
+                status="executed",
+            ),
+        ]
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            models=models,
+            con=duckdb_con,
+        )
+        question = next(
+            q
+            for q in questions
+            if "status" in q.question.lower() and "amount" in q.question.lower()
+        )
+
+        assert "LEFT JOIN staging.stg_order_status" in (question.sql_hint or "")
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            models=models,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert not any("raw codes or ids" in warning.lower() for warning in result.warnings)
+        assert {row["dimension"] for row in result.data} == {"Open", "On hold"}
+
+    def test_ranked_dimension_questions_filter_null_dimension_rows(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_payments AS
+            SELECT * FROM (VALUES
+                (1, 15.0),
+                (1, 18.0),
+                (2, 12.0),
+                (NULL, 50.0)
+            ) AS t(payment_type, fare_amount)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="payments",
+                    row_count=4,
+                    columns=[
+                        ColumnInfo(name="payment_type", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="fare_amount", dtype="double", semantic_type="metric"),
+                    ],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="payments",
+                    column_name="payment_type",
+                    dtype="int64",
+                    null_count=1,
+                    distinct_count=2,
+                    top_values=[("1", 2), ("2", 1)],
+                ),
+                ColumnProfile(
+                    table_name="payments",
+                    column_name="fare_amount",
+                    dtype="double",
+                    null_count=0,
+                    distinct_count=4,
+                    min_value=12.0,
+                    max_value=50.0,
+                    mean=23.75,
+                ),
+            ],
+        )
+
+        questions = generate_suggestions(
+            discovery=discovery,
+            con=duckdb_con,
+        )
+        question = next(
+            q
+            for q in questions
+            if "highest fare amount" in q.question.lower() and "payment method" in q.question.lower()
+        )
+
+        result = ask(
+            question=question.question,
+            con=duckdb_con,
+            discovery=discovery,
+            suggestions=questions,
+        )
+
+        assert result.error is None
+        assert all(row["dimension"] is not None for row in result.data)
+
+    def test_route_question_without_lookup_returns_guided_error(self, duckdb_con):
+        duckdb_con.execute(
+            """
+            CREATE TABLE staging.stg_tlc_trips AS
+            SELECT * FROM (VALUES
+                (101, 202, TIMESTAMP '2026-01-01 08:00:00', TIMESTAMP '2026-01-01 08:45:00'),
+                (101, 202, TIMESTAMP '2026-01-01 09:00:00', TIMESTAMP '2026-01-01 09:55:00'),
+                (202, 303, TIMESTAMP '2026-01-01 10:00:00', TIMESTAMP '2026-01-01 10:20:00')
+            ) AS t(PULocationID, DOLocationID, pickup_datetime, dropoff_datetime)
+            """
+        )
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="test", type="json", path="/data"),
+            tables=[
+                TableInfo(
+                    name="tlc_trips",
+                    row_count=3,
+                    columns=[
+                        ColumnInfo(name="PULocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(name="DOLocationID", dtype="int64", semantic_type="dimension"),
+                        ColumnInfo(
+                            name="pickup_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                        ColumnInfo(
+                            name="dropoff_datetime",
+                            dtype="timestamp",
+                            semantic_type="temporal",
+                        ),
+                    ],
+                )
+            ],
+        )
+        suggestions = [
+            SuggestedQuestion(
+                question="How do weekday and weekend trip times compare in tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+            SuggestedQuestion(
+                question="Which access a ride flag segments dominate tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+            SuggestedQuestion(
+                question="Which hour has the highest trip volume in tlc trips?",
+                source="business",
+                category="Trips",
+                relevant_tables=["tlc_trips"],
+            ),
+        ]
+
+        result = ask(
+            question="Which routes have the longest duration in tlc trips?",
+            con=duckdb_con,
+            discovery=discovery,
+            suggestions=suggestions,
+        )
+
+        assert result.error is not None
+        assert "readable lookup" in result.error.lower()
+        assert result.sql == ""
+        assert result.suggestions
+        assert not any("flag" in suggestion.lower() for suggestion in result.suggestions)
+        assert any("weekday and weekend" in suggestion.lower() for suggestion in result.suggestions)
+        assert len(result.suggestions) == len(set(result.suggestions))
 
 
 # ---------------------------------------------------------------------------
@@ -1470,6 +4970,16 @@ class TestVisualization:
         assert viz.x_axis == "reading_date"
         assert viz.y_axis == "avg_value"
 
+    def test_line_temporal_with_numeric_time_metric_name(self):
+        data = [
+            {"period": "2026-01-01", "avg_trip_time": 18.4},
+            {"period": "2026-01-02", "avg_trip_time": 19.1},
+        ]
+        viz = recommend_visualization(["period", "avg_trip_time"], data)
+        assert viz.chart_type == "line"
+        assert viz.x_axis == "period"
+        assert viz.y_axis == "avg_trip_time"
+
     def test_bar_dimension_metric(self):
         data = [
             {"zone_name": "Zone A", "count": 100},
@@ -1479,6 +4989,60 @@ class TestVisualization:
         assert viz.chart_type == "bar"
         assert viz.x_axis == "zone_name"
 
+    def test_pie_categorical_distribution(self):
+        data = [
+            {"payment_method": "Credit card", "records": 60},
+            {"payment_method": "Cash", "records": 30},
+            {"payment_method": "No charge", "records": 10},
+        ]
+        viz = recommend_visualization(
+            ["payment_method", "records"],
+            data,
+            "What is the distribution of trips by payment method?",
+        )
+        assert viz.chart_type == "pie"
+        assert viz.x_axis == "payment_method"
+        assert viz.y_axis == "records"
+
+    def test_pie_small_count_breakdown_without_distribution_wording(self):
+        data = [
+            {"site_type": "Roadside", "records": 240},
+            {"site_type": "Urban", "records": 180},
+            {"site_type": "Industrial", "records": 80},
+        ]
+        viz = recommend_visualization(
+            ["site_type", "records"],
+            data,
+            "How many records are there by site type?",
+        )
+        assert viz.chart_type == "pie"
+
+    def test_average_breakdown_with_aux_count_stays_bar(self):
+        data = [
+            {"site_type": "Roadside", "records": 240, "avg_value": 12.5},
+            {"site_type": "Urban", "records": 180, "avg_value": 10.8},
+            {"site_type": "Industrial", "records": 80, "avg_value": 9.3},
+        ]
+        viz = recommend_visualization(
+            ["site_type", "records", "avg_value"],
+            data,
+            "What is the average value in readings by site type?",
+        )
+        assert viz.chart_type == "bar"
+
+    def test_numeric_bucket_distribution_stays_bar(self):
+        data = [
+            {"bucket": "0-10", "records": 15},
+            {"bucket": "10-20", "records": 25},
+            {"bucket": "20-30", "records": 12},
+        ]
+        viz = recommend_visualization(
+            ["bucket", "records"],
+            data,
+            "What is the distribution of tolls?",
+        )
+        assert viz.chart_type == "bar"
+
     def test_scatter_two_metrics(self):
         data = [
             {"value": 10.0, "score": 85.0},
@@ -1486,6 +5050,38 @@ class TestVisualization:
         ]
         viz = recommend_visualization(["value", "score"], data)
         assert viz.chart_type == "scatter"
+
+    def test_numeric_dimension_codes_stay_bar_for_ranked_answers(self):
+        data = [
+            {"dimension": 1, "fare_amount": 42.0, "records": 120},
+            {"dimension": 2, "fare_amount": 38.5, "records": 90},
+            {"dimension": 3, "fare_amount": 35.0, "records": 70},
+        ]
+        viz = recommend_visualization(
+            ["dimension", "fare_amount", "records"],
+            data,
+            "Which trip type has the highest fare amount in tlc raw green tripdata 2026?",
+        )
+        assert viz.chart_type == "bar"
+        assert viz.x_axis == "dimension"
+
+    def test_heatmap_for_matrix_style_question(self):
+        data = [
+            {"period": "2024-01", "sensor_type": "pm25", "avg_value": 12.0},
+            {"period": "2024-01", "sensor_type": "ozone", "avg_value": 18.0},
+            {"period": "2024-02", "sensor_type": "pm25", "avg_value": 14.0},
+            {"period": "2024-02", "sensor_type": "ozone", "avg_value": 19.0},
+            {"period": "2024-03", "sensor_type": "pm25", "avg_value": 11.0},
+            {"period": "2024-03", "sensor_type": "ozone", "avg_value": 17.0},
+        ]
+        viz = recommend_visualization(
+            ["period", "sensor_type", "avg_value"],
+            data,
+            "How does average value vary by month and sensor type in readings?",
+        )
+        assert viz.chart_type == "heatmap"
+        assert viz.x_axis == "period"
+        assert viz.y_axis == "sensor_type"
 
     def test_table_fallback(self):
         data = [{"a": "x", "b": "y", "c": "z"}]

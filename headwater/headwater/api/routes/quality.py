@@ -6,19 +6,20 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
-from headwater.core.events import EventType
+from headwater.api.project_scope import scoped_pipeline
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
 from headwater.services.contract_lifecycle import apply_contract_statuses
+from headwater.services.pipeline_state import persist_quality_report
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
 @router.get("/contracts")
-async def list_contracts(request: Request):
+async def list_contracts(request: Request, project_id: str | None = None):
     """List all quality contracts."""
-    contracts = request.app.state.pipeline["contracts"]
+    contracts = scoped_pipeline(request, project_id)["contracts"]
     return [
         {
             "id": c.id,
@@ -53,7 +54,12 @@ async def run_quality_checks(request: Request):
     report = build_report(results)
     pipeline["quality_report"] = report
     source_name = _active_source_name(pipeline)
-    quality_run_id = _persist_quality_report(request, source_name, report)
+    store = getattr(request.app.state, "metadata_store", None)
+    quality_run_id = (
+        persist_quality_report(store, source_name, report)
+        if store is not None
+        else None
+    )
 
     return {
         "total": report.total_contracts,
@@ -75,12 +81,18 @@ async def run_quality_checks(request: Request):
 
 
 @router.get("/quality")
-async def get_quality_report(request: Request):
+async def get_quality_report(request: Request, project_id: str | None = None):
     """Get the latest quality report."""
-    report = request.app.state.pipeline["quality_report"]
+    pipeline = scoped_pipeline(request, project_id)
+    report = pipeline["quality_report"]
     if not report:
         store = getattr(request.app.state, "metadata_store", None)
-        latest = store.get_latest_quality_report() if store is not None else None
+        source_names = pipeline.get("source_names") or []
+        latest = (
+            store.get_latest_quality_report(source_names[0])
+            if store is not None and source_names
+            else store.get_latest_quality_report() if store is not None else None
+        )
         if latest:
             return {
                 "total": latest["total_contracts"],
@@ -140,50 +152,3 @@ def _active_source_name(pipeline: dict) -> str:
     discovery = pipeline.get("discovery")
     source = getattr(discovery, "source", None)
     return getattr(source, "name", None) or "source"
-
-
-def _persist_quality_report(request: Request, source_name: str, report):
-    store = getattr(request.app.state, "metadata_store", None)
-    if store is None:
-        return None
-    run_id = store.save_quality_report(source_name, report)
-    if report.failed:
-        try:
-            store.insert_event(
-                EventType.QUALITY_CHECKS_FAILED,
-                f"{report.failed} quality contract(s) failed",
-                source_name=source_name,
-                severity="warning",
-                artifact_type="quality_run",
-                artifact_id=str(run_id),
-                payload={
-                    "quality_run_id": run_id,
-                    "total": report.total_contracts,
-                    "passed": report.passed,
-                    "failed": report.failed,
-                },
-                invalidates=["sources", "briefing", "health", "insights", "quality"],
-            )
-        except Exception:
-            logger.exception("Failed to emit quality event for '%s'", source_name)
-    elif getattr(report, "previous_failed", 0):
-        try:
-            store.insert_event(
-                EventType.QUALITY_CHECKS_RECOVERED,
-                "Quality contracts recovered",
-                source_name=source_name,
-                severity="info",
-                artifact_type="quality_run",
-                artifact_id=str(run_id),
-                payload={
-                    "quality_run_id": run_id,
-                    "total": report.total_contracts,
-                    "passed": report.passed,
-                    "failed": report.failed,
-                    "previous_failed": getattr(report, "previous_failed", 0),
-                },
-                invalidates=["sources", "briefing", "health", "insights", "quality"],
-            )
-        except Exception:
-            logger.exception("Failed to emit quality recovery event for '%s'", source_name)
-    return run_id

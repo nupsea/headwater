@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, type RerunPlan } from "@/lib/api";
 import { useToast } from "@/components/toast";
+import { useProjects } from "@/lib/project-context";
 
 const STORAGE_KEY = "hw-needs-rerun";
 
@@ -17,6 +18,7 @@ const STORAGE_KEY = "hw-needs-rerun";
  */
 export function RerunBanner() {
   const { toast } = useToast();
+  const { activeProject } = useProjects();
   const [needs, setNeeds] = useState(
     () =>
       typeof window !== "undefined" &&
@@ -24,8 +26,7 @@ export function RerunBanner() {
   );
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
-  const [sourceUri, setSourceUri] = useState<string | null>(null);
-  const [sourceName, setSourceName] = useState<string | null>(null);
+  const sourceName = activeProject?.sources?.[0] ?? null;
   const [plan, setPlan] = useState<RerunPlan | null>(null);
 
   useEffect(() => {
@@ -44,17 +45,6 @@ export function RerunBanner() {
     };
     window.addEventListener("hw-needs-rerun", onSet);
     window.addEventListener("hw-rerun-cleared", onClear);
-
-    fetch("/api/sources")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d?.sources?.length) {
-          const s = d.sources[d.sources.length - 1];
-          setSourceUri(s.uri || s.path || null);
-          setSourceName(s.name);
-        }
-      })
-      .catch(() => {});
 
     return () => {
       window.removeEventListener("hw-needs-rerun", onSet);
@@ -82,17 +72,13 @@ export function RerunBanner() {
   };
 
   const rerun = async () => {
-    if (!sourceName && !sourceUri) {
-      toast("No source registered. Add one on the Sources page.", "error");
+    if (!sourceName) {
+      toast("The selected project has no linked source.", "error");
       return;
     }
     setRunning(true);
     try {
-      if (sourceName) {
-        await api.syncSource(sourceName);
-      } else if (sourceUri) {
-        await api.pipelineRun(sourceUri);
-      }
+      await api.syncSource(sourceName);
       setDone(true);
       toast("Pipeline complete -- analysis updated", "success");
       setTimeout(dismiss, 1800);

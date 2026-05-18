@@ -146,6 +146,31 @@ class TestDataCatalog:
         stg = next(t for t in data["tables"] if t["table_name"] == "stg_readings")
         assert stg["row_count"] == 5
 
+    def test_catalog_respects_project_schema_scope(self, client):
+        client.app.state.duckdb_con.execute("""
+            CREATE SCHEMA IF NOT EXISTS src_lifestyle;
+            CREATE SCHEMA IF NOT EXISTS src_other;
+            CREATE TABLE src_lifestyle.orders (id INTEGER);
+            CREATE TABLE src_other.aqi_by_county (id INTEGER);
+        """)
+        store = client.app.state.metadata_store
+        store.upsert_source("lifestyle_redshift", "redshift", None, "redshift://example/db")
+        store.upsert_project(
+            "project-1",
+            "lifestyle",
+            "Lifestyle",
+            sources_json='["lifestyle_redshift"]',
+        )
+        store.upsert_table("orders", "lifestyle_redshift", schema_name="src_lifestyle", row_count=1)
+        store.upsert_column("orders", "lifestyle_redshift", "id", "int64")
+
+        resp = client.get("/api/data/catalog?project_id=project-1")
+
+        assert resp.status_code == 200
+        names = [t["qualified_name"] for t in resp.json()["tables"]]
+        assert "src_lifestyle.orders" in names
+        assert "src_other.aqi_by_county" not in names
+
 
 class TestDataPreview:
     """Test GET /data/{table_name}/preview."""

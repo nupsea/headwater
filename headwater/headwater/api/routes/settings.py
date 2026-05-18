@@ -6,10 +6,11 @@ import logging
 import os
 from typing import Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from headwater.core.config import get_settings, save_settings_to_file
+from headwater.core.draft_secrets import DraftSecretDependencyError, DraftSecretStore
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -47,6 +48,14 @@ class LLMVerifyResponse(BaseModel):
     latency_ms: int | None = None
 
 
+class SetupDraftSecretPayload(BaseModel):
+    password: str = ""
+
+
+class SetupDraftSecretStatus(BaseModel):
+    saved: bool
+
+
 @router.get("/settings/llm")
 async def get_llm_settings(request: Request) -> LLMSettingsResponse:
     """Return current LLM provider configuration. Never returns actual keys."""
@@ -59,6 +68,37 @@ async def get_llm_settings(request: Request) -> LLMSettingsResponse:
         has_api_key=bool(settings.llm_api_key),
         has_openai_compat_key=bool(settings.openai_compat_api_key),
     )
+
+
+@router.get("/settings/setup-drafts/create-project-secret")
+async def get_create_project_secret() -> SetupDraftSecretStatus:
+    try:
+        secret = DraftSecretStore().load("create-project") or {}
+    except DraftSecretDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return SetupDraftSecretStatus(saved=bool(secret.get("password")))
+
+
+@router.put("/settings/setup-drafts/create-project-secret")
+async def save_create_project_secret(body: SetupDraftSecretPayload):
+    try:
+        store = DraftSecretStore()
+        if body.password:
+            store.save("create-project", {"password": body.password})
+        else:
+            store.delete("create-project")
+    except DraftSecretDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"saved": bool(body.password)}
+
+
+@router.delete("/settings/setup-drafts/create-project-secret")
+async def delete_create_project_secret():
+    try:
+        DraftSecretStore().delete("create-project")
+    except DraftSecretDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"deleted": True}
 
 
 # Cloud-only model prefixes that cannot run in Ollama

@@ -18,10 +18,15 @@ from headwater.connectors.registry import (
     get_connector_capabilities,
     list_connector_catalog,
 )
+from headwater.connectors.snowflake_loader import (
+    SnowflakeConnector,
+    _parse_snowflake_uri,
+)
 from headwater.connectors.sqlite_loader import SQLiteConnector
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 from headwater.profiler.schema import extract_schema
+from headwater.services.source_evaluation import evaluate_connector_type
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sample"
 
@@ -106,6 +111,8 @@ class TestRegistry:
         assert catalog["sqlite"]["status"] == "supported"
         assert catalog["postgres"]["status"] == "supported"
         assert catalog["mysql"]["status"] == "preview"
+        assert catalog["snowflake"]["status"] == "preview"
+        assert catalog["snowflake"]["supported"] is True
         assert catalog["json"]["supported"] is True
         assert catalog["mysql"]["supported"] is False
         assert catalog["json"]["capabilities"]["list_tables"] is True
@@ -114,12 +121,15 @@ class TestRegistry:
         assert catalog["json"]["capabilities"]["sample_arrow"] is True
         assert catalog["mysql"]["capabilities"]["test"] is True
         assert catalog["mysql"]["capabilities"]["load_to_duckdb"] is False
+        assert catalog["snowflake"]["capabilities"]["execute_readonly"] is True
+        assert catalog["snowflake"]["capabilities"]["load_to_duckdb"] is False
 
     def test_connector_status_helper(self):
         assert connector_status("postgres") == "supported"
         assert connector_status("duckdb") == "supported"
         assert connector_status("sqlite") == "supported"
         assert connector_status("mysql") == "preview"
+        assert connector_status("snowflake") == "preview"
         assert connector_status("mongo") is None
 
     def test_connector_capabilities_helper(self):
@@ -128,6 +138,7 @@ class TestRegistry:
         sqlite_caps = get_connector_capabilities("sqlite")
         postgres_caps = get_connector_capabilities("postgres")
         mysql_caps = get_connector_capabilities("mysql")
+        snowflake_caps = get_connector_capabilities("snowflake")
 
         assert json_caps.load_to_duckdb is True
         assert duckdb_caps.load_to_duckdb is True
@@ -139,6 +150,29 @@ class TestRegistry:
         assert mysql_caps.test is True
         assert mysql_caps.execute_readonly is True
         assert mysql_caps.load_to_duckdb is False
+        assert snowflake_caps.test is True
+        assert snowflake_caps.list_tables is True
+        assert snowflake_caps.estimate_row_count is True
+        assert snowflake_caps.load_to_duckdb is False
+
+    def test_oltp_connector_evaluation_reports_constraint_gap(self):
+        evaluation = evaluate_connector_type("postgres")
+
+        assert evaluation["workload"] == "oltp"
+        assert evaluation["readiness"] == "needs_review"
+        assert evaluation["maturity_mode"] == "oltp_heuristic"
+        assert any(row["key"] == "constraints" for row in evaluation["evidence"])
+        assert any("PK/FK/check" in gap for gap in evaluation["gaps"])
+        assert evaluation["profiling_policy"]["mode"] == "metadata_first"
+
+    def test_olap_connector_evaluation_uses_observe_policy(self):
+        evaluation = evaluate_connector_type("duckdb")
+
+        assert evaluation["workload"] == "olap"
+        assert evaluation["readiness"] == "ready"
+        assert evaluation["maturity_mode"] == "warehouse_metadata"
+        assert evaluation["profiling_policy"]["mode"] == "observe"
+        assert evaluation["profiling_policy"]["aggregate_only_above_rows"] == 1_000_000
 
     def test_get_planned_connector_explains_status(self):
         with pytest.raises(ConnectorError, match="preview"):
@@ -311,6 +345,65 @@ class TestMySQLConnector:
             "user": "user",
             "password": "p@ss",
             "database": "analytics",
+        }
+
+
+class TestSnowflakeConnector:
+    def test_snowflake_preview_capabilities_are_declared(self):
+        caps = SnowflakeConnector().capabilities()
+        assert caps.test is True
+        assert caps.list_schemas is True
+        assert caps.list_tables is True
+        assert caps.list_columns is True
+        assert caps.profile_table is True
+        assert caps.sample_arrow is True
+        assert caps.execute_readonly is True
+        assert caps.estimate_row_count is True
+        assert caps.load_to_duckdb is False
+        assert caps.modes == ["generate", "observe"]
+
+    def test_snowflake_requires_uri(self):
+        loader = SnowflakeConnector()
+        with pytest.raises(ConnectorError, match="requires a URI"):
+            loader.connect(SourceConfig(name="snowflake", type="snowflake"))
+
+    def test_snowflake_missing_driver_error_is_actionable(self, monkeypatch):
+        import headwater.connectors.snowflake_loader as snowflake_loader
+
+        def missing_driver(name: str):
+            if name == "snowflake.connector":
+                raise ImportError("missing")
+            return None
+
+        monkeypatch.setattr(snowflake_loader.importlib, "import_module", missing_driver)
+
+        loader = SnowflakeConnector()
+        with pytest.raises(ConnectorError, match="uv add snowflake-connector-python"):
+            loader.connect(
+                SourceConfig(
+                    name="snowflake",
+                    type="snowflake",
+                    uri=(
+                        "snowflake://user:pass@acme-xy123/ANALYTICS/PUBLIC"
+                        "?warehouse=COMPUTE_WH&role=ANALYST"
+                    ),
+                )
+            )
+
+    def test_snowflake_uri_parsing(self):
+        parts = _parse_snowflake_uri(
+            "snowflake://analyst:p%40ss@acme-xy123/analytics/public"
+            "?warehouse=compute_wh&role=reader"
+        )
+        assert parts == {
+            "account": "acme-xy123",
+            "user": "analyst",
+            "password": "p@ss",
+            "database": "ANALYTICS",
+            "schema": "PUBLIC",
+            "warehouse": "compute_wh",
+            "role": "reader",
+            "authenticator": None,
         }
 
 

@@ -45,6 +45,23 @@ function colorFor(domain: string, palette: string[]): string {
   return palette[Math.abs(h) % palette.length];
 }
 
+function safeRowCount(node: Pick<GraphNode, "row_count">, fallback = 0): number {
+  return typeof node.row_count === "number" && Number.isFinite(node.row_count)
+    ? node.row_count
+    : fallback;
+}
+
+function formatRowCount(value: number): string {
+  return value.toLocaleString();
+}
+
+function compactRowCount(value: number): string {
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`;
+  }
+  return String(value);
+}
+
 // ---------- Layout ----------
 
 interface LaidOutNode extends GraphNode {
@@ -166,6 +183,9 @@ function layoutNodes(
       const h = health.get(t.id);
       out.push({
         ...t,
+        row_count: safeRowCount(t, h?.row_count ?? 0),
+        domain: t.domain || h?.domain || DEFAULT_DOMAIN,
+        description: t.description || h?.description || "",
         x: cursorX + CLUSTER_PAD + c * (CARD_W + CARD_GAP),
         y: cursorY + CLUSTER_PAD + 22 + r * (CARD_H + CARD_GAP),
         w: CARD_W,
@@ -674,16 +694,17 @@ export function ModelERD({ graphData, tableHealth, height = 620 }: Props) {
             const isSel = selected === n.id;
             const isExp = expanded === n.id;
             const color = colorFor(n.domain || DEFAULT_DOMAIN, DOMAIN_COLORS);
+            const rowCount = safeRowCount(n);
 
             if (effectiveDensity === "compact" && !isExp) {
-              const rowsLog = Math.max(1, Math.log10(Math.max(1, n.row_count)));
+              const rowsLog = Math.max(1, Math.log10(Math.max(1, rowCount)));
               const r = Math.max(6, Math.min(18, rowsLog * 4));
               return (
                 <button
                   key={n.id}
                   data-card
                   onClick={() => toggleExpand(n.id)}
-                  title={`${n.id} · ${n.row_count.toLocaleString()} rows`}
+                  title={`${n.id} · ${formatRowCount(rowCount)} rows`}
                   className="absolute group"
                   style={{
                     left: n.x + n.w / 2 - r,
@@ -747,9 +768,7 @@ export function ModelERD({ graphData, tableHealth, height = 620 }: Props) {
                       {n.id}
                     </span>
                     <span className="text-[10px] text-muted font-mono shrink-0">
-                      {n.row_count >= 1000
-                        ? `${(n.row_count / 1000).toFixed(n.row_count >= 10000 ? 0 : 1)}K`
-                        : n.row_count}
+                      {compactRowCount(rowCount)}
                     </span>
                   </div>
                   {n.pk.length > 0 ? (

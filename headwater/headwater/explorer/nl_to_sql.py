@@ -19,6 +19,8 @@ from typing import Any
 import duckdb
 
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider
+from headwater.analyzer.metadata_retrieval import build_lookup_index, retrieve_metadata
+from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.core.classification import (
     is_dimension_column as _shared_is_dimension,
 )
@@ -36,6 +38,7 @@ from headwater.core.models import (
     TableInfo,
 )
 from headwater.explorer.query_planner import QueryPlanner
+from headwater.explorer.readability import is_opaque_business_value, is_readable_dimension
 from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.utils import resolve_table_ref, table_exists
 from headwater.explorer.visualization import recommend_visualization
@@ -44,8 +47,36 @@ logger = logging.getLogger(__name__)
 
 MAX_REPAIR_ATTEMPTS = 3
 
+
+def _safe_sql_alias(value: str, prefix: str | None = None) -> str:
+    """Return a stable SQL-safe alias for human-readable column names."""
+    normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", value).strip("_").lower()
+    if not normalized:
+        normalized = "value"
+    if normalized[0].isdigit():
+        normalized = f"c_{normalized}"
+    if prefix:
+        normalized = f"{prefix}_{normalized}"
+    return normalized
+
 _FORBIDDEN_PATTERNS = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXEC)\b",
+    re.IGNORECASE,
+)
+_TEMPORAL_RESULT_RE = re.compile(
+    r"(date|time|month|year|day|week|quarter|period|hour|minute)", re.IGNORECASE
+)
+_METRIC_RESULT_RE = re.compile(
+    r"(count|records|rows|trips|events|rides|amount|fare|tip|value|avg|average|mean|"
+    r"median|min|max|sum|total|share|ratio|rate|duration|minutes?|hours?)",
+    re.IGNORECASE,
+)
+_EXPLICIT_DIMENSION_RE = re.compile(
+    r"(dimension|group|segment|category|type|status|route|origin|destination|location|zone|site)",
+    re.IGNORECASE,
+)
+_LOW_SIGNAL_FOLLOW_UP_RE = re.compile(
+    r"(flag|indicator|store and fwd|store_and_fwd|source file|source system|load batch|audit)",
     re.IGNORECASE,
 )
 
@@ -110,8 +141,13 @@ def ask(
     has_llm = provider is not None and not isinstance(provider, NoLLMProvider)
     context = _build_context(discovery, models or []) if has_llm else ""
 
+    preflight_result = _preflight_question_constraints(question, discovery, suggestions or [])
+    if preflight_result is not None:
+        return preflight_result
+
     # Strategy 0: Suggestion matcher (pre-built, validated SQL -- highest priority)
-    sql = _match_suggestion(question, suggestions or [])
+    matched_suggestion = _find_matching_suggestion(question, suggestions or [])
+    sql = matched_suggestion.sql_hint if matched_suggestion else None
 
     # Strategy 1: Catalog decomposer (ontology-driven, deterministic SQL)
     decomposition = None
@@ -204,7 +240,15 @@ def ask(
     if result.error and has_llm:
         result = _repair_loop(question, sql, result.error, con, context, provider)
 
-    result.warnings = warnings
+    readability_warnings, follow_ups = _business_readability_feedback(
+        question,
+        result,
+        suggestions or [],
+        matched_suggestion,
+    )
+    result.warnings = warnings + readability_warnings
+    if follow_ups and not result.suggestions:
+        result.suggestions = follow_ups
     return result
 
 
@@ -356,19 +400,27 @@ Fix the SQL query so it executes successfully. Return ONLY the corrected SQL."""
 # ---------------------------------------------------------------------------
 
 
-def _match_suggestion(
+def _find_matching_suggestion(
     question: str,
     suggestions: list[SuggestedQuestion],
-    con: duckdb.DuckDBPyConnection | None = None,
-) -> str | None:
+) -> SuggestedQuestion | None:
     """Find a suggested question that matches and has a SQL hint."""
     q_lower = question.lower().strip().rstrip("?")
 
     for s in suggestions:
         if s.sql_hint and _questions_similar(q_lower, s.question.lower().strip().rstrip("?")):
-            return s.sql_hint
+            return s
 
     return None
+
+
+def _match_suggestion(
+    question: str,
+    suggestions: list[SuggestedQuestion],
+) -> str | None:
+    """Backward-compatible helper that returns the SQL hint for a match."""
+    match = _find_matching_suggestion(question, suggestions)
+    return match.sql_hint if match else None
 
 
 _STOP_WORDS = {
@@ -688,18 +740,20 @@ def _heuristic_sql(
     if scalar_agg and not has_breakdown_word:
         metric = target_metric or (metric_cols[0] if metric_cols else None)
         if metric:
+            alias = _safe_sql_alias(metric.name, scalar_agg.lower())
             return (
                 f'SELECT {scalar_agg}("{metric.name}") AS '
-                f'{scalar_agg.lower()}_{metric.name} FROM {table_ref}'
+                f"{alias} FROM {table_ref}"
             )
 
     # -- COUNT DISTINCT: "how many distinct X are there?"
     if is_count and has_distinct:
         dim = target_dim or (dimension_cols[0] if dimension_cols else None)
         if dim:
+            alias = _safe_sql_alias(dim.name, "distinct")
             return (
                 f'SELECT COUNT(DISTINCT "{dim.name}") AS '
-                f'distinct_{dim.name} FROM {table_ref}'
+                f"{alias} FROM {table_ref}"
             )
 
     # -- Trend query: metric over time, optionally grouped by a dimension
@@ -724,7 +778,8 @@ def _heuristic_sql(
         if dim:
             parts[0] += f', "{dim.name}"'
         if metric:
-            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}'
+            avg_alias = _safe_sql_alias(metric.name, "avg")
+            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS {avg_alias}'
             parts[0] += ", COUNT(*) AS total"
         else:
             parts[0] += ", COUNT(*) AS total"
@@ -742,13 +797,14 @@ def _heuristic_sql(
         metric = target_metric or (metric_cols[0] if metric_cols else None)
         parts = [f'SELECT "{target_dim.name}"']
         if metric:
-            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}'
+            avg_alias = _safe_sql_alias(metric.name, "avg")
+            parts[0] += f', ROUND(AVG("{metric.name}"), 2) AS {avg_alias}'
         parts[0] += ", COUNT(*) AS total"
         parts.append(f"FROM {table_ref}")
         parts.append(f'GROUP BY "{target_dim.name}"')
         order = "ORDER BY total DESC"
         if metric:
-            order = f"ORDER BY avg_{metric.name} DESC"
+            order = f"ORDER BY {avg_alias} DESC"
         parts.append(order)
         return " ".join(parts)
 
@@ -757,12 +813,13 @@ def _heuristic_sql(
         metric = target_metric or (metric_cols[0] if metric_cols else None)
         dim = target_dim or (dimension_cols[0] if dimension_cols else None)
         if dim and metric:
+            avg_alias = _safe_sql_alias(metric.name, "avg")
             return (
-                f'SELECT "{dim.name}", ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}, '
+                f'SELECT "{dim.name}", ROUND(AVG("{metric.name}"), 2) AS {avg_alias}, '
                 f"COUNT(*) AS total "
                 f"FROM {table_ref} "
                 f'GROUP BY "{dim.name}" '
-                f"ORDER BY avg_{metric.name} DESC LIMIT 15"
+                f"ORDER BY {avg_alias} DESC LIMIT 15"
             )
         if dim:
             return (
@@ -786,9 +843,10 @@ def _heuristic_sql(
     if dimension_cols and metric_cols:
         dim = target_dim or dimension_cols[0]
         metric = target_metric or metric_cols[0]
+        avg_alias = _safe_sql_alias(metric.name, "avg")
         return (
             f'SELECT "{dim.name}", '
-            f'ROUND(AVG("{metric.name}"), 2) AS avg_{metric.name}, '
+            f'ROUND(AVG("{metric.name}"), 2) AS {avg_alias}, '
             f"COUNT(*) AS total "
             f"FROM {table_ref} "
             f'GROUP BY "{dim.name}" '
@@ -854,7 +912,9 @@ def _build_join_sql(
 
     select_parts = [f'{group_col} AS "{group_label}"', "COUNT(*) AS total"]
     if pri_metric:
-        select_parts.append(f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}')
+        select_parts.append(
+            f'ROUND(AVG(p."{pri_metric.name}"), 2) AS {_safe_sql_alias(pri_metric.name, "avg")}'
+        )
 
     return (
         f"SELECT {', '.join(select_parts)} "
@@ -999,7 +1059,9 @@ def _build_indirect_join_sql(
 
     select_parts = [f'{group_col} AS "{group_label}"', "COUNT(*) AS total"]
     if pri_metric:
-        select_parts.append(f'ROUND(AVG(p."{pri_metric.name}"), 2) AS avg_{pri_metric.name}')
+        select_parts.append(
+            f'ROUND(AVG(p."{pri_metric.name}"), 2) AS {_safe_sql_alias(pri_metric.name, "avg")}'
+        )
 
     return (
         f"SELECT {', '.join(select_parts)} "
@@ -1503,6 +1565,199 @@ def _check_grounding(
         )
 
     return warnings
+
+
+def _preflight_question_constraints(
+    question: str,
+    discovery: DiscoveryResult,
+    suggestions: list[SuggestedQuestion],
+) -> ExplorationResult | None:
+    """Fail fast for question types the current project cannot answer readably."""
+    if not re.search(r"\broutes?\b", question, re.IGNORECASE):
+        return None
+    if _project_has_readable_route_dimensions(discovery):
+        return None
+    return ExplorationResult(
+        question=question,
+        sql="",
+        error=(
+            "This project does not have a readable lookup for origin and destination IDs, "
+            "so route questions would return opaque codes instead of business labels."
+        ),
+        suggestions=_alternative_questions_for_unreadable_result(
+            question,
+            suggestions,
+            matched_suggestion=None,
+            route_like=True,
+        ),
+    )
+
+
+def _project_has_readable_route_dimensions(discovery: DiscoveryResult) -> bool:
+    metadata = retrieve_metadata(discovery)
+    semantic_schema = infer_semantic_schema(discovery, metadata.context if metadata else None)
+    lookup_index = build_lookup_index(discovery.tables, metadata, discovery.relationships)
+    for table in discovery.tables:
+        roles = roles_for_table(semantic_schema, table.name)
+        origin = roles.get("origin_id") or roles.get("location_id")
+        dest = roles.get("destination_id")
+        if not origin or not dest:
+            continue
+        if is_readable_dimension(table.name, origin.column_name, lookup_index, metadata) and (
+            is_readable_dimension(table.name, dest.column_name, lookup_index, metadata)
+        ):
+            return True
+    return False
+
+
+def _business_readability_feedback(
+    question: str,
+    result: ExplorationResult,
+    suggestions: list[SuggestedQuestion],
+    matched_suggestion: SuggestedQuestion | None,
+) -> tuple[list[str], list[str]]:
+    """Warn when an otherwise valid answer is dominated by raw IDs or codes."""
+    if result.error or not result.data:
+        return [], []
+
+    opaque_columns = _opaque_result_columns(result.data)
+    if not opaque_columns:
+        return [], []
+
+    route_like = any("route" in column.lower() for column in opaque_columns) or bool(
+        re.search(r"\broutes?\b", question, re.IGNORECASE)
+    )
+    if route_like:
+        warning = (
+            "This answer uses raw route or location IDs because the dataset does not "
+            "contain a readable lookup for those fields. The ranking may be correct, "
+            "but it is not yet business-readable."
+        )
+    else:
+        labels = ", ".join(f'"{column}"' for column in opaque_columns)
+        warning = (
+            f"This answer uses raw codes or IDs in {labels}. The query ran correctly, "
+            "but the result is not yet business-readable. Add a lookup table or "
+            "dictionary mapping to resolve those values."
+        )
+
+    follow_ups = _alternative_questions_for_unreadable_result(
+        question,
+        suggestions,
+        matched_suggestion,
+        route_like=route_like,
+    )
+    return [warning], follow_ups
+
+
+def _opaque_result_columns(data: list[dict[str, Any]]) -> list[str]:
+    if not data:
+        return []
+    columns = list(data[0].keys())
+    candidates: list[str] = []
+    for index, column in enumerate(columns):
+        if not _is_dimension_like_result_column(column, index, len(columns)):
+            continue
+        values = [row.get(column) for row in data[:20] if row.get(column) is not None]
+        if len(values) < 2:
+            continue
+        opaque = sum(1 for value in values if is_opaque_business_value(value))
+        if opaque / len(values) >= 0.8:
+            candidates.append(column)
+    return candidates
+
+
+def _is_dimension_like_result_column(column: str, index: int, total_columns: int) -> bool:
+    lower = column.lower()
+    if _TEMPORAL_RESULT_RE.search(lower):
+        return False
+    if _EXPLICIT_DIMENSION_RE.search(lower):
+        return True
+    if _METRIC_RESULT_RE.search(lower):
+        return False
+    return index == 0 and total_columns >= 2
+def _alternative_questions_for_unreadable_result(
+    question: str,
+    suggestions: list[SuggestedQuestion],
+    matched_suggestion: SuggestedQuestion | None,
+    *,
+    route_like: bool,
+) -> list[str]:
+    ranked: list[tuple[int, str]] = []
+    for suggestion in suggestions:
+        if matched_suggestion and suggestion.question == matched_suggestion.question:
+            continue
+        if _questions_similar(
+            question.lower().strip().rstrip("?"),
+            suggestion.question.lower().strip().rstrip("?"),
+        ):
+            continue
+        suggestion_lower = suggestion.question.lower()
+        if route_like and re.search(
+            r"\b(route|origin|destination|location|zone|pickup|dropoff)\b",
+            suggestion_lower,
+        ):
+            continue
+        if _LOW_SIGNAL_FOLLOW_UP_RE.search(suggestion.question):
+            continue
+        ranked.append((_follow_up_value_score(suggestion.question), suggestion.question))
+
+    ranked.sort(key=lambda item: (-item[0], len(item[1])))
+    prioritized_shapes = ("comparison", "trend", "ranking", "other", "count", "distribution")
+    alternatives: list[str] = []
+
+    for shape in prioritized_shapes:
+        for _score, prompt in ranked:
+            if prompt in alternatives or _follow_up_shape(prompt) != shape:
+                continue
+            alternatives.append(prompt)
+            break
+        if len(alternatives) >= 3:
+            return alternatives[:3]
+
+    for _score, prompt in ranked:
+        if prompt not in alternatives:
+            alternatives.append(prompt)
+        if len(alternatives) >= 3:
+            break
+    return alternatives
+
+
+def _follow_up_value_score(question: str) -> int:
+    lower = question.lower()
+    score = 0
+    if "weekday and weekend" in lower:
+        score += 8
+    if "wait time" in lower:
+        score += 8
+    if "longest" in lower:
+        score += 7
+    if "changed over time" in lower:
+        score += 6
+    if "hour has the highest" in lower or "busiest" in lower:
+        score += 6
+    if "highest" in lower:
+        score += 3
+    if "how many" in lower:
+        score -= 2
+    if "distribution of" in lower:
+        score -= 4
+    return score
+
+
+def _follow_up_shape(question: str) -> str:
+    lower = " ".join(question.lower().split())
+    if "changed over time" in lower or lower.startswith("how has "):
+        return "trend"
+    if lower.startswith("how do ") and " compare" in lower:
+        return "comparison"
+    if lower.startswith("which ") and " highest " in lower:
+        return "ranking"
+    if lower.startswith("how many "):
+        return "count"
+    if "distribution of" in lower:
+        return "distribution"
+    return "other"
 
 
 # ---------------------------------------------------------------------------

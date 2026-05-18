@@ -26,6 +26,8 @@ def test_init_creates_tables(meta: MetadataStore):
     assert "quality_results" in names
     assert "decisions" in names
     assert "llm_audit_log" in names
+    assert "warehouse_insight_plans" in names
+    assert "evidence_records" in names
 
 
 def test_upsert_and_get_source(meta: MetadataStore):
@@ -45,6 +47,41 @@ def test_list_sources(meta: MetadataStore):
     meta.upsert_source("b", "csv", "/b", None)
     sources = meta.list_sources()
     assert len(sources) == 2
+
+
+def test_warehouse_insight_plan_and_evidence_roundtrip(meta: MetadataStore):
+    meta.upsert_source("snow", "snowflake", None, "snowflake://account/db/schema")
+    plan_id = meta.insert_warehouse_insight_plan(
+        "snow",
+        budget={"max_queries": 3},
+        plan={"mode": "dry_run", "planned_queries": 1},
+    )
+    evidence_id = meta.insert_evidence_record(
+        "snow",
+        "warehouse_aggregate",
+        plan_id=plan_id,
+        artifact_type="table",
+        artifact_id="snow.orders",
+        table_name="orders",
+        query_purpose="freshness_volume_and_null_shape",
+        sql_text='SELECT COUNT(*) AS row_count FROM "PUBLIC"."ORDERS"',
+        coverage={"row_count": 1000},
+        sample={"method": "pushdown_aggregate"},
+        cost={"cost_tier": "low"},
+        confidence=0.8,
+        confidence_reason="Pushdown aggregate evidence.",
+        status="planned",
+    )
+
+    plans = meta.list_warehouse_insight_plans("snow")
+    assert plans[0]["id"] == plan_id
+    assert plans[0]["budget"] == {"max_queries": 3}
+    assert plans[0]["plan"]["planned_queries"] == 1
+
+    records = meta.list_evidence_records("snow", plan_id=plan_id)
+    assert records[0]["id"] == evidence_id
+    assert records[0]["coverage"]["row_count"] == 1000
+    assert records[0]["cost"]["cost_tier"] == "low"
 
 
 def test_upsert_source_idempotent(meta: MetadataStore):

@@ -8,6 +8,8 @@ from headwater.connectors.duckdb_loader import DuckDBConnector
 from headwater.connectors.json_loader import JsonLoader
 from headwater.connectors.mysql_loader import MySQLConnector
 from headwater.connectors.postgres_loader import PostgresConnector
+from headwater.connectors.redshift_loader import RedshiftConnector
+from headwater.connectors.snowflake_loader import SnowflakeConnector
 from headwater.connectors.sqlite_loader import SQLiteConnector
 from headwater.core.exceptions import ConnectorError
 
@@ -17,6 +19,8 @@ _REGISTRY: dict[str, type] = {
     "duckdb": DuckDBConnector,
     "sqlite": SQLiteConnector,
     "postgres": PostgresConnector,
+    "redshift": RedshiftConnector,
+    "snowflake": SnowflakeConnector,
 }
 
 _CAPABILITY_REGISTRY: dict[str, type] = {
@@ -57,8 +61,8 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Warehouse",
         "color": "#29b5e8",
         "glyph": "S",
-        "status": "planned",
-        "supported": False,
+        "status": "preview",
+        "supported": True,
     },
     {
         "id": "bigquery",
@@ -75,8 +79,8 @@ CONNECTOR_CATALOG: list[dict] = [
         "category": "Warehouse",
         "color": "#cc2b5e",
         "glyph": "R",
-        "status": "planned",
-        "supported": False,
+        "status": "preview",
+        "supported": True,
     },
     {
         "id": "databricks",

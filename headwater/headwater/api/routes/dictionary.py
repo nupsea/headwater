@@ -15,6 +15,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from headwater.api.project_scope import scoped_pipeline
 from headwater.analyzer.heuristics import generate_clarifying_questions
 from headwater.core.models import (
     CatalogItemSummary,
@@ -177,9 +178,9 @@ def _build_dictionary_table(
 
 
 @router.get("/dictionary")
-async def get_dictionary(request: Request):
+async def get_dictionary(request: Request, project_id: str | None = None):
     """Return the full data dictionary for the current source."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -213,9 +214,9 @@ async def get_dictionary(request: Request):
 
 
 @router.get("/dictionary/summary")
-async def get_review_summary(request: Request):
+async def get_review_summary(request: Request, project_id: str | None = None):
     """Return review progress summary."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -247,9 +248,9 @@ class CatalogItemAction(BaseModel):
 
 
 @router.get("/dictionary/catalog")
-async def get_catalog_for_review(request: Request):
+async def get_catalog_for_review(request: Request, project_id: str | None = None):
     """Return catalog metrics and dimensions with their review status."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -259,6 +260,13 @@ async def get_catalog_for_review(request: Request):
     metrics = store.get_catalog_metrics(source_name)
     dimensions = store.get_catalog_dimensions(source_name)
     entities = store.get_catalog_entities(source_name)
+    table_names = set(pipeline.get("table_names") or [])
+    if table_names:
+        metrics = [metric for metric in metrics if metric.get("table_name") in table_names]
+        dimensions = [
+            dimension for dimension in dimensions if dimension.get("table_name") in table_names
+        ]
+        entities = [entity for entity in entities if entity.get("table_name") in table_names]
 
     return {
         "metrics": metrics,
@@ -280,9 +288,10 @@ async def review_catalog_metric(
     metric_name: str,
     body: CatalogItemAction,
     request: Request,
+    project_id: str | None = None,
 ):
     """Confirm or reject a catalog metric."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -318,9 +327,10 @@ async def review_catalog_dimension(
     dimension_name: str,
     body: CatalogItemAction,
     request: Request,
+    project_id: str | None = None,
 ):
     """Confirm or reject a catalog dimension. Optionally update synonyms."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -361,9 +371,13 @@ async def review_catalog_dimension(
 
 
 @router.get("/dictionary/{table_name}")
-async def get_dictionary_table(table_name: str, request: Request):
+async def get_dictionary_table(
+    table_name: str,
+    request: Request,
+    project_id: str | None = None,
+):
     """Return data dictionary for a single table."""
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
@@ -379,6 +393,16 @@ async def get_dictionary_table(table_name: str, request: Request):
     if store:
         catalog_metrics = store.get_catalog_metrics(source_name)
         catalog_dimensions = store.get_catalog_dimensions(source_name)
+        table_names = set(pipeline.get("table_names") or [])
+        if table_names:
+            catalog_metrics = [
+                metric for metric in catalog_metrics if metric.get("table_name") in table_names
+            ]
+            catalog_dimensions = [
+                dimension
+                for dimension in catalog_dimensions
+                if dimension.get("table_name") in table_names
+            ]
 
     clarifying = generate_clarifying_questions([table], discovery.profiles)
     result = _build_dictionary_table(
@@ -398,13 +422,18 @@ class SkipRequest(BaseModel):
 
 
 @router.post("/dictionary/{table_name}/review")
-async def review_table(table_name: str, body: TableReviewRequest, request: Request):
+async def review_table(
+    table_name: str,
+    body: TableReviewRequest,
+    request: Request,
+    project_id: str | None = None,
+):
     """Submit a review for a table's data dictionary.
 
     Updates column classifications, descriptions, PKs. If confirm=True,
     locks all columns and marks the table as reviewed.
     """
-    pipeline = request.app.state.pipeline
+    pipeline = scoped_pipeline(request, project_id)
     discovery = pipeline["discovery"]
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")

@@ -9,6 +9,15 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+function projectQuery(projectId?: string | null): string {
+  return projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+}
+
+function appendProjectQuery(url: string, projectId?: string | null): string {
+  if (!projectId) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}project_id=${encodeURIComponent(projectId)}`;
+}
+
 // ---------- Types ----------
 
 export interface StatusResponse {
@@ -292,9 +301,28 @@ export interface DataInsight {
   chart: DataInsightChartPoint[];
 }
 
+export interface SemanticHighlight {
+  id: string;
+  title: string;
+  detail: string;
+  table: string;
+  metric: string;
+  insight_type: string;
+  severity: "info" | "warning" | "critical";
+  confidence_level: string | null;
+  support_count: number | null;
+  decision_lens: string;
+  metadata_signals: {
+    has_context: boolean;
+    glossary_terms: number;
+    lookup_tables: number;
+  };
+}
+
 export interface InsightsResponse {
   data_profile: DataProfile;
   top_insights: DataInsight[];
+  semantic_highlights?: SemanticHighlight[];
   workflow: Workflow;
   advisory_actions: AdvisoryAction[];
   overview: {
@@ -343,7 +371,7 @@ export interface PipelineRunResponse {
 
 export interface SuggestedQuestion {
   question: string;
-  source: "mart" | "relationship" | "quality" | "semantic" | "statistical" | "catalog" | "cross_table";
+  source: "business" | "mart" | "relationship" | "quality" | "semantic" | "statistical" | "catalog" | "cross_table";
   category: string;
   relevant_tables: string[];
   sql_hint: string | null;
@@ -355,8 +383,17 @@ export interface StatisticalInsight {
   insight_type:
     | "temporal_anomaly"
     | "period_comparison"
+    | "change_point"
     | "correlation"
-    | "distribution_shift";
+    | "distribution_shift"
+    | "coverage_period"
+    | "volume_distribution"
+    | "peak_period"
+    | "duration_distribution"
+    | "geographic_hotspot"
+    | "route_pair"
+    | "congestion_proxy"
+    | "data_quality";
   description: string;
   magnitude: number;
   z_score: number | null;
@@ -368,7 +405,7 @@ export interface StatisticalInsight {
 }
 
 export interface VisualizationSpec {
-  chart_type: "kpi" | "bar" | "line" | "scatter" | "table" | "heatmap";
+  chart_type: "kpi" | "bar" | "line" | "pie" | "scatter" | "table" | "heatmap";
   title: string;
   x_axis: string | null;
   y_axis: string | null;
@@ -406,13 +443,70 @@ export interface ExplorationResult {
 
 export interface ExploreSuggestionsResponse {
   suggestions: SuggestedQuestion[];
+  business_insights?: DataInsight[];
+  semantic_highlights?: SemanticHighlight[];
   insights: StatisticalInsight[];
+  diagnostics?: InsightFamilyDiagnostic[];
   review_pct: number;
 }
 
 export interface ExploreInsightsResponse {
+  business_insights?: DataInsight[];
+  semantic_highlights?: SemanticHighlight[];
   insights: StatisticalInsight[];
+  diagnostics?: InsightFamilyDiagnostic[];
   total: number;
+}
+
+export interface InsightFamilyDiagnostic {
+  schema_name: string;
+  physical_table: string;
+  table_name: string | null;
+  family: string;
+  status: "generated" | "skipped" | "failed";
+  required_roles: string[];
+  found_roles: string[];
+  generated_count: number;
+  reason: string | null;
+}
+
+export interface DatasetContext {
+  source_name: string;
+  row_represents: string | null;
+  time_grain: string | null;
+  period_covered: string | null;
+  lifecycle: string | null;
+  decisions: string | null;
+  quality_caveats: string | null;
+  external_references: string[];
+  updated_at: string | null;
+}
+
+export interface SemanticColumnRole {
+  table_name: string;
+  column_name: string;
+  canonical_role: string;
+  confidence: number;
+  source: "name_registry" | "profile_stats" | "human_lock" | "context";
+  locked: boolean;
+  reason: string | null;
+}
+
+export interface SemanticDerivedField {
+  table_name: string;
+  name: string;
+  expression: string;
+  role: string;
+  required_roles: string[];
+  confidence: number;
+}
+
+export interface SemanticSchema {
+  source_name: string;
+  columns: SemanticColumnRole[];
+  derived_fields: SemanticDerivedField[];
+  generated_at: string;
+  ambiguous_count: number;
 }
 
 // ---------- Drift types (US-402, US-403) ----------
@@ -634,7 +728,14 @@ export interface Project {
   catalog_confidence: number;
   created_at: string;
   updated_at: string;
+  sources: string[];
   progress?: ProjectProgress;
+}
+
+export interface ProjectUpdatePayload {
+  display_name?: string;
+  description?: string;
+  sources?: string[];
 }
 
 // ---------- v2: Catalog types ----------
@@ -874,6 +975,7 @@ export interface CreateProjectPayload {
   display_name: string;
   source_path?: string;
   description?: string;
+  sources?: string[];
 }
 
 // ---------- Connection test types ----------
@@ -886,15 +988,145 @@ export interface ConnectionTestResult {
   detail: string;
 }
 
+export interface SetupDraftSecretResponse {
+  saved: boolean;
+}
+
+export interface SourcePreviewTableDetail {
+  name: string;
+  estimated_rows: number | null;
+}
+
+export interface SourcePreviewResponse {
+  source_name: string;
+  source_type: string;
+  schemas_found: number;
+  schemas: string[];
+  tables_found: number;
+  tables_considered: number;
+  tables_skipped: number;
+  tables_skipped_names: string[];
+  tables: SourcePreviewTableDetail[];
+  total_estimated_rows: number | null;
+  has_row_estimates: boolean;
+  config: {
+    max_tables: number;
+    sample_rows: number;
+    schema_filter: Record<string, string[]> | null;
+  };
+  sample_rows_per_table: number;
+  estimated_sample_total: number;
+}
+
+// ---------- Warehouse insight planning types ----------
+
+export interface WarehouseInsightCandidate {
+  evidence_type: string;
+  artifact_type?: string;
+  artifact_id?: string;
+  table_name?: string;
+  query_purpose: string;
+  sql?: string | null;
+  status: "planned" | "skipped" | "succeeded" | "failed";
+  skipped_reason?: string | null;
+  confidence: number;
+  confidence_reason?: string | null;
+  coverage?: Record<string, unknown>;
+  sample?: Record<string, unknown>;
+  cost?: Record<string, unknown>;
+}
+
+export interface WarehouseInsightPlan {
+  source_name: string;
+  source_type: string;
+  mode: "dry_run";
+  plan_id: number;
+  budget: Record<string, unknown>;
+  tables_considered: number;
+  tables_available: number;
+  planned_queries: number;
+  skipped_queries: number;
+  policy: Record<string, unknown>;
+  candidates: WarehouseInsightCandidate[];
+  last_execution?: WarehouseInsightExecution;
+}
+
+export interface WarehouseInsightPlanRecord {
+  id: number;
+  source_name: string;
+  mode: string;
+  status: string;
+  budget: Record<string, unknown>;
+  plan: WarehouseInsightPlan;
+  created_at: string;
+}
+
+export interface EvidenceRecord {
+  id: number;
+  source_name: string;
+  plan_id: number | null;
+  evidence_type: string;
+  artifact_type: string | null;
+  artifact_id: string | null;
+  table_name: string | null;
+  model_name: string | null;
+  metric_name: string | null;
+  query_purpose: string | null;
+  sql_text: string | null;
+  coverage: Record<string, unknown>;
+  sample: Record<string, unknown>;
+  cost: Record<string, unknown>;
+  confidence: number;
+  confidence_reason: string | null;
+  status: string;
+  skipped_reason: string | null;
+  query_id: string | null;
+  statement_timeout_seconds: number | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface WarehouseInsightExecution {
+  plan_id: number;
+  source_name: string;
+  approved: boolean;
+  status: "succeeded" | "failed";
+  query_tag: string;
+  statement_timeout_seconds: number;
+  planned_queries: number;
+  executed_queries: number;
+  duration_ms: number;
+  results: {
+    status: "succeeded" | "failed";
+    table_name?: string;
+    query_purpose?: string;
+    sql: string;
+    row_count: number;
+    rows: Record<string, unknown>[];
+    duration_ms: number;
+    error?: string;
+    confidence_reason?: string;
+  }[];
+}
+
 // ---------- API calls ----------
 
 export const api = {
-  status: () => fetchJSON<StatusResponse>("/status"),
+  status: (projectId?: string | null) =>
+    fetchJSON<StatusResponse>(`/status${projectQuery(projectId)}`),
 
-  testConnection: (sourcePath: string, sourceType = "auto") =>
+  testConnection: (sourcePath: string, sourceType = "auto", filters?: { include_schemas?: string[]; exclude_schemas?: string[]; include_tables?: string[]; exclude_tables?: string[] }) =>
     fetchJSON<ConnectionTestResult>(
-      `/pipeline/test-connection?source_path=${encodeURIComponent(sourcePath)}&source_type=${sourceType}`,
-      { method: "POST" }
+      `/pipeline/test-connection`,
+      { 
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          source_path: sourcePath, 
+          source_type: sourceType,
+          ...filters 
+        }),
+      }
     ),
 
   pipelineRun: (sourcePath: string, sourceType = "auto") =>
@@ -903,49 +1135,55 @@ export const api = {
       { method: "POST" }
     ),
 
-  insights: () => fetchJSON<InsightsResponse>("/insights"),
+  insights: (projectId?: string | null) =>
+    fetchJSON<InsightsResponse>(`/insights${projectQuery(projectId)}`),
 
-  table: (name: string) => fetchJSON<TableDetail>(`/tables/${name}`),
+  table: (name: string, projectId?: string | null) =>
+    fetchJSON<TableDetail>(appendProjectQuery(`/tables/${name}`, projectId)),
 
-  tableProfile: (name: string) =>
-    fetchJSON<ColumnProfile[]>(`/tables/${name}/profile`),
+  tableProfile: (name: string, projectId?: string | null) =>
+    fetchJSON<ColumnProfile[]>(appendProjectQuery(`/tables/${name}/profile`, projectId)),
 
-  models: () => fetchJSON<ModelSummary[]>("/models"),
+  models: (projectId?: string | null) =>
+    fetchJSON<ModelSummary[]>(`/models${projectQuery(projectId)}`),
 
-  model: (name: string) => fetchJSON<ModelDetail>(`/models/${name}`),
+  model: (name: string, projectId?: string | null) =>
+    fetchJSON<ModelDetail>(appendProjectQuery(`/models/${name}`, projectId)),
 
-  modelImpact: () => fetchJSON<ModelImpactResponse>("/models/impact"),
+  modelImpact: (projectId?: string | null) =>
+    fetchJSON<ModelImpactResponse>(`/models/impact${projectQuery(projectId)}`),
 
   rerunPlan: (source?: string) =>
     fetchJSON<RerunPlan>(
       `/rerun-plan${source ? `?source=${encodeURIComponent(source)}` : ""}`
     ),
 
-  approveModel: (name: string) =>
-    fetchJSON<{ name: string; status: string }>(`/models/${name}/approve`, {
+  approveModel: (name: string, projectId?: string | null) =>
+    fetchJSON<{ name: string; status: string }>(appendProjectQuery(`/models/${name}/approve`, projectId), {
       method: "POST",
     }),
 
-  rejectModel: (name: string) =>
-    fetchJSON<{ name: string; status: string }>(`/models/${name}/reject`, {
+  rejectModel: (name: string, projectId?: string | null) =>
+    fetchJSON<{ name: string; status: string }>(appendProjectQuery(`/models/${name}/reject`, projectId), {
       method: "POST",
     }),
 
-  contracts: () => fetchJSON<ContractSummary[]>("/contracts"),
+  contracts: (projectId?: string | null) =>
+    fetchJSON<ContractSummary[]>(`/contracts${projectQuery(projectId)}`),
 
   // Data Dictionary
-  dictionary: () =>
-    fetchJSON<{ tables: DictTable[] }>("/dictionary"),
+  dictionary: (projectId?: string | null) =>
+    fetchJSON<{ tables: DictTable[] }>(`/dictionary${projectQuery(projectId)}`),
 
-  dictionaryTable: (name: string) =>
-    fetchJSON<DictTable>(`/dictionary/${name}`),
+  dictionaryTable: (name: string, projectId?: string | null) =>
+    fetchJSON<DictTable>(appendProjectQuery(`/dictionary/${name}`, projectId)),
 
-  dictionarySummary: () =>
-    fetchJSON<DictReviewSummary>("/dictionary/summary"),
+  dictionarySummary: (projectId?: string | null) =>
+    fetchJSON<DictReviewSummary>(`/dictionary/summary${projectQuery(projectId)}`),
 
-  reviewTable: (name: string, body: TableReviewPayload) =>
+  reviewTable: (name: string, body: TableReviewPayload, projectId?: string | null) =>
     fetchJSON<{ table: string; review_status: string; columns_updated: number }>(
-      `/dictionary/${name}/review`,
+      appendProjectQuery(`/dictionary/${name}/review`, projectId),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -965,31 +1203,52 @@ export const api = {
     }),
 
   // Data Viewer
-  dataCatalog: () => fetchJSON<CatalogResponse>("/data/catalog"),
+  dataCatalog: (projectId?: string | null) =>
+    fetchJSON<CatalogResponse>(`/data/catalog${projectQuery(projectId)}`),
 
-  dataPreview: (tableName: string, limit = 100) =>
+  dataPreview: (tableName: string, limit = 100, projectId?: string | null) =>
     fetchJSON<DataPreviewResponse>(
-      `/data/${tableName}/preview?limit=${limit}`
+      appendProjectQuery(`/data/${tableName}/preview?limit=${limit}`, projectId)
     ),
 
-  dataQuery: (sql: string) =>
-    fetchJSON<DataQueryResponse>("/data/query", {
+  dataQuery: (sql: string, projectId?: string | null) =>
+    fetchJSON<DataQueryResponse>(appendProjectQuery("/data/query", projectId), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sql }),
     }),
 
-  exploreSuggestions: () =>
-    fetchJSON<ExploreSuggestionsResponse>("/explore/suggestions"),
+  exploreSuggestions: (projectId?: string | null) =>
+    fetchJSON<ExploreSuggestionsResponse>(`/explore/suggestions${projectQuery(projectId)}`),
 
-  exploreInsights: () =>
-    fetchJSON<ExploreInsightsResponse>("/explore/insights"),
+  exploreInsights: (projectId?: string | null) =>
+    fetchJSON<ExploreInsightsResponse>(`/explore/insights${projectQuery(projectId)}`),
 
-  exploreAsk: (question: string) =>
-    fetchJSON<ExplorationResult>("/explore/ask", {
+  exploreAsk: (question: string, projectId?: string | null) =>
+    fetchJSON<ExplorationResult>(appendProjectQuery("/explore/ask", projectId), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
+    }),
+
+  datasetContext: (projectId?: string | null) =>
+    fetchJSON<DatasetContext>(`/dataset-context${projectQuery(projectId)}`),
+
+  saveDatasetContext: (body: DatasetContext, projectId?: string | null) =>
+    fetchJSON<DatasetContext>(appendProjectQuery("/dataset-context", projectId), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
+  semanticSchema: (projectId?: string | null) =>
+    fetchJSON<SemanticSchema>(`/semantic-schema${projectQuery(projectId)}`),
+
+  confirmSemanticSchema: (body: { min_confidence?: number; table_name?: string | null }, projectId?: string | null) =>
+    fetchJSON<{ columns_confirmed: number }>(appendProjectQuery("/semantic-schema/confirm", projectId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
 
   // Drift (US-402, US-403)
@@ -1034,11 +1293,12 @@ export const api = {
     fetchJSON<{ deleted: string }>(`/projects/${id}`, { method: "DELETE" }),
 
   // v2: Catalog review
-  catalogReview: () => fetchJSON<CatalogReviewResponse>("/dictionary/catalog"),
+  catalogReview: (projectId?: string | null) =>
+    fetchJSON<CatalogReviewResponse>(`/dictionary/catalog${projectQuery(projectId)}`),
 
-  reviewMetric: (name: string, action: "confirmed" | "rejected") =>
+  reviewMetric: (name: string, action: "confirmed" | "rejected", projectId?: string | null) =>
     fetchJSON<{ metric: string; status: string; confidence: number }>(
-      `/dictionary/catalog/metrics/${name}`,
+      appendProjectQuery(`/dictionary/catalog/metrics/${name}`, projectId),
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1046,9 +1306,9 @@ export const api = {
       }
     ),
 
-  reviewDimension: (name: string, action: "confirmed" | "rejected", synonyms?: string[]) =>
+  reviewDimension: (name: string, action: "confirmed" | "rejected", synonyms?: string[], projectId?: string | null) =>
     fetchJSON<{ dimension: string; status: string; confidence: number }>(
-      `/dictionary/catalog/dimensions/${name}`,
+      appendProjectQuery(`/dictionary/catalog/dimensions/${name}`, projectId),
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1057,9 +1317,11 @@ export const api = {
     ),
 
   // v2: Graph
-  graphData: () => fetchJSON<GraphData>("/graph/data"),
+  graphData: (projectId?: string | null) =>
+    fetchJSON<GraphData>(`/graph/data${projectQuery(projectId)}`),
 
-  graphPatterns: () => fetchJSON<GraphPatterns>("/graph/patterns"),
+  graphPatterns: (projectId?: string | null) =>
+    fetchJSON<GraphPatterns>(`/graph/patterns${projectQuery(projectId)}`),
 
   graphJoinPath: (from: string, to: string) =>
     fetchJSON<{ from_table: string; to_table: string; path: unknown[] | null; hop_count?: number }>(
@@ -1084,11 +1346,29 @@ export const api = {
 
   // v3: Verify LLM connectivity
   verifyLLM: () => fetchJSON<LLMVerifyResponse>("/settings/verify-llm"),
+  getCreateProjectSecret: () =>
+    fetchJSON<SetupDraftSecretResponse>("/settings/setup-drafts/create-project-secret"),
+  saveCreateProjectSecret: (body: { password: string }) =>
+    fetchJSON<{ saved: boolean }>("/settings/setup-drafts/create-project-secret", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteCreateProjectSecret: () =>
+    fetchJSON<{ deleted: boolean }>("/settings/setup-drafts/create-project-secret", {
+      method: "DELETE",
+    }),
 
   // v3: Create project
   createProject: (body: CreateProjectPayload) =>
     fetchJSON<Project>("/projects", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  updateProject: (id: string, body: ProjectUpdatePayload) =>
+    fetchJSON<Project>(`/projects/${id}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
@@ -1106,8 +1386,10 @@ export const api = {
     fetchJSON<{ activities: ActivityEntry[] }>(`/activity?limit=${limit}`),
 
   // v3: PK/FK suggestions
-  pkfkSuggestions: (table: string) =>
-    fetchJSON<PKFKSuggestions>(`/tables/${table}/pk-fk-suggestions`),
+  pkfkSuggestions: (table: string, projectId?: string | null) =>
+    fetchJSON<PKFKSuggestions>(
+      appendProjectQuery(`/tables/${table}/pk-fk-suggestions`, projectId)
+    ),
 
   // v3: Confirm/reject PK/FK
   persistKeys: (table: string, body: {
@@ -1115,9 +1397,9 @@ export const api = {
     reject_pks?: string[];
     confirm_fks?: { from_col: string; to_table: string; to_col: string }[];
     reject_fk_ids?: number[];
-  }) =>
+  }, projectId?: string | null) =>
     fetchJSON<{ pks_confirmed: number; pks_rejected: number; fks_confirmed: number; fks_rejected: number }>(
-      `/tables/${table}/keys`,
+      appendProjectQuery(`/tables/${table}/keys`, projectId),
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1126,9 +1408,13 @@ export const api = {
     ),
 
   // v3: Model answers
-  submitModelAnswers: (modelName: string, answers: { question_index: number; answer: string }[]) =>
+  submitModelAnswers: (
+    modelName: string,
+    answers: { question_index: number; answer: string }[],
+    projectId?: string | null
+  ) =>
     fetchJSON<{ model_name: string; answers_saved: number }>(
-      `/models/${modelName}/answers`,
+      appendProjectQuery(`/models/${modelName}/answers`, projectId),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1136,9 +1422,9 @@ export const api = {
       }
     ),
 
-  getModelAnswers: (modelName: string) =>
+  getModelAnswers: (modelName: string, projectId?: string | null) =>
     fetchJSON<{ model_name: string; answers: ModelAnswer[] }>(
-      `/models/${modelName}/answers`
+      appendProjectQuery(`/models/${modelName}/answers`, projectId)
     ),
 
   // v3: Dictionary answers (table-scoped)
@@ -1176,11 +1462,18 @@ export const api = {
     ),
 
   // Sources (multi-source)
-  sources: () => fetchJSON<{ sources: SourceSummary[] }>("/sources"),
+  sources: (projectId?: string | null) =>
+    fetchJSON<{ sources: SourceSummary[] }>(`/sources${projectQuery(projectId)}`),
   source: (name: string) => fetchJSON<SourceDetail>(`/sources/${name}`),
   createSource: (body: SourceCreatePayload) =>
     fetchJSON<SourceSummary>("/sources", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  updateSource: (name: string, body: SourceUpdatePayload) =>
+    fetchJSON<SourceDetail>(`/sources/${name}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
@@ -1197,11 +1490,19 @@ export const api = {
       `/sources/${name}/sync`,
       { method: "POST" }
     ),
+  testSource: (name: string) =>
+    fetchJSON<ConnectionTestResult>(`/sources/${name}/test`, {
+      method: "POST",
+    }),
   deleteSource: (name: string) =>
     fetchJSON<{ name: string; deleted: boolean }>(
       `/sources/${name}`,
       { method: "DELETE" }
     ),
+  previewSource: (name: string) =>
+    fetchJSON<SourcePreviewResponse>(`/sources/${name}/preview`, {
+      method: "POST",
+    }),
   sourceEvents: (name: string, limit = 50) =>
     fetchJSON<{ events: SystemEvent[] }>(`/sources/${name}/events?limit=${limit}`),
   events: (limit = 50, source?: string) =>
@@ -1212,9 +1513,49 @@ export const api = {
     fetchJSON<{ events: SyncEvent[] }>(`/sync-events?limit=${limit}`),
   connectorCatalog: () =>
     fetchJSON<{ connectors: ConnectorType[] }>("/connector-catalog"),
+  sourceEvaluations: () =>
+    fetchJSON<{ evaluations: SourceEvaluation[] }>("/source-evaluations"),
+  sourceEvaluation: (name: string) =>
+    fetchJSON<SourceEvaluation>(`/sources/${name}/evaluation`),
+
+  dryRunWarehouseInsightPlan: (sourceName: string, body: Record<string, unknown> = {}) =>
+    fetchJSON<WarehouseInsightPlan>(
+      `/sources/${encodeURIComponent(sourceName)}/insight-plan/dry-run`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    ),
+  executeWarehouseInsightPlan: (
+    planId: number,
+    body: {
+      approved: boolean;
+      max_queries?: number;
+      query_tag?: string;
+      statement_timeout_seconds?: number;
+    }
+  ) =>
+    fetchJSON<WarehouseInsightExecution>(`/warehouse-insight-plans/${planId}/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  warehouseInsightPlans: (source?: string) =>
+    fetchJSON<{ plans: WarehouseInsightPlanRecord[] }>(
+      `/warehouse-insight-plans${source ? `?source=${encodeURIComponent(source)}` : ""}`
+    ),
+  evidence: (source?: string, planId?: number) =>
+    fetchJSON<{ records: EvidenceRecord[] }>(
+      `/evidence?${new URLSearchParams({
+        ...(source ? { source } : {}),
+        ...(planId ? { plan_id: String(planId) } : {}),
+      }).toString()}`
+    ),
 
   // Briefing (homepage)
-  briefingToday: () => fetchJSON<BriefingResponse>("/briefing/today"),
+  briefingToday: (projectId?: string | null) =>
+    fetchJSON<BriefingResponse>(`/briefing/today${projectQuery(projectId)}`),
 };
 
 // ---------- Multi-source types ----------
@@ -1237,6 +1578,37 @@ export interface SourceSummary {
   tables: number;
   rows: number;
   schemas: number;
+  evaluation: SourceEvaluation;
+}
+
+export interface SourceEvaluationEvidence {
+  key: string;
+  label: string;
+  status: "ok" | "warning" | "gap";
+  detail: string;
+}
+
+export interface SourceEvaluationAction {
+  priority: "blocking" | "recommended" | "informational";
+  title: string;
+  detail: string;
+}
+
+export interface SourceEvaluation {
+  source_type: string;
+  source_name?: string;
+  workload: "files" | "oltp" | "olap" | "unknown";
+  readiness: "ready" | "needs_sync" | "needs_review" | "limited" | "preview" | "planned";
+  score: number;
+  maturity_mode: string;
+  status: string;
+  supported: boolean;
+  capabilities: ConnectorCapabilities;
+  evidence: SourceEvaluationEvidence[];
+  gaps: string[];
+  warnings: string[];
+  recommended_actions: SourceEvaluationAction[];
+  profiling_policy: Record<string, unknown>;
 }
 
 export interface SyncEvent {
@@ -1265,6 +1637,9 @@ export interface SystemEvent {
 }
 
 export interface SourceDetail extends SourceSummary {
+  uri?: string | null;
+  path?: string | null;
+  config?: Record<string, unknown>;
   events: SystemEvent[];
   runs: SyncRun[];
 }
@@ -1287,6 +1662,16 @@ export interface SyncRun {
 export interface SourceCreatePayload {
   name: string;
   type: string;
+  host?: string;
+  uri?: string;
+  path?: string;
+  display_name?: string;
+  auto_sync?: boolean;
+  config?: Record<string, unknown>;
+}
+
+export interface SourceUpdatePayload {
+  type?: string;
   host?: string;
   uri?: string;
   path?: string;
