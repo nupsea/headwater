@@ -93,6 +93,5 @@ cd ui && npx tsc --noEmit
 ## Documentation
 
 - [Current Architecture](docs/ARCHITECTURE.md)
-- [Progress and Roadmap](docs/PROGRESS.md)
-- [Implementation Plan](IMPLEMENTATION_PLAN.md)
+- [Active Implementation Plan](IMPLEMENTATION_PLAN.md)
 - Archived plans live in [archives](archives/).
