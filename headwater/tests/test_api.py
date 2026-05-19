@@ -80,6 +80,74 @@ class TestProjectContext:
         titles = {resource["title"] for resource in resources}
         assert "Business glossary" in titles
 
+    def test_user_can_review_context_item(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        item = next(
+            entry for entry in context["items"] if entry["item_type"] == "column_semantics"
+        )
+
+        review = client.patch(
+            f"/api/projects/source/context/items/{item['id']}",
+            json={
+                "status": "approved",
+                "confidence": 0.98,
+                "reason": "Validated during context review",
+                "value": {
+                    **item["value"],
+                    "description": "Reviewed business meaning.",
+                    "role": "dimension",
+                },
+            },
+        )
+        assert review.status_code == 200
+        reviewed = review.json()
+        assert reviewed["status"] == "approved"
+        assert reviewed["source"] == "user"
+        assert reviewed["value"]["description"] == "Reviewed business meaning."
+
+        refreshed = client.get("/api/projects/source/context").json()
+        updated = next(entry for entry in refreshed["items"] if entry["id"] == item["id"])
+        assert updated["status"] == "approved"
+        assert updated["value"]["description"] == "Reviewed business meaning."
+
+    def test_project_context_export_renders_yaml_and_review_markdown(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        item = next(
+            entry for entry in context["items"] if entry["item_type"] == "column_semantics"
+        )
+        client.post(
+            f"/api/projects/source/context/items/{item['id']}/lock",
+            json={
+                "reason": "Keep reviewed meaning stable",
+                "confidence": 0.99,
+                "value": {
+                    **item["value"],
+                    "description": "Locked business definition.",
+                    "role": "identifier",
+                    "semantic_type": "id",
+                },
+            },
+        )
+
+        exported = client.get("/api/projects/source/context/export")
+        assert exported.status_code == 200
+        files = exported.json()["files"]
+
+        assert "context.yaml" in files
+        assert "semantic_types.yaml" in files
+        assert "semantic_schema.yaml" in files
+        assert "REVIEW.md" in files
+        assert "version: 1" in files["context.yaml"]
+        assert "Locked business definition." in files["semantic_types.yaml"]
+        assert "role: identifier" in files["semantic_schema.yaml"]
+        assert "# Project Context Review: source" in files["REVIEW.md"]
+
 
 class TestInsightRanking:
     def test_semantic_insights_rank_before_generic_anomaly(self):

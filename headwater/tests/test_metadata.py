@@ -317,6 +317,57 @@ def test_project_context_roundtrip_and_preserve_reviewed_items(meta: MetadataSto
     assert refreshed["value"]["semantic_type"] == "id"
 
 
+def test_update_project_context_item_allows_user_review_edits(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "value": {"semantic_type": "dimension"},
+                "confidence": 0.61,
+                "evidence": [],
+            }
+        ],
+    )
+
+    updated = meta.update_project_context_item(
+        "column_semantics:orders.status_code",
+        project_id="src",
+        status="locked",
+        value={
+            "semantic_type": "dimension",
+            "role": "dimension",
+            "description": "Business lifecycle status for the order.",
+        },
+        confidence=0.99,
+        source="user",
+        evidence=[
+            {
+                "evidence_type": "review",
+                "source": "user",
+                "summary": "Confirmed by reviewer.",
+                "payload": {"reviewer": "tester"},
+            }
+        ],
+    )
+
+    assert updated is not None
+    assert updated["status"] == "locked"
+    assert updated["value"]["description"] == "Business lifecycle status for the order."
+    assert updated["confidence"] == 0.99
+    assert updated["source"] == "user"
+    assert updated["evidence"][0]["evidence_type"] == "review"
+
+
 def test_load_retrieved_metadata_uses_store_backed_project_context(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     meta.upsert_dataset_context(

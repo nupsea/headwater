@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -18,6 +19,7 @@ from headwater.api.project_scope import (
     visible_projects,
 )
 from headwater.core.runtime_state import get_runtime_state
+from headwater.services.context_projection import build_context_exports
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -47,6 +49,21 @@ class AddContextResourceRequest(BaseModel):
     location: str | None = None
     status: str = "active"
     metadata: dict = Field(default_factory=dict)
+
+
+class UpdateContextItemRequest(BaseModel):
+    status: Literal["proposed", "approved", "rejected", "locked", "needs_review"] | None = None
+    value: dict | None = None
+    name: str | None = None
+    title: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    reason: str | None = None
+
+
+class ContextItemDecisionRequest(BaseModel):
+    reason: str | None = None
+    value: dict | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 def _slugify(name: str) -> str:
@@ -190,9 +207,7 @@ def _compute_progress(
 
 
 def _project_context_payload(project: dict, store) -> dict:
-    ids = _source_ids_for_project(project, store)
-    if project["id"] not in ids:
-        ids.insert(0, project["id"])
+    ids = _context_ids_for_project(project, store)
 
     dataset_contexts = []
     items: list[dict] = []
@@ -240,6 +255,66 @@ def _project_context_payload(project: dict, store) -> dict:
             "status_counts": status_counts,
         },
     }
+
+
+def _context_ids_for_project(project: dict, store) -> list[str]:
+    ids = _source_ids_for_project(project, store)
+    if project["id"] not in ids:
+        ids.insert(0, project["id"])
+    return ids
+
+
+def _find_project_context_item(project: dict, store, item_id: str) -> dict | None:
+    for context_id in _context_ids_for_project(project, store):
+        item = store.get_project_context_item(item_id, project_id=context_id)
+        if item is not None:
+            return item
+    return None
+
+
+def _update_context_item(
+    project: dict,
+    store,
+    item_id: str,
+    *,
+    status: str | None = None,
+    value: dict | None = None,
+    name: str | None = None,
+    title: str | None = None,
+    confidence: float | None = None,
+    reason: str | None = None,
+) -> dict:
+    item = _find_project_context_item(project, store, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"Context item '{item_id}' not found.")
+    updated = store.update_project_context_item(
+        item_id,
+        project_id=item["project_id"],
+        status=status if status is not None else item.get("status"),
+        value=value if value is not None else item.get("value"),
+        name=name if name is not None else item.get("name"),
+        title=title if title is not None else item.get("title"),
+        confidence=confidence if confidence is not None else item.get("confidence"),
+        source="user",
+    )
+    assert updated is not None
+    store.record_decision(
+        "project_context_item",
+        item_id,
+        updated["status"],
+        reason=reason,
+        payload={
+            "before": item,
+            "after": updated,
+        },
+    )
+    store.log_activity(
+        "project_context_item_reviewed",
+        f"Updated context item '{item_id}' to {updated['status']}",
+        artifact_type="project_context_item",
+        artifact_id=item_id,
+    )
+    return updated
 
 
 def _compute_maturity(progress: dict) -> tuple[str, float]:
@@ -644,6 +719,130 @@ async def get_project_context(project_id: str, request: Request):
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
     return _project_context_payload(project, store)
+
+
+@router.patch("/projects/{project_id}/context/items/{item_id}")
+async def update_project_context_item(
+    project_id: str,
+    item_id: str,
+    body: UpdateContextItemRequest,
+    request: Request,
+):
+    """Update or review a canonical context item."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    if (
+        body.status is None
+        and body.value is None
+        and body.name is None
+        and body.title is None
+        and body.confidence is None
+    ):
+        raise HTTPException(status_code=400, detail="No context item changes were provided.")
+    return _update_context_item(
+        project,
+        store,
+        item_id,
+        status=body.status,
+        value=body.value,
+        name=body.name,
+        title=body.title,
+        confidence=body.confidence,
+        reason=body.reason,
+    )
+
+
+@router.post("/projects/{project_id}/context/items/{item_id}/approve")
+async def approve_project_context_item(
+    project_id: str,
+    item_id: str,
+    request: Request,
+    body: ContextItemDecisionRequest | None = None,
+):
+    """Approve a canonical context item."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    body = body or ContextItemDecisionRequest()
+    return _update_context_item(
+        project,
+        store,
+        item_id,
+        status="approved",
+        value=body.value,
+        confidence=body.confidence,
+        reason=body.reason,
+    )
+
+
+@router.post("/projects/{project_id}/context/items/{item_id}/reject")
+async def reject_project_context_item(
+    project_id: str,
+    item_id: str,
+    request: Request,
+    body: ContextItemDecisionRequest | None = None,
+):
+    """Reject a canonical context item."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    body = body or ContextItemDecisionRequest()
+    return _update_context_item(
+        project,
+        store,
+        item_id,
+        status="rejected",
+        value=body.value,
+        confidence=body.confidence,
+        reason=body.reason,
+    )
+
+
+@router.post("/projects/{project_id}/context/items/{item_id}/lock")
+async def lock_project_context_item(
+    project_id: str,
+    item_id: str,
+    request: Request,
+    body: ContextItemDecisionRequest | None = None,
+):
+    """Lock a canonical context item."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    body = body or ContextItemDecisionRequest()
+    return _update_context_item(
+        project,
+        store,
+        item_id,
+        status="locked",
+        value=body.value,
+        confidence=body.confidence,
+        reason=body.reason,
+    )
+
+
+@router.get("/projects/{project_id}/context/export")
+async def export_project_context(
+    project_id: str,
+    request: Request,
+    include_proposed: bool = Query(default=True),
+):
+    """Export canonical context as machine and review projections."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    payload = _project_context_payload(project, store)
+    return {
+        "project_id": project["id"],
+        "include_proposed": include_proposed,
+        "files": build_context_exports(payload, include_proposed=include_proposed),
+    }
 
 
 @router.post("/projects/{project_id}/context/resources")

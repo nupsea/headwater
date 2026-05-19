@@ -9,10 +9,12 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from headwater.core.exceptions import MetadataError
 
 logger = logging.getLogger(__name__)
+_UNSET = object()
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -1046,6 +1048,91 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         sql += " ORDER BY item_type, table_name, column_name, name, id"
         rows = self.con.execute(sql, params).fetchall()
         return [self._decode_project_context_item(dict(row)) for row in rows]
+
+    def get_project_context_item(
+        self,
+        item_id: str,
+        *,
+        project_id: str | None = None,
+    ) -> dict | None:
+        sql = "SELECT * FROM project_context_items WHERE id = ?"
+        params: list[Any] = [item_id]
+        if project_id is not None:
+            sql += " AND project_id = ?"
+            params.append(project_id)
+        row = self.con.execute(sql, params).fetchone()
+        if row is None:
+            return None
+        return self._decode_project_context_item(dict(row))
+
+    def update_project_context_item(
+        self,
+        item_id: str,
+        *,
+        project_id: str | None = None,
+        status: str | object = _UNSET,
+        value: dict | None | object = _UNSET,
+        name: str | None | object = _UNSET,
+        title: str | None | object = _UNSET,
+        confidence: float | None | object = _UNSET,
+        source: str | None | object = _UNSET,
+        evidence: list[dict] | None | object = _UNSET,
+    ) -> dict | None:
+        item = self.get_project_context_item(item_id, project_id=project_id)
+        if item is None:
+            return None
+
+        new_status = item["status"] if status is _UNSET else status
+        new_value = item["value"] if value is _UNSET else (value or {})
+        new_name = item["name"] if name is _UNSET else name
+        new_title = item.get("title") if title is _UNSET else title
+        new_confidence = item["confidence"] if confidence is _UNSET else confidence
+        new_source = item["source"] if source is _UNSET else source
+
+        self.con.execute(
+            """
+            UPDATE project_context_items
+            SET status = ?,
+                value_json = ?,
+                name = ?,
+                title = ?,
+                confidence = ?,
+                source = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+              AND (? IS NULL OR project_id = ?)
+            """,
+            (
+                new_status,
+                json.dumps(new_value),
+                new_name,
+                new_title,
+                new_confidence,
+                new_source,
+                item_id,
+                project_id,
+                project_id,
+            ),
+        )
+        if evidence is not _UNSET:
+            self.con.execute("DELETE FROM project_context_evidence WHERE item_id = ?", (item_id,))
+            for record in evidence or []:
+                self.con.execute(
+                    """
+                    INSERT INTO project_context_evidence
+                        (item_id, evidence_type, source, summary, payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item_id,
+                        record.get("evidence_type", "review"),
+                        record.get("source", "user"),
+                        record.get("summary", ""),
+                        json.dumps(record.get("payload") or {}),
+                    ),
+                )
+        self.con.commit()
+        return self.get_project_context_item(item_id, project_id=project_id)
 
     def upsert_project_context_resource(
         self,
