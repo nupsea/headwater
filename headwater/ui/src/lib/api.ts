@@ -794,6 +794,46 @@ export interface ProjectContextResponse {
   };
 }
 
+export interface ProjectContextDecision {
+  id: number;
+  artifact_type: string;
+  artifact_id: string;
+  action: string;
+  reason: string | null;
+  payload_json?: string | null;
+  created_at: string;
+}
+
+export interface ProjectContextDriftReport {
+  id: number;
+  source_name: string;
+  run_id_from: number | null;
+  run_id_to: number;
+  acknowledged: number;
+  detected_at: string;
+  diff: {
+    no_changes?: boolean;
+    tables_added?: string[];
+    tables_removed?: string[];
+    tables_changed?: Array<{
+      table_name: string;
+      change_type: string;
+      column_changes?: Array<{
+        column_name: string;
+        change_type: string;
+        before?: string | null;
+        after?: string | null;
+      }>;
+    }>;
+  };
+}
+
+export interface ProjectContextHistoryResponse {
+  project_id: string;
+  decisions: ProjectContextDecision[];
+  drift_reports: ProjectContextDriftReport[];
+}
+
 export interface ProjectContextExportResponse {
   project_id: string;
   include_proposed: boolean;
@@ -1354,6 +1394,9 @@ export const api = {
   projectContext: (id: string) =>
     fetchJSON<ProjectContextResponse>(`/projects/${id}/context`),
 
+  projectContextHistory: (id: string, limit = 20) =>
+    fetchJSON<ProjectContextHistoryResponse>(`/projects/${id}/context/history?limit=${limit}`),
+
   reviewProjectContextItem: (
     projectId: string,
     itemId: string,
@@ -1412,6 +1455,7 @@ export const api = {
       resource_type: string;
       title: string;
       location?: string | null;
+      content?: string | null;
       status?: string;
       metadata?: Record<string, unknown>;
     }

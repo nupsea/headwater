@@ -49,6 +49,7 @@ class AddContextResourceRequest(BaseModel):
     resource_type: str
     title: str
     location: str | None = None
+    content: str | None = None
     status: str = "active"
     metadata: dict = Field(default_factory=dict)
 
@@ -279,6 +280,80 @@ def _find_project_context_item(project: dict, store, item_id: str) -> dict | Non
     return None
 
 
+def _project_context_history_payload(project: dict, store, *, limit: int = 20) -> dict:
+    source_names = project_sources(project, store)
+    context_ids = set(_context_ids_for_project(project, store))
+    item_ids = {
+        item["id"]
+        for context_id in context_ids
+        for item in store.list_project_context_items(context_id)
+    }
+    resource_ids = {
+        resource["id"]
+        for context_id in context_ids
+        for resource in store.list_project_context_resources(context_id)
+    }
+    decisions = []
+    for entry in store.get_decisions():
+        if not _decision_belongs_to_project(
+            entry,
+            project_id=project["id"],
+            context_ids=context_ids,
+            item_ids=item_ids,
+            resource_ids=resource_ids,
+        ):
+            continue
+        decisions.append(entry)
+        if len(decisions) >= limit:
+            break
+
+    drift_reports = []
+    for source_name in source_names:
+        for report in store.get_drift_reports(source_name, limit=limit):
+            drift_reports.append(report)
+    drift_reports.sort(key=lambda report: report.get("id", 0), reverse=True)
+
+    return {
+        "project_id": project["id"],
+        "decisions": decisions[:limit],
+        "drift_reports": drift_reports[:limit],
+    }
+
+
+def _decision_belongs_to_project(
+    decision: dict,
+    *,
+    project_id: str,
+    context_ids: set[str],
+    item_ids: set[str],
+    resource_ids: set[str],
+) -> bool:
+    artifact_type = decision.get("artifact_type")
+    artifact_id = decision.get("artifact_id")
+    payload = {}
+    payload_json = decision.get("payload_json")
+    if isinstance(payload_json, str) and payload_json:
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError:
+            payload = {}
+
+    if artifact_type == "project_context_item":
+        if artifact_id in item_ids:
+            return True
+        before = payload.get("before") or {}
+        after = payload.get("after") or {}
+        return before.get("project_id") in context_ids or after.get("project_id") in context_ids
+    if artifact_type == "project_context_resource":
+        resource = payload.get("resource") or {}
+        if artifact_id in resource_ids:
+            return True
+        return resource.get("project_id") in context_ids
+    if artifact_type == "project_context":
+        return payload.get("project_id") == project_id
+    return False
+
+
 def _update_context_item(
     project: dict,
     store,
@@ -311,6 +386,7 @@ def _update_context_item(
         updated["status"],
         reason=reason,
         payload={
+            "project_id": item["project_id"],
             "before": item,
             "after": updated,
         },
@@ -728,6 +804,20 @@ async def get_project_context(project_id: str, request: Request):
     return _project_context_payload(project, store)
 
 
+@router.get("/projects/{project_id}/context/history")
+async def get_project_context_history(
+    project_id: str,
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """Return recent context review decisions and relevant drift reports."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    return _project_context_history_payload(project, store, limit=limit)
+
+
 @router.patch("/projects/{project_id}/context/items/{item_id}")
 async def update_project_context_item(
     project_id: str,
@@ -875,7 +965,10 @@ async def import_project_context(
         "project_context",
         project["id"],
         "imported",
-        payload=result,
+        payload={
+            **result,
+            "project_id": project["id"],
+        },
     )
     store.log_activity(
         "project_context_imported",
@@ -911,7 +1004,10 @@ async def add_project_context_resource(
         "location": body.location,
         "status": body.status,
         "source": "user",
-        "metadata": body.metadata,
+        "metadata": {
+            **body.metadata,
+            **({"content": body.content} if body.content else {}),
+        },
     }
     store.upsert_project_context_resource(**resource)
     enrichment = enrich_project_context_resource(store, project["id"], resource)
@@ -920,6 +1016,7 @@ async def add_project_context_resource(
         resource["id"],
         "added",
         payload={
+            "project_id": project["id"],
             "resource": resource,
             "enrichment": {
                 "items_created": enrichment["items_created"],

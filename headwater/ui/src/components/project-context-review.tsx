@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   api,
+  type ProjectContextDecision,
+  type ProjectContextDriftReport,
   type ProjectContextItem,
   type ProjectContextResponse,
 } from "@/lib/api";
@@ -31,6 +33,13 @@ function statusTone(status: string) {
 
 function itemSummary(item: ProjectContextItem) {
   const value = item.value || {};
+  if (
+    item.status === "needs_review" &&
+    item.source === "context_drift" &&
+    typeof value.drift_reason === "string"
+  ) {
+    return value.drift_reason;
+  }
   if (item.item_type === "open_question") {
     return String(value.question || item.title || item.name);
   }
@@ -59,6 +68,22 @@ function itemLocation(item: ProjectContextItem) {
   if (item.table_name && item.column_name) return `${item.table_name}.${item.column_name}`;
   if (item.table_name) return item.table_name;
   return item.scope;
+}
+
+function historySummary(entry: ProjectContextDecision) {
+  if (entry.reason) return entry.reason;
+  return `${entry.artifact_type} ${entry.action}`;
+}
+
+function driftSummary(report: ProjectContextDriftReport) {
+  const added = report.diff.tables_added?.length || 0;
+  const removed = report.diff.tables_removed?.length || 0;
+  const changed = report.diff.tables_changed?.length || 0;
+  const parts = [];
+  if (added) parts.push(`${added} added`);
+  if (removed) parts.push(`${removed} removed`);
+  if (changed) parts.push(`${changed} changed`);
+  return parts.length > 0 ? parts.join(" · ") : "No schema changes";
 }
 
 function itemPriority(item: ProjectContextItem, selectedTable: string | null) {
@@ -91,9 +116,15 @@ export function ProjectContextReview({
   const [message, setMessage] = useState("");
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
   const [selectedTableOnly, setSelectedTableOnly] = useState(true);
+  const [history, setHistory] = useState<{
+    project_id: string;
+    decisions: ProjectContextDecision[];
+    drift_reports: ProjectContextDriftReport[];
+  } | null>(null);
   const [resourceType, setResourceType] = useState("url");
   const [resourceTitle, setResourceTitle] = useState("");
   const [resourceLocation, setResourceLocation] = useState("");
+  const [resourceContent, setResourceContent] = useState("");
   const [resourceUseFor, setResourceUseFor] = useState("");
   const [exportFiles, setExportFiles] = useState<Record<string, string> | null>(null);
   const [selectedFile, setSelectedFile] = useState<string>("context.yaml");
@@ -111,10 +142,11 @@ export function ProjectContextReview({
       };
     }
     setLoading(true);
-    api.projectContext(projectId)
-      .then((payload) => {
+    Promise.all([api.projectContext(projectId), api.projectContextHistory(projectId, 12)])
+      .then(([payload, historyPayload]) => {
         if (cancelled) return;
         setContext(payload);
+        setHistory(historyPayload);
       })
       .catch((error) => {
         if (!cancelled) {
@@ -158,8 +190,12 @@ export function ProjectContextReview({
 
   async function refreshContext() {
     if (!projectId) return;
-    const payload = await api.projectContext(projectId);
+    const [payload, historyPayload] = await Promise.all([
+      api.projectContext(projectId),
+      api.projectContextHistory(projectId, 12),
+    ]);
     setContext(payload);
+    setHistory(historyPayload);
   }
 
   async function notifyChanged(nextMessage: string) {
@@ -191,6 +227,7 @@ export function ProjectContextReview({
         resource_type: resourceType,
         title: resourceTitle.trim(),
         location: resourceLocation.trim() || null,
+        content: resourceContent.trim() || null,
         metadata: {
           use_for: resourceUseFor
             .split(",")
@@ -200,6 +237,7 @@ export function ProjectContextReview({
       });
       setResourceTitle("");
       setResourceLocation("");
+      setResourceContent("");
       setResourceUseFor("");
       await notifyChanged("Context resource added.");
     } catch (error) {
@@ -306,6 +344,28 @@ export function ProjectContextReview({
               <div className="text-lg font-semibold">{context.resources.length}</div>
             </div>
           </div>
+
+          {history && history.drift_reports.length > 0 && (
+            <div className="mb-4 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3">
+              <div className="text-sm font-semibold">Schema Drift Review</div>
+              <div className="text-xs text-muted mt-1">
+                Re-ingestion changed the source shape. Drift-flagged context items stay in review
+                until you confirm them again.
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {history.drift_reports.slice(0, 3).map((report) => (
+                  <span
+                    key={report.id}
+                    className="inline-flex items-center gap-2 rounded-full border border-warning/40 px-2.5 py-1 text-[11px]"
+                  >
+                    <span>{report.source_name}</span>
+                    <span className="text-muted">#{report.id}</span>
+                    <span className="text-muted">{driftSummary(report)}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,1fr)] gap-4">
             <div className="space-y-4">
@@ -461,8 +521,18 @@ export function ProjectContextReview({
                     <input
                       value={resourceLocation}
                       onChange={(event) => setResourceLocation(event.target.value)}
-                      placeholder="https://..., docs/glossary.md, /shared/metrics.pdf"
+                      placeholder="Optional: https://..., docs/glossary.md, /shared/metrics.pdf"
                       className="mt-1 w-full px-2 py-1.5 border border-border rounded bg-card text-sm"
+                    />
+                  </label>
+                  <label className="text-xs text-muted">
+                    Inline content
+                    <textarea
+                      value={resourceContent}
+                      onChange={(event) => setResourceContent(event.target.value)}
+                      rows={6}
+                      placeholder="Paste markdown, YAML, CSV dictionary rows, or short notes here."
+                      className="mt-1 w-full px-2 py-1.5 border border-border rounded bg-card text-sm resize-y"
                     />
                   </label>
                   <label className="text-xs text-muted">
@@ -477,7 +547,11 @@ export function ProjectContextReview({
                 </div>
                 <button
                   onClick={handleAddResource}
-                  disabled={loading || !resourceTitle.trim()}
+                  disabled={
+                    loading ||
+                    !resourceTitle.trim() ||
+                    (!resourceLocation.trim() && !resourceContent.trim())
+                  }
                   className="mt-3 px-3 py-1.5 bg-foreground text-background rounded text-xs font-medium disabled:opacity-50"
                 >
                   Add Resource
@@ -499,6 +573,11 @@ export function ProjectContextReview({
                             {resource.resource_type}
                             {resource.location ? ` · ${resource.location}` : ""}
                           </div>
+                          {typeof resource.metadata?.enrichment === "object" && (
+                            <div className="text-[11px] text-muted mt-1">
+                              {`${Number((resource.metadata.enrichment as Record<string, unknown>).items_created || 0)} items · ${Number((resource.metadata.enrichment as Record<string, unknown>).questions_created || 0)} questions`}
+                            </div>
+                          )}
                         </div>
                         <span className={`inline-flex px-2 py-0.5 rounded border text-[10px] ${statusTone(resource.status)}`}>
                           {resource.status}
@@ -543,6 +622,32 @@ export function ProjectContextReview({
                     ))}
                   </div>
                 )}
+              </div>
+
+              <div className="rounded-lg border border-border bg-background p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold">Recent History</h3>
+                  <span className="text-xs text-muted">
+                    {history?.decisions.length || 0} decisions
+                  </span>
+                </div>
+                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                  {history?.decisions.map((entry) => (
+                    <div key={`${entry.artifact_type}:${entry.id}`} className="rounded border border-border px-3 py-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-medium">{entry.action}</div>
+                        <div className="text-[11px] text-muted">{entry.created_at}</div>
+                      </div>
+                      <div className="text-[11px] text-muted mt-1">
+                        {entry.artifact_type} · {entry.artifact_id}
+                      </div>
+                      <div className="text-sm mt-2">{historySummary(entry)}</div>
+                    </div>
+                  ))}
+                  {(!history || history.decisions.length === 0) && (
+                    <div className="text-sm text-muted">No project-context review history yet.</div>
+                  )}
+                </div>
               </div>
             </div>
           </div>

@@ -133,6 +133,38 @@ class TestProjectContext:
         )
         assert extracted_question["status"] == "needs_review"
 
+    def test_inline_resource_content_enriches_project_context(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "markdown",
+                "title": "Inline glossary",
+                "content": "\n".join(
+                    [
+                        "# complaints",
+                        "assigned_to: Staff member assigned to investigate the complaint.",
+                    ]
+                ),
+                "metadata": {"use_for": ["glossary"]},
+            },
+        )
+        assert create.status_code == 200
+        created = create.json()
+        assert created["metadata"]["enrichment"]["items_created"] >= 1
+
+        context = client.get("/api/projects/source/context").json()
+        assigned_to = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "complaints"
+            and item["column_name"] == "assigned_to"
+        )
+        assert assigned_to["value"]["description"].startswith("Staff member assigned")
+
     def test_reingest_marks_missing_reviewed_context_as_needs_review(self, client, tmp_path):
         source_dir = tmp_path / "orders_source"
         source_dir.mkdir()
@@ -191,6 +223,14 @@ class TestProjectContext:
         assert updated["source"] == "context_drift"
         assert "no longer present" in updated["value"]["drift_reason"]
         assert updated["evidence"][-1]["evidence_type"] == "schema_drift"
+
+        history = client.get("/api/projects/source/context/history").json()
+        assert history["project_id"] == "source"
+        assert len(history["drift_reports"]) >= 1
+        assert any(
+            entry["artifact_type"] == "project_context_item"
+            for entry in history["decisions"]
+        )
 
     def test_markdown_table_heading_scopes_resource_enrichment(self, client, tmp_path):
         source_dir = tmp_path / "support_source"
