@@ -58,10 +58,10 @@ def build_context_exports(payload: dict, *, include_proposed: bool = True) -> di
         "version": 1,
         "project_id": project_id,
         "terms": [
-            _glossary_entry(item)
+            _glossary_term_entry(item)
             for item in items
-            if item.get("item_type") == "column_semantics"
-            and item.get("value", {}).get("description")
+            if item.get("item_type") == "glossary_term"
+            and item.get("value", {}).get("definition")
         ],
     }
     resources_doc = {
@@ -149,7 +149,6 @@ def _semantic_role_entry(item: dict) -> dict:
         "column": item.get("column_name"),
         "role": value.get("role"),
         "semantic_type": value.get("semantic_type"),
-        "description": value.get("description"),
         "status": item.get("status"),
         "confidence": item.get("confidence"),
         "source": item.get("source"),
@@ -168,14 +167,11 @@ def _lookup_entry(item: dict) -> dict:
     }
 
 
-def _glossary_entry(item: dict) -> dict:
+def _glossary_term_entry(item: dict) -> dict:
     value = item.get("value") or {}
-    column_name = item.get("column_name") or item.get("name")
     return {
-        "term": f"{item.get('table_name')}.{column_name}",
-        "definition": value.get("description"),
-        "semantic_type": value.get("semantic_type"),
-        "role": value.get("role"),
+        "term": item.get("name"),
+        "definition": value.get("definition"),
         "status": item.get("status"),
         "confidence": item.get("confidence"),
         "source": item.get("source"),

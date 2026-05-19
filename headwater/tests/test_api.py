@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from headwater.api.app import create_app
@@ -147,6 +148,47 @@ class TestProjectContext:
         assert "Locked business definition." in files["semantic_types.yaml"]
         assert "role: identifier" in files["semantic_schema.yaml"]
         assert "# Project Context Review: source" in files["REVIEW.md"]
+
+    def test_project_context_import_merges_exported_files(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        exported = client.get("/api/projects/source/context/export")
+        assert exported.status_code == 200
+        files = exported.json()["files"]
+        semantic_types = yaml.safe_load(files["semantic_types.yaml"])
+        target = next(
+            column
+            for column in semantic_types["columns"]
+            if column.get("table") and column.get("column")
+        )
+        target["description"] = "Imported canonical identifier"
+        files["semantic_types.yaml"] = yaml.safe_dump(
+            semantic_types,
+            sort_keys=False,
+            allow_unicode=False,
+        )
+
+        imported = client.post(
+            "/api/projects/source/context/import",
+            json={"files": files},
+        )
+        assert imported.status_code == 200
+        body = imported.json()
+        assert body["items_upserted"] > 0
+        assert "semantic_types.yaml" in body["files_processed"]
+
+        context = client.get("/api/projects/source/context").json()
+        updated = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == target["table"]
+            and item["column_name"] == target["column"]
+        )
+        assert updated["value"].get("description") == "Imported canonical identifier"
+        assert updated["status"] == target.get("status", "proposed")
+        assert updated["source"] == "import"
 
 
 class TestInsightRanking:

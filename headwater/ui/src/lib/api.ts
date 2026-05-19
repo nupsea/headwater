@@ -738,6 +738,78 @@ export interface ProjectUpdatePayload {
   sources?: string[];
 }
 
+export interface ProjectContextEvidence {
+  evidence_type: string;
+  source: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  created_at?: string;
+}
+
+export interface ProjectContextItem {
+  id: string;
+  project_id: string;
+  source_name: string | null;
+  item_type: string;
+  scope: string;
+  name: string;
+  title: string | null;
+  table_name: string | null;
+  column_name: string | null;
+  value: Record<string, unknown>;
+  status: "proposed" | "approved" | "rejected" | "locked" | "needs_review";
+  confidence: number;
+  source: string;
+  evidence: ProjectContextEvidence[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ProjectContextResource {
+  id: string;
+  project_id: string;
+  source_name: string | null;
+  resource_type: string;
+  title: string;
+  location: string | null;
+  status: "active" | "archived";
+  source: string;
+  metadata: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ProjectContextResponse {
+  project_id: string;
+  source_names: string[];
+  dataset_contexts: DatasetContext[];
+  items: ProjectContextItem[];
+  resources: ProjectContextResource[];
+  summary: {
+    item_count: number;
+    resource_count: number;
+    dataset_context_count: number;
+    item_types: Record<string, number>;
+    status_counts: Record<string, number>;
+  };
+}
+
+export interface ProjectContextExportResponse {
+  project_id: string;
+  include_proposed: boolean;
+  files: Record<string, string>;
+}
+
+export interface ProjectContextImportResponse {
+  project_id: string;
+  source_name: string | null;
+  items_upserted: number;
+  resources_upserted: number;
+  dataset_contexts_updated: number;
+  files_processed: string[];
+  context: ProjectContextResponse;
+}
+
 // ---------- v2: Catalog types ----------
 
 export interface CatalogMetric {
@@ -1278,6 +1350,77 @@ export const api = {
   projects: () => fetchJSON<{ projects: Project[] }>("/projects"),
 
   project: (id: string) => fetchJSON<Project>(`/projects/${id}`),
+
+  projectContext: (id: string) =>
+    fetchJSON<ProjectContextResponse>(`/projects/${id}/context`),
+
+  reviewProjectContextItem: (
+    projectId: string,
+    itemId: string,
+    body: {
+      status?: "proposed" | "approved" | "rejected" | "locked" | "needs_review";
+      value?: Record<string, unknown>;
+      name?: string;
+      title?: string;
+      confidence?: number;
+      reason?: string;
+    }
+  ) =>
+    fetchJSON<ProjectContextItem>(`/projects/${projectId}/context/items/${itemId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
+  decideProjectContextItem: (
+    projectId: string,
+    itemId: string,
+    action: "approve" | "reject" | "lock",
+    body?: {
+      reason?: string;
+      value?: Record<string, unknown>;
+      confidence?: number;
+    }
+  ) =>
+    fetchJSON<ProjectContextItem>(
+      `/projects/${projectId}/context/items/${itemId}/${action}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      }
+    ),
+
+  exportProjectContext: (projectId: string, includeProposed = true) =>
+    fetchJSON<ProjectContextExportResponse>(
+      `/projects/${projectId}/context/export?include_proposed=${includeProposed ? "true" : "false"}`
+    ),
+
+  importProjectContext: (
+    projectId: string,
+    body: { files: Record<string, string>; source_name?: string | null }
+  ) =>
+    fetchJSON<ProjectContextImportResponse>(`/projects/${projectId}/context/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
+  addProjectContextResource: (
+    projectId: string,
+    body: {
+      resource_type: string;
+      title: string;
+      location?: string | null;
+      status?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ) =>
+    fetchJSON<ProjectContextResource>(`/projects/${projectId}/context/resources`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 
   projectProgress: (id: string) =>
     fetchJSON<{ project_id: string; progress: ProjectProgress; maturity: string; maturity_score: number }>(

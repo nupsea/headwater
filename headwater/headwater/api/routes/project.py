@@ -19,6 +19,7 @@ from headwater.api.project_scope import (
     visible_projects,
 )
 from headwater.core.runtime_state import get_runtime_state
+from headwater.services.context_import import import_context_exports
 from headwater.services.context_projection import build_context_exports
 
 router = APIRouter()
@@ -64,6 +65,11 @@ class ContextItemDecisionRequest(BaseModel):
     reason: str | None = None
     value: dict | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class ImportProjectContextRequest(BaseModel):
+    files: dict[str, str] = Field(default_factory=dict)
+    source_name: str | None = None
 
 
 def _slugify(name: str) -> str:
@@ -842,6 +848,43 @@ async def export_project_context(
         "project_id": project["id"],
         "include_proposed": include_proposed,
         "files": build_context_exports(payload, include_proposed=include_proposed),
+    }
+
+
+@router.post("/projects/{project_id}/context/import")
+async def import_project_context(
+    project_id: str,
+    body: ImportProjectContextRequest,
+    request: Request,
+):
+    """Import machine-reviewable context files back into canonical state."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    if not body.files:
+        raise HTTPException(status_code=400, detail="No context files were provided.")
+    result = import_context_exports(
+        store,
+        project,
+        files=body.files,
+        source_name=body.source_name,
+    )
+    store.record_decision(
+        "project_context",
+        project["id"],
+        "imported",
+        payload=result,
+    )
+    store.log_activity(
+        "project_context_imported",
+        f"Imported context files for project '{project['id']}'",
+        artifact_type="project",
+        artifact_id=project["id"],
+    )
+    return {
+        **result,
+        "context": _project_context_payload(project, store),
     }
 
 
