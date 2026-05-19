@@ -22,6 +22,7 @@ from headwater.profiler.engine import discover
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
 from headwater.services.context_bootstrap import bootstrap_project_context
+from headwater.services.context_drift import reconcile_project_context_drift
 from headwater.services.contract_lifecycle import apply_contract_statuses
 from headwater.services.discovery_persistence import (
     persist_catalog_data,
@@ -208,6 +209,15 @@ def run_pipeline(
             items=[item.model_dump(mode="json") for item in project_context.items],
             resources=[resource.model_dump(mode="json") for resource in project_context.resources],
         )
+        persist_discovery_data(metadata_store, discovery_result, source_name)
+        persist_semantic_data(metadata_store, discovery_result, source_name)
+        reconcile_project_context_drift(
+            metadata_store,
+            discovery_result,
+            project_id=source_name,
+            source_name=source_name,
+            drift_report=metadata_store.get_latest_drift_report(source_name),
+        )
         metadata = load_retrieved_metadata(
             metadata_store,
             discovery_result,
@@ -246,8 +256,6 @@ def run_pipeline(
     pipeline["graph_store"] = assets.graph_store
     pipeline["vector_store"] = assets.vector_store
 
-    persist_discovery_data(metadata_store, discovery_result, source_name)
-    persist_semantic_data(metadata_store, discovery_result, source_name)
     persist_catalog_data(metadata_store, catalog, evaluation, source_name)
     logger.info("Metadata persistence complete")
 

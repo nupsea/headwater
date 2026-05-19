@@ -23,6 +23,7 @@ from headwater.core.runtime_state import get_runtime_state
 from headwater.drift.schema import build_snapshot_from_discovery, compare_schemas
 from headwater.profiler.engine import discover
 from headwater.services.context_bootstrap import bootstrap_project_context
+from headwater.services.context_drift import reconcile_project_context_drift
 from headwater.services.discovery_persistence import (
     persist_catalog_data,
     persist_discovery_data,
@@ -123,6 +124,15 @@ async def run_discovery(
         len(project_context.items),
         len(project_context.resources),
     )
+    persist_discovery_data(request.app.state.metadata_store, discovery, source_name)
+    persist_semantic_data(request.app.state.metadata_store, discovery, source_name)
+    reconcile_project_context_drift(
+        store,
+        discovery,
+        project_id=source_name,
+        source_name=source_name,
+        drift_report=store.get_latest_drift_report(source_name),
+    )
     metadata = load_retrieved_metadata(store, discovery, project_id=source_name)
 
     # Build semantic catalog (heuristic tier 0)
@@ -146,13 +156,6 @@ async def run_discovery(
     runtime_state["graph_store"] = assets.graph_store
     runtime_state["vector_store"] = assets.vector_store
     runtime_state["project_context"] = project_context
-
-    # Persist all discovery data to metadata store
-    logger.info("Persisting discovery data to metadata store...")
-    persist_discovery_data(request.app.state.metadata_store, discovery, source_name)
-
-    # Persist semantic details and companion docs
-    persist_semantic_data(request.app.state.metadata_store, discovery, source_name)
 
     # Persist catalog to metadata store
     persist_catalog_data(request.app.state.metadata_store, catalog, evaluation, source_name)

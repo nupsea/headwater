@@ -102,13 +102,19 @@ def _normalize_context_resources(
 def _glossary_from_context_items(items: list[ProjectContextItem]) -> dict[str, str]:
     glossary: dict[str, str] = {}
     for item in items:
-        if item.item_type != "column_semantics":
-            continue
-        description = str(item.value.get("description") or "").strip()
-        if item.column_name and description:
-            normalized = _normalize_glossary_description(description)
-            if normalized:
-                glossary.setdefault(item.column_name.lower(), normalized)
+        if item.item_type == "column_semantics":
+            description = str(item.value.get("description") or "").strip()
+            if item.column_name and description:
+                normalized = _normalize_glossary_description(description)
+                if normalized:
+                    glossary.setdefault(item.column_name.lower(), normalized)
+        elif item.item_type == "glossary_term":
+            term = str(item.name or "").strip().lower()
+            definition = str(item.value.get("definition") or "").strip()
+            if term and definition:
+                normalized = _normalize_glossary_description(definition)
+                if normalized:
+                    glossary.setdefault(term, normalized)
     return glossary
 
 

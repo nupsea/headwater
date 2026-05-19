@@ -974,20 +974,32 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                 value_json = CASE
                     WHEN project_context_items.status IN ('approved', 'locked')
                         THEN project_context_items.value_json
+                    WHEN project_context_items.status = 'needs_review'
+                         AND project_context_items.source <> 'bootstrap'
+                        THEN project_context_items.value_json
                     ELSE excluded.value_json
                 END,
                 status = CASE
                     WHEN project_context_items.status IN ('approved', 'locked')
+                        THEN project_context_items.status
+                    WHEN project_context_items.status = 'needs_review'
+                         AND project_context_items.source <> 'bootstrap'
                         THEN project_context_items.status
                     ELSE excluded.status
                 END,
                 confidence = CASE
                     WHEN project_context_items.status IN ('approved', 'locked')
                         THEN project_context_items.confidence
+                    WHEN project_context_items.status = 'needs_review'
+                         AND project_context_items.source <> 'bootstrap'
+                        THEN project_context_items.confidence
                     ELSE excluded.confidence
                 END,
                 source = CASE
                     WHEN project_context_items.status IN ('approved', 'locked')
+                        THEN project_context_items.source
+                    WHEN project_context_items.status = 'needs_review'
+                         AND project_context_items.source <> 'bootstrap'
                         THEN project_context_items.source
                     ELSE excluded.source
                 END,

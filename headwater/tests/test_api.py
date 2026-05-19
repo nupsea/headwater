@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 
@@ -80,6 +81,183 @@ class TestProjectContext:
         resources = resp.json()["resources"]
         titles = {resource["title"] for resource in resources}
         assert "Business glossary" in titles
+
+    def test_local_resource_addition_enriches_project_context(self, client, tmp_path):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        glossary = tmp_path / "complaints_glossary.md"
+        glossary.write_text(
+            "\n".join(
+                [
+                    "assigned_to: Staff member assigned to investigate and resolve the complaint.",
+                    "status: Workflow status of the complaint case.",
+                    (
+                        "Confirm whether date_acknowledged should be treated "
+                        "as the first service-response timestamp?"
+                    ),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "markdown",
+                "title": "Complaints glossary",
+                "location": str(glossary),
+                "metadata": {"use_for": ["glossary", "semantic_roles"]},
+            },
+        )
+        assert create.status_code == 200
+        created = create.json()
+        assert created["metadata"]["enrichment"]["items_created"] >= 2
+        assert "complaints" in created["metadata"]["matched_tables"]
+
+        context = client.get("/api/projects/source/context").json()
+        assigned_to = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "complaints"
+            and item["column_name"] == "assigned_to"
+        )
+        assert assigned_to["value"]["description"].startswith("Staff member assigned")
+
+        extracted_question = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "open_question"
+            and "date_acknowledged" in str(item["value"].get("question") or "")
+        )
+        assert extracted_question["status"] == "needs_review"
+
+    def test_reingest_marks_missing_reviewed_context_as_needs_review(self, client, tmp_path):
+        source_dir = tmp_path / "orders_source"
+        source_dir.mkdir()
+        orders = source_dir / "orders.json"
+        orders.write_text(
+            "\n".join(
+                [
+                    json.dumps({"order_id": 1, "status_code": "open", "amount": 12.5}),
+                    json.dumps({"order_id": 2, "status_code": "closed", "amount": 7.0}),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        discover = client.post("/api/discover", params={"source_path": str(source_dir)})
+        assert discover.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        target = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "orders"
+            and item["column_name"] == "status_code"
+        )
+        review = client.post(
+            f"/api/projects/source/context/items/{target['id']}/approve",
+            json={
+                "reason": "Confirmed with source owner",
+                "confidence": 0.99,
+                "value": {
+                    **target["value"],
+                    "description": "Reviewed workflow status for the order.",
+                    "role": "dimension",
+                },
+            },
+        )
+        assert review.status_code == 200
+
+        orders.write_text(
+            "\n".join(
+                [
+                    json.dumps({"order_id": 1, "amount": 12.5}),
+                    json.dumps({"order_id": 2, "amount": 7.0}),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        rediscover = client.post("/api/discover", params={"source_path": str(source_dir)})
+        assert rediscover.status_code == 200
+
+        refreshed = client.get("/api/projects/source/context").json()
+        updated = next(item for item in refreshed["items"] if item["id"] == target["id"])
+        assert updated["status"] == "needs_review"
+        assert updated["source"] == "context_drift"
+        assert "no longer present" in updated["value"]["drift_reason"]
+        assert updated["evidence"][-1]["evidence_type"] == "schema_drift"
+
+    def test_markdown_table_heading_scopes_resource_enrichment(self, client, tmp_path):
+        source_dir = tmp_path / "support_source"
+        source_dir.mkdir()
+        (source_dir / "orders.json").write_text(
+            "\n".join(
+                [
+                    json.dumps({"order_id": 1, "status_code": "open"}),
+                    json.dumps({"order_id": 2, "status_code": "closed"}),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (source_dir / "returns.json").write_text(
+            "\n".join(
+                [
+                    json.dumps({"return_id": 1, "status_code": "requested"}),
+                    json.dumps({"return_id": 2, "status_code": "approved"}),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        discover = client.post("/api/discover", params={"source_path": str(source_dir)})
+        assert discover.status_code == 200
+
+        glossary = tmp_path / "returns_glossary.md"
+        glossary.write_text(
+            "\n".join(
+                [
+                    "# returns",
+                    "status_code: Workflow status for the return request lifecycle.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "markdown",
+                "title": "Returns glossary",
+                "location": str(glossary),
+            },
+        )
+        assert create.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        returns_status = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "returns"
+            and item["column_name"] == "status_code"
+        )
+        orders_status = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "orders"
+            and item["column_name"] == "status_code"
+        )
+        assert (
+            returns_status["value"]["description"]
+            == "Workflow status for the return request lifecycle."
+        )
+        assert orders_status["value"].get("description") != returns_status["value"]["description"]
 
     def test_user_can_review_context_item(self, client):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})

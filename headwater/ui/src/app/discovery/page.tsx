@@ -16,6 +16,7 @@ import { useProjects } from "@/lib/project-context";
 import { ProfileTable } from "@/components/profile-table";
 import { KeyColumnsView } from "@/components/key-columns-view";
 import { PKFKManager } from "@/components/pk-fk-manager";
+import { ProjectContextReview } from "@/components/project-context-review";
 
 const ROLE_OPTIONS = [
   "metric",
@@ -215,6 +216,12 @@ export default function DiscoveryPage() {
       setContextMsg(e instanceof Error ? e.message : "Confirmation failed");
     }
     setSaving(false);
+  };
+
+  const refreshSemanticSchema = async () => {
+    if (!activeProjectId) return;
+    const schema = await api.semanticSchema(activeProjectId).catch(() => null);
+    if (schema) setSemanticSchema(schema);
   };
 
   const handleColEdit = (colName: string, field: keyof DictColumn, value: unknown) => {
@@ -427,6 +434,12 @@ export default function DiscoveryPage() {
           </label>
         </div>
       )}
+
+      <ProjectContextReview
+        projectId={activeProjectId}
+        selectedTable={selected}
+        onChanged={refreshSemanticSchema}
+      />
 
       <div className="grid grid-cols-1 xl:grid-cols-[280px_minmax(0,1fr)] gap-6">
         {/* Table list sidebar */}

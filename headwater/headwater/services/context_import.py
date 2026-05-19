@@ -93,6 +93,23 @@ def import_context_exports(
     for term in parsed.get("glossary.yaml", {}).get("terms", []):
         target = _parse_term_target(term.get("term"))
         if target is None:
+            glossary_id = f"glossary:{_slugged_id('term', term.get('term') or 'glossary')}"
+            items[glossary_id] = {
+                "id": glossary_id,
+                "project_id": project["id"],
+                "source_name": source_name,
+                "item_type": "glossary_term",
+                "scope": "project",
+                "name": term.get("term") or "glossary_term",
+                "title": f"Glossary term: {term.get('term') or 'glossary'}",
+                "value": {
+                    "definition": term.get("definition"),
+                },
+                "status": term.get("status") or "approved",
+                "confidence": float(term.get("confidence") or 1.0),
+                "source": "import",
+                "evidence": [],
+            }
             continue
         table_name, column_name = target
         _merge_column_semantics(

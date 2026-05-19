@@ -368,6 +368,64 @@ def test_update_project_context_item_allows_user_review_edits(meta: MetadataStor
     assert updated["evidence"][0]["evidence_type"] == "review"
 
 
+def test_replace_project_context_preserves_non_bootstrap_needs_review_items(
+    meta: MetadataStore,
+):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "value": {"semantic_type": "dimension", "description": "Reviewed label"},
+                "status": "needs_review",
+                "confidence": 0.45,
+                "source": "context_drift",
+                "evidence": [],
+            }
+        ],
+    )
+
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "value": {"semantic_type": "metric", "description": "Bootstrap overwrite"},
+                "status": "proposed",
+                "confidence": 0.11,
+                "source": "bootstrap",
+                "evidence": [],
+            }
+        ],
+    )
+
+    refreshed = meta.get_project_context_item(
+        "column_semantics:orders.status_code",
+        project_id="src",
+    )
+    assert refreshed is not None
+    assert refreshed["status"] == "needs_review"
+    assert refreshed["source"] == "context_drift"
+    assert refreshed["value"]["description"] == "Reviewed label"
+
+
 def test_load_retrieved_metadata_uses_store_backed_project_context(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     meta.upsert_dataset_context(
@@ -438,6 +496,42 @@ def test_load_retrieved_metadata_uses_store_backed_project_context(meta: Metadat
     assert metadata.lookup_tables["status_lookup"]["label_column"] == "status_label"
     assert metadata.glossary["status_code"] == "Order lifecycle status."
     assert metadata.locked_roles[("orders", "status_code")] == "dimension"
+
+
+def test_load_retrieved_metadata_includes_glossary_term_items(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "glossary:triage",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "glossary_term",
+                "scope": "project",
+                "name": "triage",
+                "value": {"definition": "Initial intake and prioritization of work."},
+                "status": "approved",
+                "confidence": 0.9,
+                "evidence": [],
+            }
+        ],
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                columns=[ColumnInfo(name="status_code", dtype="varchar")],
+            )
+        ],
+    )
+
+    metadata = load_retrieved_metadata(meta, discovery, project_id="src")
+
+    assert metadata.glossary["triage"] == "Initial intake and prioritization of work."
 
 
 def test_persist_pk_fk_stores_reload_safe_relationship_values(meta: MetadataStore):

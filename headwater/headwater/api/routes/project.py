@@ -21,6 +21,7 @@ from headwater.api.project_scope import (
 from headwater.core.runtime_state import get_runtime_state
 from headwater.services.context_import import import_context_exports
 from headwater.services.context_projection import build_context_exports
+from headwater.services.context_resource_enrichment import enrich_project_context_resource
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -913,13 +914,20 @@ async def add_project_context_resource(
         "metadata": body.metadata,
     }
     store.upsert_project_context_resource(**resource)
+    enrichment = enrich_project_context_resource(store, project["id"], resource)
     store.record_decision(
         "project_context_resource",
         resource["id"],
         "added",
-        payload=resource,
+        payload={
+            "resource": resource,
+            "enrichment": {
+                "items_created": enrichment["items_created"],
+                "questions_created": enrichment["questions_created"],
+            },
+        },
     )
-    return resource
+    return enrichment["resource"]
 
 
 @router.get("/activity")

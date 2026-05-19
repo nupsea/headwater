@@ -38,6 +38,16 @@ type ConnectionForm = {
   exclude_tables: string;
 };
 
+type ConnectionStringField =
+  | "host"
+  | "port"
+  | "database"
+  | "schema"
+  | "warehouse"
+  | "role"
+  | "user"
+  | "path";
+
 const DEFAULT_FORM: ConnectionForm = {
   display_name: "",
   host: "",
@@ -164,14 +174,24 @@ export function EditProjectDialog({
       });
 
       if (sourceName && selectedConnector) {
-        const connectionValue = buildConnectionValue(selectedConnector.id, form);
+        const connectionValue = resolveConnectionValue(selectedConnector.id, form, source);
+        if (!connectionValue) {
+          const message =
+            "Re-enter the source password before saving connection changes.";
+          setError(message);
+          toast(message, "error");
+          return;
+        }
         const sourceBody = {
           type: selectedConnector.id,
           display_name: form.display_name.trim() || source?.display_name || sourceName,
           host: form.host.trim() || undefined,
           auto_sync: form.auto_sync,
-          uri: "uri" in connectionValue ? connectionValue.uri : "",
-          path: "path" in connectionValue ? connectionValue.path : "",
+          ...(connectionValue.kind === "uri"
+            ? { uri: connectionValue.value }
+            : connectionValue.kind === "path"
+              ? { path: connectionValue.value }
+              : {}),
           config: {
             max_tables: form.max_tables,
             sample_rows: form.sample_rows,
@@ -599,6 +619,29 @@ function buildConnectionTarget(connectorId: string, form: ConnectionForm): strin
   return null;
 }
 
+function resolveConnectionValue(
+  connectorId: string,
+  form: ConnectionForm,
+  source: SourceDetail | null
+): { kind: "uri" | "path" | "preserve_uri"; value?: string } | null {
+  if (!DATABASE_CONNECTORS.has(connectorId)) {
+    return { kind: "path", value: form.path.trim() };
+  }
+
+  const password = form.password.trim();
+  if (password) {
+    const built = buildConnectionValue(connectorId, form);
+    return "uri" in built ? { kind: "uri", value: built.uri } : null;
+  }
+
+  const baseline = source ? readConnectionForm(source) : DEFAULT_FORM;
+  if (_sameConnectionDetails(connectorId, form, baseline)) {
+    return { kind: "preserve_uri" };
+  }
+
+  return null;
+}
+
 function buildConnectionValue(
   connectorId: string,
   form: ConnectionForm
@@ -638,6 +681,31 @@ function buildConnectionValue(
     };
   }
   return { path: form.path.trim() };
+}
+
+function _sameConnectionDetails(
+  connectorId: string,
+  current: ConnectionForm,
+  baseline: ConnectionForm
+): boolean {
+  const fields: ConnectionStringField[] = [
+    "host",
+    "port",
+    "database",
+    "user",
+  ];
+  const snowflakeFields: ConnectionStringField[] = ["schema", "warehouse", "role"];
+  const fileFields: ConnectionStringField[] = ["path"];
+
+  const compare = (field: ConnectionStringField) =>
+    current[field].trim() === baseline[field].trim();
+
+  if (!DATABASE_CONNECTORS.has(connectorId)) {
+    return fileFields.every(compare);
+  }
+  if (!fields.every(compare)) return false;
+  if (connectorId === "snowflake" && !snowflakeFields.every(compare)) return false;
+  return true;
 }
 
 function parseConnectionUri(type: string, value: string): Record<string, string> {
