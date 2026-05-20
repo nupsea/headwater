@@ -38,7 +38,7 @@ def load_context_eval_cases(paths: list[str | Path]) -> list[dict]:
         source = Path(path)
         gold = load_context_gold(source)
         fixture_name = str(gold.get("fixture") or source.stem)
-        discovery = _fixture_discovery(fixture_name)
+        discovery = _case_discovery(source, gold, fixture_name)
         cases.append(
             {
                 "name": str(gold.get("name") or fixture_name),
@@ -514,14 +514,65 @@ def _normalize_expected(value: Any) -> Any:
     return value
 
 
+def _case_discovery(gold_path: Path, gold: dict, fixture_name: str) -> DiscoveryResult:
+    discovery_path = gold.get("discovery_path")
+    if discovery_path:
+        return _load_fixture_discovery((gold_path.parent / str(discovery_path)).resolve())
+    discovery = gold.get("discovery")
+    if discovery:
+        return _discovery_from_spec(discovery)
+    return _fixture_discovery(fixture_name)
+
+
+def _load_fixture_discovery(path: Path) -> DiscoveryResult:
+    """Load a deterministic discovery fixture from YAML or JSON."""
+    spec = load_context_gold(path)
+    if not spec:
+        raise ValueError(f"Context discovery fixture is empty or invalid: {path}")
+    return _discovery_from_spec(spec)
+
+
+def _discovery_from_spec(spec: dict) -> DiscoveryResult:
+    source = SourceConfig(**(spec.get("source") or {}))
+    tables = [
+        TableInfo(
+            name=table["name"],
+            row_count=int(table.get("row_count") or 0),
+            columns=[
+                ColumnInfo(**column)
+                for column in table.get("columns") or []
+            ],
+        )
+        for table in spec.get("tables") or []
+    ]
+    profiles = [
+        ColumnProfile(**_normalize_profile_spec(profile))
+        for profile in spec.get("profiles") or []
+    ]
+    relationships = [
+        Relationship(**relationship)
+        for relationship in spec.get("relationships") or []
+    ]
+    return DiscoveryResult(
+        source=source,
+        tables=tables,
+        profiles=profiles,
+        relationships=relationships,
+    )
+
+def _normalize_profile_spec(profile: dict) -> dict:
+    normalized = dict(profile)
+    if "top_values" in normalized:
+        normalized["top_values"] = [
+            tuple(item) if isinstance(item, list) else item
+            for item in normalized["top_values"]
+        ]
+    return normalized
+
+
 def _fixture_discovery(name: str) -> DiscoveryResult:
     fixtures = {
-        "finance_transactions": _finance_transactions_fixture_discovery,
-        "manufacturing_runs": _manufacturing_runs_fixture_discovery,
-        "operations_events": _operations_events_fixture_discovery,
         "orders": _orders_fixture_discovery,
-        "patient_encounters": _patient_encounters_fixture_discovery,
-        "random_schema": _random_schema_fixture_discovery,
     }
     if name in fixtures:
         return fixtures[name]()
@@ -595,322 +646,4 @@ def _orders_fixture_discovery() -> DiscoveryResult:
                 source="inferred_name",
             )
         ],
-    )
-
-
-def _finance_transactions_fixture_discovery() -> DiscoveryResult:
-    return DiscoveryResult(
-        source=SourceConfig(name="finance_transactions", type="csv", path="/data/finance"),
-        tables=[
-            TableInfo(
-                name="transactions",
-                row_count=1_000,
-                columns=[
-                    ColumnInfo(name="transaction_id", dtype="int64", is_primary_key=True),
-                    ColumnInfo(name="account_id", dtype="int64", semantic_type="foreign_key"),
-                    ColumnInfo(name="posted_at", dtype="timestamp", role="temporal"),
-                    ColumnInfo(
-                        name="merchant_category",
-                        dtype="varchar",
-                        semantic_type="dimension",
-                    ),
-                    ColumnInfo(name="amount_usd", dtype="double", semantic_type="metric"),
-                    ColumnInfo(
-                        name="transaction_status",
-                        dtype="varchar",
-                        semantic_type="dimension",
-                    ),
-                ],
-            ),
-            TableInfo(
-                name="accounts",
-                row_count=100,
-                columns=[
-                    ColumnInfo(name="account_id", dtype="int64", is_primary_key=True),
-                    ColumnInfo(name="account_segment", dtype="varchar", semantic_type="dimension"),
-                ],
-            ),
-        ],
-        profiles=[
-            _profile("transactions", "transaction_id", "int64", 1_000, uniqueness_ratio=1.0),
-            _profile("accounts", "account_id", "int64", 100, uniqueness_ratio=1.0),
-            _profile(
-                "accounts",
-                "account_segment",
-                "varchar",
-                3,
-                top_values=[("consumer", 60), ("business", 30), ("enterprise", 10)],
-            ),
-            _profile(
-                "transactions",
-                "merchant_category",
-                "varchar",
-                12,
-                top_values=[("grocery", 220), ("fuel", 150), ("travel", 80)],
-            ),
-            _profile(
-                "transactions",
-                "transaction_status",
-                "varchar",
-                4,
-                top_values=[("posted", 850), ("pending", 100), ("reversed", 50)],
-            ),
-            _profile("transactions", "amount_usd", "double", 940, min_value=1.25, max_value=2500.0),
-        ],
-        relationships=[
-            _relationship("transactions", "account_id", "accounts", "account_id"),
-        ],
-    )
-
-
-def _manufacturing_runs_fixture_discovery() -> DiscoveryResult:
-    return DiscoveryResult(
-        source=SourceConfig(name="manufacturing_runs", type="csv", path="/data/manufacturing"),
-        tables=[
-            TableInfo(
-                name="production_runs",
-                row_count=500,
-                columns=[
-                    ColumnInfo(name="run_id", dtype="int64", is_primary_key=True),
-                    ColumnInfo(name="machine_id", dtype="int64", semantic_type="foreign_key"),
-                    ColumnInfo(name="started_at", dtype="timestamp", role="temporal"),
-                    ColumnInfo(name="shift_code", dtype="varchar", semantic_type="dimension"),
-                    ColumnInfo(name="units_produced", dtype="int64", semantic_type="metric"),
-                    ColumnInfo(name="defect_count", dtype="int64", semantic_type="metric"),
-                ],
-            ),
-            TableInfo(
-                name="machines",
-                row_count=20,
-                columns=[
-                    ColumnInfo(name="machine_id", dtype="int64", is_primary_key=True),
-                    ColumnInfo(name="plant_code", dtype="varchar", semantic_type="dimension"),
-                ],
-            ),
-        ],
-        profiles=[
-            _profile("production_runs", "run_id", "int64", 500, uniqueness_ratio=1.0),
-            _profile("machines", "machine_id", "int64", 20, uniqueness_ratio=1.0),
-            _profile(
-                "machines",
-                "plant_code",
-                "varchar",
-                3,
-                top_values=[("P1", 8), ("P2", 7), ("P3", 5)],
-            ),
-            _profile(
-                "production_runs",
-                "shift_code",
-                "varchar",
-                3,
-                top_values=[("A", 180), ("B", 170), ("C", 150)],
-            ),
-            _profile(
-                "production_runs",
-                "units_produced",
-                "int64",
-                220,
-                min_value=50,
-                max_value=1200,
-            ),
-            _profile("production_runs", "defect_count", "int64", 30, min_value=0, max_value=45),
-        ],
-        relationships=[
-            _relationship("production_runs", "machine_id", "machines", "machine_id"),
-        ],
-    )
-
-
-def _operations_events_fixture_discovery() -> DiscoveryResult:
-    return DiscoveryResult(
-        source=SourceConfig(name="operations_events", type="csv", path="/data/operations"),
-        tables=[
-            TableInfo(
-                name="events",
-                row_count=2_500,
-                columns=[
-                    ColumnInfo(name="event_uuid", dtype="varchar", is_primary_key=True),
-                    ColumnInfo(name="site_id", dtype="int64", semantic_type="foreign_key"),
-                    ColumnInfo(name="event_time", dtype="timestamp", role="temporal"),
-                    ColumnInfo(name="event_type", dtype="varchar", semantic_type="dimension"),
-                    ColumnInfo(name="severity", dtype="varchar", semantic_type="dimension"),
-                    ColumnInfo(name="duration_minutes", dtype="double", semantic_type="metric"),
-                ],
-            ),
-            TableInfo(
-                name="sites",
-                row_count=30,
-                columns=[
-                    ColumnInfo(name="site_id", dtype="int64", is_primary_key=True),
-                    ColumnInfo(name="region", dtype="varchar", semantic_type="dimension"),
-                ],
-            ),
-        ],
-        profiles=[
-            _profile("events", "event_uuid", "varchar", 2_500, uniqueness_ratio=1.0),
-            _profile("sites", "site_id", "int64", 30, uniqueness_ratio=1.0),
-            _profile(
-                "events",
-                "event_type",
-                "varchar",
-                8,
-                top_values=[("alarm", 900), ("inspection", 700), ("maintenance", 500)],
-            ),
-            _profile(
-                "events",
-                "severity",
-                "varchar",
-                4,
-                top_values=[("low", 1200), ("medium", 900), ("high", 400)],
-            ),
-            _profile(
-                "sites",
-                "region",
-                "varchar",
-                4,
-                top_values=[("north", 10), ("south", 8), ("west", 7)],
-            ),
-            _profile("events", "duration_minutes", "double", 300, min_value=0.5, max_value=480.0),
-        ],
-        relationships=[
-            _relationship("events", "site_id", "sites", "site_id"),
-        ],
-    )
-
-
-def _patient_encounters_fixture_discovery() -> DiscoveryResult:
-    return DiscoveryResult(
-        source=SourceConfig(name="patient_encounters", type="csv", path="/data/health"),
-        tables=[
-            TableInfo(
-                name="encounters",
-                row_count=1_200,
-                columns=[
-                    ColumnInfo(name="encounter_id", dtype="int64", is_primary_key=True),
-                    ColumnInfo(name="patient_id", dtype="int64", semantic_type="foreign_key"),
-                    ColumnInfo(name="admitted_at", dtype="timestamp", role="temporal"),
-                    ColumnInfo(name="department", dtype="varchar", semantic_type="dimension"),
-                    ColumnInfo(
-                        name="discharge_disposition",
-                        dtype="varchar",
-                        semantic_type="dimension",
-                    ),
-                    ColumnInfo(name="length_of_stay_days", dtype="double", semantic_type="metric"),
-                ],
-            ),
-            TableInfo(
-                name="patients",
-                row_count=700,
-                columns=[
-                    ColumnInfo(name="patient_id", dtype="int64", is_primary_key=True),
-                    ColumnInfo(name="age_band", dtype="varchar", semantic_type="dimension"),
-                ],
-            ),
-        ],
-        profiles=[
-            _profile("encounters", "encounter_id", "int64", 1_200, uniqueness_ratio=1.0),
-            _profile("patients", "patient_id", "int64", 700, uniqueness_ratio=1.0),
-            _profile(
-                "encounters",
-                "department",
-                "varchar",
-                9,
-                top_values=[("emergency", 400), ("cardiology", 180), ("orthopedics", 150)],
-            ),
-            _profile(
-                "encounters",
-                "discharge_disposition",
-                "varchar",
-                5,
-                top_values=[("home", 800), ("transfer", 210), ("rehab", 120)],
-            ),
-            _profile(
-                "patients",
-                "age_band",
-                "varchar",
-                6,
-                top_values=[("65-74", 220), ("55-64", 180), ("75-84", 140)],
-            ),
-            _profile(
-                "encounters",
-                "length_of_stay_days",
-                "double",
-                40,
-                min_value=0.0,
-                max_value=35.0,
-            ),
-        ],
-        relationships=[
-            _relationship("encounters", "patient_id", "patients", "patient_id"),
-        ],
-    )
-
-
-def _random_schema_fixture_discovery() -> DiscoveryResult:
-    return DiscoveryResult(
-        source=SourceConfig(name="random_schema", type="csv", path="/data/random"),
-        tables=[
-            TableInfo(
-                name="wide_records",
-                row_count=300,
-                columns=[
-                    ColumnInfo(name="record_key", dtype="varchar"),
-                    ColumnInfo(name="batch_code", dtype="varchar", semantic_type="dimension"),
-                    ColumnInfo(name="event_ts", dtype="timestamp", role="temporal"),
-                    ColumnInfo(name="value_num", dtype="double", semantic_type="metric"),
-                ],
-            )
-        ],
-        profiles=[
-            _profile("wide_records", "record_key", "varchar", 300, uniqueness_ratio=1.0),
-            _profile(
-                "wide_records",
-                "batch_code",
-                "varchar",
-                5,
-                top_values=[("B1", 90), ("B2", 80), ("B3", 70)],
-            ),
-            _profile("wide_records", "value_num", "double", 250, min_value=-10.0, max_value=99.5),
-        ],
-    )
-
-
-def _profile(
-    table_name: str,
-    column_name: str,
-    dtype: str,
-    distinct_count: int,
-    *,
-    uniqueness_ratio: float = 0.0,
-    min_value: float | None = None,
-    max_value: float | None = None,
-    top_values: list[tuple[str, int]] | None = None,
-) -> ColumnProfile:
-    return ColumnProfile(
-        table_name=table_name,
-        column_name=column_name,
-        dtype=dtype,
-        distinct_count=distinct_count,
-        uniqueness_ratio=uniqueness_ratio,
-        min_value=min_value,
-        max_value=max_value,
-        top_values=top_values,
-    )
-
-
-def _relationship(
-    from_table: str,
-    from_column: str,
-    to_table: str,
-    to_column: str,
-) -> Relationship:
-    return Relationship(
-        from_table=from_table,
-        from_column=from_column,
-        to_table=to_table,
-        to_column=to_column,
-        type="many_to_one",
-        confidence=0.92,
-        referential_integrity=1.0,
-        source="inferred_name",
     )

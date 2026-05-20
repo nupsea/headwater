@@ -1,5 +1,6 @@
 name: random_schema
 fixture: random_schema
+discovery_path: context_fixtures/random_schema.yaml
 row_grain:
   wide_records:
     - record_key

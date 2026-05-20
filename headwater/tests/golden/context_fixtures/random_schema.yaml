@@ -1,0 +1,39 @@
+source:
+  name: random_schema
+  type: csv
+  path: /data/random
+tables:
+  - name: wide_records
+    row_count: 300
+    columns:
+      - name: record_key
+        dtype: varchar
+      - name: batch_code
+        dtype: varchar
+        semantic_type: dimension
+      - name: event_ts
+        dtype: timestamp
+        role: temporal
+      - name: value_num
+        dtype: double
+        semantic_type: metric
+profiles:
+  - table_name: wide_records
+    column_name: record_key
+    dtype: varchar
+    distinct_count: 300
+    uniqueness_ratio: 1.0
+  - table_name: wide_records
+    column_name: batch_code
+    dtype: varchar
+    distinct_count: 5
+    top_values:
+      - [B1, 90]
+      - [B2, 80]
+      - [B3, 70]
+  - table_name: wide_records
+    column_name: value_num
+    dtype: double
+    distinct_count: 250
+    min_value: -10.0
+    max_value: 99.5

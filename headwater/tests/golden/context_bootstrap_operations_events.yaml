@@ -1,5 +1,6 @@
 name: operations_events
 fixture: operations_events
+discovery_path: context_fixtures/operations_events.yaml
 row_grain:
   events:
     - event_uuid

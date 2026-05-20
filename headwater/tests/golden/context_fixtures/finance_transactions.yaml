@@ -1,0 +1,85 @@
+source:
+  name: finance_transactions
+  type: csv
+  path: /data/finance
+tables:
+  - name: transactions
+    row_count: 1000
+    columns:
+      - name: transaction_id
+        dtype: int64
+        is_primary_key: true
+      - name: account_id
+        dtype: int64
+        semantic_type: foreign_key
+      - name: posted_at
+        dtype: timestamp
+        role: temporal
+      - name: merchant_category
+        dtype: varchar
+        semantic_type: dimension
+      - name: amount_usd
+        dtype: double
+        semantic_type: metric
+      - name: transaction_status
+        dtype: varchar
+        semantic_type: dimension
+  - name: accounts
+    row_count: 100
+    columns:
+      - name: account_id
+        dtype: int64
+        is_primary_key: true
+      - name: account_segment
+        dtype: varchar
+        semantic_type: dimension
+profiles:
+  - table_name: transactions
+    column_name: transaction_id
+    dtype: int64
+    distinct_count: 1000
+    uniqueness_ratio: 1.0
+  - table_name: accounts
+    column_name: account_id
+    dtype: int64
+    distinct_count: 100
+    uniqueness_ratio: 1.0
+  - table_name: accounts
+    column_name: account_segment
+    dtype: varchar
+    distinct_count: 3
+    top_values:
+      - [consumer, 60]
+      - [business, 30]
+      - [enterprise, 10]
+  - table_name: transactions
+    column_name: merchant_category
+    dtype: varchar
+    distinct_count: 12
+    top_values:
+      - [grocery, 220]
+      - [fuel, 150]
+      - [travel, 80]
+  - table_name: transactions
+    column_name: transaction_status
+    dtype: varchar
+    distinct_count: 4
+    top_values:
+      - [posted, 850]
+      - [pending, 100]
+      - [reversed, 50]
+  - table_name: transactions
+    column_name: amount_usd
+    dtype: double
+    distinct_count: 940
+    min_value: 1.25
+    max_value: 2500.0
+relationships:
+  - from_table: transactions
+    from_column: account_id
+    to_table: accounts
+    to_column: account_id
+    type: many_to_one
+    confidence: 0.92
+    referential_integrity: 1.0
+    source: inferred_name

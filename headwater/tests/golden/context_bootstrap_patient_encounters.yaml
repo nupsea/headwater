@@ -1,5 +1,6 @@
 name: patient_encounters
 fixture: patient_encounters
+discovery_path: context_fixtures/patient_encounters.yaml
 row_grain:
   encounters:
     - encounter_id

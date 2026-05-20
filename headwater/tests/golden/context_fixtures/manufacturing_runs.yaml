@@ -1,0 +1,83 @@
+source:
+  name: manufacturing_runs
+  type: csv
+  path: /data/manufacturing
+tables:
+  - name: production_runs
+    row_count: 500
+    columns:
+      - name: run_id
+        dtype: int64
+        is_primary_key: true
+      - name: machine_id
+        dtype: int64
+        semantic_type: foreign_key
+      - name: started_at
+        dtype: timestamp
+        role: temporal
+      - name: shift_code
+        dtype: varchar
+        semantic_type: dimension
+      - name: units_produced
+        dtype: int64
+        semantic_type: metric
+      - name: defect_count
+        dtype: int64
+        semantic_type: metric
+  - name: machines
+    row_count: 20
+    columns:
+      - name: machine_id
+        dtype: int64
+        is_primary_key: true
+      - name: plant_code
+        dtype: varchar
+        semantic_type: dimension
+profiles:
+  - table_name: production_runs
+    column_name: run_id
+    dtype: int64
+    distinct_count: 500
+    uniqueness_ratio: 1.0
+  - table_name: machines
+    column_name: machine_id
+    dtype: int64
+    distinct_count: 20
+    uniqueness_ratio: 1.0
+  - table_name: machines
+    column_name: plant_code
+    dtype: varchar
+    distinct_count: 3
+    top_values:
+      - [P1, 8]
+      - [P2, 7]
+      - [P3, 5]
+  - table_name: production_runs
+    column_name: shift_code
+    dtype: varchar
+    distinct_count: 3
+    top_values:
+      - [A, 180]
+      - [B, 170]
+      - [C, 150]
+  - table_name: production_runs
+    column_name: units_produced
+    dtype: int64
+    distinct_count: 220
+    min_value: 50
+    max_value: 1200
+  - table_name: production_runs
+    column_name: defect_count
+    dtype: int64
+    distinct_count: 30
+    min_value: 0
+    max_value: 45
+relationships:
+  - from_table: production_runs
+    from_column: machine_id
+    to_table: machines
+    to_column: machine_id
+    type: many_to_one
+    confidence: 0.92
+    referential_integrity: 1.0
+    source: inferred_name

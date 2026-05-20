@@ -150,6 +150,27 @@ def test_load_context_eval_cases_builds_named_fixture_from_gold():
     assert result["passed"] is True
 
 
+def test_cross_domain_fixture_inputs_are_data_driven():
+    cross_domain_gold = [
+        path
+        for path in sorted(GOLD_DIR.glob("context_bootstrap_*.yaml"))
+        if path != GOLD
+    ]
+
+    cases = load_context_eval_cases(cross_domain_gold)
+    service_source = (
+        Path(__file__).resolve().parent.parent
+        / "headwater"
+        / "services"
+        / "context_evaluation.py"
+    ).read_text(encoding="utf-8")
+
+    assert len(cases) == 5
+    for case in cases:
+        assert case["gold"]["discovery_path"].startswith("context_fixtures/")
+        assert case["name"] not in service_source
+
+
 def test_all_context_eval_gold_fixtures_pass():
     cases = load_context_eval_cases(sorted(GOLD_DIR.glob("context_bootstrap_*.yaml")))
 

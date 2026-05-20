@@ -1,5 +1,6 @@
 name: manufacturing_runs
 fixture: manufacturing_runs
+discovery_path: context_fixtures/manufacturing_runs.yaml
 row_grain:
   production_runs:
     - run_id
