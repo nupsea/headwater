@@ -25,6 +25,7 @@ def build_context_exports(payload: dict, *, include_proposed: bool = True) -> di
         "dataset_contexts": dataset_contexts,
         "summary": _summary(items),
         "dataset_summary": _first_item_value(items, "dataset_summary"),
+        "cold_start_summary": _first_item_value(items, "cold_start_summary"),
         "row_grains": _entries_for_type(items, "row_grain"),
         "row_entities": _entries_for_type(items, "row_entity"),
         "time_anchors": _entries_for_type(items, "time_anchor"),
@@ -298,6 +299,22 @@ def _review_markdown(
             lines.append(f"- {source_name}: row={row_represents}; time_grain={time_grain}")
         lines.append("")
 
+    cold_start = _first_item_value(items, "cold_start_summary")
+    if cold_start:
+        lines.extend(["## Cold Start Summary", ""])
+        top_dimensions = cold_start.get("top_dimensions") or []
+        top_measures = cold_start.get("top_measures") or []
+        fallback_questions = cold_start.get("fallback_questions") or []
+        lines.append(f"- Top dimensions: {_column_list(top_dimensions)}")
+        lines.append(f"- Top measures: {_column_list(top_measures)}")
+        lines.append(f"- Quality risks: {len(cold_start.get('quality_risks') or [])}")
+        lines.append(f"- Sensitive columns: {len(cold_start.get('sensitive_columns') or [])}")
+        if fallback_questions:
+            lines.append("- Fallback questions:")
+            for question in fallback_questions[:5]:
+                lines.append(f"  - {question}")
+        lines.append("")
+
     open_questions = [item for item in items if item.get("item_type") == "open_question"]
     lines.extend(["## Open Questions", ""])
     if open_questions:
@@ -356,3 +373,15 @@ def _review_markdown(
         lines.append("- None")
     lines.append("")
     return "\n".join(lines)
+
+
+def _column_list(items: list[dict]) -> str:
+    labels = [
+        ".".join(
+            part
+            for part in (item.get("table_name"), item.get("column_name"))
+            if part
+        )
+        for item in items[:5]
+    ]
+    return ", ".join(label for label in labels if label) or "none"

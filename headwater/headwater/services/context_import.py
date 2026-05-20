@@ -79,6 +79,24 @@ def import_context_exports(
             "evidence": [],
         }
 
+    cold_start_summary = parsed.get("context.yaml", {}).get("cold_start_summary") or {}
+    if cold_start_summary:
+        item_id = f"cold_start_summary:{source_name or project['id']}"
+        items[item_id] = {
+            "id": item_id,
+            "project_id": project["id"],
+            "source_name": source_name,
+            "item_type": "cold_start_summary",
+            "scope": "project",
+            "name": "cold_start_summary",
+            "title": "Cold-start summary",
+            "value": cold_start_summary,
+            "status": "approved",
+            "confidence": 1.0,
+            "source": "import",
+            "evidence": [],
+        }
+
     for question in parsed.get("context.yaml", {}).get("open_questions", []):
         item_id = question.get("id") or _slugged_id(
             "question",

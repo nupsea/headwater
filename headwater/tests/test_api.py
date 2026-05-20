@@ -374,11 +374,13 @@ class TestProjectContext:
         assert "advisor_packs.yaml" in files
         assert "REVIEW.md" in files
         assert "version: 1" in files["context.yaml"]
+        assert "cold_start_summary:" in files["context.yaml"]
         assert "row_grains:" in files["context.yaml"]
         assert "pk_candidates:" in files["context.yaml"]
         assert "Locked business definition." in files["semantic_types.yaml"]
         assert "role: identifier" in files["semantic_schema.yaml"]
         assert "# Project Context Review: source" in files["REVIEW.md"]
+        assert "## Cold Start Summary" in files["REVIEW.md"]
 
     def test_project_context_import_merges_exported_files(self, client):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
@@ -387,6 +389,15 @@ class TestProjectContext:
         exported = client.get("/api/projects/source/context/export")
         assert exported.status_code == 200
         files = exported.json()["files"]
+        context_yaml = yaml.safe_load(files["context.yaml"])
+        context_yaml["cold_start_summary"]["fallback_questions"] = [
+            "Imported cold-start question?"
+        ]
+        files["context.yaml"] = yaml.safe_dump(
+            context_yaml,
+            sort_keys=False,
+            allow_unicode=False,
+        )
         semantic_types = yaml.safe_load(files["semantic_types.yaml"])
         target = next(
             column
@@ -442,6 +453,14 @@ class TestProjectContext:
         assert updated["value"].get("description") == "Imported canonical identifier"
         assert updated["status"] == target.get("status", "proposed")
         assert updated["source"] == "import"
+        cold_start = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "cold_start_summary"
+        )
+        assert cold_start["value"]["fallback_questions"] == [
+            "Imported cold-start question?"
+        ]
         policy = next(
             item
             for item in context["items"]
