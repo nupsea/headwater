@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -386,11 +387,7 @@ def _update_context_item(
         item_id,
         updated["status"],
         reason=reason,
-        payload={
-            "project_id": item["project_id"],
-            "before": item,
-            "after": updated,
-        },
+        payload=_context_decision_payload(item, updated),
     )
     store.log_activity(
         "project_context_item_reviewed",
@@ -399,6 +396,64 @@ def _update_context_item(
         artifact_id=item_id,
     )
     return updated
+
+
+def _context_decision_payload(before: dict, after: dict) -> dict:
+    return {
+        "project_id": before["project_id"],
+        "item_id": before["id"],
+        "item_type": before.get("item_type"),
+        "producer": after.get("source") or "user",
+        "prior_status": before.get("status"),
+        "new_status": after.get("status"),
+        "prior_value": before.get("value") or {},
+        "new_value": after.get("value") or {},
+        "prior_confidence": before.get("confidence"),
+        "new_confidence": after.get("confidence"),
+        "evidence_ids": _context_evidence_ids(after.get("evidence") or []),
+        "time_to_decision_seconds": _time_to_decision_seconds(before),
+        "source_snapshot": {
+            "source_name": before.get("source_name"),
+            "table_name": before.get("table_name"),
+            "column_name": before.get("column_name"),
+            "prior_updated_at": before.get("updated_at"),
+            "new_updated_at": after.get("updated_at"),
+        },
+        "before": before,
+        "after": after,
+    }
+
+
+def _context_evidence_ids(evidence: list[dict]) -> list[str]:
+    ids: list[str] = []
+    for index, item in enumerate(evidence):
+        evidence_id = item.get("evidence_id") or item.get("id")
+        if evidence_id:
+            ids.append(str(evidence_id))
+            continue
+        evidence_type = item.get("evidence_type") or "evidence"
+        source = item.get("source") or "unknown"
+        ids.append(f"{evidence_type}:{source}:{index}")
+    return ids
+
+
+def _time_to_decision_seconds(item: dict) -> int | None:
+    created_at = _parse_datetime(item.get("created_at"))
+    if created_at is None:
+        return None
+    return max(0, int((datetime.now(UTC) - created_at).total_seconds()))
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _compute_maturity(progress: dict) -> tuple[str, float]:

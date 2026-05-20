@@ -266,6 +266,24 @@ class TestProjectContext:
             entry["artifact_type"] == "project_context_item"
             for entry in history["decisions"]
         )
+        decision = next(
+            entry
+            for entry in history["decisions"]
+            if entry["artifact_type"] == "project_context_item"
+            and entry["artifact_id"] == target["id"]
+            and entry["action"] == "approved"
+        )
+        payload = json.loads(decision["payload_json"])
+        assert payload["item_id"] == target["id"]
+        assert payload["item_type"] == "column_semantics"
+        assert payload["producer"] == "user"
+        assert payload["prior_status"] == target["status"]
+        assert payload["new_status"] == "approved"
+        assert payload["prior_confidence"] == target["confidence"]
+        assert payload["new_confidence"] == 0.99
+        assert payload["new_value"]["description"] == "Reviewed workflow status for the order."
+        assert payload["source_snapshot"]["column_name"] == "status_code"
+        assert isinstance(payload["time_to_decision_seconds"], int)
 
     def test_markdown_table_heading_scopes_resource_enrichment(self, client, tmp_path):
         source_dir = tmp_path / "support_source"
