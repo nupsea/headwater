@@ -145,6 +145,46 @@ def evaluate_context_suite(
     }
 
 
+def build_context_eval_metrics(result: dict) -> dict:
+    """Build a compact, stable metrics artifact for regression tracking."""
+    return {
+        "schema_version": 1,
+        "passed": result["passed"],
+        "score": result["score"],
+        "thresholds": {
+            "min_score": result["min_score"],
+            "min_category_score": result["min_category_score"],
+        },
+        "metrics": result["metrics"],
+        "categories": _metrics_artifact_categories(result["category_metrics"]),
+        "fixtures": [
+            {
+                "name": fixture["name"],
+                "passed": fixture["passed"],
+                "score": fixture["score"],
+                "thresholds": fixture["thresholds"],
+                "metrics": fixture["metrics"],
+                "categories": _metrics_artifact_categories(fixture["category_metrics"]),
+                "threshold_failures": fixture["threshold_failures"],
+                "failure_names": [failure["name"] for failure in fixture["failures"]],
+            }
+            for fixture in result["fixtures"]
+        ],
+    }
+
+
+def _metrics_artifact_categories(category_metrics: dict) -> dict:
+    return {
+        category: {
+            "total_checks": metrics["total_checks"],
+            "passed_checks": metrics["passed_checks"],
+            "failed_checks": metrics["failed_checks"],
+            "exact_match_score": metrics["score"],
+        }
+        for category, metrics in category_metrics.items()
+    }
+
+
 def _fixture_thresholds(
     gold: dict,
     *,

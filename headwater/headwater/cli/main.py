@@ -532,11 +532,17 @@ def context_eval(
         "--json",
         help="Emit the full evaluation result as JSON.",
     ),
+    metrics_out: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--metrics-out",
+        help="Write compact regression metrics JSON to this path.",
+    ),
 ) -> None:
     """Run context bootstrap gold-fixture evaluation."""
     import json
 
     from headwater.services.context_evaluation import (
+        build_context_eval_metrics,
         evaluate_context_suite,
         load_context_eval_cases,
     )
@@ -557,6 +563,12 @@ def context_eval(
         min_score=min_score,
         min_category_score=min_category_score,
     )
+    if metrics_out is not None:
+        metrics_out.parent.mkdir(parents=True, exist_ok=True)
+        metrics_out.write_text(
+            json.dumps(build_context_eval_metrics(result), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     if json_output:
         typer.echo(json.dumps(result, indent=2, sort_keys=True))
     else:

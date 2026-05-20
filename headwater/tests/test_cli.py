@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from typer.testing import CliRunner
 
 from headwater.cli.main import app
@@ -121,6 +123,22 @@ class TestCLIContextEval:
         result = runner.invoke(app, ["context-eval", "--gold", str(gold)])
         assert result.exit_code == 1
         assert "threshold category:row_grain" in result.output
+
+    def test_context_eval_writes_metrics_artifact(self, tmp_path):
+        metrics_path = tmp_path / "metrics" / "context-eval.json"
+
+        result = runner.invoke(
+            app,
+            ["context-eval", "--metrics-out", str(metrics_path)],
+        )
+
+        assert result.exit_code == 0
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        assert metrics["schema_version"] == 1
+        assert metrics["passed"] is True
+        assert metrics["metrics"]["fixture_count"] == 6
+        assert metrics["categories"]["row_grain"]["exact_match_score"] == 1.0
+        assert metrics["fixtures"][0]["failure_names"] == []
 
     def test_context_eval_bad_path(self):
         result = runner.invoke(app, ["context-eval", "--gold", "/nonexistent"])

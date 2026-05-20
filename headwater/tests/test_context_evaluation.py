@@ -14,6 +14,7 @@ from headwater.core.models import (
 )
 from headwater.services.context_bootstrap import bootstrap_project_context
 from headwater.services.context_evaluation import (
+    build_context_eval_metrics,
     evaluate_context_bundle,
     evaluate_context_suite,
     load_context_eval_cases,
@@ -158,6 +159,20 @@ def test_all_context_eval_gold_fixtures_pass():
     assert result["metrics"]["fixture_count"] == 6
     assert result["category_metrics"]["row_grain"]["failed_checks"] == 0
     assert result["category_metrics"]["top_dimensions"]["passed_checks"] >= 10
+
+
+def test_context_evaluation_metrics_artifact_tracks_category_scores():
+    cases = load_context_eval_cases([GOLD])
+    result = evaluate_context_suite(cases, min_score=1.0, min_category_score=0.9)
+
+    metrics = build_context_eval_metrics(result)
+
+    assert metrics["schema_version"] == 1
+    assert metrics["thresholds"] == {"min_score": 1.0, "min_category_score": 0.9}
+    assert metrics["categories"]["row_grain"]["exact_match_score"] == 1.0
+    assert metrics["fixtures"][0]["name"] == "orders"
+    assert metrics["fixtures"][0]["categories"]["top_measures"]["failed_checks"] == 0
+    assert metrics["fixtures"][0]["failure_names"] == []
 
 
 def _orders_discovery() -> DiscoveryResult:
