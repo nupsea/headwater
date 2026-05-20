@@ -402,6 +402,129 @@ roles:
         assert roles["event_ts"].column_name == "occurred_at"
         assert roles["event_ts"].source == "context"
 
+    def test_generic_derived_fields_are_only_time_buckets(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="source", type="json"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    columns=[
+                        ColumnInfo(name="started_at", dtype="timestamp"),
+                        ColumnInfo(name="resolved_at", dtype="timestamp"),
+                    ],
+                )
+            ],
+            profiles=[],
+            relationships=[],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "column_semantics:events.started_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "started_at",
+                    "table_name": "events",
+                    "column_name": "started_at",
+                    "status": "approved",
+                    "value": {"role": "lifecycle_start_ts"},
+                },
+                {
+                    "id": "column_semantics:events.resolved_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "resolved_at",
+                    "table_name": "events",
+                    "column_name": "resolved_at",
+                    "status": "approved",
+                    "value": {"role": "lifecycle_end_ts"},
+                },
+            ],
+        )
+
+        schema = infer_semantic_schema(discovery, metadata=metadata)
+        derived_names = {field.name for field in schema.derived_fields}
+
+        assert {"event_date", "event_hour", "day_of_week"} <= derived_names
+        assert "duration_min" not in derived_names
+
+    def test_project_context_can_define_derived_fields(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="source", type="json"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    columns=[
+                        ColumnInfo(name="started_at", dtype="timestamp"),
+                        ColumnInfo(name="resolved_at", dtype="timestamp"),
+                    ],
+                )
+            ],
+            profiles=[],
+            relationships=[],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "column_semantics:events.started_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "started_at",
+                    "table_name": "events",
+                    "column_name": "started_at",
+                    "status": "approved",
+                    "value": {"role": "lifecycle_start_ts"},
+                },
+                {
+                    "id": "column_semantics:events.resolved_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "resolved_at",
+                    "table_name": "events",
+                    "column_name": "resolved_at",
+                    "status": "approved",
+                    "value": {"role": "lifecycle_end_ts"},
+                },
+                {
+                    "id": "derived_field:events.elapsed_minutes",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "derived_field",
+                    "scope": "table",
+                    "name": "elapsed_minutes",
+                    "table_name": "events",
+                    "status": "approved",
+                    "confidence": 0.91,
+                    "value": {
+                        "name": "elapsed_minutes",
+                        "role": "duration_minutes",
+                        "required_roles": ["lifecycle_start_ts", "lifecycle_end_ts"],
+                        "expression": (
+                            "date_diff('second', {lifecycle_start_ts}, "
+                            "{lifecycle_end_ts}) / 60.0"
+                        ),
+                    },
+                },
+            ],
+        )
+
+        schema = infer_semantic_schema(discovery, metadata=metadata)
+        derived = {field.name: field for field in schema.derived_fields}
+
+        assert derived["elapsed_minutes"].role == "duration_minutes"
+        assert '"started_at"' in derived["elapsed_minutes"].expression
+        assert '"resolved_at"' in derived["elapsed_minutes"].expression
+
 
 # -- LLM provider -----------------------------------------------------------
 

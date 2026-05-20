@@ -188,7 +188,7 @@ def infer_semantic_schema(
     return SemanticSchema(
         source_name=discovery.source.name,
         columns=roles,
-        derived_fields=_derive_fields(roles),
+        derived_fields=_derive_fields(roles, metadata),
     )
 
 
@@ -219,10 +219,6 @@ def _infer_column_role(
         if pattern.search(name):
             if role.endswith("_ts") and not _TEMPORAL_DTYPE.search(dtype):
                 confidence -= 0.18
-            if role in {"distance", "duration", "amount", "tip_amount", "count"} and (
-                not _NUMERIC_DTYPE.search(dtype)
-            ):
-                confidence -= 0.2
             return role, max(0.5, confidence), reason
 
     if _TEMPORAL_DTYPE.search(dtype):
@@ -238,35 +234,26 @@ def _infer_column_role(
 
 
 def _role_from_locked_column(role: str | None, semantic_type: str | None) -> str | None:
-    value = " ".join(v for v in (role, semantic_type) if v).lower()
-    if value in {
-        "event_ts",
-        "request_ts",
-        "lifecycle_start_ts",
-        "lifecycle_end_ts",
-        "location_id",
-        "origin_id",
-        "destination_id",
-        "measure",
-        "distance",
-        "duration",
-        "amount",
-        "count",
-        "service_type",
-    }:
-        return value
+    if role:
+        return _normalize_role_name(role)
+    value = (semantic_type or "").lower()
     if "temporal" in value or "date" in value or "time" in value:
         return "event_ts"
-    if "geo" in value or "location" in value:
-        return "location_id"
+    if "id" in value or "key" in value:
+        return "identifier"
     if "metric" in value:
         return "measure"
     if "dimension" in value:
-        return "service_type"
+        return "dimension"
+    if "text" in value or "string" in value:
+        return "text"
     return None
 
 
-def _derive_fields(roles: list[SemanticColumnRole]) -> list[SemanticDerivedField]:
+def _derive_fields(
+    roles: list[SemanticColumnRole],
+    metadata: RetrievedMetadata | None = None,
+) -> list[SemanticDerivedField]:
     by_table: dict[str, dict[str, SemanticColumnRole]] = defaultdict(dict)
     for role in roles:
         current = by_table[role.table_name].get(role.canonical_role)
@@ -275,12 +262,7 @@ def _derive_fields(roles: list[SemanticColumnRole]) -> list[SemanticDerivedField
 
     derived: list[SemanticDerivedField] = []
     for table_name, table_roles in by_table.items():
-        start = table_roles.get("lifecycle_start_ts") or table_roles.get("event_ts")
-        end = table_roles.get("lifecycle_end_ts")
-        request = table_roles.get("request_ts")
-        origin = table_roles.get("origin_id") or table_roles.get("location_id")
-        dest = table_roles.get("destination_id")
-        distance = table_roles.get("distance")
+        start = _preferred_time_role(table_roles)
 
         if start:
             derived.extend(
@@ -311,71 +293,65 @@ def _derive_fields(roles: list[SemanticColumnRole]) -> list[SemanticDerivedField
                     ),
                 ]
             )
-        if start and end:
-            derived.append(
-                SemanticDerivedField(
-                    table_name=table_name,
-                    name="duration_min",
-                    expression=(
-                        f"date_diff('second', {quote_ident(start.column_name)}, "
-                        f"{quote_ident(end.column_name)}) / 60.0"
-                    ),
-                    role="duration_minutes",
-                    required_roles=[start.canonical_role, end.canonical_role],
-                    confidence=min(start.confidence, end.confidence),
-                )
-            )
-        if request and start:
-            derived.append(
-                SemanticDerivedField(
-                    table_name=table_name,
-                    name="wait_min",
-                    expression=(
-                        f"date_diff('second', {quote_ident(request.column_name)}, "
-                        f"{quote_ident(start.column_name)}) / 60.0"
-                    ),
-                    role="wait_minutes",
-                    required_roles=[request.canonical_role, start.canonical_role],
-                    confidence=min(request.confidence, start.confidence),
-                )
-            )
-        if start and end and distance:
-            duration_expr = (
-                f"date_diff('second', {quote_ident(start.column_name)}, "
-                f"{quote_ident(end.column_name)}) / 3600.0"
-            )
-            derived.append(
-                SemanticDerivedField(
-                    table_name=table_name,
-                    name="speed_per_hour",
-                    expression=(
-                        f"CASE WHEN {duration_expr} > 0 THEN "
-                        f"{quote_ident(distance.column_name)} / ({duration_expr}) END"
-                    ),
-                    role="speed",
-                    required_roles=[
-                        start.canonical_role,
-                        end.canonical_role,
-                        distance.canonical_role,
-                    ],
-                    confidence=min(start.confidence, end.confidence, distance.confidence),
-                )
-            )
-        if origin and dest:
-            derived.append(
-                SemanticDerivedField(
-                    table_name=table_name,
-                    name="route_pair",
-                    expression=(
-                        f"CAST({quote_ident(origin.column_name)} AS VARCHAR) || ' -> ' || "
-                        f"CAST({quote_ident(dest.column_name)} AS VARCHAR)"
-                    ),
-                    role="route_pair",
-                    required_roles=[origin.canonical_role, dest.canonical_role],
-                    confidence=min(origin.confidence, dest.confidence),
-                )
-            )
+        derived.extend(_context_derived_fields(table_name, table_roles, metadata))
     return derived
+
+
+def _preferred_time_role(
+    table_roles: dict[str, SemanticColumnRole],
+) -> SemanticColumnRole | None:
+    for role_name, role in table_roles.items():
+        if role_name == "event_ts" or role_name.endswith("_ts"):
+            return role
+    return None
+
+
+def _context_derived_fields(
+    table_name: str,
+    table_roles: dict[str, SemanticColumnRole],
+    metadata: RetrievedMetadata | None,
+) -> list[SemanticDerivedField]:
+    if metadata is None:
+        return []
+    derived: list[SemanticDerivedField] = []
+    for item in metadata.context_items:
+        if item.item_type != "derived_field" or item.status not in {"approved", "locked"}:
+            continue
+        if item.table_name and item.table_name != table_name:
+            continue
+        value = item.value or {}
+        required_roles = [str(role) for role in value.get("required_roles") or []]
+        if not required_roles or not all(role in table_roles for role in required_roles):
+            continue
+        expression = str(value.get("expression") or "").strip()
+        if not expression:
+            continue
+        derived.append(
+            SemanticDerivedField(
+                table_name=table_name,
+                name=str(value.get("name") or item.name),
+                expression=_fill_role_placeholders(expression, table_roles),
+                role=str(value.get("role") or value.get("semantic_type") or item.name),
+                required_roles=required_roles,
+                confidence=item.confidence,
+            )
+        )
+    return derived
+
+
+def _fill_role_placeholders(
+    expression: str,
+    table_roles: dict[str, SemanticColumnRole],
+) -> str:
+    rendered = expression
+    for role_name, role in table_roles.items():
+        rendered = rendered.replace("{" + role_name + "}", quote_ident(role.column_name))
+    return rendered
+
+
+def _normalize_role_name(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
+    return normalized.strip("_")
 
 
 def quote_ident(name: str) -> str:
