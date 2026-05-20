@@ -3988,6 +3988,18 @@ class TestNlToSql:
     def test_rejects_select_with_drop(self):
         assert _is_read_only("SELECT 1; DROP TABLE foo") is False
 
+    def test_rejects_multiple_select_statements(self):
+        assert _is_read_only("SELECT 1; SELECT 2") is False
+
+    def test_rejects_admin_statements(self):
+        assert _is_read_only("PRAGMA show_tables") is False
+        assert _is_read_only("ATTACH 'other.duckdb' AS other") is False
+        assert _is_read_only("INSTALL httpfs") is False
+
+    def test_ignores_comments_when_checking_shape(self):
+        assert _is_read_only("-- explain\nSELECT * FROM foo") is True
+        assert _is_read_only("/* explain */ WITH cte AS (SELECT 1) SELECT * FROM cte") is True
+
     def test_questions_similar_exact(self):
         assert _questions_similar("what is the average", "what is the average") is True
 

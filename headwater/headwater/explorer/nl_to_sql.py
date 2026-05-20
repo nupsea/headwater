@@ -44,6 +44,7 @@ from headwater.core.models import (
 from headwater.explorer.query_planner import QueryPlanner
 from headwater.explorer.readability import is_opaque_business_value, is_readable_dimension
 from headwater.explorer.schema_graph import SchemaGraph
+from headwater.explorer.sql_safety import validate_explore_sql
 from headwater.explorer.utils import resolve_table_ref, table_exists
 from headwater.explorer.visualization import recommend_visualization
 
@@ -63,10 +64,6 @@ def _safe_sql_alias(value: str, prefix: str | None = None) -> str:
         normalized = f"{prefix}_{normalized}"
     return normalized
 
-_FORBIDDEN_PATTERNS = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXEC)\b",
-    re.IGNORECASE,
-)
 _TEMPORAL_RESULT_RE = re.compile(
     r"(date|time|month|year|day|week|quarter|period|hour|minute)", re.IGNORECASE
 )
@@ -235,11 +232,16 @@ def ask(
         )
 
     # Validate read-only
-    if not _is_read_only(sql):
+    safety = validate_explore_sql(sql)
+    if not safety.allowed:
         return ExplorationResult(
             question=question,
             sql=sql,
-            error="Generated SQL contains write operations and was blocked for safety.",
+            error=(
+                "Generated SQL contains blocked or write operations and was "
+                "blocked for safety: "
+                f"{safety.reason or 'not an allowed read-only query'}"
+            ),
         )
 
     # Grounding check: verify question terms exist in schema + generated SQL
@@ -1871,10 +1873,7 @@ Generate a DuckDB SELECT query that answers this question. Return ONLY the SQL, 
 
 def _is_read_only(sql: str) -> bool:
     """Validate that SQL contains only read operations."""
-    stripped = sql.strip().rstrip(";").strip()
-    if not stripped.upper().startswith("SELECT") and not stripped.upper().startswith("WITH"):
-        return False
-    return not bool(_FORBIDDEN_PATTERNS.search(sql))
+    return validate_explore_sql(sql).allowed
 
 
 _INTERNAL_SCHEMAS = {"information_schema", "pg_catalog"}
