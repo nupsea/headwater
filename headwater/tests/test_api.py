@@ -385,6 +385,69 @@ class TestProjectContext:
         assert updated["status"] == "approved"
         assert updated["value"]["description"] == "Reviewed business meaning."
 
+    def test_user_can_revert_context_item_decision(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        item = next(
+            entry for entry in context["items"] if entry["item_type"] == "column_semantics"
+        )
+        approve = client.post(
+            f"/api/projects/source/context/items/{item['id']}/approve",
+            json={
+                "reason": "Confirmed during review",
+                "confidence": 0.97,
+                "value": {
+                    **item["value"],
+                    "description": "Reviewed meaning to roll back.",
+                    "role": "dimension",
+                },
+            },
+        )
+        assert approve.status_code == 200
+
+        history = client.get("/api/projects/source/context/history").json()
+        decision = next(
+            entry
+            for entry in history["decisions"]
+            if entry["artifact_type"] == "project_context_item"
+            and entry["artifact_id"] == item["id"]
+            and entry["action"] == "approved"
+        )
+
+        revert = client.post(
+            f"/api/projects/source/context/decisions/{decision['id']}/revert",
+            json={"reason": "Undo accidental approval"},
+        )
+
+        assert revert.status_code == 200
+        reverted = revert.json()
+        assert reverted["reverted_decision_id"] == decision["id"]
+        assert reverted["item"]["id"] == item["id"]
+        assert reverted["item"]["status"] == item["status"]
+        assert reverted["item"]["confidence"] == item["confidence"]
+        assert reverted["item"]["source"] == item["source"]
+        assert reverted["item"]["value"] == item["value"]
+
+        refreshed = client.get("/api/projects/source/context").json()
+        current = next(entry for entry in refreshed["items"] if entry["id"] == item["id"])
+        assert current["value"] == item["value"]
+
+        revert_history = client.get("/api/projects/source/context/history").json()
+        revert_decision = next(
+            entry
+            for entry in revert_history["decisions"]
+            if entry["artifact_type"] == "project_context_item"
+            and entry["artifact_id"] == item["id"]
+            and entry["action"] == "reverted"
+        )
+        payload = json.loads(revert_decision["payload_json"])
+        assert payload["reverted_decision_id"] == decision["id"]
+        assert payload["prior_status"] == "approved"
+        assert payload["new_status"] == item["status"]
+        assert payload["new_value"] == item["value"]
+
     def test_project_context_export_renders_yaml_and_review_markdown(self, client):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
         assert discover.status_code == 200

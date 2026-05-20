@@ -1061,6 +1061,18 @@ def test_get_decisions_filtered_by_artifact(meta: MetadataStore):
     assert all(d["artifact_id"] == "stg_zones" for d in decisions)
 
 
+def test_get_decision_by_id(meta: MetadataStore):
+    meta.record_decision("model", "stg_zones", "approved")
+    decision_id = meta.get_decisions()[0]["id"]
+
+    decision = meta.get_decision(decision_id)
+
+    assert decision is not None
+    assert decision["id"] == decision_id
+    assert decision["artifact_id"] == "stg_zones"
+    assert meta.get_decision(999_999) is None
+
+
 def test_payload_json_column_exists(meta: MetadataStore):
     """Verify decisions table has payload_json column (migration)."""
     cols = meta.con.execute("PRAGMA table_info(decisions)").fetchall()

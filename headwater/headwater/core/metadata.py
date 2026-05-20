@@ -2981,6 +2981,11 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
             rows = self.con.execute("SELECT * FROM decisions ORDER BY created_at DESC").fetchall()
         return [dict(r) for r in rows]
 
+    def get_decision(self, decision_id: int) -> dict | None:
+        """Return a single recorded decision by id."""
+        row = self.con.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+        return dict(row) if row is not None else None
+
     # -- LLM audit log -----------------------------------------------------
 
     def insert_llm_audit(

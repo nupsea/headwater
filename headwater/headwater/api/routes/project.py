@@ -71,6 +71,10 @@ class ContextItemDecisionRequest(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class RevertContextDecisionRequest(BaseModel):
+    reason: str | None = None
+
+
 class ImportProjectContextRequest(BaseModel):
     files: dict[str, str] = Field(default_factory=dict)
     source_name: str | None = None
@@ -284,17 +288,7 @@ def _find_project_context_item(project: dict, store, item_id: str) -> dict | Non
 
 def _project_context_history_payload(project: dict, store, *, limit: int = 20) -> dict:
     source_names = project_sources(project, store)
-    context_ids = set(_context_ids_for_project(project, store))
-    item_ids = {
-        item["id"]
-        for context_id in context_ids
-        for item in store.list_project_context_items(context_id)
-    }
-    resource_ids = {
-        resource["id"]
-        for context_id in context_ids
-        for resource in store.list_project_context_resources(context_id)
-    }
+    context_ids, item_ids, resource_ids = _project_context_membership(project, store)
     decisions = []
     for entry in store.get_decisions():
         if not _decision_belongs_to_project(
@@ -322,6 +316,21 @@ def _project_context_history_payload(project: dict, store, *, limit: int = 20) -
     }
 
 
+def _project_context_membership(project: dict, store) -> tuple[set[str], set[str], set[str]]:
+    context_ids = set(_context_ids_for_project(project, store))
+    item_ids = {
+        item["id"]
+        for context_id in context_ids
+        for item in store.list_project_context_items(context_id)
+    }
+    resource_ids = {
+        resource["id"]
+        for context_id in context_ids
+        for resource in store.list_project_context_resources(context_id)
+    }
+    return context_ids, item_ids, resource_ids
+
+
 def _decision_belongs_to_project(
     decision: dict,
     *,
@@ -332,13 +341,7 @@ def _decision_belongs_to_project(
 ) -> bool:
     artifact_type = decision.get("artifact_type")
     artifact_id = decision.get("artifact_id")
-    payload = {}
-    payload_json = decision.get("payload_json")
-    if isinstance(payload_json, str) and payload_json:
-        try:
-            payload = json.loads(payload_json)
-        except json.JSONDecodeError:
-            payload = {}
+    payload = _decision_payload(decision)
 
     if artifact_type == "project_context_item":
         if artifact_id in item_ids:
@@ -354,6 +357,17 @@ def _decision_belongs_to_project(
     if artifact_type == "project_context":
         return payload.get("project_id") == project_id
     return False
+
+
+def _decision_payload(decision: dict) -> dict:
+    payload_json = decision.get("payload_json")
+    if not isinstance(payload_json, str) or not payload_json:
+        return {}
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _update_context_item(
@@ -396,6 +410,82 @@ def _update_context_item(
         artifact_id=item_id,
     )
     return updated
+
+
+def _revert_context_decision(
+    project: dict,
+    store,
+    decision: dict,
+    *,
+    reason: str | None = None,
+) -> dict:
+    context_ids, item_ids, resource_ids = _project_context_membership(project, store)
+    if not _decision_belongs_to_project(
+        decision,
+        project_id=project["id"],
+        context_ids=context_ids,
+        item_ids=item_ids,
+        resource_ids=resource_ids,
+    ):
+        raise HTTPException(status_code=404, detail=f"Decision '{decision['id']}' not found.")
+    if decision.get("artifact_type") != "project_context_item":
+        raise HTTPException(
+            status_code=400,
+            detail="Only project context item decisions can be reverted.",
+        )
+
+    payload = _decision_payload(decision)
+    prior = payload.get("before")
+    if not isinstance(prior, dict) or not prior.get("id") or not prior.get("project_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Decision does not include a restorable prior context item state.",
+        )
+    if prior["project_id"] not in context_ids:
+        raise HTTPException(status_code=404, detail=f"Decision '{decision['id']}' not found.")
+
+    current = store.get_project_context_item(prior["id"], project_id=prior["project_id"])
+    if current is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Context item '{prior['id']}' is no longer available.",
+        )
+
+    reverted = store.update_project_context_item(
+        prior["id"],
+        project_id=prior["project_id"],
+        status=prior.get("status"),
+        value=prior.get("value") or {},
+        name=prior.get("name"),
+        title=prior.get("title"),
+        confidence=prior.get("confidence"),
+        source=prior.get("source") or "user",
+        evidence=prior.get("evidence") or [],
+    )
+    assert reverted is not None
+    revert_payload = {
+        **_context_decision_payload(current, reverted),
+        "reverted_decision_id": decision["id"],
+        "reverted_action": decision.get("action"),
+        "restored_from": payload,
+    }
+    store.record_decision(
+        "project_context_item",
+        reverted["id"],
+        "reverted",
+        reason=reason,
+        payload=revert_payload,
+    )
+    store.log_activity(
+        "project_context_item_decision_reverted",
+        f"Reverted context decision '{decision['id']}' for item '{reverted['id']}'",
+        artifact_type="project_context_item",
+        artifact_id=reverted["id"],
+    )
+    return {
+        "reverted_decision_id": decision["id"],
+        "item": reverted,
+    }
 
 
 def _context_decision_payload(before: dict, after: dict) -> dict:
@@ -977,6 +1067,25 @@ async def lock_project_context_item(
         confidence=body.confidence,
         reason=body.reason,
     )
+
+
+@router.post("/projects/{project_id}/context/decisions/{decision_id}/revert")
+async def revert_project_context_decision(
+    project_id: str,
+    decision_id: int,
+    request: Request,
+    body: RevertContextDecisionRequest | None = None,
+):
+    """Revert a context item to the state captured before a prior decision."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    decision = store.get_decision(decision_id)
+    if decision is None:
+        raise HTTPException(status_code=404, detail=f"Decision '{decision_id}' not found.")
+    body = body or RevertContextDecisionRequest()
+    return _revert_context_decision(project, store, decision, reason=body.reason)
 
 
 @router.get("/projects/{project_id}/context/export")
