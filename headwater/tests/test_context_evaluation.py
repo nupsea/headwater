@@ -15,6 +15,7 @@ from headwater.core.models import (
 from headwater.services.context_bootstrap import bootstrap_project_context
 from headwater.services.context_evaluation import (
     evaluate_context_bundle,
+    evaluate_context_suite,
     load_context_gold,
 )
 
@@ -52,6 +53,48 @@ def test_context_bundle_evaluation_reports_failed_gold_expectation():
     failures = {check["name"]: check for check in result["checks"] if not check["passed"]}
     assert failures["row_grain:orders"]["actual"] == ("order_id",)
     assert failures["forbidden_terms"]["actual"] == ["orders"]
+
+
+def test_context_evaluation_suite_aggregates_fixture_metrics():
+    bundle = bootstrap_project_context(_orders_discovery(), project_id="src")
+    gold = load_context_gold(GOLD)
+
+    result = evaluate_context_suite(
+        [{"name": "orders", "bundle": bundle, "gold": gold}],
+        min_score=1.0,
+    )
+
+    assert result["passed"] is True
+    assert result["score"] == 1.0
+    assert result["metrics"]["fixture_count"] == 1
+    assert result["metrics"]["failed_fixture_count"] == 0
+    assert result["fixtures"][0]["name"] == "orders"
+    assert result["fixtures"][0]["failures"] == []
+
+
+def test_context_evaluation_suite_fails_below_threshold():
+    bundle = bootstrap_project_context(_orders_discovery(), project_id="src")
+
+    result = evaluate_context_suite(
+        [
+            {
+                "name": "orders",
+                "bundle": bundle,
+                "gold": {
+                    "row_grain": {"orders": ["not_the_key"]},
+                    "time_anchor": {"orders": "created_at"},
+                },
+            }
+        ],
+        min_score=1.0,
+    )
+
+    assert result["passed"] is False
+    assert result["metrics"]["fixture_count"] == 1
+    assert result["metrics"]["failed_fixture_count"] == 1
+    assert result["metrics"]["failed_checks"] == 1
+    assert result["fixtures"][0]["score"] == 0.5
+    assert result["fixtures"][0]["failures"][0]["name"] == "row_grain:orders"
 
 
 def _orders_discovery() -> DiscoveryResult:

@@ -54,6 +54,46 @@ def evaluate_context_bundle(bundle: Any, gold: dict) -> dict:
     }
 
 
+def evaluate_context_suite(cases: list[dict], *, min_score: float = 1.0) -> dict:
+    """Evaluate named context fixtures and aggregate CI-friendly metrics.
+
+    Each case must provide name, bundle, and gold. The suite passes only when
+    every fixture reaches min_score.
+    """
+    fixture_results = []
+    for case in cases:
+        result = evaluate_context_bundle(case["bundle"], case["gold"])
+        fixture_results.append(
+            {
+                "name": case["name"],
+                "passed": result["score"] >= min_score,
+                "score": result["score"],
+                "metrics": result["metrics"],
+                "failures": [
+                    check for check in result["checks"] if not check["passed"]
+                ],
+            }
+        )
+
+    total_checks = sum(item["metrics"]["total_checks"] for item in fixture_results)
+    passed_checks = sum(item["metrics"]["passed_checks"] for item in fixture_results)
+    failed_checks = sum(item["metrics"]["failed_checks"] for item in fixture_results)
+    failed_fixtures = [item for item in fixture_results if not item["passed"]]
+    return {
+        "passed": not failed_fixtures,
+        "min_score": min_score,
+        "score": round(passed_checks / total_checks, 4) if total_checks else 1.0,
+        "metrics": {
+            "fixture_count": len(fixture_results),
+            "failed_fixture_count": len(failed_fixtures),
+            "total_checks": total_checks,
+            "passed_checks": passed_checks,
+            "failed_checks": failed_checks,
+        },
+        "fixtures": fixture_results,
+    }
+
+
 def _bundle_items(bundle: Any) -> list[dict]:
     raw_items = (
         bundle.get("items", [])
