@@ -124,7 +124,7 @@ async def run_discovery(
         len(project_context.items),
         len(project_context.resources),
     )
-    persist_discovery_data(request.app.state.metadata_store, discovery, source_name)
+    run_id = persist_discovery_data(request.app.state.metadata_store, discovery, source_name)
     persist_semantic_data(request.app.state.metadata_store, discovery, source_name)
     reconcile_project_context_drift(
         store,
@@ -133,6 +133,12 @@ async def run_discovery(
         source_name=source_name,
         drift_report=store.get_latest_drift_report(source_name),
     )
+    if run_id is not None:
+        store.save_project_context_snapshot(
+            run_id,
+            project_id=source_name,
+            source_name=source_name,
+        )
     metadata = load_retrieved_metadata(store, discovery, project_id=source_name)
 
     # Build semantic catalog (heuristic tier 0)

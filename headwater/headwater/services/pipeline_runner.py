@@ -209,7 +209,7 @@ def run_pipeline(
             items=[item.model_dump(mode="json") for item in project_context.items],
             resources=[resource.model_dump(mode="json") for resource in project_context.resources],
         )
-        persist_discovery_data(metadata_store, discovery_result, source_name)
+        run_id = persist_discovery_data(metadata_store, discovery_result, source_name)
         persist_semantic_data(metadata_store, discovery_result, source_name)
         reconcile_project_context_drift(
             metadata_store,
@@ -218,6 +218,12 @@ def run_pipeline(
             source_name=source_name,
             drift_report=metadata_store.get_latest_drift_report(source_name),
         )
+        if run_id is not None:
+            metadata_store.save_project_context_snapshot(
+                run_id,
+                project_id=source_name,
+                source_name=source_name,
+            )
         metadata = load_retrieved_metadata(
             metadata_store,
             discovery_result,

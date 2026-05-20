@@ -423,6 +423,38 @@ def test_context_bootstrap_emits_semantic_type_evidence_and_sensitive_policy():
     )
 
 
+def test_project_context_snapshot_round_trip(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    run_id = meta.start_run("src")
+    meta.upsert_project_context_item(
+        id="row_grain:orders",
+        project_id="src",
+        source_name="src",
+        item_type="row_grain",
+        name="orders",
+        value={"columns": ["order_id"]},
+        status="proposed",
+        confidence=0.82,
+    )
+
+    snapshot_id = meta.save_project_context_snapshot(
+        run_id,
+        project_id="src",
+        source_name="src",
+    )
+
+    snapshots = meta.list_project_context_snapshots("src")
+    assert snapshots[0]["id"] == snapshot_id
+    assert snapshots[0]["run_id"] == run_id
+    assert snapshots[0]["snapshot"]["summary"]["item_count"] == 1
+    assert snapshots[0]["snapshot"]["items"][0]["id"] == "row_grain:orders"
+
+    snapshot = meta.get_project_context_snapshot("src", run_id)
+    assert snapshot is not None
+    assert snapshot["snapshot"]["items"][0]["value"] == {"columns": ["order_id"]}
+    assert meta.get_project_context_snapshot("src", 999_999) is None
+
+
 def test_context_bootstrap_emits_cold_start_day_one_summary():
     discovery = DiscoveryResult(
         source=SourceConfig(name="src", type="csv", path="/data/random.csv"),

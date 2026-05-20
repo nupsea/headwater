@@ -16,11 +16,11 @@ from headwater.services.model_impacts import (
 logger = logging.getLogger(__name__)
 
 
-def persist_discovery_data(store, discovery, source_name: str) -> None:
+def persist_discovery_data(store, discovery, source_name: str) -> int | None:
     """Persist tables, columns, profiles, and relationships."""
     if store is None:
         logger.warning("persist_discovery_data: no metadata store available, skipping")
-        return
+        return None
 
     source = discovery.source
     logger.info(
@@ -100,6 +100,7 @@ def persist_discovery_data(store, discovery, source_name: str) -> None:
     _persist_schema_drift(store, discovery, source_name, run_id)
     store.finish_run(run_id, table_count=len(discovery.tables))
     logger.info("Discovery run_id=%d finished", run_id)
+    return run_id
 
 
 def persist_semantic_data(store, discovery, source_name: str) -> None:

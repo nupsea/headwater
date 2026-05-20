@@ -964,6 +964,45 @@ async def get_project_context_history(
     return _project_context_history_payload(project, store, limit=limit)
 
 
+@router.get("/projects/{project_id}/context/snapshots")
+async def list_project_context_snapshots(
+    project_id: str,
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """Return recent ingest-time snapshots of project context."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    context_ids, _, _ = _project_context_membership(project, store)
+    return {
+        "project_id": project["id"],
+        "snapshots": store.list_project_context_snapshots(list(context_ids), limit=limit),
+    }
+
+
+@router.get("/projects/{project_id}/context/snapshots/{run_id}")
+async def get_project_context_snapshot(
+    project_id: str,
+    run_id: int,
+    request: Request,
+):
+    """Return the context snapshot captured for a specific discovery run."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    context_ids, _, _ = _project_context_membership(project, store)
+    snapshot = store.get_project_context_snapshot(list(context_ids), run_id)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Context snapshot for run '{run_id}' not found.",
+        )
+    return snapshot
+
+
 @router.patch("/projects/{project_id}/context/items/{item_id}")
 async def update_project_context_item(
     project_id: str,

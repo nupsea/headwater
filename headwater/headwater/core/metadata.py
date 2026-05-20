@@ -311,6 +311,19 @@ CREATE INDEX IF NOT EXISTS idx_project_context_resources_project
 CREATE INDEX IF NOT EXISTS idx_project_context_resources_source
     ON project_context_resources(source_name, status);
 
+CREATE TABLE IF NOT EXISTS project_context_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL REFERENCES discovery_runs(id),
+    project_id  TEXT NOT NULL,
+    source_name TEXT REFERENCES sources(name),
+    snapshot_json TEXT NOT NULL,
+    captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_context_snapshots_project
+    ON project_context_snapshots(project_id, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_project_context_snapshots_source
+    ON project_context_snapshots(source_name, run_id DESC);
+
 CREATE TABLE IF NOT EXISTS projects (
     id              TEXT PRIMARY KEY,
     slug            TEXT NOT NULL UNIQUE,
@@ -666,6 +679,19 @@ CREATE INDEX IF NOT EXISTS idx_project_context_resources_project
 CREATE INDEX IF NOT EXISTS idx_project_context_resources_source
     ON project_context_resources(source_name, status);
 
+CREATE TABLE IF NOT EXISTS project_context_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL REFERENCES discovery_runs(id),
+    project_id  TEXT NOT NULL,
+    source_name TEXT REFERENCES sources(name),
+    snapshot_json TEXT NOT NULL,
+    captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_context_snapshots_project
+    ON project_context_snapshots(project_id, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_project_context_snapshots_source
+    ON project_context_snapshots(source_name, run_id DESC);
+
 CREATE TABLE IF NOT EXISTS model_reviews (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     model_name  TEXT NOT NULL,
@@ -839,6 +865,8 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         self.con.execute("DELETE FROM table_semantic_details WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM companion_docs WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM dataset_contexts WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM project_context_snapshots WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM project_context_snapshots WHERE project_id = ?", (name,))
         self.con.execute("DELETE FROM project_context_resources WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM project_context_items WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM project_context_resources WHERE project_id = ?", (name,))
@@ -1224,6 +1252,95 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         sql += " ORDER BY title, id"
         rows = self.con.execute(sql, params).fetchall()
         return [self._decode_project_context_resource(dict(row)) for row in rows]
+
+    def save_project_context_snapshot(
+        self,
+        run_id: int,
+        *,
+        project_id: str,
+        source_name: str | None = None,
+    ) -> int:
+        """Persist the current project context as it stood during an ingest run."""
+        items = self.list_project_context_items(project_id)
+        resources = self.list_project_context_resources(project_id)
+        item_types: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
+        for item in items:
+            item_types[item["item_type"]] = item_types.get(item["item_type"], 0) + 1
+            status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
+        snapshot = {
+            "project_id": project_id,
+            "source_name": source_name,
+            "run_id": run_id,
+            "items": items,
+            "resources": resources,
+            "summary": {
+                "item_count": len(items),
+                "resource_count": len(resources),
+                "item_types": item_types,
+                "status_counts": status_counts,
+            },
+        }
+        cur = self.con.execute(
+            """
+            INSERT INTO project_context_snapshots
+                (run_id, project_id, source_name, snapshot_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (run_id, project_id, source_name, json.dumps(snapshot)),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_project_context_snapshots(
+        self,
+        project_ids: str | list[str],
+        *,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Return recent project context snapshots with decoded snapshot payloads."""
+        ids = [project_ids] if isinstance(project_ids, str) else list(project_ids)
+        if not ids:
+            return []
+        placeholders = ", ".join("?" for _ in ids)
+        rows = self.con.execute(
+            f"""
+            SELECT * FROM project_context_snapshots
+            WHERE project_id IN ({placeholders})
+            ORDER BY run_id DESC, id DESC
+            LIMIT ?
+            """,
+            (*ids, limit),
+        ).fetchall()
+        return [self._decode_project_context_snapshot(dict(row)) for row in rows]
+
+    def get_project_context_snapshot(
+        self,
+        project_ids: str | list[str],
+        run_id: int,
+    ) -> dict | None:
+        """Return the project context snapshot captured for a discovery run."""
+        ids = [project_ids] if isinstance(project_ids, str) else list(project_ids)
+        if not ids:
+            return None
+        placeholders = ", ".join("?" for _ in ids)
+        row = self.con.execute(
+            f"""
+            SELECT * FROM project_context_snapshots
+            WHERE project_id IN ({placeholders})
+              AND run_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (*ids, run_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._decode_project_context_snapshot(dict(row))
+
+    def _decode_project_context_snapshot(self, row: dict) -> dict:
+        row["snapshot"] = json.loads(row.pop("snapshot_json"))
+        return row
 
     # -- Warehouse evidence and insight plans -----------------------------
 

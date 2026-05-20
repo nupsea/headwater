@@ -63,6 +63,27 @@ class TestProjectContext:
         assert "row_entity" in body["summary"]["item_types"]
         assert "pk_candidate" in body["summary"]["item_types"]
 
+    def test_discovery_snapshots_project_context(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        resp = client.get("/api/projects/source/context/snapshots")
+        assert resp.status_code == 200
+        snapshots = resp.json()["snapshots"]
+        assert len(snapshots) == 1
+        latest = snapshots[0]
+        assert latest["project_id"] == "source"
+        assert latest["source_name"] == "source"
+        assert latest["run_id"] > 0
+        assert latest["snapshot"]["summary"]["item_count"] > 0
+        assert "row_grain" in latest["snapshot"]["summary"]["item_types"]
+
+        detail = client.get(f"/api/projects/source/context/snapshots/{latest['run_id']}")
+        assert detail.status_code == 200
+        snapshot = detail.json()["snapshot"]
+        assert snapshot["run_id"] == latest["run_id"]
+        assert any(item["item_type"] == "row_grain" for item in snapshot["items"])
+
     def test_user_can_add_context_resource(self, client):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
         assert discover.status_code == 200
