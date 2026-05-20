@@ -143,10 +143,16 @@ def ask(
     """
     logger.info("Explorer ask: %r", question)
 
+    metadata = metadata or retrieve_metadata(discovery)
     has_llm = provider is not None and not isinstance(provider, NoLLMProvider)
     context = _build_context(discovery, models or []) if has_llm else ""
 
-    preflight_result = _preflight_question_constraints(question, discovery, suggestions or [])
+    preflight_result = _preflight_question_constraints(
+        question,
+        discovery,
+        suggestions or [],
+        metadata,
+    )
     if preflight_result is not None:
         return preflight_result
 
@@ -237,7 +243,14 @@ def ask(
         )
 
     # Grounding check: verify question terms exist in schema + generated SQL
-    warnings = _check_grounding(question, discovery, models or [], sql, suggestions or [])
+    warnings = _check_grounding(
+        question,
+        discovery,
+        models or [],
+        sql,
+        suggestions or [],
+        metadata,
+    )
 
     # Execute (with auto-repair if LLM is available)
     result = _execute_query(question, sql, con, metadata)
@@ -1402,6 +1415,7 @@ _ANALYTICAL_WORDS = {
 def _build_vocabulary(
     discovery: DiscoveryResult,
     models: list[GeneratedModel],
+    metadata: RetrievedMetadata | None = None,
 ) -> set[str]:
     """Build a set of all known terms from schema metadata.
 
@@ -1441,7 +1455,57 @@ def _build_vocabulary(
         vocab.update(rel.from_table.lower().replace("_", " ").split())
         vocab.update(rel.to_table.lower().replace("_", " ").split())
 
+    if metadata is not None:
+        _add_metadata_vocabulary(vocab, metadata)
+
     return vocab
+
+
+def _add_metadata_vocabulary(vocab: set[str], metadata: RetrievedMetadata) -> None:
+    if metadata.context:
+        _add_vocab_text(vocab, metadata.context.row_represents)
+        _add_vocab_text(vocab, metadata.context.decisions)
+        _add_vocab_text(vocab, metadata.context.time_grain)
+        _add_vocab_text(vocab, getattr(metadata.context, "geographic_level", None))
+    for term, definition in metadata.glossary.items():
+        _add_vocab_text(vocab, term)
+        _add_vocab_text(vocab, definition)
+    for mapping in metadata.enum_mappings.values():
+        for value, label in mapping.items():
+            _add_vocab_text(vocab, str(value))
+            _add_vocab_text(vocab, label)
+    for question in metadata.open_questions:
+        _add_vocab_text(vocab, question.get("title"))
+        _add_vocab_text(vocab, question.get("question"))
+    for item in metadata.context_items:
+        _add_vocab_text(vocab, item.name)
+        _add_vocab_text(vocab, item.title)
+        _add_vocab_text(vocab, item.table_name)
+        _add_vocab_text(vocab, item.column_name)
+        for value in item.value.values():
+            _add_vocab_value(vocab, value)
+    for lens in metadata.business_lenses:
+        for value in lens.values():
+            _add_vocab_value(vocab, value)
+
+
+def _add_vocab_value(vocab: set[str], value: object) -> None:
+    if isinstance(value, str):
+        _add_vocab_text(vocab, value)
+    elif isinstance(value, list):
+        for item in value:
+            _add_vocab_value(vocab, item)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _add_vocab_text(vocab, str(key))
+            _add_vocab_value(vocab, item)
+
+
+def _add_vocab_text(vocab: set[str], value: str | None) -> None:
+    if not value:
+        return
+    words = re.sub(r"[^a-z0-9 ]", " ", str(value).lower()).split()
+    vocab.update(words)
 
 
 def _stem(word: str) -> set[str]:
@@ -1509,6 +1573,7 @@ def _check_grounding(
     models: list[GeneratedModel],
     sql: str = "",
     suggestions: list[SuggestedQuestion] | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[str]:
     """Check that the question's key terms exist in the schema vocabulary.
 
@@ -1520,7 +1585,7 @@ def _check_grounding(
 
     Returns a list of warnings. An empty list means the question is fully grounded.
     """
-    vocab = _build_vocabulary(discovery, models)
+    vocab = _build_vocabulary(discovery, models, metadata)
 
     # Curated suggestion questions are grounded by definition -- every word
     # in a system-generated question is a valid domain term
@@ -1577,11 +1642,12 @@ def _preflight_question_constraints(
     question: str,
     discovery: DiscoveryResult,
     suggestions: list[SuggestedQuestion],
+    metadata: RetrievedMetadata | None = None,
 ) -> ExplorationResult | None:
     """Fail fast for question types the current project cannot answer readably."""
     if not re.search(r"\broutes?\b", question, re.IGNORECASE):
         return None
-    if _project_has_readable_route_dimensions(discovery):
+    if _project_has_readable_route_dimensions(discovery, metadata):
         return None
     return ExplorationResult(
         question=question,
@@ -1599,8 +1665,11 @@ def _preflight_question_constraints(
     )
 
 
-def _project_has_readable_route_dimensions(discovery: DiscoveryResult) -> bool:
-    metadata = retrieve_metadata(discovery)
+def _project_has_readable_route_dimensions(
+    discovery: DiscoveryResult,
+    metadata: RetrievedMetadata | None = None,
+) -> bool:
+    metadata = metadata or retrieve_metadata(discovery)
     semantic_schema = infer_semantic_schema(
         discovery,
         metadata.context if metadata else None,

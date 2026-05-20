@@ -4296,6 +4296,64 @@ class TestGrounding:
         assert "air" in vocab  # from mart_air_quality_daily
         assert "quality" in vocab
 
+    def test_vocabulary_includes_project_context_terms(self, sample_discovery):
+        metadata = retrieve_metadata(
+            sample_discovery,
+            DatasetContext(
+                source_name="test",
+                row_represents="monitoring observation",
+                decisions="Prioritize exceedance response.",
+            ),
+            context_items=[
+                {
+                    "id": "glossary:exceedance",
+                    "project_id": "test",
+                    "source_name": "test",
+                    "item_type": "glossary_term",
+                    "scope": "project",
+                    "name": "exceedance",
+                    "status": "approved",
+                    "value": {
+                        "definition": "A reading above an accepted compliance threshold."
+                    },
+                }
+            ],
+        )
+
+        vocab = _build_vocabulary(sample_discovery, [], metadata)
+
+        assert "exceedance" in vocab
+        assert "compliance" in vocab
+        assert "observation" in vocab
+
+    def test_grounding_accepts_project_context_terms(self, sample_discovery):
+        metadata = retrieve_metadata(
+            sample_discovery,
+            context_items=[
+                {
+                    "id": "glossary:exceedance",
+                    "project_id": "test",
+                    "source_name": "test",
+                    "item_type": "glossary_term",
+                    "scope": "project",
+                    "name": "exceedance",
+                    "status": "approved",
+                    "value": {
+                        "definition": "A reading above an accepted compliance threshold."
+                    },
+                }
+            ],
+        )
+
+        warnings = _check_grounding(
+            "How many exceedance readings are there?",
+            sample_discovery,
+            [],
+            metadata=metadata,
+        )
+
+        assert warnings == []
+
     def test_grounded_question_returns_no_warnings(self, sample_discovery):
         warnings = _check_grounding(
             "What is the average reading value by sensor type?",
