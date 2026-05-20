@@ -516,6 +516,15 @@ def bootstrap_project_context(
             )
         )
 
+    items.append(
+        _cold_start_summary_item(
+            discovery,
+            project_id=project_id,
+            source_name=source_name,
+            profiles=profiles,
+        )
+    )
+
     resources = [
         ProjectContextResource(
             id=f"resource:{source_name}:{_slug(doc.filename)}",
@@ -666,6 +675,236 @@ def _sensitive_column_policy(
         "confidence": best.confidence,
         "reason": "Generic semantic type detector marked likely sensitive.",
     }
+
+
+def _cold_start_summary_item(
+    discovery: DiscoveryResult,
+    *,
+    project_id: str,
+    source_name: str,
+    profiles: dict[tuple[str, str], ColumnProfile],
+) -> ProjectContextItem:
+    summary = _cold_start_summary(discovery, profiles)
+    return ProjectContextItem(
+        id=f"cold_start_summary:{source_name}",
+        project_id=project_id,
+        source_name=source_name,
+        item_type="cold_start_summary",
+        scope="project",
+        name="cold_start_summary",
+        title="Cold-start summary",
+        confidence=0.78,
+        value=summary,
+        evidence=[
+            {
+                "evidence_type": "cold_start",
+                "source": "bootstrap",
+                "summary": "Generic day-one summary from schema, profiles, and detectors.",
+                "payload": {
+                    "table_count": len(discovery.tables),
+                    "dimension_candidates": len(summary["top_dimensions"]),
+                    "measure_candidates": len(summary["top_measures"]),
+                    "fallback_questions": len(summary["fallback_questions"]),
+                },
+            }
+        ],
+    )
+
+
+def _cold_start_summary(
+    discovery: DiscoveryResult,
+    profiles: dict[tuple[str, str], ColumnProfile],
+) -> dict:
+    dimensions: list[dict] = []
+    measures: list[dict] = []
+    distributional_facts: list[dict] = []
+    quality_risks: list[dict] = []
+    sensitive_columns: list[dict] = []
+
+    for table in discovery.tables:
+        for column in table.columns:
+            profile = profiles.get((table.name, column.name))
+            semantic_evidence = detect_semantic_types(column.name, column.dtype, profile)
+            best_semantic = semantic_evidence[0].semantic_type if semantic_evidence else None
+            sensitive = _has_sensitive_detection(semantic_evidence)
+            if sensitive:
+                sensitive_columns.append(
+                    {
+                        "table_name": table.name,
+                        "column_name": column.name,
+                        "semantic_type": best_semantic,
+                    }
+                )
+            if _is_dimension_candidate(column, profile, sensitive):
+                dimensions.append(
+                    {
+                        "table_name": table.name,
+                        "column_name": column.name,
+                        "distinct_count": profile.distinct_count if profile else None,
+                        "semantic_type": column.semantic_type or best_semantic,
+                        "confidence": _dimension_confidence(column, profile, best_semantic),
+                    }
+                )
+                distributional_facts.extend(
+                    _distributional_facts(table.name, column.name, profile)
+                )
+            if _is_measure_candidate(column, profile, best_semantic):
+                measures.append(
+                    {
+                        "table_name": table.name,
+                        "column_name": column.name,
+                        "semantic_type": column.semantic_type or best_semantic or "measure",
+                        "min_value": profile.min_value if profile else None,
+                        "max_value": profile.max_value if profile else None,
+                        "confidence": _measure_confidence(column, profile, best_semantic),
+                    }
+                )
+            quality_risks.extend(_quality_risks(table.name, column.name, profile))
+
+    return {
+        "top_dimensions": sorted(
+            dimensions,
+            key=lambda item: (-float(item["confidence"]), item["table_name"], item["column_name"]),
+        )[:5],
+        "top_measures": sorted(
+            measures,
+            key=lambda item: (-float(item["confidence"]), item["table_name"], item["column_name"]),
+        )[:5],
+        "distributional_facts": distributional_facts[:5],
+        "quality_risks": quality_risks[:5],
+        "sensitive_columns": sensitive_columns[:5],
+        "fallback_questions": _fallback_questions(discovery, dimensions, measures),
+    }
+
+
+def _is_dimension_candidate(column, profile: ColumnProfile | None, sensitive: bool) -> bool:
+    if sensitive or column.is_primary_key or column.semantic_type in {"id", "foreign_key"}:
+        return False
+    if column.semantic_type == "dimension" or column.role == "dimension":
+        return True
+    if not _is_string_dtype(column.dtype):
+        return False
+    if profile is None:
+        return True
+    return 1 < profile.distinct_count <= 100
+
+
+def _is_measure_candidate(
+    column,
+    profile: ColumnProfile | None,
+    semantic_type: str | None,
+) -> bool:
+    if column.is_primary_key or column.semantic_type in {"id", "foreign_key", "dimension"}:
+        return False
+    if semantic_type in {"latitude", "longitude", "postal_code", "country_code"}:
+        return False
+    if column.semantic_type == "metric" or column.role == "metric":
+        return True
+    return _is_numeric_dtype(column.dtype) and not _looks_like_identifier_name(column.name)
+
+
+def _dimension_confidence(
+    column,
+    profile: ColumnProfile | None,
+    semantic_type: str | None,
+) -> float:
+    confidence = 0.55
+    if column.semantic_type == "dimension" or column.role == "dimension":
+        confidence = 0.78
+    if semantic_type in {"currency_code", "country_code", "postal_code"}:
+        confidence = max(confidence, 0.72)
+    if profile and 1 < profile.distinct_count <= 30:
+        confidence = max(confidence, 0.7)
+    return round(confidence, 3)
+
+
+def _measure_confidence(column, profile: ColumnProfile | None, semantic_type: str | None) -> float:
+    confidence = 0.62
+    if column.semantic_type == "metric" or column.role == "metric":
+        confidence = 0.82
+    if semantic_type == "monetary_amount":
+        confidence = max(confidence, 0.74)
+    if profile and profile.distinct_count > 5:
+        confidence = max(confidence, 0.68)
+    return round(confidence, 3)
+
+
+def _distributional_facts(
+    table_name: str,
+    column_name: str,
+    profile: ColumnProfile | None,
+) -> list[dict]:
+    if profile is None or not profile.top_values:
+        return []
+    sample_size = sum(int(count) for _value, count in profile.top_values)
+    if sample_size <= 0:
+        return []
+    value, count = profile.top_values[0]
+    return [
+        {
+            "table_name": table_name,
+            "column_name": column_name,
+            "fact_type": "top_value",
+            "value": str(value),
+            "count": int(count),
+            "share": round(int(count) / sample_size, 3),
+        }
+    ]
+
+
+def _quality_risks(
+    table_name: str,
+    column_name: str,
+    profile: ColumnProfile | None,
+) -> list[dict]:
+    if profile is None:
+        return []
+    risks: list[dict] = []
+    if profile.null_rate >= 0.2:
+        risks.append(
+            {
+                "table_name": table_name,
+                "column_name": column_name,
+                "risk_type": "high_null_rate",
+                "observed_value": profile.null_rate,
+            }
+        )
+    if profile.distinct_count == 1:
+        risks.append(
+            {
+                "table_name": table_name,
+                "column_name": column_name,
+                "risk_type": "constant_column",
+                "observed_value": profile.distinct_count,
+            }
+        )
+    return risks
+
+
+def _fallback_questions(
+    discovery: DiscoveryResult,
+    dimensions: list[dict],
+    measures: list[dict],
+) -> list[str]:
+    primary_table = (
+        max(discovery.tables, key=lambda table: table.row_count).name
+        if discovery.tables
+        else "records"
+    )
+    questions = [
+        f"What should one row in '{primary_table}' represent?",
+        f"Which column should be the primary time anchor for '{primary_table}'?",
+    ]
+    if dimensions:
+        questions.append("Which dimensions are most useful for slicing this dataset?")
+    if measures:
+        questions.append("Which measures should be monitored over time?")
+    questions.append("Are any detected sensitive columns allowed outside local analysis?")
+    return questions[:5]
+
+
+def _looks_like_identifier_name(name: str) -> bool:
+    return bool(re.search(r"(^id$|_id$|key$|code$|uuid$)", name, re.I))
 
 
 def _primary_key_candidates(table, table_profiles: dict[str, ColumnProfile | None]) -> list[dict]:

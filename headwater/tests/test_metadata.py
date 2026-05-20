@@ -423,6 +423,66 @@ def test_context_bootstrap_emits_semantic_type_evidence_and_sensitive_policy():
     )
 
 
+def test_context_bootstrap_emits_cold_start_day_one_summary():
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="csv", path="/data/random.csv"),
+        tables=[
+            TableInfo(
+                name="events",
+                row_count=100,
+                columns=[
+                    ColumnInfo(name="event_id", dtype="int64"),
+                    ColumnInfo(name="event_time", dtype="timestamp"),
+                    ColumnInfo(name="category", dtype="varchar"),
+                    ColumnInfo(name="amount", dtype="double"),
+                    ColumnInfo(name="email", dtype="varchar"),
+                ],
+            )
+        ],
+        profiles=[
+            ColumnProfile(
+                table_name="events",
+                column_name="event_id",
+                dtype="int64",
+                distinct_count=100,
+                uniqueness_ratio=1.0,
+            ),
+            ColumnProfile(
+                table_name="events",
+                column_name="category",
+                dtype="varchar",
+                distinct_count=3,
+                top_values=[("new", 40), ("open", 35), ("closed", 25)],
+            ),
+            ColumnProfile(
+                table_name="events",
+                column_name="amount",
+                dtype="double",
+                distinct_count=90,
+                min_value=1.0,
+                max_value=400.0,
+            ),
+            ColumnProfile(
+                table_name="events",
+                column_name="email",
+                dtype="varchar",
+                distinct_count=2,
+                top_values=[("a@example.com", 6), ("b@example.org", 4)],
+            ),
+        ],
+    )
+
+    bundle = bootstrap_project_context(discovery, project_id="src")
+    summary = next(item for item in bundle.items if item.item_type == "cold_start_summary")
+
+    assert summary.value["top_dimensions"][0]["column_name"] == "category"
+    assert summary.value["top_measures"][0]["column_name"] == "amount"
+    assert summary.value["distributional_facts"][0]["value"] == "new"
+    assert summary.value["sensitive_columns"][0]["column_name"] == "email"
+    assert 3 <= len(summary.value["fallback_questions"]) <= 5
+    assert any("row" in question.lower() for question in summary.value["fallback_questions"])
+
+
 def test_update_project_context_item_allows_user_review_edits(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     meta.replace_project_context(
