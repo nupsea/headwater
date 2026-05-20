@@ -396,12 +396,19 @@ def _update_context_item(
         source="user",
     )
     assert updated is not None
-    store.record_decision(
+    payload = _context_decision_payload(item, updated)
+    decision_id = store.record_decision(
         "project_context_item",
         item_id,
         updated["status"],
         reason=reason,
-        payload=_context_decision_payload(item, updated),
+        payload=payload,
+    )
+    _record_context_feedback(
+        store,
+        decision_id=decision_id,
+        action=updated["status"],
+        payload=payload,
     )
     store.log_activity(
         "project_context_item_reviewed",
@@ -469,11 +476,17 @@ def _revert_context_decision(
         "reverted_action": decision.get("action"),
         "restored_from": payload,
     }
-    store.record_decision(
+    decision_id = store.record_decision(
         "project_context_item",
         reverted["id"],
         "reverted",
         reason=reason,
+        payload=revert_payload,
+    )
+    _record_context_feedback(
+        store,
+        decision_id=decision_id,
+        action="reverted",
         payload=revert_payload,
     )
     store.log_activity(
@@ -486,6 +499,32 @@ def _revert_context_decision(
         "reverted_decision_id": decision["id"],
         "item": reverted,
     }
+
+
+def _record_context_feedback(
+    store,
+    *,
+    decision_id: int,
+    action: str,
+    payload: dict,
+) -> None:
+    store.record_context_feedback(
+        decision_id=decision_id,
+        project_id=payload["project_id"],
+        item_id=payload["item_id"],
+        item_type=payload.get("item_type"),
+        action=action,
+        producer=payload.get("producer") or "user",
+        prior_confidence=payload.get("prior_confidence"),
+        new_confidence=payload.get("new_confidence"),
+        time_to_decision_seconds=payload.get("time_to_decision_seconds"),
+        evidence_count=len(payload.get("evidence_ids") or []),
+        payload={
+            "source_snapshot": payload.get("source_snapshot") or {},
+            "prior_status": payload.get("prior_status"),
+            "new_status": payload.get("new_status"),
+        },
+    )
 
 
 def _context_decision_payload(before: dict, after: dict) -> dict:
@@ -962,6 +1001,24 @@ async def get_project_context_history(
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
     return _project_context_history_payload(project, store, limit=limit)
+
+
+@router.get("/projects/{project_id}/context/feedback")
+async def get_project_context_feedback(
+    project_id: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Return structured context review feedback for calibration and ranking."""
+    store = request.app.state.metadata_store
+    project = resolve_project(store, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    context_ids, _, _ = _project_context_membership(project, store)
+    return {
+        "project_id": project["id"],
+        "feedback": store.list_context_feedback(list(context_ids), limit=limit),
+    }
 
 
 @router.get("/projects/{project_id}/context/snapshots")

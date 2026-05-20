@@ -406,6 +406,16 @@ class TestProjectContext:
         assert updated["status"] == "approved"
         assert updated["value"]["description"] == "Reviewed business meaning."
 
+        feedback = client.get("/api/projects/source/context/feedback").json()["feedback"]
+        event = next(entry for entry in feedback if entry["item_id"] == item["id"])
+        assert event["action"] == "approved"
+        assert event["item_type"] == item["item_type"]
+        assert event["prior_confidence"] == item["confidence"]
+        assert event["new_confidence"] == 0.98
+        assert isinstance(event["time_to_decision_seconds"], int)
+        assert event["payload"]["prior_status"] == item["status"]
+        assert event["payload"]["new_status"] == "approved"
+
     def test_user_can_revert_context_item_decision(self, client):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
         assert discover.status_code == 200

@@ -159,6 +159,26 @@ CREATE TABLE IF NOT EXISTS decisions (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS context_feedback_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id INTEGER REFERENCES decisions(id),
+    project_id  TEXT NOT NULL,
+    item_id     TEXT NOT NULL,
+    item_type   TEXT,
+    action      TEXT NOT NULL,
+    producer    TEXT NOT NULL,
+    prior_confidence REAL,
+    new_confidence REAL,
+    time_to_decision_seconds INTEGER,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_context_feedback_project
+    ON context_feedback_events(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_context_feedback_item
+    ON context_feedback_events(item_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS llm_audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     provider    TEXT NOT NULL,
@@ -862,6 +882,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         self.con.execute("DELETE FROM catalog_entities WHERE project_id = ?", (name,))
         self.con.execute("DELETE FROM projects WHERE id = ?", (name,))
 
+        self.con.execute("DELETE FROM context_feedback_events WHERE project_id = ?", (name,))
         self.con.execute("DELETE FROM table_semantic_details WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM companion_docs WHERE source_name = ?", (name,))
         self.con.execute("DELETE FROM dataset_contexts WHERE source_name = ?", (name,))
@@ -3058,7 +3079,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         *,
         reason: str | None = None,
         payload: dict | None = None,
-    ) -> None:
+    ) -> int:
         """Record a human review decision in the decisions table.
 
         Args:
@@ -3069,13 +3090,14 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
             payload:       Optional dict of before/after values or context data.
         """
         payload_json = json.dumps(payload) if payload is not None else None
-        self.con.execute(
+        cur = self.con.execute(
             "INSERT INTO decisions "
             "(artifact_type, artifact_id, action, reason, payload_json) "
             "VALUES (?, ?, ?, ?, ?)",
             (artifact_type, artifact_id, action, reason, payload_json),
         )
         self.con.commit()
+        return cur.lastrowid or 0
 
     def get_decisions(
         self,
@@ -3102,6 +3124,79 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         """Return a single recorded decision by id."""
         row = self.con.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
         return dict(row) if row is not None else None
+
+    def record_context_feedback(
+        self,
+        *,
+        project_id: str,
+        item_id: str,
+        action: str,
+        decision_id: int | None = None,
+        item_type: str | None = None,
+        producer: str = "user",
+        prior_confidence: float | None = None,
+        new_confidence: float | None = None,
+        time_to_decision_seconds: int | None = None,
+        evidence_count: int = 0,
+        payload: dict | None = None,
+    ) -> int:
+        """Record a structured review feedback signal for ranking/calibration."""
+        cur = self.con.execute(
+            """
+            INSERT INTO context_feedback_events
+                (decision_id, project_id, item_id, item_type, action, producer,
+                 prior_confidence, new_confidence, time_to_decision_seconds,
+                 evidence_count, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id,
+                project_id,
+                item_id,
+                item_type,
+                action,
+                producer,
+                prior_confidence,
+                new_confidence,
+                time_to_decision_seconds,
+                evidence_count,
+                json.dumps(payload or {}),
+            ),
+        )
+        self.con.commit()
+        return cur.lastrowid or 0
+
+    def list_context_feedback(
+        self,
+        project_ids: str | list[str] | None = None,
+        *,
+        item_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Return structured context feedback events."""
+        where: list[str] = []
+        params: list[Any] = []
+        if project_ids is not None:
+            ids = [project_ids] if isinstance(project_ids, str) else list(project_ids)
+            if not ids:
+                return []
+            placeholders = ", ".join("?" for _ in ids)
+            where.append(f"project_id IN ({placeholders})")
+            params.extend(ids)
+        if item_id is not None:
+            where.append("item_id = ?")
+            params.append(item_id)
+        sql = "SELECT * FROM context_feedback_events "
+        if where:
+            sql += "WHERE " + " AND ".join(where) + " "
+        sql += "ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = self.con.execute(sql, params).fetchall()
+        return [self._decode_context_feedback(dict(row)) for row in rows]
+
+    def _decode_context_feedback(self, row: dict) -> dict:
+        row["payload"] = json.loads(row.pop("payload_json") or "{}")
+        return row
 
     # -- LLM audit log -----------------------------------------------------
 

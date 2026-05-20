@@ -1049,10 +1049,11 @@ def test_quality_report_updates_contract_lifecycle(meta: MetadataStore):
 
 
 def test_record_decision_basic(meta: MetadataStore):
-    meta.record_decision("model", "stg_zones", "approved")
+    decision_id = meta.record_decision("model", "stg_zones", "approved")
     decisions = meta.get_decisions()
     assert len(decisions) == 1
     d = decisions[0]
+    assert d["id"] == decision_id
     assert d["artifact_type"] == "model"
     assert d["artifact_id"] == "stg_zones"
     assert d["action"] == "approved"
@@ -1103,6 +1104,36 @@ def test_get_decision_by_id(meta: MetadataStore):
     assert decision["id"] == decision_id
     assert decision["artifact_id"] == "stg_zones"
     assert meta.get_decision(999_999) is None
+
+
+def test_record_context_feedback(meta: MetadataStore):
+    decision_id = meta.record_decision("project_context_item", "item-1", "approved")
+
+    feedback_id = meta.record_context_feedback(
+        decision_id=decision_id,
+        project_id="src",
+        item_id="item-1",
+        item_type="column_semantics",
+        action="approved",
+        producer="user",
+        prior_confidence=0.42,
+        new_confidence=0.95,
+        time_to_decision_seconds=12,
+        evidence_count=2,
+        payload={"prior_status": "proposed", "new_status": "approved"},
+    )
+
+    feedback = meta.list_context_feedback("src")
+    assert feedback[0]["id"] == feedback_id
+    assert feedback[0]["decision_id"] == decision_id
+    assert feedback[0]["item_id"] == "item-1"
+    assert feedback[0]["action"] == "approved"
+    assert feedback[0]["prior_confidence"] == 0.42
+    assert feedback[0]["new_confidence"] == 0.95
+    assert feedback[0]["time_to_decision_seconds"] == 12
+    assert feedback[0]["evidence_count"] == 2
+    assert feedback[0]["payload"]["new_status"] == "approved"
+    assert meta.list_context_feedback("other") == []
 
 
 def test_payload_json_column_exists(meta: MetadataStore):
