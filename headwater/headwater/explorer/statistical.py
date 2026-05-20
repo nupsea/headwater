@@ -29,6 +29,7 @@ import polars as pl
 import yaml
 from scipy import stats
 
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata
 from headwater.analyzer.semantic_schema import (
     infer_semantic_schema,
     quote_ident,
@@ -106,6 +107,7 @@ def detect_insights(
     dataset_context: DatasetContext | None = None,
     models: list[GeneratedModel] | None = None,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[StatisticalInsight]:
     """Scan all materialized tables in a schema for statistical patterns.
 
@@ -123,6 +125,7 @@ def detect_insights(
         dataset_context=dataset_context,
         models=models,
         project_id=project_id,
+        metadata=metadata,
     ).insights
 
 
@@ -133,6 +136,7 @@ def detect_insights_with_diagnostics(
     dataset_context: DatasetContext | None = None,
     models: list[GeneratedModel] | None = None,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> InsightDetectionResult:
     """Detect insights and return per-table/family execution diagnostics."""
     insights: list[StatisticalInsight] = []
@@ -144,11 +148,13 @@ def detect_insights_with_diagnostics(
         family_spec = _load_family_spec(
             source_name=discovery.source.name,
             project_id=project_id,
+            metadata=metadata,
         )
         semantic_schema = infer_semantic_schema(
             discovery,
             dataset_context,
             project_id=project_id,
+            metadata=metadata,
         )
         for table_name in tables:
             source_table = _source_table_for_physical_table(table_name, discovery, scoped_models)
@@ -1836,6 +1842,7 @@ def _candidate_family_spec_paths(source_name: str | None, project_id: str | None
 def _load_family_spec(
     source_name: str | None = None,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> dict:
     spec = {
         "version": _DEFAULT_FAMILY_SPEC["version"],
@@ -1848,7 +1855,19 @@ def _load_family_spec(
         if parsed:
             spec = _merge_family_specs(spec, parsed)
             break
+    context_spec = _family_spec_from_context(metadata)
+    if context_spec:
+        spec = _merge_family_specs(spec, context_spec)
     return spec
+
+
+def _family_spec_from_context(metadata: RetrievedMetadata | None) -> dict | None:
+    if metadata is None or not metadata.insight_families:
+        return None
+    return {
+        "version": 1,
+        "families": [dict(family) for family in metadata.insight_families],
+    }
 
 
 def _source_table_for_physical_table(

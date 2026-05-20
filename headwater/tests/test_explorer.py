@@ -2926,6 +2926,52 @@ class TestStatistical:
             "lead_time_pattern",
         }.issubset(family_keys)
 
+    def test_family_catalog_merges_canonical_context_items(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="src", type="json", path="/data"),
+            tables=[],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "insight_family:temporal_volume",
+                    "project_id": "src",
+                    "source_name": "src",
+                    "item_type": "insight_family",
+                    "scope": "project",
+                    "name": "temporal_volume",
+                    "status": "approved",
+                    "value": {
+                        "priority": 21,
+                        "required_roles": ["custom_event_ts"],
+                    },
+                },
+                {
+                    "id": "insight_family:draft",
+                    "project_id": "src",
+                    "source_name": "src",
+                    "item_type": "insight_family",
+                    "scope": "project",
+                    "name": "draft",
+                    "status": "proposed",
+                    "value": {"required_roles": []},
+                },
+            ],
+        )
+
+        families = {
+            family["key"]: family
+            for family in _load_family_spec(metadata=metadata)["families"]
+        }
+
+        assert families["temporal_volume"]["priority"] == 21
+        assert families["temporal_volume"]["required_roles"] == ["custom_event_ts"]
+        assert families["temporal_volume"]["context_item_id"] == (
+            "insight_family:temporal_volume"
+        )
+        assert "draft" not in families
+
     def test_semantic_model_lineage_maps_mart_table(self, duckdb_con):
         duckdb_con.execute(
             "CREATE TABLE marts.mart_event_summary AS "
@@ -4578,7 +4624,7 @@ class TestGrounding:
             q
             for q in questions
             if "highest fare amount" in q.question.lower()
-            and "payment method" in q.question.lower()
+            and "payment type" in q.question.lower()
         )
 
         result = ask(

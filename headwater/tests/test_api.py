@@ -464,10 +464,10 @@ class TestInsightRanking:
             support_count=1000,
         )
         semantic = StatisticalInsight(
-            metric="duration_min",
+            metric="event_date",
             table_name="events",
-            insight_type="peak_period",
-            description="Weekday events take longer than weekend events",
+            insight_type="coverage_period",
+            description="Events cover a complete reporting window",
             magnitude=2.3,
             severity="info",
             support_count=50_000,

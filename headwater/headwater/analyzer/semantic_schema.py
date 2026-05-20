@@ -235,7 +235,16 @@ def _infer_column_role(
 
 def _role_from_locked_column(role: str | None, semantic_type: str | None) -> str | None:
     if role:
-        return _normalize_role_name(role)
+        normalized_role = _normalize_role_name(role)
+        role_aliases = {
+            "temporal": "event_ts",
+            "date": "event_ts",
+            "datetime": "event_ts",
+            "timestamp": "event_ts",
+            "time": "event_ts",
+            "metric": "measure",
+        }
+        return role_aliases.get(normalized_role, normalized_role)
     value = (semantic_type or "").lower()
     if "temporal" in value or "date" in value or "time" in value:
         return "event_ts"

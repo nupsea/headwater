@@ -1335,6 +1335,7 @@ def compute_semantic_highlights(
         dataset_context=context,
         models=models,
         project_id=project_id,
+        metadata=metadata,
     )
     highlight_types = set(_SEMANTIC_HIGHLIGHT_ORDER) | {"coverage_period"}
     candidates = [

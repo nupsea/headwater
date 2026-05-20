@@ -319,6 +319,20 @@ def test_retrieve_metadata_merges_canonical_project_context_items() -> None:
                     }
                 },
             },
+            {
+                "id": "insight_family:order_lifecycle",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "insight_family",
+                "scope": "project",
+                "name": "order_lifecycle",
+                "status": "approved",
+                "confidence": 0.92,
+                "value": {
+                    "required_roles": ["event_ts", "dimension"],
+                    "priority": 11,
+                },
+            },
         ],
     )
 
@@ -333,6 +347,15 @@ def test_retrieve_metadata_merges_canonical_project_context_items() -> None:
     }
     assert metadata.glossary["status_code"] == "Order lifecycle status."
     assert metadata.locked_roles[("orders", "status_code")] == "dimension"
+    assert metadata.insight_families == [
+        {
+            "key": "order_lifecycle",
+            "required_roles": ["event_ts", "dimension"],
+            "priority": 11,
+            "source": "project_context",
+            "context_item_id": "insight_family:order_lifecycle",
+        }
+    ]
 
 
 def test_nonexistent_path_returns_empty() -> None:

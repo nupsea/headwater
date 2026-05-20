@@ -226,6 +226,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         dataset_context=context,
         models=all_models,
         project_id=project_id,
+        metadata=metadata,
     )
     marts_result = detect_insights_with_diagnostics(
         con,
@@ -234,6 +235,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         dataset_context=context,
         models=all_models,
         project_id=project_id,
+        metadata=metadata,
     )
     statistical_insights = staging_result.insights + marts_result.insights
     diagnostics = staging_result.diagnostics + marts_result.diagnostics
@@ -349,6 +351,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
         context,
         all_models,
         project_id=project_id,
+        metadata=metadata,
     )
     staging_result = detect_insights_with_diagnostics(
         con,
@@ -357,6 +360,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
         dataset_context=context,
         models=all_models,
         project_id=project_id,
+        metadata=metadata,
     )
     marts_result = detect_insights_with_diagnostics(
         con,
@@ -365,6 +369,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
         dataset_context=context,
         models=all_models,
         project_id=project_id,
+        metadata=metadata,
     )
     insights = staging_result.insights + marts_result.insights
     diagnostics = staging_result.diagnostics + marts_result.diagnostics

@@ -519,6 +519,20 @@ def test_load_retrieved_metadata_uses_store_backed_project_context(meta: Metadat
                 },
                 "evidence": [],
             },
+            {
+                "id": "insight_family:order_health",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "insight_family",
+                "scope": "project",
+                "name": "order_health",
+                "status": "approved",
+                "value": {
+                    "required_roles": ["event_ts"],
+                    "priority": 12,
+                },
+                "evidence": [],
+            },
         ],
     )
 
@@ -546,6 +560,8 @@ def test_load_retrieved_metadata_uses_store_backed_project_context(meta: Metadat
     assert metadata.lookup_tables["status_lookup"]["label_column"] == "status_label"
     assert metadata.glossary["status_code"] == "Order lifecycle status."
     assert metadata.locked_roles[("orders", "status_code")] == "dimension"
+    assert metadata.insight_families[0]["key"] == "order_health"
+    assert metadata.insight_families[0]["priority"] == 12
 
 
 def test_load_retrieved_metadata_includes_glossary_term_items(meta: MetadataStore):
