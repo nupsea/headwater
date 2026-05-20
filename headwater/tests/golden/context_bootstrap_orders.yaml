@@ -1,0 +1,29 @@
+row_grain:
+  orders:
+    - order_id
+row_entity:
+  orders: order
+time_anchor:
+  orders: created_at
+pk_candidates:
+  orders:
+    - order_id
+fk_candidates:
+  - from_table: orders
+    from_column: customer_id
+    to_table: customers
+    to_column: customer_id
+top_dimensions:
+  - table_name: orders
+    column_name: status
+top_measures:
+  - table_name: orders
+    column_name: amount
+min_fallback_questions: 3
+fallback_questions:
+  - What should one row in 'orders' represent?
+  - Which measures should be monitored over time?
+question_substrings:
+  - row
+forbidden_terms:
+  - nytaxi

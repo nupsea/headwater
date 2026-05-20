@@ -1,0 +1,264 @@
+"""Evaluation helpers for project context bootstrap output."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def load_context_gold(path: str | Path) -> dict:
+    """Load a YAML/JSON context-evaluation gold file."""
+    source = Path(path)
+    text = source.read_text(encoding="utf-8")
+    data = (
+        json.loads(text)
+        if source.suffix.lower() == ".json"
+        else yaml.safe_load(text) or {}
+    )
+    return data if isinstance(data, dict) else {}
+
+
+def evaluate_context_bundle(bundle: Any, gold: dict) -> dict:
+    """Grade context proposals against explicit gold expectations.
+
+    Expected gold keys are optional and may include row_grain, row_entity,
+    time_anchor, pk_candidates, fk_candidates, top_dimensions, top_measures,
+    fallback_questions, question_substrings, min_fallback_questions, and
+    forbidden_terms.
+    """
+    items = _bundle_items(bundle)
+    checks: list[dict] = []
+    checks.extend(_table_value_checks(items, gold, "row_grain", "columns"))
+    checks.extend(_table_value_checks(items, gold, "row_entity", "entity"))
+    checks.extend(_table_value_checks(items, gold, "time_anchor", "column"))
+    checks.extend(_pk_checks(items, gold.get("pk_candidates") or {}))
+    checks.extend(_fk_checks(items, gold.get("fk_candidates") or []))
+    checks.extend(_cold_start_checks(items, gold))
+    checks.append(_forbidden_term_check(items, gold.get("forbidden_terms") or []))
+
+    scored = [check for check in checks if check["name"] != "forbidden_terms" or check["expected"]]
+    passed = sum(1 for check in scored if check["passed"])
+    failed = len(scored) - passed
+    return {
+        "passed": failed == 0,
+        "score": round(passed / len(scored), 4) if scored else 1.0,
+        "metrics": {
+            "total_checks": len(scored),
+            "passed_checks": passed,
+            "failed_checks": failed,
+        },
+        "checks": checks,
+    }
+
+
+def _bundle_items(bundle: Any) -> list[dict]:
+    raw_items = (
+        bundle.get("items", [])
+        if isinstance(bundle, dict)
+        else getattr(bundle, "items", [])
+    )
+    items: list[dict] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            items.append(item)
+        elif hasattr(item, "model_dump"):
+            items.append(item.model_dump(mode="json"))
+    return items
+
+
+def _table_value_checks(
+    items: list[dict],
+    gold: dict,
+    item_type: str,
+    value_key: str,
+) -> list[dict]:
+    expected = gold.get(item_type) or {}
+    if not isinstance(expected, dict):
+        return []
+    actual_by_table = {
+        item.get("table_name") or (item.get("value") or {}).get("table"): item.get("value") or {}
+        for item in items
+        if item.get("item_type") == item_type
+    }
+    checks = []
+    for table_name, expected_value in expected.items():
+        actual_value = (actual_by_table.get(table_name) or {}).get(value_key)
+        checks.append(
+            _check(
+                f"{item_type}:{table_name}",
+                _normalize_expected(expected_value),
+                _normalize_expected(actual_value),
+            )
+        )
+    return checks
+
+
+def _pk_checks(items: list[dict], expected: dict) -> list[dict]:
+    if not isinstance(expected, dict):
+        return []
+    actual_by_table: dict[str, set[tuple[str, ...]]] = {}
+    for item in items:
+        if item.get("item_type") != "pk_candidate":
+            continue
+        value = item.get("value") or {}
+        table = item.get("table_name") or value.get("table")
+        if not table:
+            continue
+        actual_by_table.setdefault(table, set()).add(tuple(value.get("columns") or []))
+    checks = []
+    for table, columns in expected.items():
+        expected_columns = tuple(_as_list(columns))
+        actual = sorted(actual_by_table.get(table, set()))
+        checks.append(
+            _check(
+                f"pk_candidate:{table}",
+                expected_columns,
+                expected_columns if expected_columns in actual else None,
+            )
+        )
+    return checks
+
+
+def _fk_checks(items: list[dict], expected: list[dict]) -> list[dict]:
+    checks = []
+    actual = {
+        (
+            value.get("from_table"),
+            value.get("from_column"),
+            value.get("to_table"),
+            value.get("to_column"),
+        )
+        for item in items
+        if item.get("item_type") == "fk_candidate"
+        for value in [item.get("value") or {}]
+    }
+    for relation in expected:
+        relation_key = (
+            relation.get("from_table"),
+            relation.get("from_column"),
+            relation.get("to_table"),
+            relation.get("to_column"),
+        )
+        checks.append(
+            _check(
+                "fk_candidate:"
+                f"{relation_key[0]}.{relation_key[1]}->{relation_key[2]}.{relation_key[3]}",
+                relation_key,
+                relation_key if relation_key in actual else None,
+            )
+        )
+    return checks
+
+
+def _cold_start_checks(items: list[dict], gold: dict) -> list[dict]:
+    cold_start = next(
+        (
+            item.get("value") or {}
+            for item in items
+            if item.get("item_type") == "cold_start_summary"
+        ),
+        {},
+    )
+    checks: list[dict] = []
+    checks.extend(
+        _top_column_checks(
+            "top_dimensions",
+            cold_start.get("top_dimensions") or [],
+            gold.get("top_dimensions") or [],
+        )
+    )
+    checks.extend(
+        _top_column_checks(
+            "top_measures",
+            cold_start.get("top_measures") or [],
+            gold.get("top_measures") or [],
+        )
+    )
+    min_questions = gold.get("min_fallback_questions")
+    if min_questions is not None:
+        questions = cold_start.get("fallback_questions") or []
+        checks.append(
+            {
+                "name": "fallback_question_count",
+                "passed": len(questions) >= int(min_questions),
+                "expected": int(min_questions),
+                "actual": len(questions),
+            }
+        )
+    for expected_question in gold.get("fallback_questions") or []:
+        questions = cold_start.get("fallback_questions") or []
+        checks.append(
+            {
+                "name": f"fallback_question:{expected_question}",
+                "passed": expected_question in questions,
+                "expected": expected_question,
+                "actual": questions,
+            }
+        )
+    for substring in gold.get("question_substrings") or []:
+        questions = [
+            str(question).lower()
+            for question in cold_start.get("fallback_questions") or []
+        ]
+        expected = str(substring).lower()
+        checks.append(
+            {
+                "name": f"fallback_question_contains:{substring}",
+                "passed": any(expected in question for question in questions),
+                "expected": expected,
+                "actual": cold_start.get("fallback_questions") or [],
+            }
+        )
+    return checks
+
+
+def _top_column_checks(
+    name: str,
+    actual_items: list[dict],
+    expected_items: list[dict],
+) -> list[dict]:
+    actual = [(item.get("table_name"), item.get("column_name")) for item in actual_items]
+    checks = []
+    for expected in expected_items:
+        expected_key = (expected.get("table_name"), expected.get("column_name"))
+        checks.append(
+            _check(
+                f"{name}:{expected_key[0]}.{expected_key[1]}",
+                expected_key,
+                expected_key if expected_key in actual else None,
+            )
+        )
+    return checks
+
+
+def _forbidden_term_check(items: list[dict], forbidden_terms: list[str]) -> dict:
+    serialized = json.dumps(items, sort_keys=True).lower()
+    leaks = [term for term in forbidden_terms if str(term).lower() in serialized]
+    return {
+        "name": "forbidden_terms",
+        "passed": not leaks,
+        "expected": forbidden_terms,
+        "actual": leaks,
+    }
+
+
+def _check(name: str, expected: Any, actual: Any) -> dict:
+    return {
+        "name": name,
+        "passed": actual == expected,
+        "expected": expected,
+        "actual": actual,
+    }
+
+
+def _as_list(value: Any) -> list:
+    return value if isinstance(value, list) else [value]
+
+
+def _normalize_expected(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(value)
+    return value
