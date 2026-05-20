@@ -22,6 +22,7 @@ from headwater.core.runtime_state import get_runtime_state
 from headwater.services.context_import import import_context_exports
 from headwater.services.context_projection import build_context_exports
 from headwater.services.context_resource_enrichment import enrich_project_context_resource
+from headwater.services.resource_safety import classified_resource_metadata
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -995,6 +996,13 @@ async def add_project_context_resource(
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
 
     source_names = project_sources(project, store) or [project_id]
+    metadata = classified_resource_metadata(
+        {
+            **body.metadata,
+            **({"content": body.content} if body.content else {}),
+        },
+        content=body.content,
+    )
     resource = {
         "id": f"resource:{project_id}:{uuid.uuid4().hex}",
         "project_id": project["id"],
@@ -1004,10 +1012,7 @@ async def add_project_context_resource(
         "location": body.location,
         "status": body.status,
         "source": "user",
-        "metadata": {
-            **body.metadata,
-            **({"content": body.content} if body.content else {}),
-        },
+        "metadata": metadata,
     }
     store.upsert_project_context_resource(**resource)
     enrichment = enrich_project_context_resource(store, project["id"], resource)

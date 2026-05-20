@@ -7,6 +7,8 @@ from collections import OrderedDict
 
 import yaml
 
+from headwater.services.resource_safety import classified_resource_metadata
+
 _CONTEXT_SECTIONS = {
     "row_grains": "row_grain",
     "row_entities": "row_entity",
@@ -257,7 +259,7 @@ def import_context_exports(
             location=resource.get("location"),
             status=resource.get("status") or "active",
             source=resource.get("source") or "import",
-            metadata=resource.get("metadata") or {},
+            metadata=classified_resource_metadata(resource.get("metadata") or {}),
         )
         resources_upserted += 1
 

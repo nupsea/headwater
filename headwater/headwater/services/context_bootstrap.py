@@ -13,6 +13,7 @@ from headwater.core.models import (
     ProjectContextItem,
     ProjectContextResource,
 )
+from headwater.services.resource_safety import classified_resource_metadata
 
 
 def bootstrap_project_context(
@@ -534,6 +535,7 @@ def bootstrap_project_context(
             title=doc.filename,
             location=doc.filename,
             metadata={
+                **classified_resource_metadata({}),
                 "matched_tables": doc.matched_tables,
                 "confidence": doc.confidence,
             },

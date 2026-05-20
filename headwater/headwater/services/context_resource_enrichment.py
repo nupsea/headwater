@@ -11,6 +11,7 @@ import yaml
 
 from headwater.analyzer.companion import match_docs_to_tables
 from headwater.core.models import CompanionDoc
+from headwater.services.resource_safety import classified_resource_metadata
 
 _DOC_TYPE_BY_SUFFIX = {
     ".md": "markdown",
@@ -29,6 +30,7 @@ def enrich_project_context_resource(
     resource: dict,
 ) -> dict:
     """Extract context proposals from a stored project resource."""
+    resource = _with_resource_safety_metadata(resource)
     items = store.list_project_context_items(project_id)
     content = _resource_content(resource)
     if not content:
@@ -243,6 +245,18 @@ def enrich_project_context_resource(
         "items_created": created,
         "questions_created": questions_created,
     }
+
+
+def _with_resource_safety_metadata(resource: dict) -> dict:
+    metadata = classified_resource_metadata(
+        resource.get("metadata") or {},
+        content=(resource.get("metadata") or {}).get("content"),
+    )
+    if metadata == (resource.get("metadata") or {}):
+        return resource
+    updated = dict(resource)
+    updated["metadata"] = metadata
+    return updated
 
 
 def _upsert_item(store, existing_by_id: dict[str, dict], payload: dict) -> bool:

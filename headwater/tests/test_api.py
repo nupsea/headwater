@@ -79,11 +79,38 @@ class TestProjectContext:
         assert create.status_code == 200
         created = create.json()
         assert created["source"] == "user"
+        assert created["metadata"]["classification"] == "unknown"
+        assert created["metadata"]["external_llm_allowed"] is False
 
         resp = client.get("/api/projects/source/context")
         resources = resp.json()["resources"]
         titles = {resource["title"] for resource in resources}
         assert "Business glossary" in titles
+
+    def test_public_context_resource_can_be_explicitly_allowed_for_external_llm(
+        self,
+        client,
+    ):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "url",
+                "title": "Public glossary",
+                "location": "https://example.com/glossary",
+                "metadata": {
+                    "classification": "public",
+                    "allow_external_llm": True,
+                },
+            },
+        )
+
+        assert create.status_code == 200
+        created = create.json()
+        assert created["metadata"]["classification"] == "public"
+        assert created["metadata"]["external_llm_allowed"] is True
 
     def test_local_resource_addition_enriches_project_context(self, client, tmp_path):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
