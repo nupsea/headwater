@@ -18,6 +18,18 @@ from headwater.core.models import (
 )
 from headwater.services.context_bootstrap import bootstrap_project_context
 
+_REQUIRED_GOLD_CATEGORIES = (
+    "row_grain",
+    "row_entity",
+    "time_anchor",
+    "pk_candidates",
+    "fk_candidates",
+    "top_dimensions",
+    "top_measures",
+    "question_gold",
+    "forbidden_terms",
+)
+
 
 def load_context_gold(path: str | Path) -> dict:
     """Load a YAML/JSON context-evaluation gold file."""
@@ -48,9 +60,26 @@ def load_context_eval_cases(paths: list[str | Path]) -> list[dict]:
                 ),
                 "gold": gold,
                 "gold_path": str(source),
+                "gold_coverage": context_gold_coverage(gold),
             }
         )
     return cases
+
+
+def context_gold_coverage(gold: dict) -> dict:
+    """Report whether a gold file covers the required Phase 11 categories."""
+    present = []
+    missing = []
+    for category in _REQUIRED_GOLD_CATEGORIES:
+        if _gold_category_present(gold, category):
+            present.append(category)
+        else:
+            missing.append(category)
+    return {
+        "complete": not missing,
+        "present": present,
+        "missing": missing,
+    }
 
 
 def evaluate_context_bundle(bundle: Any, gold: dict) -> dict:
@@ -113,6 +142,7 @@ def evaluate_context_suite(
                 "name": case["name"],
                 "passed": not threshold_failures,
                 "score": result["score"],
+                "gold_coverage": case.get("gold_coverage") or context_gold_coverage(case["gold"]),
                 "thresholds": thresholds,
                 "metrics": result["metrics"],
                 "category_metrics": result["category_metrics"],
@@ -128,11 +158,13 @@ def evaluate_context_suite(
     failed_checks = sum(item["metrics"]["failed_checks"] for item in fixture_results)
     failed_fixtures = [item for item in fixture_results if not item["passed"]]
     category_metrics = _aggregate_category_metrics(fixture_results)
+    gold_coverage = _suite_gold_coverage(fixture_results)
     return {
         "passed": not failed_fixtures,
         "min_score": min_score,
         "min_category_score": min_category_score,
         "score": round(passed_checks / total_checks, 4) if total_checks else 1.0,
+        "gold_coverage": gold_coverage,
         "metrics": {
             "fixture_count": len(fixture_results),
             "failed_fixture_count": len(failed_fixtures),
@@ -155,6 +187,7 @@ def build_context_eval_metrics(result: dict) -> dict:
             "min_score": result["min_score"],
             "min_category_score": result["min_category_score"],
         },
+        "gold_coverage": result["gold_coverage"],
         "metrics": result["metrics"],
         "categories": _metrics_artifact_categories(result["category_metrics"]),
         "fixtures": [
@@ -162,6 +195,7 @@ def build_context_eval_metrics(result: dict) -> dict:
                 "name": fixture["name"],
                 "passed": fixture["passed"],
                 "score": fixture["score"],
+                "gold_coverage": fixture["gold_coverage"],
                 "thresholds": fixture["thresholds"],
                 "metrics": fixture["metrics"],
                 "categories": _metrics_artifact_categories(fixture["category_metrics"]),
@@ -170,6 +204,33 @@ def build_context_eval_metrics(result: dict) -> dict:
             }
             for fixture in result["fixtures"]
         ],
+    }
+
+
+def _gold_category_present(gold: dict, category: str) -> bool:
+    if category == "question_gold":
+        return (
+            gold.get("min_fallback_questions") is not None
+            or bool(gold.get("fallback_questions"))
+            or bool(gold.get("question_substrings"))
+            or bool(gold.get("question_intents"))
+        )
+    if category == "fk_candidates":
+        return category in gold and isinstance(gold.get(category), list)
+    value = gold.get(category)
+    return bool(value)
+
+
+def _suite_gold_coverage(fixture_results: list[dict]) -> dict:
+    missing_by_fixture = {
+        fixture["name"]: fixture["gold_coverage"]["missing"]
+        for fixture in fixture_results
+        if fixture["gold_coverage"]["missing"]
+    }
+    return {
+        "complete": not missing_by_fixture,
+        "required_categories": list(_REQUIRED_GOLD_CATEGORIES),
+        "missing_by_fixture": missing_by_fixture,
     }
 
 

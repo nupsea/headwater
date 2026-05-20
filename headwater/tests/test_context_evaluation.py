@@ -15,6 +15,7 @@ from headwater.core.models import (
 from headwater.services.context_bootstrap import bootstrap_project_context
 from headwater.services.context_evaluation import (
     build_context_eval_metrics,
+    context_gold_coverage,
     evaluate_context_bundle,
     evaluate_context_suite,
     load_context_eval_cases,
@@ -188,10 +189,26 @@ def test_load_context_eval_cases_builds_named_fixture_from_gold():
     assert len(cases) == 1
     assert cases[0]["name"] == "orders"
     assert cases[0]["gold"]["fixture"] == "orders"
+    assert cases[0]["gold_coverage"]["complete"] is True
     assert cases[0]["gold_path"].endswith("context_bootstrap_orders.yaml")
 
     result = evaluate_context_suite(cases, min_score=1.0)
     assert result["passed"] is True
+
+
+def test_context_gold_coverage_reports_missing_categories():
+    coverage = context_gold_coverage(
+        {
+            "row_grain": {"orders": ["order_id"]},
+            "min_fallback_questions": 3,
+        }
+    )
+
+    assert coverage["complete"] is False
+    assert "row_grain" in coverage["present"]
+    assert "question_gold" in coverage["present"]
+    assert "row_entity" in coverage["missing"]
+    assert "fk_candidates" in coverage["missing"]
 
 
 def test_cross_domain_fixture_inputs_are_data_driven():
@@ -221,6 +238,7 @@ def test_all_context_eval_gold_fixtures_pass():
     result = evaluate_context_suite(cases, min_score=1.0)
 
     assert result["passed"] is True
+    assert result["gold_coverage"]["complete"] is True
     assert result["metrics"]["fixture_count"] == 6
     assert result["category_metrics"]["row_grain"]["failed_checks"] == 0
     assert result["category_metrics"]["top_dimensions"]["passed_checks"] >= 10
@@ -234,8 +252,10 @@ def test_context_evaluation_metrics_artifact_tracks_category_scores():
 
     assert metrics["schema_version"] == 1
     assert metrics["thresholds"] == {"min_score": 1.0, "min_category_score": 0.9}
+    assert metrics["gold_coverage"]["complete"] is True
     assert metrics["categories"]["row_grain"]["exact_match_score"] == 1.0
     assert metrics["fixtures"][0]["name"] == "orders"
+    assert metrics["fixtures"][0]["gold_coverage"]["complete"] is True
     assert metrics["fixtures"][0]["categories"]["top_measures"]["failed_checks"] == 0
     assert metrics["fixtures"][0]["failure_names"] == []
 
