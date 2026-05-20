@@ -1,3 +1,5 @@
+name: orders
+fixture: orders
 row_grain:
   orders:
     - order_id

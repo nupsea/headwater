@@ -8,6 +8,16 @@ from typing import Any
 
 import yaml
 
+from headwater.core.models import (
+    ColumnInfo,
+    ColumnProfile,
+    DiscoveryResult,
+    Relationship,
+    SourceConfig,
+    TableInfo,
+)
+from headwater.services.context_bootstrap import bootstrap_project_context
+
 
 def load_context_gold(path: str | Path) -> dict:
     """Load a YAML/JSON context-evaluation gold file."""
@@ -19,6 +29,28 @@ def load_context_gold(path: str | Path) -> dict:
         else yaml.safe_load(text) or {}
     )
     return data if isinstance(data, dict) else {}
+
+
+def load_context_eval_cases(paths: list[str | Path]) -> list[dict]:
+    """Load gold files and build deterministic context-evaluation cases."""
+    cases = []
+    for path in paths:
+        source = Path(path)
+        gold = load_context_gold(source)
+        fixture_name = str(gold.get("fixture") or source.stem)
+        discovery = _fixture_discovery(fixture_name)
+        cases.append(
+            {
+                "name": str(gold.get("name") or fixture_name),
+                "bundle": bootstrap_project_context(
+                    discovery,
+                    project_id=str(gold.get("project_id") or discovery.source.name),
+                ),
+                "gold": gold,
+                "gold_path": str(source),
+            }
+        )
+    return cases
 
 
 def evaluate_context_bundle(bundle: Any, gold: dict) -> dict:
@@ -302,3 +334,79 @@ def _normalize_expected(value: Any) -> Any:
     if isinstance(value, list):
         return tuple(value)
     return value
+
+
+def _fixture_discovery(name: str) -> DiscoveryResult:
+    if name == "orders":
+        return _orders_fixture_discovery()
+    raise ValueError(f"Unknown context evaluation fixture: {name}")
+
+
+def _orders_fixture_discovery() -> DiscoveryResult:
+    return DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data/orders"),
+        tables=[
+            TableInfo(
+                name="orders",
+                row_count=100,
+                columns=[
+                    ColumnInfo(name="order_id", dtype="int64", is_primary_key=True),
+                    ColumnInfo(name="customer_id", dtype="int64", semantic_type="foreign_key"),
+                    ColumnInfo(name="created_at", dtype="timestamp"),
+                    ColumnInfo(name="status", dtype="varchar"),
+                    ColumnInfo(name="amount", dtype="double"),
+                ],
+            ),
+            TableInfo(
+                name="customers",
+                row_count=10,
+                columns=[
+                    ColumnInfo(name="customer_id", dtype="int64", is_primary_key=True),
+                    ColumnInfo(name="segment", dtype="varchar"),
+                ],
+            ),
+        ],
+        profiles=[
+            ColumnProfile(
+                table_name="orders",
+                column_name="order_id",
+                dtype="int64",
+                distinct_count=100,
+                uniqueness_ratio=1.0,
+            ),
+            ColumnProfile(
+                table_name="orders",
+                column_name="status",
+                dtype="varchar",
+                distinct_count=3,
+                top_values=[("new", 40), ("paid", 35), ("shipped", 25)],
+            ),
+            ColumnProfile(
+                table_name="orders",
+                column_name="amount",
+                dtype="double",
+                distinct_count=90,
+                min_value=1.0,
+                max_value=500.0,
+            ),
+            ColumnProfile(
+                table_name="customers",
+                column_name="customer_id",
+                dtype="int64",
+                distinct_count=10,
+                uniqueness_ratio=1.0,
+            ),
+        ],
+        relationships=[
+            Relationship(
+                from_table="orders",
+                from_column="customer_id",
+                to_table="customers",
+                to_column="customer_id",
+                type="many_to_one",
+                confidence=0.92,
+                referential_integrity=1.0,
+                source="inferred_name",
+            )
+        ],
+    )

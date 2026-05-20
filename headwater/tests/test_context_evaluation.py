@@ -16,6 +16,7 @@ from headwater.services.context_bootstrap import bootstrap_project_context
 from headwater.services.context_evaluation import (
     evaluate_context_bundle,
     evaluate_context_suite,
+    load_context_eval_cases,
     load_context_gold,
 )
 
@@ -95,6 +96,18 @@ def test_context_evaluation_suite_fails_below_threshold():
     assert result["metrics"]["failed_checks"] == 1
     assert result["fixtures"][0]["score"] == 0.5
     assert result["fixtures"][0]["failures"][0]["name"] == "row_grain:orders"
+
+
+def test_load_context_eval_cases_builds_named_fixture_from_gold():
+    cases = load_context_eval_cases([GOLD])
+
+    assert len(cases) == 1
+    assert cases[0]["name"] == "orders"
+    assert cases[0]["gold"]["fixture"] == "orders"
+    assert cases[0]["gold_path"].endswith("context_bootstrap_orders.yaml")
+
+    result = evaluate_context_suite(cases, min_score=1.0)
+    assert result["passed"] is True
 
 
 def _orders_discovery() -> DiscoveryResult:

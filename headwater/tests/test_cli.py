@@ -79,3 +79,22 @@ class TestCLIGenerate:
     def test_generate_bad_path(self):
         result = runner.invoke(app, ["generate", "/nonexistent"])
         assert result.exit_code == 1
+
+
+class TestCLIContextEval:
+    def test_context_eval_default_gold(self):
+        result = runner.invoke(app, ["context-eval"])
+        assert result.exit_code == 0
+        assert "Context evaluation" in result.output
+        assert "PASS orders" in result.output
+
+    def test_context_eval_json_output(self):
+        result = runner.invoke(app, ["context-eval", "--json"])
+        assert result.exit_code == 0
+        assert '"passed": true' in result.output
+        assert '"fixture_count": 1' in result.output
+
+    def test_context_eval_bad_path(self):
+        result = runner.invoke(app, ["context-eval", "--gold", "/nonexistent"])
+        assert result.exit_code == 1
+        assert "No context gold fixtures found" in result.output
