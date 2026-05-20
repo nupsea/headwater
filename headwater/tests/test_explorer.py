@@ -55,7 +55,11 @@ from headwater.explorer.statistical import (
     detect_insights,
     detect_insights_with_diagnostics,
 )
-from headwater.explorer.suggestions import _select_diverse_questions, generate_suggestions
+from headwater.explorer.suggestions import (
+    _decision_category,
+    _select_diverse_questions,
+    generate_suggestions,
+)
 from headwater.explorer.visualization import _classify_columns, recommend_visualization
 
 
@@ -267,6 +271,35 @@ class TestModels:
 
 
 class TestSuggestions:
+    def test_business_lens_labels_decision_category_from_context(self):
+        discovery = DiscoveryResult(source=SourceConfig(name="src", type="json"), tables=[])
+        metadata = retrieve_metadata(
+            discovery,
+            DatasetContext(
+                source_name="src",
+                decisions="Prioritize delivery exceptions and late orders.",
+            ),
+            context_items=[
+                {
+                    "id": "business_lens:fulfillment",
+                    "project_id": "src",
+                    "source_name": "src",
+                    "item_type": "business_lens",
+                    "scope": "project",
+                    "name": "fulfillment",
+                    "status": "approved",
+                    "value": {
+                        "label": "Fulfillment Signals",
+                        "decision_terms": ["delivery", "late"],
+                        "question_terms": ["orders"],
+                        "priority": 7,
+                    },
+                }
+            ],
+        )
+
+        assert _decision_category(metadata) == "Fulfillment Signals"
+
     def test_generates_mart_suggestions(self, sample_discovery, sample_models):
         questions = generate_suggestions(
             discovery=sample_discovery,
@@ -5167,6 +5200,47 @@ class TestSuggestionQuality:
 
 
 class TestVisualization:
+    def test_context_visualization_hint_overrides_shape_default(self):
+        discovery = DiscoveryResult(source=SourceConfig(name="src", type="json"), tables=[])
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "visualization_hint:status_heatmap",
+                    "project_id": "src",
+                    "source_name": "src",
+                    "item_type": "visualization_hint",
+                    "scope": "project",
+                    "name": "status_heatmap",
+                    "status": "approved",
+                    "value": {
+                        "chart_type": "heatmap",
+                        "columns": ["period", "status", "orders"],
+                        "x_axis": "period",
+                        "y_axis": "status",
+                        "question_terms": ["status"],
+                        "title": "Status Heatmap",
+                    },
+                }
+            ],
+        )
+        data = [
+            {"period": "2026-01", "status": "Open", "orders": 5},
+            {"period": "2026-02", "status": "Closed", "orders": 8},
+        ]
+
+        viz = recommend_visualization(
+            ["period", "status", "orders"],
+            data,
+            "Show orders by status",
+            metadata,
+        )
+
+        assert viz.chart_type == "heatmap"
+        assert viz.x_axis == "period"
+        assert viz.y_axis == "status"
+        assert viz.title == "Status Heatmap"
+
     def test_kpi_single_metric(self):
         viz = recommend_visualization(
             ["avg_value"],

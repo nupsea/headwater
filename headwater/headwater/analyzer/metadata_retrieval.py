@@ -39,6 +39,8 @@ class RetrievedMetadata:
     table_profiles: dict[str, dict] = field(default_factory=dict)
     column_hints: dict[tuple[str, str], dict] = field(default_factory=dict)
     insight_families: list[dict] = field(default_factory=list)
+    business_lenses: list[dict] = field(default_factory=list)
+    visualization_hints: list[dict] = field(default_factory=list)
 
 
 def retrieve_metadata(
@@ -74,6 +76,8 @@ def retrieve_metadata(
         table_profiles=_table_profiles_from_context_items(normalized_items),
         column_hints=_column_hints_from_context_items(normalized_items),
         insight_families=_insight_families_from_context_items(normalized_items),
+        business_lenses=_context_values(normalized_items, "business_lens"),
+        visualization_hints=_context_values(normalized_items, "visualization_hint"),
     )
 
 
@@ -214,6 +218,21 @@ def _insight_families_from_context_items(items: list[ProjectContextItem]) -> lis
             family["priority"] = 5
         families.append(family)
     return families
+
+
+def _context_values(items: list[ProjectContextItem], item_type: str) -> list[dict]:
+    values: list[dict] = []
+    for item in items:
+        if item.item_type != item_type:
+            continue
+        if item.status not in {"approved", "locked"}:
+            continue
+        value = dict(item.value)
+        value.setdefault("key", item.name)
+        value.setdefault("source", "project_context")
+        value.setdefault("context_item_id", item.id)
+        values.append(value)
+    return values
 
 
 def _glossary_from_docs(discovery: DiscoveryResult) -> dict[str, str]:

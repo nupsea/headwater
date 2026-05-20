@@ -19,7 +19,11 @@ from typing import Any
 import duckdb
 
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider
-from headwater.analyzer.metadata_retrieval import build_lookup_index, retrieve_metadata
+from headwater.analyzer.metadata_retrieval import (
+    RetrievedMetadata,
+    build_lookup_index,
+    retrieve_metadata,
+)
 from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.core.classification import (
     is_dimension_column as _shared_is_dimension,
@@ -119,6 +123,7 @@ def ask(
     catalog: Any | None = None,
     vector_store: Any | None = None,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> ExplorationResult:
     """Translate a natural language question to SQL, execute it, and return results.
 
@@ -168,7 +173,7 @@ def ask(
             )
             sql = decomposition.sql
             # Execute the catalog-generated SQL
-            result = _execute_query(question, sql, con)
+            result = _execute_query(question, sql, con, metadata)
             if not result.error:
                 result.warnings = decomposition.warnings
                 result.suggestions = decomposition.suggestions
@@ -235,10 +240,10 @@ def ask(
     warnings = _check_grounding(question, discovery, models or [], sql, suggestions or [])
 
     # Execute (with auto-repair if LLM is available)
-    result = _execute_query(question, sql, con)
+    result = _execute_query(question, sql, con, metadata)
 
     if result.error and has_llm:
-        result = _repair_loop(question, sql, result.error, con, context, provider)
+        result = _repair_loop(question, sql, result.error, con, context, provider, metadata)
 
     readability_warnings, follow_ups = _business_readability_feedback(
         question,
@@ -301,6 +306,7 @@ def _repair_loop(
     con: duckdb.DuckDBPyConnection,
     context: str,
     provider: LLMProvider,
+    metadata: RetrievedMetadata | None = None,
 ) -> ExplorationResult:
     """Attempt to repair a failed SQL query using the LLM.
 
@@ -333,7 +339,7 @@ def _repair_loop(
             break
 
         # Try executing the repaired query
-        result = _execute_query(question, fixed_sql, con)
+        result = _execute_query(question, fixed_sql, con, metadata)
 
         if result.error is None:
             # Repair succeeded
@@ -1822,6 +1828,7 @@ def _execute_query(
     question: str,
     sql: str,
     con: duckdb.DuckDBPyConnection,
+    metadata: RetrievedMetadata | None = None,
 ) -> ExplorationResult:
     """Execute a validated SQL query and return structured results."""
     try:
@@ -1834,7 +1841,7 @@ def _execute_query(
         for row in rows[:500]:  # Cap at 500 rows
             data.append(dict(zip(columns, [_serialize_value(v) for v in row], strict=False)))
 
-        viz = recommend_visualization(columns, data, question)
+        viz = recommend_visualization(columns, data, question, metadata)
 
         return ExplorationResult(
             question=question,

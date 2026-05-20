@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata
 from headwater.core.models import VisualizationSpec
 
 # Column names that indicate temporal data
@@ -44,6 +45,7 @@ def recommend_visualization(
     columns: list[str],
     data: list[dict[str, Any]],
     question: str = "",
+    metadata: RetrievedMetadata | None = None,
 ) -> VisualizationSpec:
     """Recommend a chart type based on the result shape and content."""
     if not data or not columns:
@@ -53,6 +55,9 @@ def recommend_visualization(
 
     row_count = len(data)
     col_types = _classify_columns(columns, data)
+    hinted = _visualization_from_hints(columns, col_types, question, metadata)
+    if hinted is not None:
+        return hinted
 
     temporal_cols = [c for c, t in col_types.items() if t == "temporal"]
     metric_cols = [c for c, t in col_types.items() if t == "metric"]
@@ -206,6 +211,73 @@ def _classify_columns(
             result[col] = "dimension"
 
     return result
+
+
+def _visualization_from_hints(
+    columns: list[str],
+    col_types: dict[str, str],
+    question: str,
+    metadata: RetrievedMetadata | None,
+) -> VisualizationSpec | None:
+    if metadata is None:
+        return None
+    available = set(columns)
+    lowered_question = question.lower()
+    for hint in metadata.visualization_hints:
+        chart_type = hint.get("chart_type")
+        if chart_type not in {"kpi", "bar", "line", "pie", "scatter", "table", "heatmap"}:
+            continue
+        required_columns = [str(col) for col in hint.get("columns") or []]
+        if required_columns and not set(required_columns).issubset(available):
+            continue
+        question_terms = _hint_terms(hint, "question_terms", "question_keywords")
+        if question_terms and not any(term in lowered_question for term in question_terms):
+            continue
+        x_axis = _hint_axis(hint.get("x_axis"), columns)
+        y_axis = _hint_axis(hint.get("y_axis"), columns)
+        group_by = _hint_axis(hint.get("group_by"), columns)
+        if x_axis is None:
+            x_axis = _first_column_of_type(columns, col_types, "temporal")
+            if x_axis is None:
+                x_axis = _first_column_of_type(columns, col_types, "dimension")
+        if y_axis is None:
+            y_axis = _first_column_of_type(columns, col_types, "metric")
+        title = str(hint.get("title") or _title_from_question(question) or "Query Results")
+        description = str(hint.get("description") or f"Context hint: {chart_type}")
+        return VisualizationSpec(
+            chart_type=chart_type,
+            title=title,
+            x_axis=x_axis,
+            y_axis=y_axis,
+            group_by=group_by,
+            description=description,
+        )
+    return None
+
+
+def _hint_terms(hint: dict, *keys: str) -> list[str]:
+    terms: list[str] = []
+    for key in keys:
+        value = hint.get(key)
+        if isinstance(value, str):
+            terms.extend(part.strip().lower() for part in re.split(r"[,;]", value))
+        elif isinstance(value, list):
+            terms.extend(str(part).strip().lower() for part in value)
+    return [term for term in terms if term]
+
+
+def _hint_axis(value: Any, columns: list[str]) -> str | None:
+    if not isinstance(value, str) or value not in columns:
+        return None
+    return value
+
+
+def _first_column_of_type(
+    columns: list[str],
+    col_types: dict[str, str],
+    column_type: str,
+) -> str | None:
+    return next((column for column in columns if col_types.get(column) == column_type), None)
 
 
 def _should_use_pie_chart(

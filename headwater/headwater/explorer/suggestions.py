@@ -2385,6 +2385,9 @@ def _context_question_bonus(
         return 0
     decisions = metadata.context.decisions.lower()
     q = question.lower()
+    lens_bonus = _business_lens_question_bonus(q, decisions, metadata)
+    if lens_bonus:
+        return lens_bonus
     score = 0
     if (
         any(token in decisions for token in ("operation", "dispatch", "capacity", "service"))
@@ -2413,6 +2416,9 @@ def _decision_category(metadata: RetrievedMetadata | None) -> str:
         if metadata and metadata.context and metadata.context.decisions
         else ""
     )
+    lens_label = _business_lens_label(decisions, metadata)
+    if lens_label:
+        return lens_label
     if any(token in decisions for token in ("revenue", "pricing", "sales", "finance")):
         return "Revenue Signals"
     if any(token in decisions for token in ("compliance", "quality", "audit", "risk")):
@@ -2420,6 +2426,54 @@ def _decision_category(metadata: RetrievedMetadata | None) -> str:
     if any(token in decisions for token in ("operation", "dispatch", "capacity", "service")):
         return "Operational Signals"
     return "Decision Signals"
+
+
+def _business_lens_question_bonus(
+    question: str,
+    decisions: str,
+    metadata: RetrievedMetadata,
+) -> int:
+    best = 0
+    for lens in metadata.business_lenses:
+        decision_terms = _lens_terms(lens, "decision_terms", "decision_keywords", "terms")
+        question_terms = _lens_terms(lens, "question_terms", "question_keywords", "signals")
+        if decision_terms and not any(term in decisions for term in decision_terms):
+            continue
+        if question_terms and not any(term in question for term in question_terms):
+            continue
+        try:
+            priority = int(lens.get("priority", 3))
+        except (TypeError, ValueError):
+            priority = 3
+        best = max(best, max(1, priority))
+    return best
+
+
+def _business_lens_label(
+    decisions: str,
+    metadata: RetrievedMetadata | None,
+) -> str | None:
+    if metadata is None:
+        return None
+    for lens in metadata.business_lenses:
+        decision_terms = _lens_terms(lens, "decision_terms", "decision_keywords", "terms")
+        if decision_terms and not any(term in decisions for term in decision_terms):
+            continue
+        label = lens.get("label") or lens.get("title") or lens.get("name") or lens.get("key")
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+    return None
+
+
+def _lens_terms(lens: dict, *keys: str) -> list[str]:
+    terms: list[str] = []
+    for key in keys:
+        value = lens.get(key)
+        if isinstance(value, str):
+            terms.extend(part.strip().lower() for part in re.split(r"[,;]", value))
+        elif isinstance(value, list):
+            terms.extend(str(part).strip().lower() for part in value)
+    return [term for term in terms if term]
 
 
 def _row_subject_metric(metadata: RetrievedMetadata | None, fallback: str) -> str:

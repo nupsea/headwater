@@ -533,6 +533,28 @@ def test_load_retrieved_metadata_uses_store_backed_project_context(meta: Metadat
                 },
                 "evidence": [],
             },
+            {
+                "id": "business_lens:operations",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "business_lens",
+                "scope": "project",
+                "name": "operations",
+                "status": "approved",
+                "value": {"label": "Operations Signals", "terms": ["fulfillment"]},
+                "evidence": [],
+            },
+            {
+                "id": "visualization_hint:orders_line",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "visualization_hint",
+                "scope": "project",
+                "name": "orders_line",
+                "status": "approved",
+                "value": {"chart_type": "line", "columns": ["created_at", "orders"]},
+                "evidence": [],
+            },
         ],
     )
 
@@ -562,6 +584,8 @@ def test_load_retrieved_metadata_uses_store_backed_project_context(meta: Metadat
     assert metadata.locked_roles[("orders", "status_code")] == "dimension"
     assert metadata.insight_families[0]["key"] == "order_health"
     assert metadata.insight_families[0]["priority"] == 12
+    assert metadata.business_lenses[0]["label"] == "Operations Signals"
+    assert metadata.visualization_hints[0]["chart_type"] == "line"
 
 
 def test_load_retrieved_metadata_includes_glossary_term_items(meta: MetadataStore):

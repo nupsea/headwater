@@ -333,6 +333,34 @@ def test_retrieve_metadata_merges_canonical_project_context_items() -> None:
                     "priority": 11,
                 },
             },
+            {
+                "id": "business_lens:fulfillment",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "business_lens",
+                "scope": "project",
+                "name": "fulfillment",
+                "status": "approved",
+                "value": {
+                    "label": "Fulfillment Signals",
+                    "decision_terms": ["delivery"],
+                    "question_terms": ["late"],
+                    "priority": 4,
+                },
+            },
+            {
+                "id": "visualization_hint:status_heatmap",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "visualization_hint",
+                "scope": "project",
+                "name": "status_heatmap",
+                "status": "approved",
+                "value": {
+                    "chart_type": "heatmap",
+                    "columns": ["status_code", "created_date", "orders"],
+                },
+            },
         ],
     )
 
@@ -356,6 +384,8 @@ def test_retrieve_metadata_merges_canonical_project_context_items() -> None:
             "context_item_id": "insight_family:order_lifecycle",
         }
     ]
+    assert metadata.business_lenses[0]["label"] == "Fulfillment Signals"
+    assert metadata.visualization_hints[0]["chart_type"] == "heatmap"
 
 
 def test_nonexistent_path_returns_empty() -> None:
