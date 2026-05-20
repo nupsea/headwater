@@ -45,18 +45,15 @@ def project_sources(project: dict, store, *, sources: list[dict] | None = None) 
     sources = list(sources) if sources is not None else store.list_sources()
     if project_id and any(source.get("name") == project_id for source in sources):
         return [project_id]
+
+    alias_matches = _source_names_from_alias_context(project, store, sources)
+    if alias_matches:
+        return alias_matches
+
     if len(sources) == 1:
         return [sources[0]["name"]]
 
-    project_slug = project.get("slug") or _slugify(project.get("display_name", ""))
-    matches = []
-    for source in sources:
-        source_name = source.get("name") or ""
-        source_display = source.get("display_name") or ""
-        source_slug = _slugify(f"{source_name} {source_display}")
-        if _slug_matches(project_slug, source_slug):
-            matches.append(source_name)
-    return matches or ([project_id] if project_id else [])
+    return [project_id] if project_id else []
 
 
 def project_for_source(
@@ -67,13 +64,14 @@ def project_for_source(
 ) -> dict | None:
     """Return the real project linked to a source, if one exists."""
     linked = []
-    source_slug = _slugify(source_name)
     for project in (projects if projects is not None else store.list_projects()):
         if project.get("id") == source_name:
             continue
         explicit = project.get("sources") or []
-        project_slug = project.get("slug") or _slugify(project.get("display_name", ""))
-        if source_name in explicit or _slug_matches(project_slug, source_slug):
+        if source_name in explicit or source_name in _source_names_from_alias_context(
+            project,
+            store,
+        ):
             linked.append(project)
     return linked[0] if linked else None
 
@@ -165,7 +163,7 @@ def scoped_pipeline(request: Request, project_id: str | None = None) -> Pipeline
     runtime_state.project = project
     runtime_state.source_names = source_names
 
-    table_names = _project_table_names(project, runtime_state.discovery)
+    table_names = _project_table_names(project, runtime_state.discovery, store=store)
     if table_names is not None:
         runtime_state.discovery = _filter_discovery(runtime_state.discovery, table_names)
         runtime_state.staging_models = _filter_models(runtime_state.staging_models, table_names)
@@ -318,7 +316,7 @@ def _filter_models(models: list[GeneratedModel], table_names: set[str]) -> list[
     ]
 
 
-def _project_table_names(project: dict, discovery) -> set[str] | None:
+def _project_table_names(project: dict, discovery, *, store=None) -> set[str] | None:
     explicit = [
         str(table)
         for table in project.get("tables", [])
@@ -327,28 +325,10 @@ def _project_table_names(project: dict, discovery) -> set[str] | None:
     if explicit:
         return set(explicit)
 
-    aliases = _project_table_aliases(project)
-    if not aliases:
+    if store is None:
         return None
-
-    matches = {
-        table.name
-        for table in discovery.tables
-        if any(alias in _table_search_text(table) for alias in aliases)
-    }
+    matches = _table_names_from_alias_context(project, store, discovery)
     return matches or None
-
-
-def _project_table_aliases(project: dict) -> set[str]:
-    text = " ".join(
-        str(project.get(field) or "")
-        for field in ("slug", "display_name", "description")
-    ).lower()
-    tokens = set(_slugify(text).split("-"))
-    aliases: set[str] = set()
-    if "taxi" in tokens:
-        aliases.update({"taxi", "tlc", "trip", "tripdata", "yellow", "green", "fhv", "fhvhv"})
-    return aliases
 
 
 def _table_search_text(table) -> str:
@@ -358,6 +338,123 @@ def _table_search_text(table) -> str:
             for field in ("name", "domain", "description")
         )
     )
+
+
+def _source_names_from_alias_context(
+    project: dict,
+    store,
+    sources: list[dict] | None = None,
+) -> list[str]:
+    sources = list(sources) if sources is not None else store.list_sources()
+    source_names = {source.get("name") for source in sources if source.get("name")}
+    matches: list[str] = []
+    for item in _project_context_items(store, project.get("id"), item_type="source_alias"):
+        value = item.get("value") or {}
+        candidates = _string_values(value.get("source_names"))
+        candidates.extend(_string_values(value.get("sources")))
+        candidates.extend(_string_values(value.get("source_name")))
+        if item.get("source_name"):
+            candidates.append(str(item["source_name"]))
+
+        aliases = _alias_values(item)
+        for source in sources:
+            source_name = source.get("name")
+            if not source_name:
+                continue
+            if source_name in candidates or _source_matches_alias(source, aliases):
+                matches.append(source_name)
+    return _dedupe([name for name in matches if name in source_names])
+
+
+def _table_names_from_alias_context(project: dict, store, discovery) -> set[str]:
+    discovery_tables = {table.name: table for table in discovery.tables}
+    matches: set[str] = set()
+    for item in _project_context_items(store, project.get("id"), item_type="table_alias"):
+        value = item.get("value") or {}
+        candidates = _string_values(value.get("table_names"))
+        candidates.extend(_string_values(value.get("tables")))
+        candidates.extend(_string_values(value.get("table_name")))
+        if item.get("table_name"):
+            candidates.append(str(item["table_name"]))
+
+        for table_name in candidates:
+            if table_name in discovery_tables:
+                matches.add(table_name)
+
+        aliases = _alias_values(item)
+        if not aliases:
+            continue
+        for table in discovery.tables:
+            if _alias_matches(_table_search_text(table), aliases):
+                matches.add(table.name)
+    return matches
+
+
+def _project_context_items(store, project_id: str | None, *, item_type: str) -> list[dict]:
+    if not project_id:
+        return []
+    list_items = getattr(store, "list_project_context_items", None)
+    if not callable(list_items):
+        return []
+    try:
+        items = list_items(project_id, item_type=item_type)
+    except TypeError:
+        items = [
+            item
+            for item in list_items(project_id)
+            if item.get("item_type") == item_type
+        ]
+    return [item for item in items if item.get("status") != "rejected"]
+
+
+def _source_matches_alias(source: dict, aliases: set[str]) -> bool:
+    if not aliases:
+        return False
+    return _alias_matches(
+        _slugify(
+            " ".join(
+                str(source.get(field) or "")
+                for field in ("name", "display_name", "host")
+            )
+        ),
+        aliases,
+    )
+
+
+def _alias_matches(search_text: str, aliases: set[str]) -> bool:
+    normalized = _slugify(search_text)
+    tokens = set(normalized.split("-"))
+    return any(alias == normalized or alias in tokens for alias in aliases)
+
+
+def _alias_values(item: dict) -> set[str]:
+    value = item.get("value") or {}
+    aliases = _string_values(value.get("aliases"))
+    aliases.extend(_string_values(value.get("alias")))
+    if item.get("name"):
+        aliases.append(str(item["name"]))
+    return {_slugify(alias) for alias in aliases if _slugify(alias)}
+
+
+def _string_values(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
 
 def _contracts_for_models(store, model_names: set[str]) -> list[ContractRule]:
@@ -488,11 +585,3 @@ def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9\s_-]", "", slug)
     slug = re.sub(r"[\s_-]+", "-", slug)
     return re.sub(r"-+", "-", slug).strip("-")
-
-
-def _slug_matches(project_slug: str, source_slug: str) -> bool:
-    if not project_slug or not source_slug:
-        return False
-    if project_slug in source_slug or source_slug.startswith(project_slug):
-        return True
-    return project_slug.replace("-", "") in source_slug.replace("-", "")

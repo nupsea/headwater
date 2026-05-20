@@ -45,6 +45,58 @@ class _Store:
             },
         ]
 
+    def list_project_context_items(self, project_id, *, item_type=None, status=None):
+        items = [
+            {
+                "id": "source_alias:ny-taxi:ny_taxi_postgres",
+                "project_id": "ny-taxi",
+                "source_name": "ny_taxi_postgres",
+                "item_type": "source_alias",
+                "scope": "source",
+                "name": "ny_taxi_postgres",
+                "status": "approved",
+                "value": {
+                    "source_names": ["ny_taxi_postgres"],
+                    "aliases": ["NY Taxi warehouse"],
+                },
+            },
+            {
+                "id": "table_alias:ny-taxi:yellow",
+                "project_id": "ny-taxi",
+                "source_name": "ny_taxi_postgres",
+                "item_type": "table_alias",
+                "scope": "table",
+                "name": "yellow trips",
+                "table_name": "tlc_raw_yellow_tripdata_2026_01",
+                "status": "approved",
+                "value": {
+                    "table_names": ["tlc_raw_yellow_tripdata_2026_01"],
+                    "aliases": ["yellow trips"],
+                },
+            },
+            {
+                "id": "table_alias:ny-taxi:green",
+                "project_id": "ny-taxi",
+                "source_name": "ny_taxi_postgres",
+                "item_type": "table_alias",
+                "scope": "table",
+                "name": "green trips",
+                "table_name": "tlc_raw_green_tripdata_2026_02",
+                "status": "approved",
+                "value": {
+                    "table_names": ["tlc_raw_green_tripdata_2026_02"],
+                    "aliases": ["green trips"],
+                },
+            },
+        ]
+        return [
+            item
+            for item in items
+            if item["project_id"] == project_id
+            and (item_type is None or item["item_type"] == item_type)
+            and (status is None or item["status"] == status)
+        ]
+
 
 class _ScopedStore(_Store):
     def get_project(self, project_id):
@@ -80,7 +132,7 @@ class _ScopedStore(_Store):
         return None
 
 
-def test_project_sources_infers_underscore_source_from_dash_project_slug():
+def test_project_sources_uses_context_source_alias():
     project = {
         "id": "ny-taxi",
         "slug": "ny-taxi",
@@ -130,6 +182,35 @@ def test_scoped_pipeline_filters_mixed_source_tables_for_taxi_project():
         "tlc_raw_yellow_tripdata_2026_01",
         "tlc_raw_green_tripdata_2026_02",
     ]
+
+
+class _NoAliasStore(_Store):
+    def list_project_context_items(self, project_id, *, item_type=None, status=None):
+        return []
+
+
+def test_project_sources_do_not_use_slug_bias_without_context_alias():
+    project = {
+        "id": "ny-taxi",
+        "slug": "ny-taxi",
+        "display_name": "NY Taxi",
+        "sources": [],
+    }
+
+    assert project_sources(project, _NoAliasStore()) == ["ny-taxi"]
+
+
+def test_project_scope_contains_no_hard_coded_taxi_aliases():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "headwater/api/project_scope.py"
+    ).read_text(encoding="utf-8").lower()
+
+    assert "yellow" not in source
+    assert "green" not in source
+    assert "fhv" not in source
+    assert "tlc" not in source
 
 
 class _SourceOnlyScopedStore(_ScopedStore):

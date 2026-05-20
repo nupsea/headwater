@@ -67,6 +67,30 @@ def bootstrap_project_context(
             ],
         )
     ]
+    items.append(
+        ProjectContextItem(
+            id=f"source_alias:{source_name}",
+            project_id=project_id,
+            source_name=source_name,
+            item_type="source_alias",
+            scope="source",
+            name=source_name,
+            title=f"Source alias: {source_name}",
+            confidence=0.9,
+            value={
+                "source_names": [source_name],
+                "aliases": [source_name],
+            },
+            evidence=[
+                {
+                    "evidence_type": "source_name",
+                    "source": "bootstrap",
+                    "summary": "Initial source alias from the discovered source name.",
+                    "payload": {"source_name": source_name},
+                }
+            ],
+        )
+    )
 
     for table in discovery.tables:
         table_profiles = {
