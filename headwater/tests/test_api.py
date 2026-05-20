@@ -272,13 +272,25 @@ class TestProjectContext:
 
         rediscover = client.post("/api/discover", params={"source_path": str(source_dir)})
         assert rediscover.status_code == 200
+        drift_summary = rediscover.json()["context_drift"]
+        assert drift_summary["items_flagged"] >= 1
+        assert drift_summary["drift_type_counts"]["schema"] >= 1
+        assert drift_summary["severity_counts"]["critical"] >= 1
 
         refreshed = client.get("/api/projects/source/context").json()
         updated = next(item for item in refreshed["items"] if item["id"] == target["id"])
         assert updated["status"] == "needs_review"
         assert updated["source"] == "context_drift"
+        assert updated["confidence"] == 0.25
         assert "no longer present" in updated["value"]["drift_reason"]
+        assert updated["value"]["drift_type"] == "schema"
+        assert updated["value"]["drift_severity"] == "critical"
+        assert updated["value"]["drift_detector"] == "schema.column_presence"
+        assert updated["value"]["drift_review_action"] == "needs_review"
         assert updated["evidence"][-1]["evidence_type"] == "schema_drift"
+        assert updated["evidence"][-1]["payload"]["code"] == "column_missing"
+        assert updated["evidence"][-1]["payload"]["severity"] == "critical"
+        assert updated["evidence"][-1]["payload"]["review_action"] == "needs_review"
 
         history = client.get("/api/projects/source/context/history").json()
         assert history["project_id"] == "source"

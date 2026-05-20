@@ -202,6 +202,7 @@ def run_pipeline(
     project_context = bootstrap_project_context(discovery_result, project_id=source_name)
     pipeline["project_context"] = project_context
     metadata = None
+    context_drift = {"items_flagged": 0, "item_ids": []}
     if metadata_store is not None:
         metadata_store.replace_project_context(
             source_name,
@@ -211,7 +212,7 @@ def run_pipeline(
         )
         run_id = persist_discovery_data(metadata_store, discovery_result, source_name)
         persist_semantic_data(metadata_store, discovery_result, source_name)
-        reconcile_project_context_drift(
+        context_drift = reconcile_project_context_drift(
             metadata_store,
             discovery_result,
             project_id=source_name,
@@ -325,6 +326,7 @@ def run_pipeline(
         "catalog_entities": len(catalog.entities),
         "catalog_confidence": catalog.confidence,
         "auto_confirmed": auto_stats,
+        "context_drift": context_drift,
         "profiling_policy": profiling_policy,
         "tables_skipped": skipped_tables,
         "tables_skipped_count": len(skipped_tables),

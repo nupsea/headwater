@@ -4,6 +4,35 @@ from __future__ import annotations
 
 from headwater.core.models import DiscoveryResult
 
+DRIFT_RULES = {
+    "table_missing": {
+        "drift_type": "schema",
+        "severity": "critical",
+        "detector": "schema.table_presence",
+        "evidence_type": "schema_drift",
+    },
+    "column_missing": {
+        "drift_type": "schema",
+        "severity": "critical",
+        "detector": "schema.column_presence",
+        "evidence_type": "schema_drift",
+    },
+    "column_type_changed": {
+        "drift_type": "schema",
+        "severity": "high",
+        "detector": "schema.column_type",
+        "evidence_type": "schema_drift",
+    },
+    "relationship_missing": {
+        "drift_type": "relationship",
+        "severity": "high",
+        "detector": "relationship.key_presence",
+        "evidence_type": "relationship_drift",
+    },
+}
+
+REVIEW_ACTION = "needs_review"
+
 
 def reconcile_project_context_drift(
     store,
@@ -32,7 +61,7 @@ def reconcile_project_context_drift(
         for rel in discovery.relationships
     }
 
-    flagged_ids: list[str] = []
+    flagged_items: list[dict] = []
     for item in store.list_project_context_items(project_id, source_name=source_name):
         if item.get("status") in {"rejected", "needs_review"}:
             continue
@@ -47,9 +76,22 @@ def reconcile_project_context_drift(
             drift_report=drift_report,
         )
         if updated is not None:
-            flagged_ids.append(updated["id"])
+            flagged_items.append(
+                {
+                    "id": updated["id"],
+                    "drift_type": reason["drift_type"],
+                    "severity": reason["severity"],
+                    "code": reason["code"],
+                }
+            )
 
-    return {"items_flagged": len(flagged_ids), "item_ids": flagged_ids}
+    return {
+        "items_flagged": len(flagged_items),
+        "item_ids": [item["id"] for item in flagged_items],
+        "items": flagged_items,
+        "drift_type_counts": _count_by(flagged_items, "drift_type"),
+        "severity_counts": _count_by(flagged_items, "severity"),
+    }
 
 
 def _invalidated_reason(
@@ -73,24 +115,24 @@ def _invalidated_reason(
         if None in relation:
             return None
         if relation not in relationship_keys:
-            return {
-                "code": "relationship_missing",
-                "summary": "Confirmed relationship no longer exists after re-ingestion.",
-                "payload": {
+            return _drift_reason(
+                "relationship_missing",
+                summary="Confirmed relationship no longer exists after re-ingestion.",
+                payload={
                     "from_table": relation[0],
                     "from_column": relation[1],
                     "to_table": relation[2],
                     "to_column": relation[3],
                 },
-            }
+            )
         return None
 
     if table_name and table_name not in table_names:
-        return {
-            "code": "table_missing",
-            "summary": f"Table '{table_name}' is no longer present after re-ingestion.",
-            "payload": {"table_name": table_name},
-        }
+        return _drift_reason(
+            "table_missing",
+            summary=f"Table '{table_name}' is no longer present after re-ingestion.",
+            payload={"table_name": table_name},
+        )
 
     if not table_name or not column_name:
         return None
@@ -98,31 +140,43 @@ def _invalidated_reason(
     current_columns = columns_by_table.get(table_name) or {}
     current_dtype = current_columns.get(column_name)
     if current_dtype is None:
-        return {
-            "code": "column_missing",
-            "summary": (
-                f"Column '{table_name}.{column_name}' is no longer present after re-ingestion."
-            ),
-            "payload": {"table_name": table_name, "column_name": column_name},
-        }
+        return _drift_reason(
+            "column_missing",
+            summary=f"Column '{table_name}.{column_name}' is no longer present after re-ingestion.",
+            payload={"table_name": table_name, "column_name": column_name},
+        )
 
     previous_dtype = value.get("dtype")
     if previous_dtype and str(previous_dtype) != current_dtype:
-        return {
-            "code": "column_type_changed",
-            "summary": (
+        return _drift_reason(
+            "column_type_changed",
+            summary=(
                 f"Column '{table_name}.{column_name}' changed type from "
                 f"'{previous_dtype}' to '{current_dtype}'."
             ),
-            "payload": {
+            payload={
                 "table_name": table_name,
                 "column_name": column_name,
                 "before": str(previous_dtype),
                 "after": current_dtype,
             },
-        }
+        )
 
     return None
+
+
+def _drift_reason(code: str, *, summary: str, payload: dict) -> dict:
+    rule = DRIFT_RULES[code]
+    return {
+        "code": code,
+        "summary": summary,
+        "payload": payload,
+        "drift_type": rule["drift_type"],
+        "severity": rule["severity"],
+        "detector": rule["detector"],
+        "evidence_type": rule["evidence_type"],
+        "review_action": REVIEW_ACTION,
+    }
 
 
 def _mark_item_needs_review(
@@ -136,17 +190,26 @@ def _mark_item_needs_review(
     value = dict(item.get("value") or {})
     value["drift_status"] = "invalidated"
     value["drift_reason"] = reason["summary"]
+    value["drift_type"] = reason["drift_type"]
+    value["drift_severity"] = reason["severity"]
+    value["drift_detector"] = reason["detector"]
+    value["drift_review_action"] = reason["review_action"]
     if drift_report is not None:
         value["drift_report_id"] = drift_report.get("id")
 
     evidence = list(item.get("evidence") or [])
     evidence.append(
         {
-            "evidence_type": "schema_drift",
+            "evidence_type": reason["evidence_type"],
             "source": "context_drift",
             "summary": reason["summary"],
             "payload": {
                 **(reason.get("payload") or {}),
+                "code": reason["code"],
+                "drift_type": reason["drift_type"],
+                "severity": reason["severity"],
+                "detector": reason["detector"],
+                "review_action": reason["review_action"],
                 "drift_report_id": (drift_report or {}).get("id"),
             },
         }
@@ -156,7 +219,23 @@ def _mark_item_needs_review(
         project_id=project_id,
         status="needs_review",
         value=value,
-        confidence=min(float(item.get("confidence") or 0.0), 0.45),
+        confidence=min(float(item.get("confidence") or 0.0), _confidence_cap(reason["severity"])),
         source="context_drift",
         evidence=evidence,
     )
+
+
+def _confidence_cap(severity: str) -> float:
+    if severity == "critical":
+        return 0.25
+    if severity == "high":
+        return 0.35
+    return 0.45
+
+
+def _count_by(items: list[dict], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts

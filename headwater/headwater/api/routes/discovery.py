@@ -126,7 +126,7 @@ async def run_discovery(
     )
     run_id = persist_discovery_data(request.app.state.metadata_store, discovery, source_name)
     persist_semantic_data(request.app.state.metadata_store, discovery, source_name)
-    reconcile_project_context_drift(
+    context_drift = reconcile_project_context_drift(
         store,
         discovery,
         project_id=source_name,
@@ -176,6 +176,7 @@ async def run_discovery(
         "relationships": len(discovery.relationships),
         "domains": discovery.domains,
         "companion_docs": len(discovery.companion_docs),
+        "context_drift": context_drift,
         "catalog": {
             "metrics": len(catalog.metrics),
             "dimensions": len(catalog.dimensions),
