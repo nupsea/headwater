@@ -215,11 +215,27 @@ def enrich_project_context_resource(
     metadata = dict(resource.get("metadata") or {})
     metadata["matched_tables"] = doc.matched_tables
     metadata["resource_doc_type"] = doc.doc_type
+    evidence_id = f"{resource['id']}:extraction:{doc.doc_type}"
+    metadata["extraction_evidence"] = [
+        {
+            "evidence_id": evidence_id,
+            "resource_id": resource["id"],
+            "resource_title": resource.get("title"),
+            "doc_type": doc.doc_type,
+            "classification": metadata.get("classification", "unknown"),
+            "requires_redaction": bool(metadata.get("requires_redaction", True)),
+            "matched_tables": doc.matched_tables,
+            "created_item_ids": enriched_ids,
+            "conflict_item_ids": conflict_ids,
+            "questions_created": questions_created,
+        }
+    ]
     metadata["enrichment"] = {
         "items_created": created,
         "questions_created": questions_created,
         "enriched_item_ids": enriched_ids,
         "conflict_item_ids": conflict_ids,
+        "evidence_id": evidence_id,
     }
     store.upsert_project_context_resource(
         id=resource["id"],

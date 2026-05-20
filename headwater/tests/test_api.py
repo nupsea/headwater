@@ -143,6 +143,11 @@ class TestProjectContext:
         assert create.status_code == 200
         created = create.json()
         assert created["metadata"]["enrichment"]["items_created"] >= 2
+        assert created["metadata"]["enrichment"]["evidence_id"]
+        extraction_evidence = created["metadata"]["extraction_evidence"][0]
+        assert extraction_evidence["resource_id"] == created["id"]
+        assert extraction_evidence["created_item_ids"]
+        assert extraction_evidence["classification"] == "unknown"
         assert "complaints" in created["metadata"]["matched_tables"]
 
         context = client.get("/api/projects/source/context").json()
