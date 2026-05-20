@@ -21,6 +21,7 @@ from headwater.services.context_evaluation import (
 )
 
 GOLD = Path(__file__).resolve().parent / "golden" / "context_bootstrap_orders.yaml"
+GOLD_DIR = Path(__file__).resolve().parent / "golden"
 
 
 def test_context_bundle_evaluation_passes_gold_fixture():
@@ -33,6 +34,8 @@ def test_context_bundle_evaluation_passes_gold_fixture():
     assert result["score"] == 1.0
     assert result["metrics"]["failed_checks"] == 0
     assert result["metrics"]["total_checks"] >= 9
+    assert result["category_metrics"]["row_grain"]["score"] == 1.0
+    assert result["category_metrics"]["fallback_questions"]["total_checks"] >= 4
     check_names = {check["name"] for check in result["checks"]}
     assert "row_grain:orders" in check_names
     assert "pk_candidate:orders" in check_names
@@ -69,6 +72,8 @@ def test_context_evaluation_suite_aggregates_fixture_metrics():
     assert result["score"] == 1.0
     assert result["metrics"]["fixture_count"] == 1
     assert result["metrics"]["failed_fixture_count"] == 0
+    assert result["category_metrics"]["pk_candidate"]["passed_checks"] == 1
+    assert result["fixtures"][0]["category_metrics"]["top_measures"]["score"] == 1.0
     assert result["fixtures"][0]["name"] == "orders"
     assert result["fixtures"][0]["failures"] == []
 
@@ -98,6 +103,40 @@ def test_context_evaluation_suite_fails_below_threshold():
     assert result["fixtures"][0]["failures"][0]["name"] == "row_grain:orders"
 
 
+def test_context_evaluation_suite_fails_configured_category_threshold():
+    bundle = bootstrap_project_context(_orders_discovery(), project_id="src")
+
+    result = evaluate_context_suite(
+        [
+            {
+                "name": "orders",
+                "bundle": bundle,
+                "gold": {
+                    "row_grain": {"orders": ["not_the_key"]},
+                    "time_anchor": {"orders": "created_at"},
+                    "thresholds": {
+                        "min_score": 0.0,
+                        "category_min_scores": {"row_grain": 1.0},
+                    },
+                },
+            }
+        ],
+        min_score=1.0,
+    )
+
+    assert result["passed"] is False
+    assert result["fixtures"][0]["score"] == 0.5
+    assert result["fixtures"][0]["thresholds"]["min_score"] == 0.0
+    assert result["fixtures"][0]["threshold_failures"] == [
+        {
+            "scope": "category",
+            "name": "row_grain",
+            "expected": 1.0,
+            "actual": 0.0,
+        }
+    ]
+
+
 def test_load_context_eval_cases_builds_named_fixture_from_gold():
     cases = load_context_eval_cases([GOLD])
 
@@ -108,6 +147,17 @@ def test_load_context_eval_cases_builds_named_fixture_from_gold():
 
     result = evaluate_context_suite(cases, min_score=1.0)
     assert result["passed"] is True
+
+
+def test_all_context_eval_gold_fixtures_pass():
+    cases = load_context_eval_cases(sorted(GOLD_DIR.glob("context_bootstrap_*.yaml")))
+
+    result = evaluate_context_suite(cases, min_score=1.0)
+
+    assert result["passed"] is True
+    assert result["metrics"]["fixture_count"] == 6
+    assert result["category_metrics"]["row_grain"]["failed_checks"] == 0
+    assert result["category_metrics"]["top_dimensions"]["passed_checks"] >= 10
 
 
 def _orders_discovery() -> DiscoveryResult:

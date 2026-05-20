@@ -1,0 +1,38 @@
+name: patient_encounters
+fixture: patient_encounters
+row_grain:
+  encounters:
+    - encounter_id
+  patients:
+    - patient_id
+row_entity:
+  encounters: encounter
+  patients: patient
+time_anchor:
+  encounters: admitted_at
+pk_candidates:
+  encounters:
+    - encounter_id
+  patients:
+    - patient_id
+fk_candidates:
+  - from_table: encounters
+    from_column: patient_id
+    to_table: patients
+    to_column: patient_id
+top_dimensions:
+  - table_name: encounters
+    column_name: department
+  - table_name: encounters
+    column_name: discharge_disposition
+  - table_name: patients
+    column_name: age_band
+top_measures:
+  - table_name: encounters
+    column_name: length_of_stay_days
+min_fallback_questions: 4
+question_substrings:
+  - encounters
+  - sensitive
+forbidden_terms:
+  - transactions

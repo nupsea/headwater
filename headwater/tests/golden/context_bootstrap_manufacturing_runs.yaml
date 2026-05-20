@@ -1,0 +1,38 @@
+name: manufacturing_runs
+fixture: manufacturing_runs
+row_grain:
+  production_runs:
+    - run_id
+  machines:
+    - machine_id
+row_entity:
+  production_runs: production run
+  machines: machine
+time_anchor:
+  production_runs: started_at
+pk_candidates:
+  production_runs:
+    - run_id
+  machines:
+    - machine_id
+fk_candidates:
+  - from_table: production_runs
+    from_column: machine_id
+    to_table: machines
+    to_column: machine_id
+top_dimensions:
+  - table_name: machines
+    column_name: plant_code
+  - table_name: production_runs
+    column_name: shift_code
+top_measures:
+  - table_name: production_runs
+    column_name: defect_count
+  - table_name: production_runs
+    column_name: units_produced
+min_fallback_questions: 4
+question_substrings:
+  - production_runs
+  - dimensions
+forbidden_terms:
+  - patient

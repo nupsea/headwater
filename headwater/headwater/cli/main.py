@@ -520,6 +520,13 @@ def context_eval(
         max=1.0,
         help="Minimum score required for every fixture.",
     ),
+    min_category_score: float | None = typer.Option(
+        None,
+        "--min-category-score",
+        min=0.0,
+        max=1.0,
+        help="Minimum score required for every emitted category.",
+    ),
     json_output: bool = typer.Option(
         False,
         "--json",
@@ -545,7 +552,11 @@ def context_eval(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
-    result = evaluate_context_suite(cases, min_score=min_score)
+    result = evaluate_context_suite(
+        cases,
+        min_score=min_score,
+        min_category_score=min_category_score,
+    )
     if json_output:
         typer.echo(json.dumps(result, indent=2, sort_keys=True))
     else:
@@ -559,6 +570,13 @@ def context_eval(
         for fixture in result["fixtures"]:
             status = "PASS" if fixture["passed"] else "FAIL"
             typer.echo(f"  {status} {fixture['name']} score={fixture['score']:.4f}")
+            for threshold_failure in fixture["threshold_failures"]:
+                typer.echo(
+                    "    - threshold "
+                    f"{threshold_failure['scope']}:{threshold_failure['name']} "
+                    f"expected>={threshold_failure['expected']:.4f} "
+                    f"actual={threshold_failure['actual']:.4f}"
+                )
             for failure in fixture["failures"]:
                 typer.echo(
                     "    - "

@@ -1,0 +1,24 @@
+name: random_schema
+fixture: random_schema
+row_grain:
+  wide_records:
+    - record_key
+row_entity:
+  wide_records: wide record
+time_anchor:
+  wide_records: event_ts
+pk_candidates:
+  wide_records:
+    - record_key
+top_dimensions:
+  - table_name: wide_records
+    column_name: batch_code
+top_measures:
+  - table_name: wide_records
+    column_name: value_num
+min_fallback_questions: 4
+question_substrings:
+  - wide_records
+  - row
+forbidden_terms:
+  - patient

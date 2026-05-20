@@ -92,7 +92,35 @@ class TestCLIContextEval:
         result = runner.invoke(app, ["context-eval", "--json"])
         assert result.exit_code == 0
         assert '"passed": true' in result.output
-        assert '"fixture_count": 1' in result.output
+        assert '"fixture_count": 6' in result.output
+        assert '"category_metrics"' in result.output
+        assert '"min_category_score": null' in result.output
+
+    def test_context_eval_reports_category_threshold_failure(self, tmp_path):
+        gold = tmp_path / "context_bad.yaml"
+        gold.write_text(
+            "\n".join(
+                [
+                    "name: orders",
+                    "fixture: orders",
+                    "row_grain:",
+                    "  orders:",
+                    "    - not_the_key",
+                    "time_anchor:",
+                    "  orders: created_at",
+                    "thresholds:",
+                    "  min_score: 0.0",
+                    "  category_min_scores:",
+                    "    row_grain: 1.0",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["context-eval", "--gold", str(gold)])
+        assert result.exit_code == 1
+        assert "threshold category:row_grain" in result.output
 
     def test_context_eval_bad_path(self):
         result = runner.invoke(app, ["context-eval", "--gold", "/nonexistent"])
