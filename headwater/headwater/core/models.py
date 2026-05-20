@@ -72,6 +72,15 @@ class ContextEvidence(BaseModel):
     source: str
     summary: str
     payload: dict[str, Any] = Field(default_factory=dict)
+    evidence_id: str | None = None
+    producer: str | None = None
+    method: str | None = None
+    input_snapshot_id: str | None = None
+    source_ref: str | None = None
+    observed_value: Any | None = None
+    support_count: int | None = None
+    sample_size: int | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class ProjectContextItem(BaseModel):

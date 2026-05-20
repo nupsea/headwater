@@ -720,7 +720,7 @@ def _resolve_dimension_projection(
         return (
             None,
             enum_expr,
-            enum_dimension_label(dimension.name, _humanize_name(dimension.name)),
+            enum_dimension_label(dimension.name, _humanize_name(dimension.name), metadata),
         )
     if not _is_code_like_column(dimension.name):
         return None, dimension.name, _humanize_name(dimension.name)

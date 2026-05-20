@@ -11,6 +11,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from headwater.core.context_confidence import (
+    decode_evidence_payload,
+    normalize_evidence_record,
+)
 from headwater.core.exceptions import MetadataError
 
 logger = logging.getLogger(__name__)
@@ -1021,22 +1025,12 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                 source,
             ),
         )
-        self.con.execute("DELETE FROM project_context_evidence WHERE item_id = ?", (id,))
-        for record in evidence or []:
-            self.con.execute(
-                """
-                INSERT INTO project_context_evidence
-                    (item_id, evidence_type, source, summary, payload_json)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    id,
-                    record.get("evidence_type", "profile"),
-                    record.get("source", source),
-                    record.get("summary", ""),
-                    json.dumps(record.get("payload") or {}),
-                ),
-            )
+        self._replace_project_context_evidence(
+            id,
+            evidence or [],
+            fallback_source=source,
+            fallback_confidence=confidence,
+        )
 
     def list_project_context_items(
         self,
@@ -1127,24 +1121,45 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
             ),
         )
         if evidence is not _UNSET:
-            self.con.execute("DELETE FROM project_context_evidence WHERE item_id = ?", (item_id,))
-            for record in evidence or []:
-                self.con.execute(
-                    """
-                    INSERT INTO project_context_evidence
-                        (item_id, evidence_type, source, summary, payload_json)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        item_id,
-                        record.get("evidence_type", "review"),
-                        record.get("source", "user"),
-                        record.get("summary", ""),
-                        json.dumps(record.get("payload") or {}),
-                    ),
-                )
+            self._replace_project_context_evidence(
+                item_id,
+                evidence or [],
+                fallback_source=str(new_source or "user"),
+                fallback_confidence=float(new_confidence or 0.0),
+            )
         self.con.commit()
         return self.get_project_context_item(item_id, project_id=project_id)
+
+    def _replace_project_context_evidence(
+        self,
+        item_id: str,
+        evidence: list[dict],
+        *,
+        fallback_source: str,
+        fallback_confidence: float | None = None,
+    ) -> None:
+        self.con.execute("DELETE FROM project_context_evidence WHERE item_id = ?", (item_id,))
+        for record in evidence:
+            normalized = normalize_evidence_record(
+                record,
+                item_id=item_id,
+                fallback_source=fallback_source,
+                fallback_confidence=fallback_confidence,
+            )
+            self.con.execute(
+                """
+                INSERT INTO project_context_evidence
+                    (item_id, evidence_type, source, summary, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    normalized.get("evidence_type", "profile"),
+                    normalized.get("source", fallback_source),
+                    normalized.get("summary", ""),
+                    json.dumps(normalized.get("payload") or {}),
+                ),
+            )
 
     def upsert_project_context_resource(
         self,
@@ -1399,6 +1414,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                 payload = json.loads(entry.get("payload_json") or "{}")
             except (TypeError, ValueError):
                 payload = {}
+            payload, canonical = decode_evidence_payload(payload)
             evidence.append(
                 {
                     "evidence_type": entry.get("evidence_type"),
@@ -1406,6 +1422,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                     "summary": entry.get("summary"),
                     "payload": payload,
                     "created_at": entry.get("created_at"),
+                    **canonical,
                 }
             )
         row["evidence"] = evidence

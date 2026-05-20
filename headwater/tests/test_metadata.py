@@ -7,13 +7,19 @@ import json
 from headwater.core.metadata import MetadataStore
 from headwater.core.models import (
     ColumnInfo,
+    ColumnProfile,
     ContractCheckResult,
     DiscoveryResult,
     QualityReport,
     SourceConfig,
     TableInfo,
 )
-from headwater.services.project_context import load_retrieved_metadata
+from headwater.services.context_bootstrap import bootstrap_project_context
+from headwater.services.project_context import (
+    load_project_context_bundle,
+    load_retrieved_metadata,
+    project_context_provider,
+)
 
 
 def test_init_creates_tables(meta: MetadataStore):
@@ -317,6 +323,50 @@ def test_project_context_roundtrip_and_preserve_reviewed_items(meta: MetadataSto
     assert refreshed["value"]["semantic_type"] == "id"
 
 
+def test_context_bootstrap_emits_phase_one_structural_items():
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                row_count=2,
+                columns=[
+                    ColumnInfo(name="order_id", dtype="int64"),
+                    ColumnInfo(name="created_at", dtype="timestamp"),
+                    ColumnInfo(name="status", dtype="varchar"),
+                ],
+            )
+        ],
+        profiles=[
+            ColumnProfile(
+                table_name="orders",
+                column_name="order_id",
+                dtype="int64",
+                distinct_count=2,
+                uniqueness_ratio=1.0,
+            ),
+            ColumnProfile(
+                table_name="orders",
+                column_name="created_at",
+                dtype="timestamp",
+                distinct_count=2,
+                uniqueness_ratio=1.0,
+            ),
+        ],
+    )
+
+    bundle = bootstrap_project_context(discovery, project_id="src")
+    items = {item.item_type: item for item in bundle.items if item.table_name == "orders"}
+
+    assert items["row_grain"].value["columns"] == ["order_id"]
+    assert items["row_entity"].value["entity"] == "order"
+    assert items["time_anchor"].value["column"] == "created_at"
+    assert any(
+        item.item_type == "pk_candidate" and item.value["columns"] == ["order_id"]
+        for item in bundle.items
+    )
+
+
 def test_update_project_context_item_allows_user_review_edits(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     meta.replace_project_context(
@@ -532,6 +582,106 @@ def test_load_retrieved_metadata_includes_glossary_term_items(meta: MetadataStor
     metadata = load_retrieved_metadata(meta, discovery, project_id="src")
 
     assert metadata.glossary["triage"] == "Initial intake and prioritization of work."
+
+
+def test_project_context_provider_exposes_phase_one_accessors(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "row_grain:orders",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "row_grain",
+                "scope": "table",
+                "name": "orders",
+                "table_name": "orders",
+                "status": "approved",
+                "value": {"columns": ["order_id"]},
+                "confidence": 0.95,
+                "evidence": [],
+            },
+            {
+                "id": "row_entity:orders",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "row_entity",
+                "scope": "table",
+                "name": "orders",
+                "table_name": "orders",
+                "status": "approved",
+                "value": {"entity": "order"},
+                "confidence": 0.9,
+                "evidence": [],
+            },
+            {
+                "id": "time_anchor:orders",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "time_anchor",
+                "scope": "table",
+                "name": "created_at",
+                "table_name": "orders",
+                "column_name": "created_at",
+                "status": "approved",
+                "value": {"column": "created_at"},
+                "confidence": 0.9,
+                "evidence": [],
+            },
+            {
+                "id": "pk_candidate:orders.order_id",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "pk_candidate",
+                "scope": "table",
+                "name": "orders.order_id",
+                "table_name": "orders",
+                "column_name": "order_id",
+                "status": "approved",
+                "value": {"columns": ["order_id"]},
+                "confidence": 0.95,
+                "evidence": [],
+            },
+            {
+                "id": "column_policy:orders.status",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_policy",
+                "scope": "column",
+                "name": "status",
+                "table_name": "orders",
+                "column_name": "status",
+                "status": "approved",
+                "value": {"preferred_dimension": True},
+                "confidence": 0.8,
+                "evidence": [],
+            },
+        ],
+    )
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                columns=[
+                    ColumnInfo(name="order_id", dtype="int64"),
+                    ColumnInfo(name="status", dtype="varchar"),
+                    ColumnInfo(name="created_at", dtype="timestamp"),
+                ],
+            )
+        ],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    provider = project_context_provider(bundle)
+
+    assert provider.row_grain("orders")["value"]["columns"] == ["order_id"]
+    assert provider.row_entity("orders")["value"]["entity"] == "order"
+    assert provider.time_anchor("orders")["value"]["column"] == "created_at"
+    assert provider.pk_candidates("orders")[0]["column_name"] == "order_id"
+    assert provider.preferred_dimensions()[0]["column_name"] == "status"
 
 
 def test_persist_pk_fk_stores_reload_safe_relationship_values(meta: MetadataStore):

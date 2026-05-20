@@ -14,6 +14,7 @@ from headwater.analyzer.companion import (
 )
 from headwater.analyzer.metadata_retrieval import retrieve_metadata
 from headwater.core.models import ColumnInfo, CompanionDoc, DiscoveryResult, SourceConfig, TableInfo
+from headwater.explorer.readability import enum_dimension_label, enum_mapping_for_column
 
 
 @pytest.fixture()
@@ -244,6 +245,8 @@ def test_retrieve_metadata_extracts_enum_mappings_from_dictionary_rows() -> None
         "S": "Shipped",
         "C": "Cancelled",
     }
+    assert enum_mapping_for_column("payment_type") is None
+    assert enum_dimension_label("payment_type", "payment type") == "payment type"
 
 
 def test_retrieve_metadata_merges_canonical_project_context_items() -> None:
@@ -298,6 +301,24 @@ def test_retrieve_metadata_merges_canonical_project_context_items() -> None:
                     "label_column": "status_label",
                 },
             },
+            {
+                "id": "enum_mapping:orders.status_code",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "enum_mapping",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "status": "approved",
+                "value": {
+                    "label": "order status",
+                    "labels": {
+                        "P": "Pending",
+                        "S": "Shipped",
+                    }
+                },
+            },
         ],
     )
 
@@ -306,6 +327,11 @@ def test_retrieve_metadata_merges_canonical_project_context_items() -> None:
         "id_column": "status_code",
         "label_column": "status_label",
     }
+    assert metadata.enum_mappings["status_code"] == {
+        "P": "Pending",
+        "S": "Shipped",
+    }
+    assert metadata.glossary["status_code"] == "Order lifecycle status."
     assert metadata.locked_roles[("orders", "status_code")] == "dimension"
 
 

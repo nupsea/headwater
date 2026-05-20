@@ -59,6 +59,9 @@ class TestProjectContext:
         assert body["summary"]["item_count"] > 0
         assert body["summary"]["item_types"]["dataset_summary"] == 1
         assert "column_semantics" in body["summary"]["item_types"]
+        assert "row_grain" in body["summary"]["item_types"]
+        assert "row_entity" in body["summary"]["item_types"]
+        assert "pk_candidate" in body["summary"]["item_types"]
 
     def test_user_can_add_context_resource(self, client):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
@@ -361,8 +364,18 @@ class TestProjectContext:
         assert "context.yaml" in files
         assert "semantic_types.yaml" in files
         assert "semantic_schema.yaml" in files
+        assert "derived_fields.yaml" in files
+        assert "insight_families.yaml" in files
+        assert "business_lenses.yaml" in files
+        assert "presentation.yaml" in files
+        assert "question_templates.yaml" in files
+        assert "column_policies.yaml" in files
+        assert "relationship_hints.yaml" in files
+        assert "advisor_packs.yaml" in files
         assert "REVIEW.md" in files
         assert "version: 1" in files["context.yaml"]
+        assert "row_grains:" in files["context.yaml"]
+        assert "pk_candidates:" in files["context.yaml"]
         assert "Locked business definition." in files["semantic_types.yaml"]
         assert "role: identifier" in files["semantic_schema.yaml"]
         assert "# Project Context Review: source" in files["REVIEW.md"]
@@ -386,6 +399,27 @@ class TestProjectContext:
             sort_keys=False,
             allow_unicode=False,
         )
+        files["column_policies.yaml"] = yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "source",
+                "column_policies": [
+                    {
+                        "id": "column_policy:complaints.assigned_to",
+                        "name": "assigned_to_low_signal",
+                        "title": "Low signal reviewer",
+                        "scope": "column",
+                        "table": "complaints",
+                        "column": "assigned_to",
+                        "status": "approved",
+                        "confidence": 0.91,
+                        "value": {"low_signal": True},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        )
 
         imported = client.post(
             "/api/projects/source/context/import",
@@ -395,6 +429,7 @@ class TestProjectContext:
         body = imported.json()
         assert body["items_upserted"] > 0
         assert "semantic_types.yaml" in body["files_processed"]
+        assert "column_policies.yaml" in body["files_processed"]
 
         context = client.get("/api/projects/source/context").json()
         updated = next(
@@ -407,6 +442,13 @@ class TestProjectContext:
         assert updated["value"].get("description") == "Imported canonical identifier"
         assert updated["status"] == target.get("status", "proposed")
         assert updated["source"] == "import"
+        policy = next(
+            item
+            for item in context["items"]
+            if item["id"] == "column_policy:complaints.assigned_to"
+        )
+        assert policy["item_type"] == "column_policy"
+        assert policy["value"]["low_signal"] is True
 
 
 class TestInsightRanking:

@@ -58,6 +58,21 @@ from headwater.explorer.statistical import (
 from headwater.explorer.suggestions import _select_diverse_questions, generate_suggestions
 from headwater.explorer.visualization import _classify_columns, recommend_visualization
 
+
+def _payment_type_dictionary_doc(table_name: str = "yellow_trips") -> CompanionDoc:
+    return CompanionDoc(
+        filename="dictionary.csv",
+        content=(
+            "column_name: payment_type | "
+            "description: payment method. "
+            "1=Credit card; 2=Cash; 3=No charge; 4=Dispute"
+        ),
+        doc_type="csv",
+        matched_tables=[table_name],
+        confidence=0.9,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -670,6 +685,7 @@ roles:
                     distinct_count=4,
                 ),
             ],
+            companion_docs=[_payment_type_dictionary_doc()],
         )
         models = [
             GeneratedModel(
@@ -1246,6 +1262,7 @@ roles:
                     distinct_count=6,
                 ),
             ],
+            companion_docs=[_payment_type_dictionary_doc()],
         )
 
         questions = generate_suggestions(discovery=discovery)
@@ -1299,6 +1316,7 @@ roles:
                     distinct_count=3,
                 ),
             ],
+            companion_docs=[_payment_type_dictionary_doc()],
         )
         models = [
             GeneratedModel(
@@ -1567,6 +1585,7 @@ roles:
                     distinct_count=100,
                 ),
             ],
+            companion_docs=[_payment_type_dictionary_doc("trips")],
         )
 
         questions = generate_suggestions(
@@ -2888,7 +2907,10 @@ class TestStatistical:
         }
 
     def test_family_catalog_loads_project_metadata_extensions(self):
-        family_keys = {family["key"] for family in _load_family_spec(project_id="nytaxi")["families"]}
+        family_keys = {
+            family["key"]
+            for family in _load_family_spec(project_id="nytaxi")["families"]
+        }
 
         assert {
             "temporal_coverage",
@@ -3519,7 +3541,10 @@ roles:
         )
 
         first = _semantic_highlight_id(insight, "Latitude is missing for 12% of monitor records.")
-        second = _semantic_highlight_id(insight, "Latitude values outside valid bounds appear in 3 rows.")
+        second = _semantic_highlight_id(
+            insight,
+            "Latitude values outside valid bounds appear in 3 rows.",
+        )
 
         assert first != second
 
@@ -3655,7 +3680,10 @@ roles:
         ]
 
         assert origin_insights
-        assert any("North Hub" in insight["title"] or "North Hub" in insight["detail"] for insight in origin_insights)
+        assert any(
+            "North Hub" in insight["title"] or "North Hub" in insight["detail"]
+            for insight in origin_insights
+        )
         assert all("A drives" not in insight["title"] for insight in origin_insights)
         assert all("A represents" not in insight["detail"] for insight in origin_insights)
 
@@ -3725,10 +3753,15 @@ roles:
             discovery.profiles,
             retrieve_metadata(discovery),
         )
-        status_insights = [insight for insight in insights if insight.get("column") == "status_code"]
+        status_insights = [
+            insight for insight in insights if insight.get("column") == "status_code"
+        ]
 
         assert status_insights
-        assert any("Pending" in insight["title"] or "Pending" in insight["detail"] for insight in status_insights)
+        assert any(
+            "Pending" in insight["title"] or "Pending" in insight["detail"]
+            for insight in status_insights
+        )
         assert all(not insight["title"].startswith("P ") for insight in status_insights)
         assert all("P accounts for" not in insight["detail"] for insight in status_insights)
 
@@ -4144,7 +4177,11 @@ class TestAutoRepair:
         ]
 
         sql = _heuristic_sql(
-            "Which subscription-general-detail-latest billing channel has the highest account-financial-summary-total payments in prst audience profile pivot history?",
+            (
+                "Which subscription-general-detail-latest billing channel has the highest "
+                "account-financial-summary-total payments in prst audience profile pivot "
+                "history?"
+            ),
             discovery,
             models,
             con=duckdb_con,
@@ -4540,7 +4577,8 @@ class TestGrounding:
         question = next(
             q
             for q in questions
-            if "highest fare amount" in q.question.lower() and "payment method" in q.question.lower()
+            if "highest fare amount" in q.question.lower()
+            and "payment method" in q.question.lower()
         )
 
         result = ask(

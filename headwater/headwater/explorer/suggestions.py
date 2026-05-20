@@ -2516,7 +2516,7 @@ def _dimension_projection(
             enum_expr,
             enum_expr,
             "",
-            enum_dimension_label(column_name, _column_label(column_name, metadata)),
+            enum_dimension_label(column_name, _column_label(column_name, metadata), metadata),
         )
 
     lookup = lookup_for_column(table.name, column_name, lookup_index) if table is not None else None

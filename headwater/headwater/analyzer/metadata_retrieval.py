@@ -65,7 +65,7 @@ def retrieve_metadata(
         context=context,
         glossary=glossary,
         lookup_tables=lookup_tables,
-        enum_mappings=_enum_mappings_from_docs(discovery),
+        enum_mappings=_merged_enum_mappings(discovery, normalized_items),
         locked_roles=locked_roles,
         context_items=normalized_items,
         resources=normalized_resources,
@@ -115,6 +115,14 @@ def _glossary_from_context_items(items: list[ProjectContextItem]) -> dict[str, s
                 normalized = _normalize_glossary_description(definition)
                 if normalized:
                     glossary.setdefault(term, normalized)
+        elif item.item_type == "enum_mapping":
+            label = (
+                item.value.get("label")
+                or item.value.get("display_label")
+                or item.value.get("dimension_label")
+            )
+            if item.column_name and isinstance(label, str) and label.strip():
+                glossary.setdefault(item.column_name.lower(), label.strip())
     return glossary
 
 
@@ -223,6 +231,38 @@ def _enum_mappings_from_docs(discovery: DiscoveryResult) -> dict[str, dict[str, 
                 enum_map = _parse_enum_mapping(description.strip())
                 if enum_map:
                     mappings.setdefault(column_name.lower(), enum_map)
+    return mappings
+
+
+def _merged_enum_mappings(
+    discovery: DiscoveryResult,
+    items: list[ProjectContextItem],
+) -> dict[str, dict[str, str]]:
+    mappings = _enum_mappings_from_docs(discovery)
+    mappings.update(_enum_mappings_from_context_items(items))
+    return mappings
+
+
+def _enum_mappings_from_context_items(items: list[ProjectContextItem]) -> dict[str, dict[str, str]]:
+    mappings: dict[str, dict[str, str]] = {}
+    for item in items:
+        if item.item_type != "enum_mapping" or item.status == "rejected":
+            continue
+        labels = item.value.get("labels") or item.value.get("mapping") or item.value.get("values")
+        if not isinstance(labels, dict) or not labels:
+            continue
+        normalized = {str(key): str(value) for key, value in labels.items() if value is not None}
+        if not normalized:
+            continue
+        keys = []
+        if item.column_name:
+            keys.append(item.column_name.lower())
+        if item.table_name and item.column_name:
+            keys.append(f"{item.table_name.lower()}.{item.column_name.lower()}")
+        if item.name:
+            keys.append(item.name.lower())
+        for key in keys:
+            mappings[key] = normalized
     return mappings
 
 

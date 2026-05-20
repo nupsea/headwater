@@ -74,7 +74,7 @@ def bootstrap_project_context(
             for column in table.columns
         }
         temporal_columns = [
-            column.name for column in table.columns if _is_temporal_dtype(column.dtype)
+            column.name for column in table.columns if _is_temporal_column(column)
         ]
         string_columns = [column.name for column in table.columns if _is_string_dtype(column.dtype)]
         numeric_columns = [
@@ -119,6 +119,125 @@ def bootstrap_project_context(
                 ],
             )
         )
+        pk_candidates = _primary_key_candidates(table, table_profiles)
+        best_pk = pk_candidates[0] if pk_candidates else None
+        row_grain_value = {
+            "table": table.name,
+            "columns": best_pk["columns"] if best_pk else [],
+            "grain_type": "keyed_table" if best_pk else "unknown",
+            "reason": (
+                "Best key candidate from declared key or uniqueness profile."
+                if best_pk
+                else "No strong primary key candidate was detected."
+            ),
+            "candidate_count": len(pk_candidates),
+        }
+        items.append(
+            ProjectContextItem(
+                id=f"row_grain:{table.name}",
+                project_id=project_id,
+                source_name=source_name,
+                item_type="row_grain",
+                scope="table",
+                name=table.name,
+                title=f"Row grain proposal: {table.name}",
+                table_name=table.name,
+                confidence=best_pk["confidence"] if best_pk else 0.35,
+                value=row_grain_value,
+                evidence=[
+                    {
+                        "evidence_type": "row_grain",
+                        "source": "bootstrap",
+                        "summary": "Derived from declared keys and uniqueness profiles.",
+                        "payload": row_grain_value,
+                    }
+                ],
+            )
+        )
+        row_entity_value = {
+            "table": table.name,
+            "entity": _row_entity_name(table.name),
+            "source": "table_name",
+            "review_required": True,
+        }
+        items.append(
+            ProjectContextItem(
+                id=f"row_entity:{table.name}",
+                project_id=project_id,
+                source_name=source_name,
+                item_type="row_entity",
+                scope="table",
+                name=table.name,
+                title=f"Row entity proposal: {table.name}",
+                table_name=table.name,
+                confidence=0.42,
+                value=row_entity_value,
+                evidence=[
+                    {
+                        "evidence_type": "table_name",
+                        "source": "bootstrap",
+                        "summary": "Weak entity proposal from the table name.",
+                        "payload": row_entity_value,
+                    }
+                ],
+            )
+        )
+        for candidate in pk_candidates:
+            column_key = "__".join(candidate["columns"])
+            items.append(
+                ProjectContextItem(
+                    id=f"pk_candidate:{table.name}.{column_key}",
+                    project_id=project_id,
+                    source_name=source_name,
+                    item_type="pk_candidate",
+                    scope="table",
+                    name=f"{table.name}.{column_key}",
+                    title=f"Primary key candidate: {table.name}.{column_key}",
+                    table_name=table.name,
+                    column_name=candidate["columns"][0] if len(candidate["columns"]) == 1 else None,
+                    confidence=candidate["confidence"],
+                    value=candidate,
+                    evidence=[
+                        {
+                            "evidence_type": "key_candidate",
+                            "source": "bootstrap",
+                            "summary": "Derived from declared key or uniqueness profile.",
+                            "payload": candidate,
+                        }
+                    ],
+                )
+            )
+        if temporal_columns:
+            anchor_column = _time_anchor_column(table, table_profiles, temporal_columns)
+            time_anchor_value = {
+                "table": table.name,
+                "column": anchor_column,
+                "candidates": temporal_columns,
+                "ambiguous": len(temporal_columns) > 1,
+            }
+            items.append(
+                ProjectContextItem(
+                    id=f"time_anchor:{table.name}",
+                    project_id=project_id,
+                    source_name=source_name,
+                    item_type="time_anchor",
+                    scope="table",
+                    name=anchor_column,
+                    title=f"Time anchor proposal: {table.name}.{anchor_column}",
+                    table_name=table.name,
+                    column_name=anchor_column,
+                    confidence=0.72 if len(temporal_columns) == 1 else 0.55,
+                    value=time_anchor_value,
+                    evidence=[
+                        {
+                            "evidence_type": "temporal_column",
+                            "source": "bootstrap",
+                            "summary": "Derived from timestamp-like column types.",
+                            "payload": time_anchor_value,
+                        }
+                    ],
+                )
+            )
 
         if table.name in lookup_tables:
             lookup = lookup_tables[table.name]
@@ -204,6 +323,31 @@ def bootstrap_project_context(
 
         for column in table.columns:
             profile = table_profiles.get(column.name)
+            enum_candidate = _enum_mapping_candidate(table.name, column, profile)
+            if enum_candidate is not None:
+                items.append(
+                    ProjectContextItem(
+                        id=f"enum_mapping:{table.name}.{column.name}",
+                        project_id=project_id,
+                        source_name=source_name,
+                        item_type="enum_mapping",
+                        scope="column",
+                        name=column.name,
+                        title=f"Enum mapping candidate: {table.name}.{column.name}",
+                        table_name=table.name,
+                        column_name=column.name,
+                        confidence=enum_candidate["confidence"],
+                        value=enum_candidate,
+                        evidence=[
+                            {
+                                "evidence_type": "enum_shape",
+                                "source": "bootstrap",
+                                "summary": "Low-cardinality code-like column values need labels.",
+                                "payload": enum_candidate,
+                            }
+                        ],
+                    )
+                )
             items.append(
                 ProjectContextItem(
                     id=f"column_semantics:{table.name}.{column.name}",
@@ -230,6 +374,45 @@ def bootstrap_project_context(
             )
 
     for relationship in discovery.relationships:
+        fk_value = {
+            "from_table": relationship.from_table,
+            "from_column": relationship.from_column,
+            "to_table": relationship.to_table,
+            "to_column": relationship.to_column,
+            "relationship_type": relationship.type,
+            "referential_integrity": relationship.referential_integrity,
+            "detection_source": relationship.source,
+        }
+        items.append(
+            ProjectContextItem(
+                id=(
+                    "fk_candidate:"
+                    f"{relationship.from_table}.{relationship.from_column}"
+                    f"->{relationship.to_table}.{relationship.to_column}"
+                ),
+                project_id=project_id,
+                source_name=source_name,
+                item_type="fk_candidate",
+                scope="relationship",
+                name=(
+                    f"{relationship.from_table}.{relationship.from_column}"
+                    f"->{relationship.to_table}.{relationship.to_column}"
+                ),
+                title="Foreign key candidate",
+                table_name=relationship.from_table,
+                column_name=relationship.from_column,
+                confidence=relationship.confidence,
+                value=fk_value,
+                evidence=[
+                    {
+                        "evidence_type": "relationship",
+                        "source": relationship.source,
+                        "summary": "Detected foreign-key-like relationship.",
+                        "payload": fk_value,
+                    }
+                ],
+            )
+        )
         items.append(
             ProjectContextItem(
                 id=(
@@ -362,6 +545,137 @@ def _profile_payload(profile: ColumnProfile | None) -> dict:
     }
 
 
+def _primary_key_candidates(table, table_profiles: dict[str, ColumnProfile | None]) -> list[dict]:
+    candidates: list[dict] = []
+    for column in table.columns:
+        profile = table_profiles.get(column.name)
+        if column.is_primary_key:
+            candidates.append(
+                {
+                    "table": table.name,
+                    "columns": [column.name],
+                    "declared": True,
+                    "uniqueness_ratio": _profile_uniqueness(profile),
+                    "null_rate": profile.null_rate if profile else 0.0,
+                    "distinct_count": profile.distinct_count if profile else None,
+                    "confidence": 0.98,
+                }
+            )
+            continue
+        if profile is None:
+            continue
+        if _is_temporal_column(column):
+            continue
+        if profile.distinct_count <= 1 or profile.null_rate > 0.02:
+            continue
+        if profile.uniqueness_ratio >= 0.995:
+            confidence = 0.9
+        elif profile.uniqueness_ratio >= 0.98:
+            confidence = 0.78
+        else:
+            continue
+        candidates.append(
+            {
+                "table": table.name,
+                "columns": [column.name],
+                "declared": False,
+                "uniqueness_ratio": profile.uniqueness_ratio,
+                "null_rate": profile.null_rate,
+                "distinct_count": profile.distinct_count,
+                "confidence": confidence,
+            }
+        )
+    candidates.sort(
+        key=lambda candidate: (
+            candidate["declared"],
+            candidate["confidence"],
+            candidate.get("uniqueness_ratio") or 0.0,
+        ),
+        reverse=True,
+    )
+    return candidates[:5]
+
+
+def _profile_uniqueness(profile: ColumnProfile | None) -> float | None:
+    return profile.uniqueness_ratio if profile else None
+
+
+def _row_entity_name(table_name: str) -> str:
+    tokens = [token for token in re.split(r"[^a-z0-9]+", table_name.lower()) if token]
+    if not tokens:
+        return "record"
+    last = tokens[-1]
+    if last.endswith("ies") and len(last) > 3:
+        tokens[-1] = f"{last[:-3]}y"
+    elif last.endswith("s") and not last.endswith("ss") and len(last) > 1:
+        tokens[-1] = last[:-1]
+    return " ".join(tokens)
+
+
+def _time_anchor_column(
+    table,
+    table_profiles: dict[str, ColumnProfile | None],
+    temporal_columns: list[str],
+) -> str:
+    primary_temporal = [
+        column.name
+        for column in table.columns
+        if column.name in temporal_columns and column.role == "temporal"
+    ]
+    if primary_temporal:
+        return primary_temporal[0]
+    populated = [
+        column
+        for column in temporal_columns
+        if (table_profiles.get(column) is None or table_profiles[column].null_rate < 0.5)
+    ]
+    return (populated or temporal_columns)[0]
+
+
+def _enum_mapping_candidate(table_name: str, column, profile: ColumnProfile | None) -> dict | None:
+    if profile is None or not profile.top_values:
+        return None
+    if profile.distinct_count <= 1 or profile.distinct_count > 50:
+        return None
+    if _is_temporal_column(column) or _is_numeric_measure(column):
+        return None
+    code_like = _is_code_like_name(column.name) or _has_code_like_values(profile.top_values)
+    if not code_like:
+        return None
+    values = [str(value) for value, _count in profile.top_values[:25]]
+    return {
+        "table": table_name,
+        "column": column.name,
+        "values": values,
+        "labels": {},
+        "needs_labels": True,
+        "distinct_count": profile.distinct_count,
+        "confidence": 0.62,
+    }
+
+
+def _is_numeric_measure(column) -> bool:
+    return column.semantic_type == "metric" or column.role == "metric"
+
+
+def _is_code_like_name(column_name: str) -> bool:
+    lower = column_name.lower()
+    return lower.endswith(("_code", "code", "_type", "type", "_status", "status"))
+
+
+def _has_code_like_values(top_values: list[tuple[str, int]]) -> bool:
+    values = [str(value).strip() for value, _count in top_values[:10]]
+    if not values:
+        return False
+    code_like = 0
+    for value in values:
+        if not value:
+            continue
+        if value.isdigit() or len(value) <= 3 or re.match(r"^[A-Z0-9_-]{1,8}$", value):
+            code_like += 1
+    return code_like / max(len(values), 1) >= 0.6
+
+
 def _lookup_summary(table, profiles: dict[tuple[str, str], ColumnProfile | None]) -> dict | None:
     if not (1 < len(table.columns) <= 4):
         return None
@@ -414,6 +728,12 @@ def _is_string_dtype(dtype: str | None) -> bool:
 def _is_temporal_dtype(dtype: str | None) -> bool:
     normalized = (dtype or "").lower()
     return any(token in normalized for token in ("date", "time", "timestamp"))
+
+
+def _is_temporal_column(column) -> bool:
+    if _is_temporal_dtype(column.dtype):
+        return True
+    return column.role == "temporal" or column.semantic_type in {"date", "datetime", "timestamp"}
 
 
 def _slug(value: str) -> str:

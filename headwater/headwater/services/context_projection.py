@@ -25,6 +25,14 @@ def build_context_exports(payload: dict, *, include_proposed: bool = True) -> di
         "dataset_contexts": dataset_contexts,
         "summary": _summary(items),
         "dataset_summary": _first_item_value(items, "dataset_summary"),
+        "row_grains": _entries_for_type(items, "row_grain"),
+        "row_entities": _entries_for_type(items, "row_entity"),
+        "time_anchors": _entries_for_type(items, "time_anchor"),
+        "pk_candidates": _entries_for_type(items, "pk_candidate"),
+        "fk_candidates": _entries_for_type(items, "fk_candidate"),
+        "project_aliases": _entries_for_type(items, "project_alias"),
+        "source_aliases": _entries_for_type(items, "source_alias"),
+        "table_aliases": _entries_for_type(items, "table_alias"),
         "open_questions": [
             _item_entry(item)
             for item in items
@@ -46,13 +54,29 @@ def build_context_exports(payload: dict, *, include_proposed: bool = True) -> di
         "roles": [
             _semantic_role_entry(item)
             for item in items
-            if item.get("item_type") == "column_semantics" and item.get("value", {}).get("role")
+            if (
+                item.get("item_type") == "column_semantics"
+                and item.get("value", {}).get("role")
+            )
+            or item.get("item_type") == "semantic_role"
         ],
+    }
+    derived_fields_doc = {
+        "version": 1,
+        "project_id": project_id,
+        "derived_fields": _entries_for_type(items, "derived_field"),
+    }
+    insight_families_doc = {
+        "version": 1,
+        "project_id": project_id,
+        "insight_families": _entries_for_type(items, "insight_family"),
+        "insight_priorities": _entries_for_type(items, "insight_priority"),
     }
     lookups_doc = {
         "version": 1,
         "project_id": project_id,
         "lookups": [_lookup_entry(item) for item in items if item.get("item_type") == "lookup"],
+        "enum_mappings": _entries_for_type(items, "enum_mapping"),
     }
     glossary_doc = {
         "version": 1,
@@ -64,19 +88,59 @@ def build_context_exports(payload: dict, *, include_proposed: bool = True) -> di
             and item.get("value", {}).get("definition")
         ],
     }
+    business_lenses_doc = {
+        "version": 1,
+        "project_id": project_id,
+        "business_lenses": _entries_for_type(items, "business_lens"),
+    }
+    presentation_doc = {
+        "version": 1,
+        "project_id": project_id,
+        "visualization_hints": _entries_for_type(items, "visualization_hint"),
+    }
+    question_templates_doc = {
+        "version": 1,
+        "project_id": project_id,
+        "question_templates": _entries_for_type(items, "question_template"),
+    }
+    column_policies_doc = {
+        "version": 1,
+        "project_id": project_id,
+        "column_policies": _entries_for_type(items, "column_policy"),
+    }
+    relationship_hints_doc = {
+        "version": 1,
+        "project_id": project_id,
+        "relationships": _entries_for_type(items, "relationship"),
+        "relationship_hints": _entries_for_type(items, "relationship_hint"),
+        "fk_candidates": _entries_for_type(items, "fk_candidate"),
+    }
     resources_doc = {
         "version": 1,
         "project_id": project_id,
         "resources": [_resource_entry(resource) for resource in resources],
+    }
+    advisor_packs_doc = {
+        "version": 1,
+        "project_id": project_id,
+        "advisor_packs": _entries_for_type(items, "advisor_pack"),
     }
 
     return {
         "context.yaml": _yaml(context_doc),
         "semantic_types.yaml": _yaml(semantic_types_doc),
         "semantic_schema.yaml": _yaml(semantic_schema_doc),
+        "derived_fields.yaml": _yaml(derived_fields_doc),
+        "insight_families.yaml": _yaml(insight_families_doc),
         "lookups.yaml": _yaml(lookups_doc),
         "glossary.yaml": _yaml(glossary_doc),
+        "business_lenses.yaml": _yaml(business_lenses_doc),
+        "presentation.yaml": _yaml(presentation_doc),
+        "question_templates.yaml": _yaml(question_templates_doc),
+        "column_policies.yaml": _yaml(column_policies_doc),
+        "relationship_hints.yaml": _yaml(relationship_hints_doc),
         "resources.yaml": _yaml(resources_doc),
+        "advisor_packs.yaml": _yaml(advisor_packs_doc),
         "REVIEW.md": _review_markdown(
             project_id=project_id,
             dataset_contexts=dataset_contexts,
@@ -109,6 +173,10 @@ def _first_item_value(items: list[dict], item_type: str) -> dict:
     return {}
 
 
+def _entries_for_type(items: list[dict], item_type: str) -> list[dict]:
+    return [_item_entry(item) for item in items if item.get("item_type") == item_type]
+
+
 def _item_entry(item: dict) -> dict:
     return {
         "id": item.get("id"),
@@ -117,6 +185,7 @@ def _item_entry(item: dict) -> dict:
         "scope": item.get("scope"),
         "table": item.get("table_name"),
         "column": item.get("column_name"),
+        "item_type": item.get("item_type"),
         "status": item.get("status"),
         "confidence": item.get("confidence"),
         "source": item.get("source"),

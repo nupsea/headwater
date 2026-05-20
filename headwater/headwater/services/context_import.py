@@ -7,6 +7,35 @@ from collections import OrderedDict
 
 import yaml
 
+_CONTEXT_SECTIONS = {
+    "row_grains": "row_grain",
+    "row_entities": "row_entity",
+    "time_anchors": "time_anchor",
+    "pk_candidates": "pk_candidate",
+    "fk_candidates": "fk_candidate",
+    "project_aliases": "project_alias",
+    "source_aliases": "source_alias",
+    "table_aliases": "table_alias",
+}
+
+_TYPED_FILE_SECTIONS = {
+    "derived_fields.yaml": {"derived_fields": "derived_field"},
+    "insight_families.yaml": {
+        "insight_families": "insight_family",
+        "insight_priorities": "insight_priority",
+    },
+    "business_lenses.yaml": {"business_lenses": "business_lens"},
+    "presentation.yaml": {"visualization_hints": "visualization_hint"},
+    "question_templates.yaml": {"question_templates": "question_template"},
+    "column_policies.yaml": {"column_policies": "column_policy"},
+    "relationship_hints.yaml": {
+        "relationships": "relationship",
+        "relationship_hints": "relationship_hint",
+        "fk_candidates": "fk_candidate",
+    },
+    "advisor_packs.yaml": {"advisor_packs": "advisor_pack"},
+}
+
 
 def import_context_exports(
     store,
@@ -74,13 +103,33 @@ def import_context_exports(
             "evidence": question.get("evidence") or [],
         }
 
+    context_doc = parsed.get("context.yaml", {})
+    for section, item_type in _CONTEXT_SECTIONS.items():
+        for entry in context_doc.get(section, []):
+            _merge_generic_item(
+                items,
+                project_id=project["id"],
+                source_name=source_name,
+                item_type=item_type,
+                entry=entry,
+            )
+
     for role in parsed.get("semantic_schema.yaml", {}).get("roles", []):
-        _merge_column_semantics(
-            items,
-            project_id=project["id"],
-            source_name=source_name,
-            entry=role,
-        )
+        if role.get("item_type") == "semantic_role":
+            _merge_generic_item(
+                items,
+                project_id=project["id"],
+                source_name=source_name,
+                item_type="semantic_role",
+                entry=role,
+            )
+        else:
+            _merge_column_semantics(
+                items,
+                project_id=project["id"],
+                source_name=source_name,
+                entry=role,
+            )
 
     for column in parsed.get("semantic_types.yaml", {}).get("columns", []):
         _merge_column_semantics(
@@ -154,6 +203,27 @@ def import_context_exports(
             "evidence": [],
         }
 
+    for enum_mapping in parsed.get("lookups.yaml", {}).get("enum_mappings", []):
+        _merge_generic_item(
+            items,
+            project_id=project["id"],
+            source_name=source_name,
+            item_type="enum_mapping",
+            entry=enum_mapping,
+        )
+
+    for file_name, sections in _TYPED_FILE_SECTIONS.items():
+        doc = parsed.get(file_name, {})
+        for section, item_type in sections.items():
+            for entry in doc.get(section, []):
+                _merge_generic_item(
+                    items,
+                    project_id=project["id"],
+                    source_name=source_name,
+                    item_type=item_type,
+                    entry=entry,
+                )
+
     for resource in parsed.get("resources.yaml", {}).get("resources", []):
         resource_id = resource.get("id") or _slugged_id(
             "resource",
@@ -197,6 +267,64 @@ def import_context_exports(
         "resources_upserted": resources_upserted,
         "dataset_contexts_updated": dataset_contexts_updated,
         "files_processed": sorted(parsed),
+    }
+
+
+def _merge_generic_item(
+    items: OrderedDict,
+    *,
+    project_id: str,
+    source_name: str | None,
+    item_type: str,
+    entry: dict,
+) -> None:
+    if not isinstance(entry, dict):
+        return
+    table_name = entry.get("table") or entry.get("table_name")
+    column_name = entry.get("column") or entry.get("column_name")
+    value = entry.get("value")
+    if value is None:
+        value = {
+            key: payload
+            for key, payload in entry.items()
+            if key
+            not in {
+                "id",
+                "name",
+                "title",
+                "scope",
+                "table",
+                "table_name",
+                "column",
+                "column_name",
+                "item_type",
+                "status",
+                "confidence",
+                "source",
+                "evidence",
+            }
+        }
+    item_id = entry.get("id") or _slugged_id(
+        item_type,
+        table_name,
+        column_name,
+        entry.get("name") or entry.get("title") or item_type,
+    )
+    items[item_id] = {
+        "id": item_id,
+        "project_id": project_id,
+        "source_name": source_name,
+        "item_type": item_type,
+        "scope": entry.get("scope") or _scope_for(table_name, column_name),
+        "name": entry.get("name") or str(value.get("name") or item_type),
+        "title": entry.get("title"),
+        "table_name": table_name,
+        "column_name": column_name,
+        "value": value or {},
+        "status": entry.get("status") or "approved",
+        "confidence": float(entry.get("confidence") or 1.0),
+        "source": "import",
+        "evidence": entry.get("evidence") or [],
     }
 
 
@@ -261,6 +389,14 @@ def _default_source_name(project: dict) -> str | None:
     if sources:
         return sources[0]
     return project.get("id")
+
+
+def _scope_for(table_name: str | None, column_name: str | None) -> str:
+    if column_name:
+        return "column"
+    if table_name:
+        return "table"
+    return "project"
 
 
 def _slugged_id(prefix: str, *parts: str | None) -> str:
