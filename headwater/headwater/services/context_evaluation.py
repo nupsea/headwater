@@ -416,7 +416,47 @@ def _cold_start_checks(items: list[dict], gold: dict) -> list[dict]:
                 "actual": cold_start.get("fallback_questions") or [],
             }
         )
+    checks.extend(
+        _question_intent_checks(
+            cold_start.get("fallback_questions") or [],
+            gold.get("question_intents") or [],
+        )
+    )
     return checks
+
+
+def _question_intent_checks(questions: list[str], intents: list[dict]) -> list[dict]:
+    normalized_questions = [str(question).lower() for question in questions]
+    checks = []
+    for index, intent in enumerate(intents, start=1):
+        if not isinstance(intent, dict):
+            continue
+        name = str(intent.get("name") or f"intent_{index}")
+        all_of = _lower_terms(intent.get("all_of") or [])
+        any_of = _lower_terms(intent.get("any_of") or [])
+        matched = [
+            question
+            for question in normalized_questions
+            if all(term in question for term in all_of)
+            and (not any_of or any(term in question for term in any_of))
+        ]
+        checks.append(
+            {
+                "name": f"fallback_question_intent:{name}",
+                "category": "fallback_questions",
+                "passed": bool(matched),
+                "expected": {
+                    "all_of": all_of,
+                    "any_of": any_of,
+                },
+                "actual": questions,
+            }
+        )
+    return checks
+
+
+def _lower_terms(value: Any) -> list[str]:
+    return [str(term).lower() for term in _as_list(value) if str(term)]
 
 
 def _top_column_checks(

@@ -138,6 +138,50 @@ def test_context_evaluation_suite_fails_configured_category_threshold():
     ]
 
 
+def test_context_bundle_evaluation_supports_question_intents():
+    bundle = bootstrap_project_context(_orders_discovery(), project_id="src")
+    gold = {
+        "question_intents": [
+            {
+                "name": "row_grain_question",
+                "all_of": ["row", "orders"],
+            },
+            {
+                "name": "analysis_question",
+                "any_of": ["measures", "dimensions"],
+            },
+        ]
+    }
+
+    result = evaluate_context_bundle(bundle, gold)
+
+    assert result["passed"] is True
+    check_names = {check["name"] for check in result["checks"]}
+    assert "fallback_question_intent:row_grain_question" in check_names
+    assert "fallback_question_intent:analysis_question" in check_names
+
+
+def test_context_bundle_evaluation_reports_question_intent_failure():
+    bundle = bootstrap_project_context(_orders_discovery(), project_id="src")
+    gold = {
+        "question_intents": [
+            {
+                "name": "missing_business_label",
+                "all_of": ["profit"],
+            }
+        ]
+    }
+
+    result = evaluate_context_bundle(bundle, gold)
+
+    assert result["passed"] is False
+    failures = {check["name"]: check for check in result["checks"] if not check["passed"]}
+    assert failures["fallback_question_intent:missing_business_label"]["expected"] == {
+        "all_of": ["profit"],
+        "any_of": [],
+    }
+
+
 def test_load_context_eval_cases_builds_named_fixture_from_gold():
     cases = load_context_eval_cases([GOLD])
 
