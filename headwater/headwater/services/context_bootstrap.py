@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from headwater.analyzer.semantic_types import SemanticTypeEvidence, detect_semantic_types
 from headwater.core.models import (
     ColumnProfile,
     DiscoveryResult,
@@ -347,6 +348,7 @@ def bootstrap_project_context(
 
         for column in table.columns:
             profile = table_profiles.get(column.name)
+            semantic_evidence = detect_semantic_types(column.name, column.dtype, profile)
             enum_candidate = _enum_mapping_candidate(table.name, column, profile)
             if enum_candidate is not None:
                 items.append(
@@ -383,7 +385,7 @@ def bootstrap_project_context(
                     title=f"Column semantics: {table.name}.{column.name}",
                     table_name=table.name,
                     column_name=column.name,
-                    confidence=_column_confidence(column, profile),
+                    confidence=_column_confidence(column, profile, semantic_evidence),
                     value={
                         "dtype": column.dtype,
                         "nullable": column.nullable,
@@ -391,11 +393,48 @@ def bootstrap_project_context(
                         "semantic_type": column.semantic_type,
                         "role": column.role,
                         "description": column.description,
-                        "profile": _profile_payload(profile),
+                        "profile": _profile_payload(
+                            profile,
+                            redact_values=_has_sensitive_detection(semantic_evidence),
+                        ),
+                        "semantic_type_evidence": [
+                            evidence.model_dump() for evidence in semantic_evidence
+                        ],
                     },
-                    evidence=_column_evidence(column, profile),
+                    evidence=_column_evidence(column, profile, semantic_evidence),
                 )
             )
+            policy = _sensitive_column_policy(table.name, column.name, semantic_evidence)
+            if policy is not None:
+                items.append(
+                    ProjectContextItem(
+                        id=f"column_policy:{table.name}.{column.name}",
+                        project_id=project_id,
+                        source_name=source_name,
+                        item_type="column_policy",
+                        scope="column",
+                        name=column.name,
+                        title=f"Column policy proposal: {table.name}.{column.name}",
+                        table_name=table.name,
+                        column_name=column.name,
+                        confidence=policy["confidence"],
+                        value=policy,
+                        evidence=[
+                            {
+                                "evidence_type": "semantic_type_detection",
+                                "source": "semantic_type_library",
+                                "summary": (
+                                    "Generic detector identified a likely sensitive "
+                                    "format without storing raw sample values."
+                                ),
+                                "payload": {
+                                    "semantic_type": policy["semantic_type"],
+                                    "confidence": policy["confidence"],
+                                },
+                            }
+                        ],
+                    )
+                )
 
     for relationship in discovery.relationships:
         fk_value = {
@@ -501,12 +540,19 @@ def bootstrap_project_context(
     )
 
 
-def _column_confidence(column, profile: ColumnProfile | None) -> float:
+def _column_confidence(
+    column,
+    profile: ColumnProfile | None,
+    semantic_evidence: list[SemanticTypeEvidence] | None = None,
+) -> float:
     confidence = float(column.confidence or 0.0)
+    best_semantic = semantic_evidence[0] if semantic_evidence else None
     if column.is_primary_key:
         confidence = max(confidence, 0.95)
     elif column.semantic_type or column.role:
         confidence = max(confidence, 0.65)
+    elif best_semantic is not None:
+        confidence = max(confidence, min(best_semantic.confidence, 0.9))
     elif profile and profile.detected_pattern:
         confidence = max(confidence, 0.55)
     elif profile and profile.uniqueness_ratio >= 0.98:
@@ -514,7 +560,12 @@ def _column_confidence(column, profile: ColumnProfile | None) -> float:
     return min(confidence, 1.0)
 
 
-def _column_evidence(column, profile: ColumnProfile | None) -> list[dict]:
+def _column_evidence(
+    column,
+    profile: ColumnProfile | None,
+    semantic_evidence: list[SemanticTypeEvidence] | None = None,
+) -> list[dict]:
+    redact_values = _has_sensitive_detection(semantic_evidence or [])
     evidence = [
         {
             "evidence_type": "schema",
@@ -546,16 +597,35 @@ def _column_evidence(column, profile: ColumnProfile | None) -> list[dict]:
                 "evidence_type": "profile",
                 "source": "profiler",
                 "summary": "Observed value distribution and completeness statistics.",
-                "payload": _profile_payload(profile),
+                "payload": _profile_payload(profile, redact_values=redact_values),
+            }
+        )
+    if semantic_evidence:
+        evidence.append(
+            {
+                "evidence_type": "semantic_type_detection",
+                "source": "semantic_type_library",
+                "summary": "Generic format and distribution detectors.",
+                "payload": {
+                    "detections": [
+                        detection.model_dump() for detection in semantic_evidence
+                    ]
+                },
             }
         )
     return evidence
 
 
-def _profile_payload(profile: ColumnProfile | None) -> dict:
+def _profile_payload(profile: ColumnProfile | None, *, redact_values: bool = False) -> dict:
     if profile is None:
         return {}
-    top_values = profile.top_values[:5] if profile.top_values else []
+    top_values = []
+    if profile.top_values:
+        top_values = (
+            [{"redacted": True, "count": count} for _value, count in profile.top_values[:5]]
+            if redact_values
+            else profile.top_values[:5]
+        )
     return {
         "null_rate": profile.null_rate,
         "distinct_count": profile.distinct_count,
@@ -566,6 +636,35 @@ def _profile_payload(profile: ColumnProfile | None) -> dict:
         "min_date": profile.min_date,
         "max_date": profile.max_date,
         "top_values": top_values,
+    }
+
+
+def _has_sensitive_detection(semantic_evidence: list[SemanticTypeEvidence]) -> bool:
+    return any(evidence.sensitive and evidence.confidence >= 0.75 for evidence in semantic_evidence)
+
+
+def _sensitive_column_policy(
+    table_name: str,
+    column_name: str,
+    semantic_evidence: list[SemanticTypeEvidence],
+) -> dict | None:
+    sensitive = [
+        evidence
+        for evidence in semantic_evidence
+        if evidence.sensitive and evidence.confidence >= 0.75
+    ]
+    if not sensitive:
+        return None
+    best = sensitive[0]
+    return {
+        "table_name": table_name,
+        "column_name": column_name,
+        "policy": "sensitive",
+        "semantic_type": best.semantic_type,
+        "redaction": "mask",
+        "allow_llm": False,
+        "confidence": best.confidence,
+        "reason": "Generic semantic type detector marked likely sensitive.",
     }
 
 

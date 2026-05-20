@@ -367,6 +367,62 @@ def test_context_bootstrap_emits_phase_one_structural_items():
     )
 
 
+def test_context_bootstrap_emits_semantic_type_evidence_and_sensitive_policy():
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="contacts",
+                row_count=10,
+                columns=[
+                    ColumnInfo(name="contact_email", dtype="varchar"),
+                    ColumnInfo(name="amount", dtype="double"),
+                ],
+            )
+        ],
+        profiles=[
+            ColumnProfile(
+                table_name="contacts",
+                column_name="contact_email",
+                dtype="varchar",
+                top_values=[("a@example.com", 6), ("b@example.org", 4)],
+                distinct_count=2,
+            ),
+            ColumnProfile(
+                table_name="contacts",
+                column_name="amount",
+                dtype="double",
+                min_value=1.0,
+                max_value=99.0,
+                distinct_count=10,
+            ),
+        ],
+    )
+
+    bundle = bootstrap_project_context(discovery, project_id="src")
+    email_context = next(
+        item for item in bundle.items if item.id == "column_semantics:contacts.contact_email"
+    )
+    amount_context = next(
+        item for item in bundle.items if item.id == "column_semantics:contacts.amount"
+    )
+    policy = next(
+        item for item in bundle.items if item.id == "column_policy:contacts.contact_email"
+    )
+
+    assert email_context.value["semantic_type_evidence"][0]["semantic_type"] == "email"
+    assert email_context.value["profile"]["top_values"] == [
+        {"redacted": True, "count": 6},
+        {"redacted": True, "count": 4},
+    ]
+    assert policy.value["policy"] == "sensitive"
+    assert policy.value["semantic_type"] == "email"
+    assert policy.value["allow_llm"] is False
+    assert amount_context.value["semantic_type_evidence"][0]["semantic_type"] == (
+        "monetary_amount"
+    )
+
+
 def test_update_project_context_item_allows_user_review_edits(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     meta.replace_project_context(
