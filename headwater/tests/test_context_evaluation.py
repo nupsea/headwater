@@ -226,7 +226,7 @@ def test_cross_domain_fixture_inputs_are_data_driven():
         / "context_evaluation.py"
     ).read_text(encoding="utf-8")
 
-    assert len(cases) == 6
+    assert len(cases) == 7
     for case in cases:
         assert case["gold"]["discovery_path"].startswith("context_fixtures/")
         assert case["name"] not in service_source
@@ -239,9 +239,10 @@ def test_all_context_eval_gold_fixtures_pass():
 
     assert result["passed"] is True
     assert result["gold_coverage"]["complete"] is True
-    assert result["metrics"]["fixture_count"] == 7
+    assert result["metrics"]["fixture_count"] == 8
     assert result["category_metrics"]["semantic_role"]["passed_checks"] == 6
     assert result["category_metrics"]["insight_family"]["passed_checks"] == 5
+    assert result["category_metrics"]["absent_category"]["passed_checks"] == 2
     assert result["category_metrics"]["row_grain"]["failed_checks"] == 0
     assert result["category_metrics"]["top_dimensions"]["passed_checks"] >= 10
 
@@ -258,6 +259,18 @@ def test_nytaxi_fixture_scores_project_metadata_roles_and_families():
     ]
     assert result["category_metrics"]["semantic_role"]["passed_checks"] == 6
     assert result["category_metrics"]["insight_family"]["passed_checks"] == 5
+
+
+def test_nytaxi_without_metadata_degrades_to_structural_checks():
+    cases = load_context_eval_cases([GOLD_DIR / "context_bootstrap_nytaxi_structural.yaml"])
+
+    result = evaluate_context_suite(cases, min_score=1.0)
+
+    assert result["passed"] is True
+    assert "semantic_role" not in result["category_metrics"]
+    assert "insight_family" not in result["category_metrics"]
+    assert result["category_metrics"]["absent_category"]["passed_checks"] == 2
+    assert result["fixtures"][0]["gold_coverage"]["complete"] is True
 
 
 def test_context_evaluation_metrics_artifact_tracks_category_scores():

@@ -116,6 +116,7 @@ def _evaluate_context_case(case: dict) -> dict:
         case["gold"],
         Path(case.get("gold_path") or "."),
     )
+    extra_checks.extend(_absent_category_checks(result, case["gold"]))
     if not extra_checks:
         return result
     return _result_from_checks(result["checks"] + extra_checks)
@@ -363,6 +364,20 @@ def _metadata_checks(
         )
     )
     return checks
+
+
+def _absent_category_checks(result: dict, gold: dict) -> list[dict]:
+    actual_categories = set(result["category_metrics"])
+    return [
+        {
+            "name": f"absent_category:{category}",
+            "category": "absent_category",
+            "passed": str(category) not in actual_categories,
+            "expected": None,
+            "actual": str(category) if str(category) in actual_categories else None,
+        }
+        for category in gold.get("absent_categories") or []
+    ]
 
 
 def _semantic_role_checks(

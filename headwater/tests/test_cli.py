@@ -94,7 +94,7 @@ class TestCLIContextEval:
         result = runner.invoke(app, ["context-eval", "--json"])
         assert result.exit_code == 0
         assert '"passed": true' in result.output
-        assert '"fixture_count": 7' in result.output
+        assert '"fixture_count": 8' in result.output
         assert '"category_metrics"' in result.output
         assert '"min_category_score": null' in result.output
 
@@ -136,8 +136,9 @@ class TestCLIContextEval:
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         assert metrics["schema_version"] == 1
         assert metrics["passed"] is True
-        assert metrics["metrics"]["fixture_count"] == 7
+        assert metrics["metrics"]["fixture_count"] == 8
         assert metrics["categories"]["semantic_role"]["exact_match_score"] == 1.0
+        assert metrics["categories"]["absent_category"]["exact_match_score"] == 1.0
         assert metrics["categories"]["row_grain"]["exact_match_score"] == 1.0
         assert metrics["fixtures"][0]["failure_names"] == []
 
