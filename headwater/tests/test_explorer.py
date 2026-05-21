@@ -4456,6 +4456,39 @@ class TestGrounding:
 
         assert warnings == []
 
+    def test_nytaxi_fixture_grounding_uses_metadata_backed_suggestions(self):
+        discovery = _nytaxi_fixture_discovery()
+        generic_discovery = discovery.model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        metadata_questions = generate_suggestions(
+            discovery=discovery,
+            project_id="nytaxi",
+        )
+        duration_question = next(
+            question.question
+            for question in metadata_questions
+            if "weekday and weekend duration compare" in question.question.lower()
+        )
+
+        generic_warnings = _check_grounding(
+            duration_question,
+            generic_discovery,
+            [],
+            suggestions=[],
+        )
+        metadata_warnings = _check_grounding(
+            duration_question,
+            discovery,
+            [],
+            suggestions=metadata_questions,
+        )
+
+        assert any("duration" in warning.lower() for warning in generic_warnings)
+        assert any("weekday" in warning.lower() for warning in generic_warnings)
+        assert metadata_warnings == []
+
     def test_grounded_question_returns_no_warnings(self, sample_discovery):
         warnings = _check_grounding(
             "What is the average reading value by sensor type?",
