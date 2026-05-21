@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import suppress
 from pathlib import Path
 
 from headwater.core.config import get_settings
@@ -45,28 +46,26 @@ class DraftSecretStore:
         return self._settings.setup_drafts_path / f"{safe_name or 'draft'}.enc"
 
     def _fernet(self):
-        Fernet = _load_fernet()
+        fernet_cls = _load_fernet()
         env_key = os.environ.get("HEADWATER_DRAFT_SECRET_KEY")
         if env_key:
-            return Fernet(env_key.encode("utf-8"))
+            return fernet_cls(env_key.encode("utf-8"))
 
         key_path = self._settings.setup_draft_key_path
         self._settings.ensure_dirs()
         if key_path.exists():
-            return Fernet(key_path.read_bytes())
+            return fernet_cls(key_path.read_bytes())
 
         self._settings.setup_drafts_path.mkdir(parents=True, exist_ok=True)
-        key = Fernet.generate_key()
+        key = fernet_cls.generate_key()
         key_path.write_bytes(key)
         _chmod_private(key_path)
-        return Fernet(key)
+        return fernet_cls(key)
 
 
 def _chmod_private(path: Path) -> None:
-    try:
+    with suppress(OSError):
         os.chmod(path, 0o600)
-    except OSError:
-        pass
 
 
 def _load_fernet():

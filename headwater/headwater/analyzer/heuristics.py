@@ -953,7 +953,7 @@ def generate_deep_table_description(
     # Classify columns by role
     dims = [c for c in table.columns if c.role == "dimension"]
     metrics = [c for c in table.columns if c.role == "metric"]
-    temporals = [c for c in table.columns if c.role == "temporal"]
+    temporals = [c for c in table.columns if _is_temporal_column(c)]
     identifiers = [c for c in table.columns if c.role == "identifier"]
     geos = [c for c in table.columns if c.role == "geographic"]
     texts = [c for c in table.columns if c.role == "text"]
@@ -1096,6 +1096,19 @@ def _infer_temporal_grain(
                 continue
 
     return "event-based"
+
+
+def _is_temporal_column(col: ColumnInfo) -> bool:
+    semantic = (col.semantic_type or "").lower()
+    role = (col.role or "").lower()
+    dtype = str(col.dtype or "").lower()
+    name = col.name.lower()
+    return (
+        role == "temporal"
+        or semantic == "temporal"
+        or any(token in dtype for token in ("date", "time", "timestamp", "datetime"))
+        or any(token in name for token in ("date", "time", "timestamp", "_ts"))
+    )
 
 
 def _build_column_semantic_detail(

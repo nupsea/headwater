@@ -1,4 +1,4 @@
-.PHONY: app api ui stop clean test lint fmt
+.PHONY: app api ui stop clean test lint fmt context-eval ui-build ci
 
 # --- Run everything ---
 
@@ -32,6 +32,14 @@ lint: ## Run ruff lint check
 
 fmt: ## Auto-format with ruff
 	uv run ruff format .
+
+context-eval: ## Run cross-domain context evaluation
+	uv run headwater context-eval --min-category-score 1.0
+
+ui-build: ## Build the frontend
+	cd ui && npm run build
+
+ci: lint test context-eval ui-build ## Run backend, context, and frontend checks
 
 # --- Cleanup ---
 

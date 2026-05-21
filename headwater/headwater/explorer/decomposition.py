@@ -343,6 +343,17 @@ class QueryDecomposer:
         if entity and (metric_matches or dim_matches):
             dim_matches = self._scope_dimensions(entity, metric_matches, dim_matches)
 
+        if len({m.table for m in metric_matches}) > 1 and not dim_matches:
+            logger.info(
+                "Catalog matched metrics across multiple tables without a grouping dimension"
+            )
+            return DecompositionResult(
+                status="outside_scope",
+                explanation="Multiple metric tables matched without a grouping dimension.",
+                confidence=0.0,
+                resolution_mode="catalog",
+            )
+
         # Check for ambiguous dimensions only when genuinely confusable
         ambiguous = _find_ambiguous_dimensions(dim_matches)
         if ambiguous:
