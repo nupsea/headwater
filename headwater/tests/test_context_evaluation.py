@@ -105,6 +105,36 @@ def test_context_evaluation_suite_fails_below_threshold():
     assert result["fixtures"][0]["failures"][0]["name"] == "row_grain:orders"
 
 
+def test_context_evaluation_accepts_documented_delta_without_hiding_it():
+    bundle = bootstrap_project_context(_orders_discovery(), project_id="src")
+    result = evaluate_context_suite(
+        [
+            {
+                "name": "orders",
+                "bundle": bundle,
+                "gold": {
+                    "row_grain": {"orders": ["not_the_key"]},
+                    "time_anchor": {"orders": "created_at"},
+                    "accepted_deltas": [
+                        {
+                            "check": "row_grain:orders",
+                            "reason": "temporary migration parity gap",
+                            "until": "metadata migration complete",
+                        }
+                    ],
+                },
+            }
+        ],
+        min_score=1.0,
+    )
+
+    assert result["passed"] is True
+    assert result["metrics"]["accepted_delta_checks"] == 1
+    assert result["category_metrics"]["row_grain"]["accepted_delta_checks"] == 1
+    assert result["fixtures"][0]["failures"] == []
+    assert result["fixtures"][0]["accepted_deltas"][0]["raw_passed"] is False
+
+
 def test_context_evaluation_suite_fails_configured_category_threshold():
     bundle = bootstrap_project_context(_orders_discovery(), project_id="src")
 
@@ -282,11 +312,14 @@ def test_context_evaluation_metrics_artifact_tracks_category_scores():
     assert metrics["schema_version"] == 1
     assert metrics["thresholds"] == {"min_score": 1.0, "min_category_score": 0.9}
     assert metrics["gold_coverage"]["complete"] is True
+    assert metrics["metrics"]["accepted_delta_checks"] == 0
     assert metrics["categories"]["row_grain"]["exact_match_score"] == 1.0
+    assert metrics["categories"]["row_grain"]["accepted_delta_checks"] == 0
     assert metrics["fixtures"][0]["name"] == "orders"
     assert metrics["fixtures"][0]["gold_coverage"]["complete"] is True
     assert metrics["fixtures"][0]["categories"]["top_measures"]["failed_checks"] == 0
     assert metrics["fixtures"][0]["failure_names"] == []
+    assert metrics["fixtures"][0]["accepted_delta_names"] == []
 
 
 def _orders_discovery() -> DiscoveryResult:

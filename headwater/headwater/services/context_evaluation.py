@@ -105,6 +105,7 @@ def evaluate_context_bundle(bundle: Any, gold: dict) -> dict:
     checks.extend(_fk_checks(items, gold.get("fk_candidates") or []))
     checks.extend(_cold_start_checks(items, gold))
     checks.append(_forbidden_term_check(items, gold.get("forbidden_terms") or []))
+    _apply_accepted_deltas(checks, gold.get("accepted_deltas") or [])
 
     return _result_from_checks(checks)
 
@@ -119,7 +120,9 @@ def _evaluate_context_case(case: dict) -> dict:
     extra_checks.extend(_absent_category_checks(result, case["gold"]))
     if not extra_checks:
         return result
-    return _result_from_checks(result["checks"] + extra_checks)
+    checks = result["checks"] + extra_checks
+    _apply_accepted_deltas(checks, case["gold"].get("accepted_deltas") or [])
+    return _result_from_checks(checks)
 
 
 def _result_from_checks(checks: list[dict]) -> dict:
@@ -127,6 +130,7 @@ def _result_from_checks(checks: list[dict]) -> dict:
     passed = sum(1 for check in scored if check["passed"])
     failed = len(scored) - passed
     category_metrics = _category_metrics(scored)
+    accepted = sum(1 for check in scored if check.get("accepted_delta"))
     return {
         "passed": failed == 0,
         "score": round(passed / len(scored), 4) if scored else 1.0,
@@ -134,6 +138,7 @@ def _result_from_checks(checks: list[dict]) -> dict:
             "total_checks": len(scored),
             "passed_checks": passed,
             "failed_checks": failed,
+            "accepted_delta_checks": accepted,
         },
         "category_metrics": category_metrics,
         "checks": checks,
@@ -170,6 +175,9 @@ def evaluate_context_suite(
                 "metrics": result["metrics"],
                 "category_metrics": result["category_metrics"],
                 "threshold_failures": threshold_failures,
+                "accepted_deltas": [
+                    check for check in result["checks"] if check.get("accepted_delta")
+                ],
                 "failures": [
                     check for check in result["checks"] if not check["passed"]
                 ],
@@ -179,6 +187,9 @@ def evaluate_context_suite(
     total_checks = sum(item["metrics"]["total_checks"] for item in fixture_results)
     passed_checks = sum(item["metrics"]["passed_checks"] for item in fixture_results)
     failed_checks = sum(item["metrics"]["failed_checks"] for item in fixture_results)
+    accepted_delta_checks = sum(
+        item["metrics"]["accepted_delta_checks"] for item in fixture_results
+    )
     failed_fixtures = [item for item in fixture_results if not item["passed"]]
     category_metrics = _aggregate_category_metrics(fixture_results)
     gold_coverage = _suite_gold_coverage(fixture_results)
@@ -194,6 +205,7 @@ def evaluate_context_suite(
             "total_checks": total_checks,
             "passed_checks": passed_checks,
             "failed_checks": failed_checks,
+            "accepted_delta_checks": accepted_delta_checks,
         },
         "category_metrics": category_metrics,
         "fixtures": fixture_results,
@@ -224,6 +236,10 @@ def build_context_eval_metrics(result: dict) -> dict:
                 "categories": _metrics_artifact_categories(fixture["category_metrics"]),
                 "threshold_failures": fixture["threshold_failures"],
                 "failure_names": [failure["name"] for failure in fixture["failures"]],
+                "accepted_delta_names": [
+                    check["name"]
+                    for check in fixture["accepted_deltas"]
+                ],
             }
             for fixture in result["fixtures"]
         ],
@@ -264,6 +280,7 @@ def _metrics_artifact_categories(category_metrics: dict) -> dict:
             "total_checks": metrics["total_checks"],
             "passed_checks": metrics["passed_checks"],
             "failed_checks": metrics["failed_checks"],
+            "accepted_delta_checks": metrics["accepted_delta_checks"],
             "exact_match_score": metrics["score"],
         }
         for category, metrics in category_metrics.items()
@@ -338,6 +355,54 @@ def _threshold_failures(result: dict, thresholds: dict) -> list[dict]:
                 }
             )
     return failures
+
+
+def _apply_accepted_deltas(checks: list[dict], accepted_deltas: list) -> None:
+    accepted_by_name: dict[str, dict] = {}
+    accepted_categories: dict[str, dict] = {}
+    for entry in accepted_deltas:
+        normalized = _accepted_delta_entry(entry)
+        if not normalized:
+            continue
+        if normalized.get("check"):
+            accepted_by_name[str(normalized["check"])] = normalized
+        elif normalized.get("category"):
+            accepted_categories[str(normalized["category"])] = normalized
+
+    for check in checks:
+        if check["passed"]:
+            continue
+        accepted = accepted_by_name.get(check["name"]) or accepted_categories.get(
+            check.get("category")
+        )
+        if not accepted:
+            continue
+        check["raw_passed"] = False
+        check["passed"] = True
+        check["accepted_delta"] = {
+            "reason": accepted.get("reason"),
+            "until": accepted.get("until"),
+        }
+
+
+def _accepted_delta_entry(entry: Any) -> dict | None:
+    if isinstance(entry, str):
+        return {"check": entry}
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("check"):
+        return {
+            "check": str(entry["check"]),
+            "reason": entry.get("reason"),
+            "until": entry.get("until"),
+        }
+    if entry.get("category"):
+        return {
+            "category": str(entry["category"]),
+            "reason": entry.get("reason"),
+            "until": entry.get("until"),
+        }
+    return None
 
 
 def _metadata_checks(
@@ -695,9 +760,16 @@ def _category_metrics(checks: list[dict]) -> dict:
         category = check.get("category") or _check_category(check["name"])
         metrics = grouped.setdefault(
             category,
-            {"total_checks": 0, "passed_checks": 0, "failed_checks": 0},
+            {
+                "total_checks": 0,
+                "passed_checks": 0,
+                "failed_checks": 0,
+                "accepted_delta_checks": 0,
+            },
         )
         metrics["total_checks"] += 1
+        if check.get("accepted_delta"):
+            metrics["accepted_delta_checks"] += 1
         if check["passed"]:
             metrics["passed_checks"] += 1
         else:
@@ -714,11 +786,17 @@ def _aggregate_category_metrics(fixture_results: list[dict]) -> dict:
         for category, source_metrics in fixture["category_metrics"].items():
             metrics = grouped.setdefault(
                 category,
-                {"total_checks": 0, "passed_checks": 0, "failed_checks": 0},
+                {
+                    "total_checks": 0,
+                    "passed_checks": 0,
+                    "failed_checks": 0,
+                    "accepted_delta_checks": 0,
+                },
             )
             metrics["total_checks"] += source_metrics["total_checks"]
             metrics["passed_checks"] += source_metrics["passed_checks"]
             metrics["failed_checks"] += source_metrics["failed_checks"]
+            metrics["accepted_delta_checks"] += source_metrics["accepted_delta_checks"]
     for metrics in grouped.values():
         total = metrics["total_checks"]
         metrics["score"] = round(metrics["passed_checks"] / total, 4) if total else 1.0
