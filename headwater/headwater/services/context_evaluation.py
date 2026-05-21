@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ _REQUIRED_GOLD_CATEGORIES = (
     "question_gold",
     "forbidden_terms",
 )
+_METADATA_GOLD_CATEGORIES = ("semantic_roles", "insight_families")
 
 
 def load_context_gold(path: str | Path) -> dict:
@@ -54,6 +56,7 @@ def load_context_eval_cases(paths: list[str | Path]) -> list[dict]:
         cases.append(
             {
                 "name": str(gold.get("name") or fixture_name),
+                "discovery": discovery,
                 "bundle": bootstrap_project_context(
                     discovery,
                     project_id=str(gold.get("project_id") or discovery.source.name),
@@ -70,7 +73,10 @@ def context_gold_coverage(gold: dict) -> dict:
     """Report whether a gold file covers the required Phase 11 categories."""
     present = []
     missing = []
-    for category in _REQUIRED_GOLD_CATEGORIES:
+    required = list(_REQUIRED_GOLD_CATEGORIES)
+    if gold.get("metadata_path"):
+        required.extend(_METADATA_GOLD_CATEGORIES)
+    for category in required:
         if _gold_category_present(gold, category):
             present.append(category)
         else:
@@ -100,6 +106,22 @@ def evaluate_context_bundle(bundle: Any, gold: dict) -> dict:
     checks.extend(_cold_start_checks(items, gold))
     checks.append(_forbidden_term_check(items, gold.get("forbidden_terms") or []))
 
+    return _result_from_checks(checks)
+
+
+def _evaluate_context_case(case: dict) -> dict:
+    result = evaluate_context_bundle(case["bundle"], case["gold"])
+    extra_checks = _metadata_checks(
+        case.get("discovery"),
+        case["gold"],
+        Path(case.get("gold_path") or "."),
+    )
+    if not extra_checks:
+        return result
+    return _result_from_checks(result["checks"] + extra_checks)
+
+
+def _result_from_checks(checks: list[dict]) -> dict:
     scored = [check for check in checks if check["name"] != "forbidden_terms" or check["expected"]]
     passed = sum(1 for check in scored if check["passed"])
     failed = len(scored) - passed
@@ -130,7 +152,7 @@ def evaluate_context_suite(
     """
     fixture_results = []
     for case in cases:
-        result = evaluate_context_bundle(case["bundle"], case["gold"])
+        result = _evaluate_context_case(case)
         thresholds = _fixture_thresholds(
             case["gold"],
             default_min_score=min_score,
@@ -230,6 +252,7 @@ def _suite_gold_coverage(fixture_results: list[dict]) -> dict:
     return {
         "complete": not missing_by_fixture,
         "required_categories": list(_REQUIRED_GOLD_CATEGORIES),
+        "metadata_required_categories": list(_METADATA_GOLD_CATEGORIES),
         "missing_by_fixture": missing_by_fixture,
     }
 
@@ -314,6 +337,96 @@ def _threshold_failures(result: dict, thresholds: dict) -> list[dict]:
                 }
             )
     return failures
+
+
+def _metadata_checks(
+    discovery: DiscoveryResult | None,
+    gold: dict,
+    gold_path: Path,
+) -> list[dict]:
+    metadata_path = gold.get("metadata_path")
+    if not metadata_path or discovery is None:
+        return []
+    metadata_dir = (gold_path.parent / str(metadata_path)).resolve()
+    checks = []
+    checks.extend(
+        _semantic_role_checks(
+            discovery,
+            metadata_dir / "semantic_schema.yaml",
+            gold.get("semantic_roles") or [],
+        )
+    )
+    checks.extend(
+        _insight_family_checks(
+            metadata_dir / "insight_families.yaml",
+            gold.get("insight_families") or [],
+        )
+    )
+    return checks
+
+
+def _semantic_role_checks(
+    discovery: DiscoveryResult,
+    semantic_schema_path: Path,
+    expected_roles: list[dict],
+) -> list[dict]:
+    role_patterns = _metadata_role_patterns(semantic_schema_path)
+    table_columns = {
+        table.name: {column.name: column for column in table.columns}
+        for table in discovery.tables
+    }
+    checks = []
+    for expected in expected_roles:
+        table_name = str(expected.get("table_name") or "")
+        role = str(expected.get("role") or "")
+        column_name = str(expected.get("column_name") or "")
+        column = table_columns.get(table_name, {}).get(column_name)
+        matched = (
+            column is not None
+            and any(
+                candidate_role == role and pattern.search(column.name)
+                for candidate_role, pattern in role_patterns
+            )
+        )
+        checks.append(
+            {
+                "name": f"semantic_role:{table_name}.{role}",
+                "category": "semantic_role",
+                "passed": matched,
+                "expected": column_name,
+                "actual": column_name if matched else None,
+            }
+        )
+    return checks
+
+
+def _insight_family_checks(path: Path, expected_families: list[str]) -> list[dict]:
+    parsed = load_context_gold(path)
+    actual = {
+        str(family.get("key"))
+        for family in parsed.get("families") or []
+        if isinstance(family, dict) and family.get("key")
+    }
+    return [
+        {
+            "name": f"insight_family:{family}",
+            "category": "insight_family",
+            "passed": str(family) in actual,
+            "expected": str(family),
+            "actual": str(family) if str(family) in actual else None,
+        }
+        for family in expected_families
+    ]
+
+
+def _metadata_role_patterns(path: Path) -> list[tuple[str, re.Pattern[str]]]:
+    parsed = load_context_gold(path)
+    patterns = []
+    for role in parsed.get("roles") or []:
+        if not isinstance(role, dict) or not role.get("role") or not role.get("pattern"):
+            continue
+        patterns.append((str(role["role"]), re.compile(str(role["pattern"]), re.I)))
+    return patterns
 
 
 def _bundle_items(bundle: Any) -> list[dict]:

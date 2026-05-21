@@ -1,0 +1,106 @@
+source:
+  name: nytaxi
+  type: csv
+  path: /data/nytaxi
+tables:
+  - name: trips
+    row_count: 1000
+    columns:
+      - name: trip_id
+        dtype: int64
+        is_primary_key: true
+      - name: pickup_datetime
+        dtype: timestamp
+      - name: dropoff_datetime
+        dtype: timestamp
+      - name: PULocationID
+        dtype: int64
+        semantic_type: foreign_key
+      - name: DOLocationID
+        dtype: int64
+        semantic_type: foreign_key
+      - name: vendor_id
+        dtype: varchar
+        semantic_type: dimension
+      - name: passenger_count
+        dtype: int64
+        semantic_type: metric
+      - name: trip_distance
+        dtype: double
+        semantic_type: metric
+      - name: fare_amount
+        dtype: double
+        semantic_type: metric
+  - name: taxi_zones
+    row_count: 265
+    columns:
+      - name: LocationID
+        dtype: int64
+        is_primary_key: true
+      - name: borough
+        dtype: varchar
+        semantic_type: dimension
+      - name: zone
+        dtype: varchar
+        semantic_type: dimension
+profiles:
+  - table_name: trips
+    column_name: trip_id
+    dtype: int64
+    distinct_count: 1000
+    uniqueness_ratio: 1.0
+  - table_name: taxi_zones
+    column_name: LocationID
+    dtype: int64
+    distinct_count: 265
+    uniqueness_ratio: 1.0
+  - table_name: trips
+    column_name: vendor_id
+    dtype: varchar
+    distinct_count: 2
+    top_values:
+      - [CMT, 560]
+      - [VTS, 440]
+  - table_name: taxi_zones
+    column_name: borough
+    dtype: varchar
+    distinct_count: 6
+    top_values:
+      - [Manhattan, 69]
+      - [Queens, 69]
+      - [Brooklyn, 61]
+  - table_name: taxi_zones
+    column_name: zone
+    dtype: varchar
+    distinct_count: 263
+    top_values:
+      - [Midtown Center, 3]
+      - [Astoria, 2]
+      - [JFK Airport, 2]
+  - table_name: trips
+    column_name: passenger_count
+    dtype: int64
+    distinct_count: 6
+    min_value: 1
+    max_value: 6
+  - table_name: trips
+    column_name: trip_distance
+    dtype: double
+    distinct_count: 520
+    min_value: 0.1
+    max_value: 34.2
+  - table_name: trips
+    column_name: fare_amount
+    dtype: double
+    distinct_count: 450
+    min_value: 3.0
+    max_value: 120.5
+relationships:
+  - from_table: trips
+    from_column: PULocationID
+    to_table: taxi_zones
+    to_column: LocationID
+    type: many_to_one
+    confidence: 0.92
+    referential_integrity: 1.0
+    source: inferred_name

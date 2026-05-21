@@ -1,0 +1,73 @@
+name: nytaxi
+fixture: nytaxi
+discovery_path: context_fixtures/nytaxi.yaml
+metadata_path: ../../metadata/nytaxi
+project_id: nytaxi
+row_grain:
+  trips:
+    - trip_id
+  taxi_zones:
+    - LocationID
+row_entity:
+  trips: trip
+  taxi_zones: taxi zone
+time_anchor:
+  trips: pickup_datetime
+pk_candidates:
+  trips:
+    - trip_id
+  taxi_zones:
+    - LocationID
+fk_candidates:
+  - from_table: trips
+    from_column: PULocationID
+    to_table: taxi_zones
+    to_column: LocationID
+top_dimensions:
+  - table_name: trips
+    column_name: vendor_id
+  - table_name: taxi_zones
+    column_name: borough
+top_measures:
+  - table_name: trips
+    column_name: fare_amount
+  - table_name: trips
+    column_name: passenger_count
+  - table_name: trips
+    column_name: trip_distance
+min_fallback_questions: 4
+question_intents:
+  - name: row_grain
+    all_of:
+      - row
+      - trips
+  - name: measures
+    all_of:
+      - measures
+semantic_roles:
+  - table_name: trips
+    role: lifecycle_start_ts
+    column_name: pickup_datetime
+  - table_name: trips
+    role: lifecycle_end_ts
+    column_name: dropoff_datetime
+  - table_name: trips
+    role: origin_id
+    column_name: PULocationID
+  - table_name: trips
+    role: destination_id
+    column_name: DOLocationID
+  - table_name: trips
+    role: distance
+    column_name: trip_distance
+  - table_name: trips
+    role: amount
+    column_name: fare_amount
+insight_families:
+  - duration_peak_window
+  - location_distribution
+  - path_distribution
+  - distance_efficiency
+  - lead_time_pattern
+forbidden_terms:
+  - patient
