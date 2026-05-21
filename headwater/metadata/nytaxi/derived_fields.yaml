@@ -1,0 +1,18 @@
+version: 1
+derived_fields:
+  - name: duration_min
+    table_name: trips
+    role: duration_minutes
+    required_roles: [lifecycle_start_ts, lifecycle_end_ts]
+    expression: "date_diff('second', {lifecycle_start_ts}, {lifecycle_end_ts}) / 60.0"
+    confidence: 0.92
+  - name: speed_per_hour
+    table_name: trips
+    role: speed_per_hour
+    required_roles: [distance, lifecycle_start_ts, lifecycle_end_ts]
+    expression: >-
+      CASE
+        WHEN date_diff('second', {lifecycle_start_ts}, {lifecycle_end_ts}) > 0
+        THEN {distance} / (date_diff('second', {lifecycle_start_ts}, {lifecycle_end_ts}) / 3600.0)
+      END
+    confidence: 0.86

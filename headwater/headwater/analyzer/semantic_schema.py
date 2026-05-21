@@ -54,7 +54,11 @@ def _compact_metadata_key(value: str) -> str:
     return "".join(ch.lower() for ch in value if ch.isalnum())
 
 
-def _candidate_role_spec_paths(source_name: str | None, project_id: str | None) -> list[Path]:
+def _candidate_metadata_paths(
+    source_name: str | None,
+    project_id: str | None,
+    file_name: str,
+) -> list[Path]:
     candidates: list[Path] = []
     metadata_root = _metadata_root()
     for name in [project_id, source_name]:
@@ -68,13 +72,24 @@ def _candidate_role_spec_paths(source_name: str | None, project_id: str | None) 
         for variant in variants:
             if not variant:
                 continue
-            path = metadata_root / variant / "semantic_schema.yaml"
+            path = metadata_root / variant / file_name
             if path not in candidates:
                 candidates.append(path)
     return candidates
 
 
-def _parse_role_spec(path: Path) -> dict | None:
+def _candidate_role_spec_paths(source_name: str | None, project_id: str | None) -> list[Path]:
+    return _candidate_metadata_paths(source_name, project_id, "semantic_schema.yaml")
+
+
+def _candidate_derived_field_paths(
+    source_name: str | None,
+    project_id: str | None,
+) -> list[Path]:
+    return _candidate_metadata_paths(source_name, project_id, "derived_fields.yaml")
+
+
+def _parse_metadata_spec(path: Path) -> dict | None:
     try:
         parsed = yaml.safe_load(path.read_text()) or {}
         if isinstance(parsed, dict):
@@ -117,7 +132,7 @@ def _role_patterns(
     for path in _candidate_role_spec_paths(source_name, project_id):
         if not path.exists():
             continue
-        parsed = _parse_role_spec(path)
+        parsed = _parse_metadata_spec(path)
         if parsed:
             spec = _merge_role_specs(spec, parsed)
             break
@@ -188,7 +203,12 @@ def infer_semantic_schema(
     return SemanticSchema(
         source_name=discovery.source.name,
         columns=roles,
-        derived_fields=_derive_fields(roles, metadata),
+        derived_fields=_derive_fields(
+            roles,
+            metadata,
+            source_name=discovery.source.name,
+            project_id=project_id,
+        ),
     )
 
 
@@ -262,6 +282,9 @@ def _role_from_locked_column(role: str | None, semantic_type: str | None) -> str
 def _derive_fields(
     roles: list[SemanticColumnRole],
     metadata: RetrievedMetadata | None = None,
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
 ) -> list[SemanticDerivedField]:
     by_table: dict[str, dict[str, SemanticColumnRole]] = defaultdict(dict)
     for role in roles:
@@ -302,6 +325,14 @@ def _derive_fields(
                     ),
                 ]
             )
+        derived.extend(
+            _metadata_derived_fields(
+                table_name,
+                table_roles,
+                source_name=source_name,
+                project_id=project_id,
+            )
+        )
         derived.extend(_context_derived_fields(table_name, table_roles, metadata))
     return derived
 
@@ -328,24 +359,73 @@ def _context_derived_fields(
             continue
         if item.table_name and item.table_name != table_name:
             continue
-        value = item.value or {}
-        required_roles = [str(role) for role in value.get("required_roles") or []]
-        if not required_roles or not all(role in table_roles for role in required_roles):
-            continue
-        expression = str(value.get("expression") or "").strip()
-        if not expression:
-            continue
-        derived.append(
-            SemanticDerivedField(
-                table_name=table_name,
-                name=str(value.get("name") or item.name),
-                expression=_fill_role_placeholders(expression, table_roles),
-                role=str(value.get("role") or value.get("semantic_type") or item.name),
-                required_roles=required_roles,
-                confidence=item.confidence,
-            )
+        field = _derived_field_from_spec(
+            table_name,
+            table_roles,
+            item.value or {},
+            default_name=item.name,
+            default_confidence=item.confidence,
         )
+        if field is not None:
+            derived.append(field)
     return derived
+
+
+def _metadata_derived_fields(
+    table_name: str,
+    table_roles: dict[str, SemanticColumnRole],
+    *,
+    source_name: str | None,
+    project_id: str | None,
+) -> list[SemanticDerivedField]:
+    for path in _candidate_derived_field_paths(source_name, project_id):
+        if not path.exists():
+            continue
+        parsed = _parse_metadata_spec(path)
+        if not parsed:
+            continue
+        fields = parsed.get("derived_fields")
+        if not isinstance(fields, list):
+            return []
+        derived: list[SemanticDerivedField] = []
+        for entry in fields:
+            if not isinstance(entry, dict):
+                continue
+            entry_table = entry.get("table_name") or entry.get("table")
+            if entry_table and str(entry_table) != table_name:
+                continue
+            field = _derived_field_from_spec(table_name, table_roles, entry)
+            if field is not None:
+                derived.append(field)
+        return derived
+    return []
+
+
+def _derived_field_from_spec(
+    table_name: str,
+    table_roles: dict[str, SemanticColumnRole],
+    value: dict,
+    *,
+    default_name: str | None = None,
+    default_confidence: float = 0.0,
+) -> SemanticDerivedField | None:
+    required_roles = [str(role) for role in value.get("required_roles") or []]
+    if not required_roles or not all(role in table_roles for role in required_roles):
+        return None
+    expression = str(value.get("expression") or "").strip()
+    if not expression:
+        return None
+    name = str(value.get("name") or default_name or "").strip()
+    if not name:
+        return None
+    return SemanticDerivedField(
+        table_name=table_name,
+        name=name,
+        expression=_fill_role_placeholders(expression, table_roles),
+        role=str(value.get("role") or value.get("semantic_type") or name),
+        required_roles=required_roles,
+        confidence=float(value.get("confidence", default_confidence)),
+    )
 
 
 def _fill_role_placeholders(

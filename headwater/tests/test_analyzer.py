@@ -343,6 +343,29 @@ class TestSemanticSchema:
         assert roles["distance"].column_name == "trip_distance"
         assert roles["amount"].column_name == "fare_amount"
 
+    def test_nytaxi_fixture_derived_fields_are_metadata_driven(self):
+        discovery = _nytaxi_fixture_discovery()
+        generic_discovery = discovery.model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        generic_schema = infer_semantic_schema(generic_discovery)
+        metadata_schema = infer_semantic_schema(discovery, project_id="nytaxi")
+        generic_derived = {field.name for field in generic_schema.derived_fields}
+        metadata_derived = {field.name: field for field in metadata_schema.derived_fields}
+
+        assert "duration_min" not in generic_derived
+        assert "speed_per_hour" not in generic_derived
+        assert metadata_derived["duration_min"].role == "duration_minutes"
+        assert metadata_derived["duration_min"].required_roles == [
+            "lifecycle_start_ts",
+            "lifecycle_end_ts",
+        ]
+        assert '"pickup_datetime"' in metadata_derived["duration_min"].expression
+        assert '"dropoff_datetime"' in metadata_derived["duration_min"].expression
+        assert metadata_derived["speed_per_hour"].role == "speed_per_hour"
+        assert '"trip_distance"' in metadata_derived["speed_per_hour"].expression
+
     def test_project_metadata_can_restore_dataset_specific_aliases(self, monkeypatch, tmp_path):
         discovery = DiscoveryResult(
             source=SourceConfig(name="ny_taxi_postgres", type="postgres"),
