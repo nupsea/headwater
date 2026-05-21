@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import duckdb
 import polars as pl
@@ -61,6 +62,9 @@ from headwater.explorer.suggestions import (
     generate_suggestions,
 )
 from headwater.explorer.visualization import _classify_columns, recommend_visualization
+from headwater.services.context_evaluation import load_context_eval_cases
+
+GOLD_DIR = Path(__file__).resolve().parent / "golden"
 
 
 def _payment_type_dictionary_doc(table_name: str = "yellow_trips") -> CompanionDoc:
@@ -75,6 +79,10 @@ def _payment_type_dictionary_doc(table_name: str = "yellow_trips") -> CompanionD
         matched_tables=[table_name],
         confidence=0.9,
     )
+
+
+def _nytaxi_fixture_discovery() -> DiscoveryResult:
+    return load_context_eval_cases([GOLD_DIR / "context_bootstrap_nytaxi.yaml"])[0]["discovery"]
 
 
 # ---------------------------------------------------------------------------
@@ -2958,6 +2966,59 @@ class TestStatistical:
             "distance_efficiency",
             "lead_time_pattern",
         }.issubset(family_keys)
+
+    def test_nytaxi_fixture_insight_diagnostics_are_metadata_driven(self, duckdb_con):
+        duckdb_con.execute("CREATE SCHEMA IF NOT EXISTS eval")
+        duckdb_con.execute(
+            """
+            CREATE OR REPLACE TABLE eval.stg_trips AS
+            SELECT
+                TIMESTAMP '2026-01-01 00:00:00' + i * INTERVAL 1 HOUR AS pickup_datetime,
+                TIMESTAMP '2026-01-01 00:20:00' + i * INTERVAL 1 HOUR AS dropoff_datetime,
+                i % 10 AS PULocationID,
+                (i + 1) % 10 AS DOLocationID,
+                CASE WHEN i % 2 = 0 THEN 'CMT' ELSE 'VTS' END AS vendor_id,
+                1 + (i % 4) AS passenger_count,
+                1.5 + (i % 12) AS trip_distance,
+                7.5 + (i % 20) AS fare_amount
+            FROM range(48) AS t(i)
+            """
+        )
+        discovery = _nytaxi_fixture_discovery()
+        generic_discovery = discovery.model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        generic = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="eval",
+            discovery=generic_discovery,
+        )
+        with_metadata = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="eval",
+            discovery=discovery,
+            project_id="nytaxi",
+        )
+
+        generic_families = {diagnostic.family for diagnostic in generic.diagnostics}
+        metadata_families = {diagnostic.family for diagnostic in with_metadata.diagnostics}
+
+        assert {
+            "temporal_coverage",
+            "temporal_volume",
+            "duration_distribution",
+            "data_quality",
+        }.issubset(generic_families)
+        assert "location_distribution" not in generic_families
+        assert "path_distribution" not in generic_families
+        assert "distance_efficiency" not in generic_families
+        assert {
+            "duration_peak_window",
+            "location_distribution",
+            "path_distribution",
+            "distance_efficiency",
+        }.issubset(metadata_families)
 
     def test_family_catalog_merges_canonical_context_items(self):
         discovery = DiscoveryResult(
