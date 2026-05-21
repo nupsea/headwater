@@ -31,8 +31,10 @@ from headwater.core.models import (
     TableInfo,
 )
 from headwater.profiler.engine import discover
+from headwater.services.context_evaluation import load_context_eval_cases
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sample"
+GOLD_DIR = Path(__file__).resolve().parent / "golden"
 
 
 @pytest.fixture()
@@ -44,6 +46,10 @@ def discovery_result():
     loader.load_to_duckdb(con, "env_health")
     source = SourceConfig(name="sample", type="json", path=str(SAMPLE_DIR))
     return discover(con, "env_health", source)
+
+
+def _nytaxi_fixture_discovery() -> DiscoveryResult:
+    return load_context_eval_cases([GOLD_DIR / "context_bootstrap_nytaxi.yaml"])[0]["discovery"]
 
 
 # -- Heuristics ------------------------------------------------------------
@@ -306,6 +312,36 @@ class TestSemanticSchema:
         assert "lifecycle_end_ts" not in roles
         assert "origin_id" not in roles
         assert "amount" not in roles
+
+    def test_nytaxi_fixture_without_metadata_keeps_generic_roles(self):
+        discovery = _nytaxi_fixture_discovery().model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        schema = infer_semantic_schema(discovery)
+        roles = roles_for_table(schema, "trips")
+
+        assert "event_ts" in roles
+        assert "measure" in roles
+        assert "lifecycle_start_ts" not in roles
+        assert "lifecycle_end_ts" not in roles
+        assert "origin_id" not in roles
+        assert "destination_id" not in roles
+        assert "distance" not in roles
+        assert "amount" not in roles
+
+    def test_nytaxi_fixture_metadata_restores_project_roles(self):
+        discovery = _nytaxi_fixture_discovery()
+
+        schema = infer_semantic_schema(discovery, project_id="nytaxi")
+        roles = roles_for_table(schema, "trips")
+
+        assert roles["lifecycle_start_ts"].column_name == "pickup_datetime"
+        assert roles["lifecycle_end_ts"].column_name == "dropoff_datetime"
+        assert roles["origin_id"].column_name == "PULocationID"
+        assert roles["destination_id"].column_name == "DOLocationID"
+        assert roles["distance"].column_name == "trip_distance"
+        assert roles["amount"].column_name == "fare_amount"
 
     def test_project_metadata_can_restore_dataset_specific_aliases(self, monkeypatch, tmp_path):
         discovery = DiscoveryResult(
