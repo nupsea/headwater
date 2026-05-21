@@ -124,6 +124,35 @@ class TestCLIContextEval:
         assert result.exit_code == 1
         assert "threshold category:row_grain" in result.output
 
+    def test_context_eval_reports_accepted_deltas(self, tmp_path):
+        gold = tmp_path / "context_delta.yaml"
+        gold.write_text(
+            "\n".join(
+                [
+                    "name: orders",
+                    "fixture: orders",
+                    "row_grain:",
+                    "  orders:",
+                    "    - not_the_key",
+                    "time_anchor:",
+                    "  orders: created_at",
+                    "accepted_deltas:",
+                    "  - check: row_grain:orders",
+                    "    reason: temporary migration parity gap",
+                    "    until: metadata migration complete",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["context-eval", "--gold", str(gold)])
+
+        assert result.exit_code == 0
+        assert "accepted_deltas=1" in result.output
+        assert "accepted_delta row_grain:orders" in result.output
+        assert "temporary migration parity gap" in result.output
+
     def test_context_eval_writes_metrics_artifact(self, tmp_path):
         metrics_path = tmp_path / "metrics" / "context-eval.json"
 

@@ -577,11 +577,23 @@ def context_eval(
             "Context evaluation: "
             f"{metrics['passed_checks']}/{metrics['total_checks']} checks passed "
             f"across {metrics['fixture_count']} fixture(s); "
-            f"score={result['score']:.4f}, min_score={min_score:.4f}"
+            f"score={result['score']:.4f}, min_score={min_score:.4f}, "
+            f"accepted_deltas={metrics['accepted_delta_checks']}"
         )
         for fixture in result["fixtures"]:
             status = "PASS" if fixture["passed"] else "FAIL"
-            typer.echo(f"  {status} {fixture['name']} score={fixture['score']:.4f}")
+            fixture_metrics = fixture["metrics"]
+            typer.echo(
+                f"  {status} {fixture['name']} score={fixture['score']:.4f} "
+                f"accepted_deltas={fixture_metrics['accepted_delta_checks']}"
+            )
+            for accepted_delta in fixture["accepted_deltas"]:
+                delta = accepted_delta.get("accepted_delta") or {}
+                suffix = f" until={delta['until']}" if delta.get("until") else ""
+                typer.echo(
+                    "    - accepted_delta "
+                    f"{accepted_delta['name']}: reason={delta.get('reason')}{suffix}"
+                )
             for threshold_failure in fixture["threshold_failures"]:
                 typer.echo(
                     "    - threshold "
