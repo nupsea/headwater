@@ -686,6 +686,35 @@ roles:
         assert any("weekday and weekend work order duration compare" in q for q in prompts)
         assert any("highest work order wait time" in q for q in prompts)
 
+    def test_nytaxi_fixture_suggestions_are_metadata_driven(self):
+        discovery = _nytaxi_fixture_discovery()
+        generic_discovery = discovery.model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        generic_questions = generate_suggestions(discovery=generic_discovery)
+        metadata_questions = generate_suggestions(
+            discovery=discovery,
+            project_id="nytaxi",
+        )
+        generic_prompts = [question.question.lower() for question in generic_questions]
+        metadata_prompts = [question.question.lower() for question in metadata_questions]
+
+        assert any("changed over time" in question for question in generic_prompts)
+        assert not any("which routes have the longest" in question for question in generic_prompts)
+        assert not any(
+            "which pulocationid has the longest" in question
+            for question in generic_prompts
+        )
+        assert any(
+            "which hour has the highest trips volume" in question
+            for question in metadata_prompts
+        )
+        assert any(
+            "weekday and weekend duration compare" in question
+            for question in metadata_prompts
+        )
+
     def test_encoded_dimension_questions_use_readable_labels(self, duckdb_con):
         duckdb_con.execute(
             """
