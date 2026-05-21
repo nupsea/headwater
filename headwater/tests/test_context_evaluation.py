@@ -13,6 +13,7 @@ from headwater.core.models import (
     TableInfo,
 )
 from headwater.services.context_bootstrap import bootstrap_project_context
+from headwater.services.context_drift import reconcile_project_context_drift
 from headwater.services.context_evaluation import (
     build_context_eval_metrics,
     context_gold_coverage,
@@ -303,6 +304,67 @@ def test_nytaxi_without_metadata_degrades_to_structural_checks():
     assert result["fixtures"][0]["gold_coverage"]["complete"] is True
 
 
+def test_reviewed_context_drift_is_domain_neutral_across_fixtures(meta):
+    fixture_paths = [
+        GOLD_DIR / "context_bootstrap_finance_transactions.yaml",
+        GOLD_DIR / "context_bootstrap_manufacturing_runs.yaml",
+        GOLD_DIR / "context_bootstrap_nytaxi.yaml",
+        GOLD_DIR / "context_bootstrap_patient_encounters.yaml",
+    ]
+    cases = load_context_eval_cases(fixture_paths)
+
+    for case in cases:
+        discovery = case["discovery"]
+        meta.upsert_source(
+            discovery.source.name,
+            discovery.source.type,
+            discovery.source.path,
+            None,
+        )
+        item = next(
+            bundle_item
+            for bundle_item in case["bundle"].items
+            if bundle_item.item_type == "column_semantics"
+        )
+        reviewed = item.model_dump(mode="json")
+        reviewed["status"] = "approved"
+        reviewed["source"] = "user"
+        reviewed["confidence"] = 0.95
+        meta.replace_project_context(
+            reviewed["project_id"],
+            source_name=discovery.source.name,
+            items=[reviewed],
+        )
+
+        drifted_discovery = _discovery_without_column(
+            discovery,
+            item.table_name,
+            item.column_name,
+        )
+        summary = reconcile_project_context_drift(
+            meta,
+            drifted_discovery,
+            project_id=reviewed["project_id"],
+            source_name=discovery.source.name,
+            drift_report={"id": 42},
+        )
+        updated = meta.get_project_context_item(
+            item.id,
+            project_id=reviewed["project_id"],
+        )
+
+        assert summary["items_flagged"] == 1
+        assert summary["items"][0]["code"] == "column_missing"
+        assert summary["drift_type_counts"] == {"schema": 1}
+        assert summary["severity_counts"] == {"critical": 1}
+        assert updated["status"] == "needs_review"
+        assert updated["source"] == "context_drift"
+        assert updated["confidence"] == 0.25
+        assert updated["value"]["drift_status"] == "invalidated"
+        assert updated["value"]["drift_report_id"] == 42
+        assert updated["evidence"][-1]["payload"]["code"] == "column_missing"
+
+
 def test_context_evaluation_metrics_artifact_tracks_category_scores():
     cases = load_context_eval_cases([GOLD])
     result = evaluate_context_suite(cases, min_score=1.0, min_category_score=0.9)
@@ -320,6 +382,28 @@ def test_context_evaluation_metrics_artifact_tracks_category_scores():
     assert metrics["fixtures"][0]["categories"]["top_measures"]["failed_checks"] == 0
     assert metrics["fixtures"][0]["failure_names"] == []
     assert metrics["fixtures"][0]["accepted_delta_names"] == []
+
+
+def _discovery_without_column(
+    discovery: DiscoveryResult,
+    table_name: str,
+    column_name: str,
+) -> DiscoveryResult:
+    tables = []
+    for table in discovery.tables:
+        if table.name != table_name:
+            tables.append(table)
+            continue
+        tables.append(
+            table.model_copy(
+                update={
+                    "columns": [
+                        column for column in table.columns if column.name != column_name
+                    ]
+                }
+            )
+        )
+    return discovery.model_copy(update={"tables": tables})
 
 
 def _orders_discovery() -> DiscoveryResult:
