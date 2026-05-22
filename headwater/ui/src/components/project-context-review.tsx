@@ -162,6 +162,37 @@ function compactCardLabel(item: ProjectContextItem) {
   }
 }
 
+function advisorPackMeta(item: ProjectContextItem) {
+  const value = item.value || {};
+  const packName =
+    typeof value.pack_name === "string" && value.pack_name.trim()
+      ? value.pack_name.trim()
+      : null;
+  const packVersion =
+    typeof value.pack_version === "string" && value.pack_version.trim()
+      ? value.pack_version.trim()
+      : typeof value.version === "string" && value.version.trim()
+        ? value.version.trim()
+        : null;
+  const overridesPack =
+    typeof value.overrides_pack === "string" && value.overrides_pack.trim()
+      ? value.overrides_pack.trim()
+      : null;
+  const conflictEvidence = item.evidence.find(
+    (entry) => entry.evidence_type === "advisor_pack_conflict"
+  );
+  return {
+    isPackItem: item.source === "advisor_pack" || packName !== null,
+    packName,
+    packVersion,
+    overridesPack,
+    conflictSummary:
+      typeof conflictEvidence?.summary === "string" && conflictEvidence.summary.trim()
+        ? conflictEvidence.summary.trim()
+        : null,
+  };
+}
+
 function readinessTone(complete: boolean, warning = false) {
   if (warning) return "border-warning/30 bg-warning/10";
   return complete ? "border-success/30 bg-success/10" : "border-border bg-background";
@@ -596,6 +627,10 @@ export function ProjectContextReview({
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
                     {compactReviewItems.slice(0, 4).map((item) => (
                       <div key={`compact:${item.id}`} className="rounded border border-border px-3 py-2">
+                        {(() => {
+                          const pack = advisorPackMeta(item);
+                          return (
+                            <>
                         <div className="flex items-center justify-between gap-3">
                           <div className="text-[10px] uppercase tracking-wide text-muted">
                             {compactCardLabel(item)}
@@ -608,6 +643,22 @@ export function ProjectContextReview({
                         </div>
                         <div className="text-sm font-medium mt-1">{item.title || item.name}</div>
                         <div className="text-[11px] text-muted mt-1">{itemSummary(item)}</div>
+                              {pack.isPackItem && (
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  <span className="inline-flex items-center rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-foreground">
+                                    Pack{pack.packName ? ` · ${pack.packName}` : ""}
+                                    {pack.packVersion ? ` v${pack.packVersion}` : ""}
+                                  </span>
+                                  {pack.overridesPack && (
+                                    <span className="inline-flex items-center rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-[10px] text-foreground">
+                                      Overrides {pack.overridesPack}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     ))}
                   </div>
@@ -615,6 +666,10 @@ export function ProjectContextReview({
                 <div className="space-y-3 max-h-[32rem] overflow-y-auto pr-1">
                   {previewItems.map((item) => (
                     <div key={item.id} className="rounded border border-border p-3">
+                      {(() => {
+                        const pack = advisorPackMeta(item);
+                        return (
+                          <>
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="text-sm font-medium">{item.title || item.name}</div>
@@ -630,6 +685,24 @@ export function ProjectContextReview({
                         </span>
                       </div>
                       <div className="text-sm mt-2">{itemSummary(item)}</div>
+                            {pack.isPackItem && (
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <span className="inline-flex items-center rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-foreground">
+                                  Advisor pack{pack.packName ? ` · ${pack.packName}` : ""}
+                                  {pack.packVersion ? ` v${pack.packVersion}` : ""}
+                                </span>
+                                {pack.overridesPack && (
+                                  <span className="inline-flex items-center rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-[10px] text-foreground">
+                                    Overrides {pack.overridesPack}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            {pack.conflictSummary && (
+                              <div className="mt-2 text-[11px] text-warning">
+                                {pack.conflictSummary}
+                              </div>
+                            )}
                       {item.evidence.length > 0 && (
                         <div className="mt-2 text-[11px] text-muted">
                           Evidence: {item.evidence.slice(0, 2).map((entry) => entry.summary).join(" · ")}
@@ -658,6 +731,9 @@ export function ProjectContextReview({
                           Reject
                         </button>
                       </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   ))}
                   {previewItems.length === 0 && (
