@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import yaml
+
 from headwater.core.metadata import MetadataStore
 from headwater.core.models import (
     ColumnInfo,
@@ -15,6 +17,7 @@ from headwater.core.models import (
     TableInfo,
 )
 from headwater.services.context_bootstrap import bootstrap_project_context
+from headwater.services import project_context as project_context_service
 from headwater.services.project_context import (
     load_project_context_bundle,
     load_retrieved_metadata,
@@ -870,6 +873,121 @@ def test_project_context_provider_exposes_phase_one_accessors(meta: MetadataStor
     assert provider.time_anchor("orders")["value"]["column"] == "created_at"
     assert provider.pk_candidates("orders")[0]["column_name"] == "order_id"
     assert provider.preferred_dimensions()[0]["column_name"] == "status"
+
+
+def test_load_project_context_bundle_applies_advisor_pack_items(
+    meta: MetadataStore, tmp_path, monkeypatch
+):
+    pack_dir = tmp_path / "packs" / "healthcare-core"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "business_lenses.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "business_lenses": [
+                    {
+                        "name": "care_quality",
+                        "title": "Care quality",
+                        "scope": "project",
+                        "value": {"priority": 7},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (pack_dir / "question_templates.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "question_templates": [
+                    {
+                        "name": "quality_by_unit",
+                        "title": "Quality by unit",
+                        "scope": "table",
+                        "table": "encounters",
+                        "value": {"template": "Which units have the highest readmission risk?"},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (pack_dir / "column_policies.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "column_policies": [
+                    {
+                        "name": "encounter_status_low_signal",
+                        "table": "encounters",
+                        "column": "status",
+                        "value": {"low_signal": True},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(project_context_service, "_metadata_root", lambda: tmp_path)
+    meta.upsert_source("src", "json", "/data", None)
+
+    meta.upsert_project_context_item(
+        id="advisor_pack:healthcare_core",
+        project_id="src",
+        source_name="src",
+        item_type="advisor_pack",
+        scope="project",
+        name="healthcare_core",
+        title="Healthcare Core",
+        value={"pack_name": "healthcare_core", "extends": True},
+        status="approved",
+        confidence=1.0,
+        source="import",
+    )
+    meta.upsert_project_context_item(
+        id="column_policy:encounters.status",
+        project_id="src",
+        source_name="src",
+        item_type="column_policy",
+        scope="column",
+        name="status",
+        table_name="encounters",
+        column_name="status",
+        value={"preferred_dimension": True},
+        status="approved",
+        confidence=0.95,
+        source="user",
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[TableInfo(name="encounters", columns=[ColumnInfo(name="status", dtype="varchar")])],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    provider = project_context_provider(bundle)
+
+    assert [item["name"] for item in provider.advisor_packs()] == ["healthcare_core"]
+    assert provider.business_lenses()[0]["name"] == "care_quality"
+    assert provider.business_lenses()[0]["source"] == "advisor_pack"
+    assert provider.question_templates()[0]["value"]["template"].startswith("Which units")
+    assert provider.low_signal_columns() == set()
+    assert provider.preferred_dimensions()[0]["column_name"] == "status"
+    assert any(
+        item.source == "advisor_pack" and item.item_type == "question_template"
+        for item in bundle.items
+    )
 
 
 def test_persist_pk_fk_stores_reload_safe_relationship_values(meta: MetadataStore):

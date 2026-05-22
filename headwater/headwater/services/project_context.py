@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
+from pathlib import Path
+
+import yaml
 
 from headwater.analyzer.metadata_retrieval import RetrievedMetadata, retrieve_metadata
 from headwater.core.models import DatasetContext, DiscoveryResult, ProjectContextBundle
@@ -205,6 +209,26 @@ class ProjectContextProvider:
         return self.items("advisor_pack", include_proposed=include_proposed)
 
 
+_PACK_TYPED_FILE_SECTIONS = {
+    "derived_fields.yaml": {"derived_fields": "derived_field"},
+    "insight_families.yaml": {
+        "insight_families": "insight_family",
+        "insight_priorities": "insight_priority",
+    },
+    "lookups.yaml": {"lookups": "lookup", "enum_mappings": "enum_mapping"},
+    "glossary.yaml": {"terms": "glossary_term"},
+    "business_lenses.yaml": {"business_lenses": "business_lens"},
+    "presentation.yaml": {"visualization_hints": "visualization_hint"},
+    "question_templates.yaml": {"question_templates": "question_template"},
+    "column_policies.yaml": {"column_policies": "column_policy"},
+    "relationship_hints.yaml": {
+        "relationships": "relationship",
+        "relationship_hints": "relationship_hint",
+        "fk_candidates": "fk_candidate",
+    },
+}
+
+
 def load_project_context_bundle(
     store,
     discovery: DiscoveryResult,
@@ -236,6 +260,18 @@ def load_project_context_bundle(
                 continue
             seen_resource_ids.add(resource_id)
             resources.append(resource)
+
+    pack_items = _load_advisor_pack_items(
+        items,
+        project_id=ids[0] if ids else (project_id or source_name),
+        source_name=source_name,
+    )
+    for item in pack_items:
+        item_id = item.get("id")
+        if item_id in seen_item_ids:
+            continue
+        seen_item_ids.add(item_id)
+        items.append(item)
 
     return ProjectContextBundle(
         project_id=ids[0] if ids else (project_id or source_name),
@@ -315,6 +351,199 @@ def _linked_project_for_source(store, source_name: str) -> str | None:
 def _slugify(text: str) -> str:
     normalized = "".join(char.lower() if char.isalnum() else "-" for char in text)
     return "-".join(part for part in normalized.split("-") if part)
+
+
+def _metadata_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "metadata"
+
+
+def _load_advisor_pack_items(
+    items: list[dict],
+    *,
+    project_id: str,
+    source_name: str,
+) -> list[dict]:
+    pack_names = _active_advisor_pack_names(items)
+    if not pack_names:
+        return []
+
+    existing_keys = {_item_override_key(item) for item in items}
+    loaded: list[dict] = []
+    for pack_name in pack_names:
+        for item in _load_single_advisor_pack(
+            pack_name,
+            project_id=project_id,
+            source_name=source_name,
+        ):
+            override_key = _item_override_key(item)
+            if override_key in existing_keys:
+                continue
+            existing_keys.add(override_key)
+            loaded.append(item)
+    return loaded
+
+
+def _active_advisor_pack_names(items: list[dict]) -> list[str]:
+    names: list[str] = []
+    for item in items:
+        if item.get("item_type") != "advisor_pack" or not _status_matches(item, include_proposed=False):
+            continue
+        value = item.get("value") or {}
+        pack_name = (
+            value.get("pack_name")
+            or value.get("name")
+            or item.get("name")
+            or item.get("title")
+        )
+        if pack_name:
+            names.append(str(pack_name))
+    return _dedupe(names)
+
+
+def _load_single_advisor_pack(
+    pack_name: str,
+    *,
+    project_id: str,
+    source_name: str,
+) -> list[dict]:
+    pack_dir = _metadata_root() / "packs" / _slugify(pack_name)
+    if not pack_dir.exists():
+        return []
+
+    loaded: list[dict] = []
+    for file_name, sections in _PACK_TYPED_FILE_SECTIONS.items():
+        path = pack_dir / file_name
+        if not path.exists():
+            continue
+        doc = _parse_metadata_doc(path)
+        if not isinstance(doc, dict):
+            continue
+        for section, item_type in sections.items():
+            for entry in doc.get(section, []):
+                item = _pack_entry_to_item(
+                    entry,
+                    item_type=item_type,
+                    pack_name=pack_name,
+                    project_id=project_id,
+                    source_name=source_name,
+                )
+                if item is not None:
+                    loaded.append(item)
+    return loaded
+
+
+def _parse_metadata_doc(path: Path) -> dict | None:
+    text = path.read_text(encoding="utf-8")
+    try:
+        parsed = yaml.safe_load(text) or {}
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        return None
+    return None
+
+
+def _pack_entry_to_item(
+    entry: dict,
+    *,
+    item_type: str,
+    pack_name: str,
+    project_id: str,
+    source_name: str,
+) -> dict | None:
+    if not isinstance(entry, dict):
+        return None
+    table_name = entry.get("table") or entry.get("table_name")
+    column_name = entry.get("column") or entry.get("column_name")
+    value = entry.get("value")
+    if value is None:
+        value = {
+            key: payload
+            for key, payload in entry.items()
+            if key
+            not in {
+                "id",
+                "name",
+                "title",
+                "scope",
+                "table",
+                "table_name",
+                "column",
+                "column_name",
+                "item_type",
+                "status",
+                "confidence",
+                "source",
+                "evidence",
+            }
+        }
+    value = dict(value or {})
+    value.setdefault("pack_name", pack_name)
+    item_id = entry.get("id") or _pack_item_id(
+        pack_name,
+        item_type,
+        table_name,
+        column_name,
+        entry.get("name") or entry.get("title") or item_type,
+    )
+    return {
+        "id": item_id,
+        "project_id": project_id,
+        "source_name": source_name,
+        "item_type": item_type,
+        "scope": entry.get("scope") or _scope_for(table_name, column_name),
+        "name": entry.get("name") or str(value.get("name") or item_type),
+        "title": entry.get("title"),
+        "table_name": table_name,
+        "column_name": column_name,
+        "value": value,
+        "status": entry.get("status") or "approved",
+        "confidence": float(entry.get("confidence") or 0.6),
+        "source": "advisor_pack",
+        "evidence": entry.get("evidence") or [],
+    }
+
+
+def _pack_item_id(
+    pack_name: str,
+    item_type: str,
+    table_name: str | None,
+    column_name: str | None,
+    fallback_name: str,
+) -> str:
+    parts = [_slugify(pack_name), _slugify(item_type)]
+    for part in (table_name, column_name, fallback_name):
+        if part:
+            slug = _slugify(str(part))
+            if slug:
+                parts.append(slug)
+    return "pack:" + ":".join(parts)
+
+
+def _scope_for(table_name: str | None, column_name: str | None) -> str:
+    if column_name:
+        return "column"
+    if table_name:
+        return "table"
+    return "project"
+
+
+def _item_override_key(item: dict) -> tuple[str, str | None, str | None, str]:
+    table_name = item.get("table_name")
+    column_name = item.get("column_name")
+    scoped_name = "" if table_name or column_name else str(item.get("name") or "")
+    return (
+        str(item.get("item_type") or ""),
+        table_name,
+        column_name,
+        scoped_name,
+    )
 
 
 def _as_item_dict(item: dict | Any) -> dict:
