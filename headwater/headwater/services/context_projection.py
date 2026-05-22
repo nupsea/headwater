@@ -124,6 +124,7 @@ def build_context_exports(payload: dict, *, include_proposed: bool = True) -> di
     advisor_packs_doc = {
         "version": 1,
         "project_id": project_id,
+        "extends": _advisor_pack_extends(items),
         "advisor_packs": _entries_for_type(items, "advisor_pack"),
     }
 
@@ -258,6 +259,25 @@ def _resource_entry(resource: dict) -> dict:
         "source": resource.get("source"),
         "metadata": resource.get("metadata") or {},
     }
+
+
+def _advisor_pack_extends(items: list[dict]) -> list[str]:
+    explicit_extends: list[str] = []
+    inferred_extends: list[str] = []
+    for item in items:
+        if item.get("item_type") != "advisor_pack":
+            continue
+        value = item.get("value") or {}
+        pack_name = (
+            value.get("pack_name")
+            or value.get("name")
+            or item.get("name")
+            or item.get("title")
+        )
+        if pack_name:
+            target = explicit_extends if value.get("extends") else inferred_extends
+            target.append(str(pack_name))
+    return list(dict.fromkeys([*explicit_extends, *inferred_extends]))
 
 
 def _yaml(doc: dict) -> str:

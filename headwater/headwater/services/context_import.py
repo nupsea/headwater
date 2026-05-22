@@ -232,6 +232,29 @@ def import_context_exports(
             entry=enum_mapping,
         )
 
+    for pack_name in parsed.get("advisor_packs.yaml", {}).get("extends", []):
+        if not pack_name:
+            continue
+        entry = {
+            "id": f"advisor_pack:{_slugged_id('pack', str(pack_name)).split(':', 1)[1]}",
+            "name": str(pack_name),
+            "title": f"Advisor pack: {pack_name}",
+            "scope": "project",
+            "status": "approved",
+            "confidence": 1.0,
+            "value": {
+                "pack_name": str(pack_name),
+                "extends": True,
+            },
+        }
+        _merge_generic_item(
+            items,
+            project_id=project["id"],
+            source_name=source_name,
+            item_type="advisor_pack",
+            entry=entry,
+        )
+
     for file_name, sections in _TYPED_FILE_SECTIONS.items():
         doc = parsed.get(file_name, {})
         for section, item_type in sections.items():

@@ -582,6 +582,8 @@ class TestProjectContext:
         assert "role: identifier" in files["semantic_schema.yaml"]
         assert "# Project Context Review: source" in files["REVIEW.md"]
         assert "## Cold Start Summary" in files["REVIEW.md"]
+        advisor_packs = yaml.safe_load(files["advisor_packs.yaml"])
+        assert advisor_packs["extends"] == []
 
     def test_project_context_import_merges_exported_files(self, client):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
@@ -632,6 +634,29 @@ class TestProjectContext:
             sort_keys=False,
             allow_unicode=False,
         )
+        files["advisor_packs.yaml"] = yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "source",
+                "extends": ["healthcare_core"],
+                "advisor_packs": [
+                    {
+                        "id": "advisor_pack:finance_ops",
+                        "name": "finance_ops",
+                        "title": "Finance Ops",
+                        "scope": "project",
+                        "status": "approved",
+                        "confidence": 0.93,
+                        "value": {
+                            "pack_name": "finance_ops",
+                            "version": "2026.05",
+                        },
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        )
 
         imported = client.post(
             "/api/projects/source/context/import",
@@ -669,6 +694,21 @@ class TestProjectContext:
         )
         assert policy["item_type"] == "column_policy"
         assert policy["value"]["low_signal"] is True
+        imported_packs = {
+            item["name"]: item
+            for item in context["items"]
+            if item["item_type"] == "advisor_pack"
+        }
+        assert "healthcare_core" in imported_packs
+        assert imported_packs["healthcare_core"]["value"]["extends"] is True
+        assert imported_packs["healthcare_core"]["value"]["pack_name"] == "healthcare_core"
+        assert "finance_ops" in imported_packs
+        assert imported_packs["finance_ops"]["value"]["version"] == "2026.05"
+
+        reexported = client.get("/api/projects/source/context/export")
+        assert reexported.status_code == 200
+        advisor_packs = yaml.safe_load(reexported.json()["files"]["advisor_packs.yaml"])
+        assert advisor_packs["extends"] == ["healthcare_core", "finance_ops"]
 
 
 class TestInsightRanking:
