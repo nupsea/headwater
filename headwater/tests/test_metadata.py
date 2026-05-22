@@ -1174,6 +1174,52 @@ def test_llm_audit_log_roundtrip(meta: MetadataStore):
     assert e["tokens_out"] == 50
 
 
+def test_cached_llm_response_returns_latest_matching_hash(meta: MetadataStore):
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="first",
+        response_text='{"value": 1}',
+        prompt_hash="abc123",
+        tokens_in=10,
+        tokens_out=5,
+    )
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="second",
+        response_text='{"value": 2}',
+        prompt_hash="abc123",
+        tokens_in=20,
+        tokens_out=7,
+    )
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="empty failure",
+        response_text="",
+        prompt_hash="abc123",
+    )
+
+    cached = meta.get_cached_llm_response(
+        provider="ollama",
+        model="llama3.1:8b",
+        prompt_hash="abc123",
+    )
+
+    assert cached["prompt_text"] == "second"
+    assert cached["response_text"] == '{"value": 2}'
+    assert cached["tokens_in"] == 20
+    assert (
+        meta.get_cached_llm_response(
+            provider="ollama",
+            model="other-model",
+            prompt_hash="abc123",
+        )
+        is None
+    )
+
+
 # -- v3: Activity log -------------------------------------------------------
 
 

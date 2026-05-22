@@ -11,6 +11,8 @@ import httpx
 from headwater.analyzer.llm import (
     LLM_REQUEST_TEMPLATE_VERSION,
     LLMProvider,
+    _cached_response,
+    _parse_json_response,
     make_llm_request_hash,
 )
 from headwater.core.config import HeadwaterSettings
@@ -41,6 +43,7 @@ class OllamaProvider(LLMProvider):
         )
         self._store = store
         self._timeout = settings.ollama_timeout
+        self._offline_mode = settings.llm_offline_mode
 
     async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
         """Send prompt to Ollama and return parsed JSON response.
@@ -71,6 +74,35 @@ class OllamaProvider(LLMProvider):
         tokens_in = 0
         tokens_out = 0
         result: dict[str, Any] = {}
+        prompt_hash = make_llm_request_hash(
+            prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
+            input_payload={"system": _system, "prompt": prompt},
+            provider="ollama",
+            model=self._model,
+            configuration={
+                "format": "json",
+                "stream": False,
+                "timeout": self._timeout,
+            },
+        )
+        cached = _cached_response(
+            self._store,
+            provider="ollama",
+            model=self._model,
+            prompt_hash=prompt_hash,
+        )
+        if cached is not None:
+            self._insert_cached_audit(
+                prompt,
+                cached.get("response_text") or "",
+                prompt_hash=prompt_hash,
+                tokens_in=int(cached.get("tokens_in") or 0),
+                tokens_out=int(cached.get("tokens_out") or 0),
+            )
+            return _parse_json_response(cached.get("response_text") or "")
+        if self._offline_mode:
+            self._insert_cached_audit(prompt, "", prompt_hash=prompt_hash)
+            return {}
 
         try:
             result = await self._call_ollama(payload)
@@ -89,17 +121,6 @@ class OllamaProvider(LLMProvider):
         finally:
             if self._store is not None:
                 try:
-                    prompt_hash = make_llm_request_hash(
-                        prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
-                        input_payload={"system": _system, "prompt": prompt},
-                        provider="ollama",
-                        model=self._model,
-                        configuration={
-                            "format": "json",
-                            "stream": False,
-                            "timeout": self._timeout,
-                        },
-                    )
                     self._store.insert_llm_audit(
                         provider="ollama",
                         model=self._model,
@@ -113,6 +134,31 @@ class OllamaProvider(LLMProvider):
                     logger.warning("Failed to write LLM audit log: %s", audit_err)
 
         return result
+
+    def _insert_cached_audit(
+        self,
+        prompt: str,
+        response_text: str,
+        *,
+        prompt_hash: str,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+    ) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.insert_llm_audit(
+                provider="ollama",
+                model=self._model,
+                prompt_text=prompt,
+                response_text=response_text,
+                prompt_hash=prompt_hash,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cached=1,
+            )
+        except Exception as audit_err:
+            logger.warning("Failed to write cached LLM audit log: %s", audit_err)
 
     async def _call_ollama(self, payload: dict) -> dict[str, Any]:
         """Make a single HTTP call to the Ollama API."""

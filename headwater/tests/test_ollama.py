@@ -148,3 +148,72 @@ async def test_ollama_audit_log() -> None:
     )
 
     store.close()
+
+
+@pytest.mark.asyncio()
+async def test_ollama_uses_cached_audit_response_without_live_call() -> None:
+    """OllamaProvider should replay cached responses for matching request hashes."""
+    store = MetadataStore(":memory:")
+    store.init()
+    settings = HeadwaterSettings(llm_provider="ollama")
+    provider = OllamaProvider(settings, store=store)
+    prompt = "Cached prompt"
+    prompt_hash = make_llm_request_hash(
+        prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
+        input_payload={
+            "system": (
+                "You are a data analysis assistant. "
+                "Respond with valid JSON only. "
+                "Return a single JSON object matching the schema described in the user prompt."
+            ),
+            "prompt": prompt,
+        },
+        provider="ollama",
+        model="llama3.1:8b",
+        configuration={"format": "json", "stream": False, "timeout": 120},
+    )
+    store.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text=prompt,
+        response_text='{"description": "Cached"}',
+        prompt_hash=prompt_hash,
+        tokens_in=11,
+        tokens_out=4,
+    )
+
+    async def fail_call(payload: dict) -> dict:
+        raise AssertionError("live call should not run")
+
+    provider._call_ollama = fail_call  # type: ignore[method-assign]
+
+    result = await provider.analyze(prompt)
+    logs = store.get_llm_audit_log()
+
+    assert result == {"description": "Cached"}
+    assert logs[0]["cached"] == 1
+    assert logs[0]["tokens_in"] == 11
+    store.close()
+
+
+@pytest.mark.asyncio()
+async def test_ollama_offline_mode_returns_empty_on_cache_miss() -> None:
+    """Offline mode should not attempt live provider calls when cache is missing."""
+    store = MetadataStore(":memory:")
+    store.init()
+    settings = HeadwaterSettings(llm_provider="ollama", llm_offline_mode=True)
+    provider = OllamaProvider(settings, store=store)
+
+    async def fail_call(payload: dict) -> dict:
+        raise AssertionError("live call should not run")
+
+    provider._call_ollama = fail_call  # type: ignore[method-assign]
+
+    result = await provider.analyze("Uncached prompt")
+    logs = store.get_llm_audit_log()
+
+    assert result == {}
+    assert len(logs) == 1
+    assert logs[0]["cached"] == 1
+    assert logs[0]["response_text"] == ""
+    store.close()

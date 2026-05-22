@@ -41,6 +41,7 @@ class HeadwaterSettings(BaseSettings):
     llm_provider: Literal["none", "anthropic", "ollama", "openai_compat"] = "none"
     llm_api_key: str | None = None
     llm_model: str = "claude-sonnet-4-20250514"
+    llm_offline_mode: bool = False
 
     # Ollama (local LLM)
     ollama_base_url: str = "http://localhost:11434"

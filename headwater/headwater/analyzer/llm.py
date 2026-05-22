@@ -53,6 +53,7 @@ class AnthropicProvider(LLMProvider):
         self._client = anthropic.AsyncAnthropic(api_key=settings.llm_api_key)
         self._model = settings.llm_model
         self._store = store
+        self._offline_mode = settings.llm_offline_mode
 
     async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
         """Send prompt to Claude and return parsed JSON response.
@@ -67,6 +68,31 @@ class AnthropicProvider(LLMProvider):
             "You MUST respond with valid JSON only — no prose, no markdown fences, no explanation. "
             "Return a single JSON object matching the schema described in the user prompt."
         )
+        prompt_hash = make_llm_request_hash(
+            prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
+            input_payload={"system": _system, "prompt": prompt},
+            provider="anthropic",
+            model=self._model,
+            configuration={"max_tokens": 4096},
+        )
+        cached = _cached_response(
+            self._store,
+            provider="anthropic",
+            model=self._model,
+            prompt_hash=prompt_hash,
+        )
+        if cached is not None:
+            self._insert_cached_audit(
+                prompt,
+                cached.get("response_text") or "",
+                prompt_hash=prompt_hash,
+                tokens_in=int(cached.get("tokens_in") or 0),
+                tokens_out=int(cached.get("tokens_out") or 0),
+            )
+            return _parse_json_response(cached.get("response_text") or "")
+        if self._offline_mode:
+            self._insert_cached_audit(prompt, "", prompt_hash=prompt_hash)
+            return {}
         response_text = ""
         tokens_in = 0
         tokens_out = 0
@@ -90,13 +116,6 @@ class AnthropicProvider(LLMProvider):
         finally:
             if self._store is not None:
                 try:
-                    prompt_hash = make_llm_request_hash(
-                        prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
-                        input_payload={"system": _system, "prompt": prompt},
-                        provider="anthropic",
-                        model=self._model,
-                        configuration={"max_tokens": 4096},
-                    )
                     self._store.insert_llm_audit(
                         provider="anthropic",
                         model=self._model,
@@ -109,6 +128,31 @@ class AnthropicProvider(LLMProvider):
                 except Exception as audit_err:
                     logger.warning("Failed to write LLM audit log: %s", audit_err)
         return result
+
+    def _insert_cached_audit(
+        self,
+        prompt: str,
+        response_text: str,
+        *,
+        prompt_hash: str,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+    ) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.insert_llm_audit(
+                provider="anthropic",
+                model=self._model,
+                prompt_text=prompt,
+                response_text=response_text,
+                prompt_hash=prompt_hash,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cached=1,
+            )
+        except Exception as audit_err:
+            logger.warning("Failed to write cached LLM audit log: %s", audit_err)
 
 
 def get_provider(
@@ -123,6 +167,21 @@ def get_provider(
 
         return OllamaProvider(settings, store=store)
     return NoLLMProvider()
+
+
+def _cached_response(
+    store: MetadataStore | None,
+    *,
+    provider: str,
+    model: str,
+    prompt_hash: str,
+) -> dict | None:
+    if store is None:
+        return None
+    getter = getattr(store, "get_cached_llm_response", None)
+    if getter is None:
+        return None
+    return getter(provider=provider, model=model, prompt_hash=prompt_hash)
 
 
 def make_cache_key(table_name: str, column_names: list[str]) -> str:

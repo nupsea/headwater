@@ -3234,10 +3234,33 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
     def get_llm_audit_log(self, limit: int = 100) -> list[dict]:
         """Return the most recent LLM audit log entries."""
         rows = self.con.execute(
-            "SELECT * FROM llm_audit_log ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM llm_audit_log ORDER BY created_at DESC, id DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_cached_llm_response(
+        self,
+        *,
+        provider: str,
+        model: str,
+        prompt_hash: str,
+    ) -> dict | None:
+        """Return the latest non-empty LLM response for an identical request hash."""
+        row = self.con.execute(
+            """
+            SELECT *
+            FROM llm_audit_log
+            WHERE provider = ?
+              AND model = ?
+              AND prompt_hash = ?
+              AND COALESCE(response_text, '') <> ''
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (provider, model, prompt_hash),
+        ).fetchone()
+        return dict(row) if row else None
 
     # -- Schema snapshots (US-401) -----------------------------------------
 
