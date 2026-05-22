@@ -232,7 +232,12 @@ def import_context_exports(
             entry=enum_mapping,
         )
 
-    for pack_name in parsed.get("advisor_packs.yaml", {}).get("extends", []):
+    explicit_pack_extends = {
+        str(pack_name).strip()
+        for pack_name in parsed.get("advisor_packs.yaml", {}).get("extends", [])
+        if str(pack_name).strip()
+    }
+    for pack_name in explicit_pack_extends:
         if not pack_name:
             continue
         entry = {
@@ -259,6 +264,8 @@ def import_context_exports(
         doc = parsed.get(file_name, {})
         for section, item_type in sections.items():
             for entry in doc.get(section, []):
+                if file_name == "advisor_packs.yaml" and item_type == "advisor_pack":
+                    entry = _normalize_advisor_pack_entry(entry, explicit_pack_extends)
                 _merge_generic_item(
                     items,
                     project_id=project["id"],
@@ -369,6 +376,35 @@ def _merge_generic_item(
         "source": "import",
         "evidence": entry.get("evidence") or [],
     }
+
+
+def _normalize_advisor_pack_entry(entry: dict, explicit_pack_extends: set[str]) -> dict:
+    if not isinstance(entry, dict):
+        return entry
+    normalized = dict(entry)
+    value = dict(normalized.get("value") or {})
+    pack_name = str(
+        normalized.get("name")
+        or value.get("pack_name")
+        or value.get("name")
+        or ""
+    ).strip()
+    if pack_name:
+        value.setdefault("pack_name", pack_name)
+    if normalized.get("version") is not None and "pack_version" not in value:
+        value["pack_version"] = normalized.get("version")
+    if normalized.get("dependencies") is not None and "dependencies" not in value:
+        value["dependencies"] = normalized.get("dependencies")
+    if normalized.get("supported_item_types") is not None and "supported_item_types" not in value:
+        value["supported_item_types"] = normalized.get("supported_item_types")
+    if normalized.get("description") is not None and "description" not in value:
+        value["description"] = normalized.get("description")
+    if pack_name and pack_name in explicit_pack_extends:
+        value["extends"] = True
+    elif normalized.get("extends") is not None and "extends" not in value:
+        value["extends"] = normalized.get("extends")
+    normalized["value"] = value
+    return normalized
 
 
 def _merge_column_semantics(

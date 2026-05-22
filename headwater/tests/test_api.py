@@ -584,6 +584,7 @@ class TestProjectContext:
         assert "## Cold Start Summary" in files["REVIEW.md"]
         advisor_packs = yaml.safe_load(files["advisor_packs.yaml"])
         assert advisor_packs["extends"] == []
+        assert advisor_packs["advisor_packs"] == []
 
     def test_project_context_import_merges_exported_files(self, client):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
@@ -651,6 +652,10 @@ class TestProjectContext:
                             "pack_name": "finance_ops",
                             "version": "2026.05",
                         },
+                        "version": "2026.05",
+                        "dependencies": ["common_core"],
+                        "supported_item_types": ["business_lens", "question_template"],
+                        "description": "Finance operations starter pack",
                     }
                 ],
             },
@@ -703,12 +708,26 @@ class TestProjectContext:
         assert imported_packs["healthcare_core"]["value"]["extends"] is True
         assert imported_packs["healthcare_core"]["value"]["pack_name"] == "healthcare_core"
         assert "finance_ops" in imported_packs
-        assert imported_packs["finance_ops"]["value"]["version"] == "2026.05"
+        assert imported_packs["finance_ops"]["value"]["pack_version"] == "2026.05"
+        assert imported_packs["finance_ops"]["value"]["dependencies"] == ["common_core"]
+        assert imported_packs["finance_ops"]["value"]["supported_item_types"] == [
+            "business_lens",
+            "question_template",
+        ]
+        assert imported_packs["finance_ops"]["value"]["description"] == "Finance operations starter pack"
 
         reexported = client.get("/api/projects/source/context/export")
         assert reexported.status_code == 200
         advisor_packs = yaml.safe_load(reexported.json()["files"]["advisor_packs.yaml"])
         assert advisor_packs["extends"] == ["healthcare_core", "finance_ops"]
+        finance_pack = next(
+            entry for entry in advisor_packs["advisor_packs"] if entry["name"] == "finance_ops"
+        )
+        assert finance_pack["version"] == "2026.05"
+        assert finance_pack["dependencies"] == ["common_core"]
+        assert finance_pack["supported_item_types"] == ["business_lens", "question_template"]
+        assert finance_pack["description"] == "Finance operations starter pack"
+        assert finance_pack["value"]["pack_version"] == "2026.05"
 
 
 class TestInsightRanking:

@@ -125,7 +125,11 @@ def build_context_exports(payload: dict, *, include_proposed: bool = True) -> di
         "version": 1,
         "project_id": project_id,
         "extends": _advisor_pack_extends(items),
-        "advisor_packs": _entries_for_type(items, "advisor_pack"),
+        "advisor_packs": [
+            _advisor_pack_entry(item)
+            for item in items
+            if item.get("item_type") == "advisor_pack"
+        ],
     }
 
     return {
@@ -259,6 +263,33 @@ def _resource_entry(resource: dict) -> dict:
         "source": resource.get("source"),
         "metadata": resource.get("metadata") or {},
     }
+
+
+def _advisor_pack_entry(item: dict) -> dict:
+    value = item.get("value") or {}
+    entry = {
+        "id": item.get("id"),
+        "name": value.get("pack_name") or item.get("name"),
+        "title": item.get("title"),
+        "scope": item.get("scope"),
+        "status": item.get("status"),
+        "confidence": item.get("confidence"),
+        "source": item.get("source"),
+    }
+    if value.get("pack_version") is not None:
+        entry["version"] = value.get("pack_version")
+    elif value.get("version") is not None:
+        entry["version"] = value.get("version")
+    if value.get("dependencies"):
+        entry["dependencies"] = value.get("dependencies")
+    if value.get("supported_item_types"):
+        entry["supported_item_types"] = value.get("supported_item_types")
+    if value.get("description"):
+        entry["description"] = value.get("description")
+    if value.get("extends") is not None:
+        entry["extends"] = value.get("extends")
+    entry["value"] = value
+    return entry
 
 
 def _advisor_pack_extends(items: list[dict]) -> list[str]:
