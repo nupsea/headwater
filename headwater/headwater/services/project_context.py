@@ -227,6 +227,7 @@ _PACK_TYPED_FILE_SECTIONS = {
         "fk_candidates": "fk_candidate",
     },
 }
+_PACK_MANIFEST_NAME = "pack.yaml"
 
 
 def load_project_context_bundle(
@@ -367,8 +368,9 @@ def _load_advisor_pack_items(
     if not pack_names:
         return []
 
-    existing_keys = {_item_override_key(item) for item in items}
-    loaded: list[dict] = []
+    project_keys = {_item_override_key(item) for item in items}
+    loaded_by_key: dict[tuple[str, str | None, str | None, str], dict] = {}
+    key_order: list[tuple[str, str | None, str | None, str]] = []
     for pack_name in pack_names:
         for item in _load_single_advisor_pack(
             pack_name,
@@ -376,11 +378,15 @@ def _load_advisor_pack_items(
             source_name=source_name,
         ):
             override_key = _item_override_key(item)
-            if override_key in existing_keys:
+            if override_key in project_keys:
                 continue
-            existing_keys.add(override_key)
-            loaded.append(item)
-    return loaded
+            previous = loaded_by_key.get(override_key)
+            if previous is not None:
+                item = _with_pack_override_metadata(item, previous)
+            else:
+                key_order.append(override_key)
+            loaded_by_key[override_key] = item
+    return [loaded_by_key[key] for key in key_order]
 
 
 def _active_advisor_pack_names(items: list[dict]) -> list[str]:
@@ -405,12 +411,36 @@ def _load_single_advisor_pack(
     *,
     project_id: str,
     source_name: str,
+    _visited: set[str] | None = None,
+    _stack: set[str] | None = None,
 ) -> list[dict]:
-    pack_dir = _metadata_root() / "packs" / _slugify(pack_name)
+    normalized_name = _slugify(pack_name)
+    if _visited is None:
+        _visited = set()
+    if _stack is None:
+        _stack = set()
+    if normalized_name in _stack:
+        return []
+    if normalized_name in _visited:
+        return []
+
+    pack_dir = _metadata_root() / "packs" / normalized_name
     if not pack_dir.exists():
         return []
 
+    _stack.add(normalized_name)
+    manifest = _load_pack_manifest(pack_dir, pack_name)
     loaded: list[dict] = []
+    for dependency in manifest.get("dependencies", []):
+        loaded.extend(
+            _load_single_advisor_pack(
+                dependency,
+                project_id=project_id,
+                source_name=source_name,
+                _visited=_visited,
+                _stack=_stack,
+            )
+        )
     for file_name, sections in _PACK_TYPED_FILE_SECTIONS.items():
         path = pack_dir / file_name
         if not path.exists():
@@ -423,13 +453,36 @@ def _load_single_advisor_pack(
                 item = _pack_entry_to_item(
                     entry,
                     item_type=item_type,
-                    pack_name=pack_name,
+                    pack_name=str(manifest.get("name") or pack_name),
+                    pack_meta=manifest,
                     project_id=project_id,
                     source_name=source_name,
                 )
                 if item is not None:
                     loaded.append(item)
+    _stack.remove(normalized_name)
+    _visited.add(normalized_name)
     return loaded
+
+
+def _load_pack_manifest(pack_dir: Path, pack_name: str) -> dict:
+    manifest_path = pack_dir / _PACK_MANIFEST_NAME
+    manifest = _parse_metadata_doc(manifest_path) if manifest_path.exists() else {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    dependencies = manifest.get("dependencies") or manifest.get("extends") or []
+    normalized_dependencies = [
+        str(dependency).strip()
+        for dependency in dependencies
+        if str(dependency).strip()
+    ]
+    return {
+        "name": str(manifest.get("name") or pack_name),
+        "version": manifest.get("version"),
+        "dependencies": normalized_dependencies,
+        "description": manifest.get("description"),
+        "supported_item_types": manifest.get("supported_item_types") or [],
+    }
 
 
 def _parse_metadata_doc(path: Path) -> dict | None:
@@ -454,6 +507,7 @@ def _pack_entry_to_item(
     *,
     item_type: str,
     pack_name: str,
+    pack_meta: dict,
     project_id: str,
     source_name: str,
 ) -> dict | None:
@@ -485,6 +539,8 @@ def _pack_entry_to_item(
         }
     value = dict(value or {})
     value.setdefault("pack_name", pack_name)
+    if pack_meta.get("version") is not None:
+        value.setdefault("pack_version", pack_meta.get("version"))
     item_id = entry.get("id") or _pack_item_id(
         pack_name,
         item_type,
@@ -507,6 +563,34 @@ def _pack_entry_to_item(
         "confidence": float(entry.get("confidence") or 0.6),
         "source": "advisor_pack",
         "evidence": entry.get("evidence") or [],
+    }
+
+
+def _with_pack_override_metadata(current: dict, previous: dict) -> dict:
+    previous_value = dict(previous.get("value") or {})
+    current_value = dict(current.get("value") or {})
+    previous_pack = str(previous_value.get("pack_name") or previous.get("name") or "pack")
+    current_pack = str(current_value.get("pack_name") or current.get("name") or "pack")
+    current_value["overrides_pack"] = previous_pack
+    evidence = list(current.get("evidence") or [])
+    evidence.append(
+        {
+            "evidence_type": "advisor_pack_conflict",
+            "source": "advisor_pack",
+            "summary": f"Pack '{current_pack}' overrides '{previous_pack}'.",
+            "payload": {
+                "winning_pack": current_pack,
+                "overridden_pack": previous_pack,
+                "item_type": current.get("item_type"),
+                "table_name": current.get("table_name"),
+                "column_name": current.get("column_name"),
+            },
+        }
+    )
+    return {
+        **current,
+        "value": current_value,
+        "evidence": evidence,
     }
 
 

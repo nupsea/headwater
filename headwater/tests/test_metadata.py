@@ -880,6 +880,18 @@ def test_load_project_context_bundle_applies_advisor_pack_items(
 ):
     pack_dir = tmp_path / "packs" / "healthcare-core"
     pack_dir.mkdir(parents=True)
+    (pack_dir / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "healthcare_core",
+                "version": "2026.05",
+                "supported_item_types": ["business_lens", "question_template", "column_policy"],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
     (pack_dir / "business_lenses.yaml").write_text(
         yaml.safe_dump(
             {
@@ -981,6 +993,7 @@ def test_load_project_context_bundle_applies_advisor_pack_items(
     assert [item["name"] for item in provider.advisor_packs()] == ["healthcare_core"]
     assert provider.business_lenses()[0]["name"] == "care_quality"
     assert provider.business_lenses()[0]["source"] == "advisor_pack"
+    assert provider.business_lenses()[0]["value"]["pack_version"] == "2026.05"
     assert provider.question_templates()[0]["value"]["template"].startswith("Which units")
     assert provider.low_signal_columns() == set()
     assert provider.preferred_dimensions()[0]["column_name"] == "status"
@@ -988,6 +1001,105 @@ def test_load_project_context_bundle_applies_advisor_pack_items(
         item.source == "advisor_pack" and item.item_type == "question_template"
         for item in bundle.items
     )
+
+
+def test_advisor_pack_dependencies_load_recursively_with_child_override(
+    meta: MetadataStore, tmp_path, monkeypatch
+):
+    base_dir = tmp_path / "packs" / "common-core"
+    base_dir.mkdir(parents=True)
+    (base_dir / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "common_core",
+                "version": "1.0",
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (base_dir / "business_lenses.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "business_lenses": [
+                    {
+                        "name": "care_quality",
+                        "scope": "project",
+                        "value": {"priority": 2},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+
+    child_dir = tmp_path / "packs" / "healthcare-core"
+    child_dir.mkdir(parents=True)
+    (child_dir / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "healthcare_core",
+                "version": "2.0",
+                "dependencies": ["common_core"],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (child_dir / "business_lenses.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "business_lenses": [
+                    {
+                        "name": "care_quality",
+                        "scope": "project",
+                        "value": {"priority": 9},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(project_context_service, "_metadata_root", lambda: tmp_path)
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_project_context_item(
+        id="advisor_pack:healthcare_core",
+        project_id="src",
+        source_name="src",
+        item_type="advisor_pack",
+        scope="project",
+        name="healthcare_core",
+        title="Healthcare Core",
+        value={"pack_name": "healthcare_core", "extends": True},
+        status="approved",
+        confidence=1.0,
+        source="import",
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[TableInfo(name="encounters", columns=[ColumnInfo(name="status", dtype="varchar")])],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    provider = project_context_provider(bundle)
+
+    assert provider.business_lenses()[0]["value"]["priority"] == 9
+    assert provider.business_lenses()[0]["value"]["pack_name"] == "healthcare_core"
+    assert provider.business_lenses()[0]["value"]["pack_version"] == "2.0"
+    assert provider.business_lenses()[0]["value"]["overrides_pack"] == "common_core"
+    assert provider.business_lenses()[0]["evidence"][-1]["evidence_type"] == "advisor_pack_conflict"
 
 
 def test_persist_pk_fk_stores_reload_safe_relationship_values(meta: MetadataStore):
