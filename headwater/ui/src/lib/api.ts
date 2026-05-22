@@ -950,6 +950,9 @@ export interface LLMSettings {
   model: string;
   ollama_base_url: string;
   openai_compat_base_url: string | null;
+  offline_mode: boolean;
+  max_tokens_per_run: number;
+  max_tokens_per_source: number;
   has_api_key: boolean;
   has_openai_compat_key: boolean;
 }
@@ -961,6 +964,9 @@ export interface LLMSettingsUpdate {
   ollama_base_url?: string;
   openai_compat_base_url?: string;
   openai_compat_api_key?: string;
+  offline_mode?: boolean;
+  max_tokens_per_run?: number;
+  max_tokens_per_source?: number;
 }
 
 // ---------- v2: Catalog health (from insights) ----------

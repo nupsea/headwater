@@ -1468,6 +1468,7 @@ def test_save_and_load_settings(tmp_path):
         data_dir=tmp_path,
         llm_provider="ollama",
         llm_model="llama3.2",
+        llm_offline_mode=True,
         llm_max_tokens_per_run=1234,
         llm_max_tokens_per_source=5678,
     )
@@ -1477,6 +1478,7 @@ def test_save_and_load_settings(tmp_path):
     data = json.loads(path.read_text())
     assert data["llm_provider"] == "ollama"
     assert data["llm_model"] == "llama3.2"
+    assert data["llm_offline_mode"] is True
     assert data["llm_max_tokens_per_run"] == 1234
     assert data["llm_max_tokens_per_source"] == 5678
     # Secrets should not be persisted
@@ -1486,6 +1488,7 @@ def test_save_and_load_settings(tmp_path):
     loaded = _load_settings_from_file(tmp_path)
     assert loaded["llm_provider"] == "ollama"
     assert loaded["llm_model"] == "llama3.2"
+    assert loaded["llm_offline_mode"] is True
     assert loaded["llm_max_tokens_per_run"] == 1234
     assert loaded["llm_max_tokens_per_source"] == 5678
 

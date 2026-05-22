@@ -46,6 +46,41 @@ class TestStatus:
         assert data["tables"] == 8
 
 
+class TestSettings:
+    def test_llm_settings_roundtrip_replay_and_budget_controls(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from headwater.core.config import get_settings
+
+        monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+        get_settings.cache_clear()
+        app = create_app(in_memory=True)
+        with TestClient(app) as local_client:
+            resp = local_client.put(
+                "/api/settings/llm",
+                json={
+                    "provider": "none",
+                    "offline_mode": True,
+                    "max_tokens_per_run": 1234,
+                    "max_tokens_per_source": 5678,
+                },
+            )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["offline_mode"] is True
+            assert data["max_tokens_per_run"] == 1234
+            assert data["max_tokens_per_source"] == 5678
+
+            fetched = local_client.get("/api/settings/llm").json()
+            assert fetched["offline_mode"] is True
+            assert fetched["max_tokens_per_run"] == 1234
+            assert fetched["max_tokens_per_source"] == 5678
+        get_settings.cache_clear()
+
+
 class TestProjectContext:
     def test_discovery_bootstraps_project_context(self, client):
         discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})

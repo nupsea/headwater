@@ -17,6 +17,7 @@ _PERSISTED_KEYS = frozenset(
     {
         "llm_provider",
         "llm_model",
+        "llm_offline_mode",
         "llm_max_tokens_per_run",
         "llm_max_tokens_per_source",
         "ollama_base_url",
