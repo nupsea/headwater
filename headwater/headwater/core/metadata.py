@@ -181,6 +181,7 @@ CREATE INDEX IF NOT EXISTS idx_context_feedback_item
 
 CREATE TABLE IF NOT EXISTS llm_audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT,
     provider    TEXT NOT NULL,
     model       TEXT NOT NULL,
     prompt_hash TEXT,
@@ -522,6 +523,8 @@ class MetadataStore:
             # Warehouse evidence metadata
             "ALTER TABLE evidence_records ADD COLUMN query_id TEXT",
             "ALTER TABLE evidence_records ADD COLUMN statement_timeout_seconds INTEGER",
+            # Phase 12: source-scoped LLM budget accounting
+            "ALTER TABLE llm_audit_log ADD COLUMN source_name TEXT",
         ]
         # sync_events table for source activity history (briefing + sources page)
         self.con.executescript(
@@ -3207,6 +3210,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         prompt_text: str,
         response_text: str,
         *,
+        source_name: str | None = None,
         prompt_hash: str | None = None,
         tokens_in: int = 0,
         tokens_out: int = 0,
@@ -3215,10 +3219,11 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         """Write one row to the LLM audit log."""
         self.con.execute(
             "INSERT INTO llm_audit_log "
-            "(provider, model, prompt_hash, prompt_text, response_text, "
+            "(source_name, provider, model, prompt_hash, prompt_text, response_text, "
             "tokens_in, tokens_out, cached) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
+                source_name,
                 provider,
                 model,
                 prompt_hash,
@@ -3261,6 +3266,27 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
             (provider, model, prompt_hash),
         ).fetchone()
         return dict(row) if row else None
+
+    def get_llm_token_usage(
+        self,
+        *,
+        provider: str,
+        model: str,
+        source_name: str,
+    ) -> int:
+        """Return audited live-call token usage for a provider/model/source."""
+        row = self.con.execute(
+            """
+            SELECT COALESCE(SUM(tokens_in + tokens_out), 0) AS total_tokens
+            FROM llm_audit_log
+            WHERE provider = ?
+              AND model = ?
+              AND source_name = ?
+              AND cached = 0
+            """,
+            (provider, model, source_name),
+        ).fetchone()
+        return int(row["total_tokens"] if row else 0)
 
     # -- Schema snapshots (US-401) -----------------------------------------
 

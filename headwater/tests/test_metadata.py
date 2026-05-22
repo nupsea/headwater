@@ -1163,6 +1163,7 @@ def test_llm_audit_log_roundtrip(meta: MetadataStore):
         "claude-sonnet-4-5",
         prompt_text="analyze this table",
         response_text='{"description": "test"}',
+        source_name="orders",
         tokens_in=100,
         tokens_out=50,
     )
@@ -1170,6 +1171,7 @@ def test_llm_audit_log_roundtrip(meta: MetadataStore):
     assert len(entries) == 1
     e = entries[0]
     assert e["provider"] == "anthropic"
+    assert e["source_name"] == "orders"
     assert e["tokens_in"] == 100
     assert e["tokens_out"] == 50
 
@@ -1217,6 +1219,46 @@ def test_cached_llm_response_returns_latest_matching_hash(meta: MetadataStore):
             prompt_hash="abc123",
         )
         is None
+    )
+
+
+def test_llm_token_usage_is_scoped_by_source_provider_and_model(meta: MetadataStore):
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="a",
+        response_text="{}",
+        source_name="orders",
+        tokens_in=10,
+        tokens_out=5,
+    )
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="cached",
+        response_text="{}",
+        source_name="orders",
+        tokens_in=100,
+        tokens_out=50,
+        cached=1,
+    )
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="other source",
+        response_text="{}",
+        source_name="finance",
+        tokens_in=20,
+        tokens_out=10,
+    )
+
+    assert (
+        meta.get_llm_token_usage(
+            provider="ollama",
+            model="llama3.1:8b",
+            source_name="orders",
+        )
+        == 15
     )
 
 
@@ -1385,6 +1427,7 @@ def test_save_and_load_settings(tmp_path):
         llm_provider="ollama",
         llm_model="llama3.2",
         llm_max_tokens_per_run=1234,
+        llm_max_tokens_per_source=5678,
     )
     path = save_settings_to_file(settings)
 
@@ -1393,6 +1436,7 @@ def test_save_and_load_settings(tmp_path):
     assert data["llm_provider"] == "ollama"
     assert data["llm_model"] == "llama3.2"
     assert data["llm_max_tokens_per_run"] == 1234
+    assert data["llm_max_tokens_per_source"] == 5678
     # Secrets should not be persisted
     assert "llm_api_key" not in data
 
@@ -1401,6 +1445,7 @@ def test_save_and_load_settings(tmp_path):
     assert loaded["llm_provider"] == "ollama"
     assert loaded["llm_model"] == "llama3.2"
     assert loaded["llm_max_tokens_per_run"] == 1234
+    assert loaded["llm_max_tokens_per_source"] == 5678
 
 
 def test_load_settings_missing_file(tmp_path):

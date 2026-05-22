@@ -24,6 +24,9 @@ _REDACTED_VALUE = "[REDACTED]"
 _BUDGET_EXHAUSTED_RESPONSE = json.dumps(
     {"status": "partial", "reason": "llm_token_budget_exhausted"}
 )
+_SOURCE_BUDGET_EXHAUSTED_RESPONSE = json.dumps(
+    {"status": "partial", "reason": "llm_source_token_budget_exhausted"}
+)
 
 
 class LLMProvider:
@@ -75,6 +78,7 @@ class AnthropicProvider(LLMProvider):
         settings: HeadwaterSettings,
         store: MetadataStore | None = None,
         token_budget: LLMTokenBudget | None = None,
+        source_name: str | None = None,
     ) -> None:
         if not settings.llm_api_key:
             raise ValueError("HEADWATER_LLM_API_KEY is required for Anthropic provider")
@@ -85,6 +89,8 @@ class AnthropicProvider(LLMProvider):
         self._store = store
         self._offline_mode = settings.llm_offline_mode
         self._token_budget = token_budget or LLMTokenBudget(settings.llm_max_tokens_per_run)
+        self._source_name = source_name
+        self._source_token_budget = max(0, int(settings.llm_max_tokens_per_source or 0))
 
     async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
         """Send prompt to Claude and return parsed JSON response.
@@ -128,6 +134,9 @@ class AnthropicProvider(LLMProvider):
         if not self._token_budget.can_spend(estimated_tokens):
             self._insert_budget_audit(prompt, prompt_hash=prompt_hash)
             return {}
+        if not self._source_budget_allows(estimated_tokens):
+            self._insert_source_budget_audit(prompt, prompt_hash=prompt_hash)
+            return {}
         response_text = ""
         tokens_in = 0
         tokens_out = 0
@@ -157,6 +166,7 @@ class AnthropicProvider(LLMProvider):
                         model=self._model,
                         prompt_text=prompt,
                         response_text=response_text,
+                        source_name=self._source_name,
                         prompt_hash=prompt_hash,
                         tokens_in=tokens_in,
                         tokens_out=tokens_out,
@@ -182,6 +192,7 @@ class AnthropicProvider(LLMProvider):
                 model=self._model,
                 prompt_text=prompt,
                 response_text=response_text,
+                source_name=self._source_name,
                 prompt_hash=prompt_hash,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
@@ -199,26 +210,64 @@ class AnthropicProvider(LLMProvider):
                 model=self._model,
                 prompt_text=prompt,
                 response_text=_BUDGET_EXHAUSTED_RESPONSE,
+                source_name=self._source_name,
                 prompt_hash=prompt_hash,
                 cached=0,
             )
         except Exception as audit_err:
             logger.warning("Failed to write budget LLM audit log: %s", audit_err)
 
+    def _insert_source_budget_audit(self, prompt: str, *, prompt_hash: str) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.insert_llm_audit(
+                provider="anthropic",
+                model=self._model,
+                prompt_text=prompt,
+                response_text=_SOURCE_BUDGET_EXHAUSTED_RESPONSE,
+                source_name=self._source_name,
+                prompt_hash=prompt_hash,
+                cached=0,
+            )
+        except Exception as audit_err:
+            logger.warning("Failed to write source-budget LLM audit log: %s", audit_err)
+
+    def _source_budget_allows(self, estimated_tokens: int) -> bool:
+        if self._source_token_budget <= 0 or not self._source_name or self._store is None:
+            return True
+        usage = self._store.get_llm_token_usage(
+            provider="anthropic",
+            model=self._model,
+            source_name=self._source_name,
+        )
+        return usage + max(0, estimated_tokens) <= self._source_token_budget
+
 
 def get_provider(
     settings: HeadwaterSettings,
     store: MetadataStore | None = None,
+    source_name: str | None = None,
 ) -> LLMProvider:
     """Factory: return the appropriate LLM provider based on settings."""
     if settings.llm_provider == "anthropic":
         budget = LLMTokenBudget(settings.llm_max_tokens_per_run)
-        return AnthropicProvider(settings, store=store, token_budget=budget)
+        return AnthropicProvider(
+            settings,
+            store=store,
+            token_budget=budget,
+            source_name=source_name,
+        )
     if settings.llm_provider == "ollama":
         from headwater.analyzer.ollama import OllamaProvider
 
         budget = LLMTokenBudget(settings.llm_max_tokens_per_run)
-        return OllamaProvider(settings, store=store, token_budget=budget)
+        return OllamaProvider(
+            settings,
+            store=store,
+            token_budget=budget,
+            source_name=source_name,
+        )
     return NoLLMProvider()
 
 

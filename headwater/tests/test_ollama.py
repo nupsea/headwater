@@ -240,3 +240,34 @@ async def test_ollama_token_budget_exhaustion_skips_live_call() -> None:
     assert logs[0]["cached"] == 0
     assert "llm_token_budget_exhausted" in logs[0]["response_text"]
     store.close()
+
+
+@pytest.mark.asyncio()
+async def test_ollama_source_token_budget_exhaustion_skips_live_call() -> None:
+    """Source-scoped budget exhaustion should be auditable."""
+    store = MetadataStore(":memory:")
+    store.init()
+    store.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="prior",
+        response_text="{}",
+        source_name="orders",
+        tokens_in=10,
+        tokens_out=10,
+    )
+    settings = HeadwaterSettings(llm_provider="ollama", llm_max_tokens_per_source=21)
+    provider = OllamaProvider(settings, store=store, source_name="orders")
+
+    async def fail_call(payload: dict) -> dict:
+        raise AssertionError("live call should not run")
+
+    provider._call_ollama = fail_call  # type: ignore[method-assign]
+
+    result = await provider.analyze("Prompt that exceeds remaining source budget")
+    logs = store.get_llm_audit_log()
+
+    assert result == {}
+    assert logs[0]["source_name"] == "orders"
+    assert "llm_source_token_budget_exhausted" in logs[0]["response_text"]
+    store.close()
