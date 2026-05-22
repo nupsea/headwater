@@ -15,13 +15,45 @@ const FILE_ORDER = [
   "context.yaml",
   "semantic_types.yaml",
   "semantic_schema.yaml",
+  "derived_fields.yaml",
+  "insight_families.yaml",
   "lookups.yaml",
   "glossary.yaml",
+  "business_lenses.yaml",
+  "presentation.yaml",
+  "question_templates.yaml",
+  "column_policies.yaml",
+  "relationship_hints.yaml",
   "resources.yaml",
+  "advisor_packs.yaml",
   "REVIEW.md",
 ] as const;
 
 type ContextAction = "approve" | "reject" | "lock";
+type ReviewFilter = "needs_action" | "drift" | "high_impact" | "resources" | "all";
+
+const HIGH_IMPACT_TYPES = new Set([
+  "row_grain",
+  "row_entity",
+  "time_anchor",
+  "pk_candidate",
+  "fk_candidate",
+  "semantic_role",
+  "column_semantics",
+  "relationship",
+  "relationship_hint",
+]);
+
+const COMPACT_CARD_TYPES = new Set([
+  "row_grain",
+  "row_entity",
+  "time_anchor",
+  "pk_candidate",
+  "fk_candidate",
+  "semantic_role",
+  "column_semantics",
+  "open_question",
+]);
 
 function statusTone(status: string) {
   if (status === "locked") return "border-success/30 bg-success/10 text-foreground";
@@ -86,6 +118,55 @@ function driftSummary(report: ProjectContextDriftReport) {
   return parts.length > 0 ? parts.join(" · ") : "No schema changes";
 }
 
+function isDriftItem(item: ProjectContextItem) {
+  const value = item.value || {};
+  return (
+    item.status === "needs_review" &&
+    (item.source === "context_drift" ||
+      typeof value.drift_reason === "string" ||
+      value.drift_review_action === "needs_review")
+  );
+}
+
+function isResourceItem(item: ProjectContextItem) {
+  if (item.source === "resource" || item.source === "context_resource_enrichment") return true;
+  return item.evidence.some(
+    (entry) => entry.source === "resource" || entry.evidence_type === "resource"
+  );
+}
+
+function isHighImpactItem(item: ProjectContextItem) {
+  return HIGH_IMPACT_TYPES.has(item.item_type);
+}
+
+function compactCardLabel(item: ProjectContextItem) {
+  switch (item.item_type) {
+    case "row_grain":
+      return "Row grain";
+    case "row_entity":
+      return "Row entity";
+    case "time_anchor":
+      return "Canonical time";
+    case "pk_candidate":
+      return "Primary key";
+    case "fk_candidate":
+      return "Foreign key";
+    case "semantic_role":
+      return "Semantic role";
+    case "column_semantics":
+      return "Column semantics";
+    case "open_question":
+      return "Open question";
+    default:
+      return item.item_type.replaceAll("_", " ");
+  }
+}
+
+function readinessTone(complete: boolean, warning = false) {
+  if (warning) return "border-warning/30 bg-warning/10";
+  return complete ? "border-success/30 bg-success/10" : "border-border bg-background";
+}
+
 function itemPriority(item: ProjectContextItem, selectedTable: string | null) {
   const selectedBoost = item.table_name && item.table_name === selectedTable ? -4 : 0;
   const statusRank =
@@ -130,6 +211,7 @@ export function ProjectContextReview({
   const [selectedFile, setSelectedFile] = useState<string>("context.yaml");
   const [fileEditor, setFileEditor] = useState("");
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("needs_action");
 
   useEffect(() => {
     let cancelled = false;
@@ -177,16 +259,92 @@ export function ProjectContextReview({
       if (!selectedTableOnly || !selectedTable) return true;
       return item.table_name === selectedTable;
     });
-    return [...base].sort(
+    const filtered = base.filter((item) => {
+      switch (reviewFilter) {
+        case "needs_action":
+          return item.status === "proposed" || item.status === "needs_review";
+        case "drift":
+          return isDriftItem(item);
+        case "high_impact":
+          return isHighImpactItem(item);
+        case "resources":
+          return isResourceItem(item);
+        case "all":
+        default:
+          return true;
+      }
+    });
+    return [...filtered].sort(
       (left, right) => itemPriority(left, selectedTable) - itemPriority(right, selectedTable)
     );
-  }, [context, selectedTable, selectedTableOnly]);
+  }, [context, reviewFilter, selectedTable, selectedTableOnly]);
 
   const openQuestions = visibleItems.filter((item) => item.item_type === "open_question");
-  const attentionItems = visibleItems.filter(
+  const attentionItems = (context?.items ?? []).filter(
     (item) => item.status === "proposed" || item.status === "needs_review"
   );
+  const driftItems = (context?.items ?? []).filter((item) => isDriftItem(item));
+  const highImpactItems = (context?.items ?? []).filter((item) => isHighImpactItem(item));
+  const reviewedCriticalItems = highImpactItems.filter(
+    (item) => item.status === "approved" || item.status === "locked"
+  );
+  const resourceItems = (context?.items ?? []).filter((item) => isResourceItem(item));
   const previewItems = visibleItems.slice(0, 12);
+  const compactReviewItems = previewItems.filter((item) => COMPACT_CARD_TYPES.has(item.item_type));
+  const readinessChecks = [
+    {
+      label: "Structural discovery",
+      detail:
+        highImpactItems.length > 0
+          ? `${highImpactItems.length} critical context item(s) proposed`
+          : "Run discovery or profiling to bootstrap critical context",
+      complete: highImpactItems.length > 0,
+      warning: false,
+    },
+    {
+      label: "Context coverage",
+      detail:
+        highImpactItems.length > 0
+          ? `${reviewedCriticalItems.length}/${highImpactItems.length} critical item(s) approved or locked`
+          : "No critical context items available yet",
+      complete: highImpactItems.length > 0 && reviewedCriticalItems.length === highImpactItems.length,
+      warning: highImpactItems.length > 0 && reviewedCriticalItems.length < highImpactItems.length,
+    },
+    {
+      label: "Reviewed critical items",
+      detail:
+        attentionItems.filter((item) => isHighImpactItem(item)).length > 0
+          ? `${attentionItems.filter((item) => isHighImpactItem(item)).length} critical item(s) still need action`
+          : "No unresolved critical review items",
+      complete: attentionItems.filter((item) => isHighImpactItem(item)).length === 0,
+      warning: attentionItems.filter((item) => isHighImpactItem(item)).length > 0,
+    },
+    {
+      label: "Resource coverage",
+      detail:
+        context?.resources.length || resourceItems.length
+          ? `${context?.resources.length ?? 0} resource(s), ${resourceItems.length} resource-backed item(s)`
+          : "No business resources attached yet",
+      complete: (context?.resources.length ?? 0) > 0 || resourceItems.length > 0,
+      warning: false,
+    },
+    {
+      label: "Unresolved drift",
+      detail:
+        driftItems.length > 0
+          ? `${driftItems.length} context item(s) moved back to review`
+          : "No unresolved drift detected",
+      complete: driftItems.length === 0,
+      warning: driftItems.length > 0,
+    },
+  ];
+  const filterCounts: Record<ReviewFilter, number> = {
+    needs_action: attentionItems.length,
+    drift: driftItems.length,
+    high_impact: highImpactItems.length,
+    resources: resourceItems.length,
+    all: context?.items.length ?? 0,
+  };
 
   async function refreshContext() {
     if (!projectId) return;
@@ -339,9 +497,34 @@ export function ProjectContextReview({
               <div className="text-[10px] uppercase tracking-wide text-muted">Open Questions</div>
               <div className="text-lg font-semibold">{openQuestions.length}</div>
             </div>
-            <div className="rounded border border-border bg-background px-3 py-2">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Resources</div>
-              <div className="text-lg font-semibold">{context.resources.length}</div>
+              <div className="rounded border border-border bg-background px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wide text-muted">Resources</div>
+                <div className="text-lg font-semibold">{context.resources.length}</div>
+              </div>
+            </div>
+
+          <div className="mb-4 rounded-lg border border-border bg-background p-4">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <h3 className="text-sm font-semibold">Insight Readiness</h3>
+                <div className="text-xs text-muted">
+                  Review-critical context before treating project-specific insight language as ready.
+                </div>
+              </div>
+              <div className="text-xs text-muted">
+                {reviewedCriticalItems.length}/{highImpactItems.length || 0} critical reviewed
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+              {readinessChecks.map((check) => (
+                <div
+                  key={check.label}
+                  className={`rounded border px-3 py-2 ${readinessTone(check.complete, check.warning)}`}
+                >
+                  <div className="text-[10px] uppercase tracking-wide text-muted">{check.label}</div>
+                  <div className="text-xs mt-1">{check.detail}</div>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -381,6 +564,54 @@ export function ProjectContextReview({
                     {visibleItems.length} visible
                   </div>
                 </div>
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {[
+                    ["needs_action", "Needs action"],
+                    ["drift", "Drift"],
+                    ["high_impact", "High impact"],
+                    ["resources", "Resources"],
+                    ["all", "All context"],
+                  ].map(([value, label]) => {
+                    const filterValue = value as ReviewFilter;
+                    const active = reviewFilter === filterValue;
+                    return (
+                      <button
+                        key={filterValue}
+                        onClick={() => setReviewFilter(filterValue)}
+                        className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] ${
+                          active
+                            ? "border-foreground bg-foreground text-background"
+                            : "border-border bg-background text-muted hover:border-foreground"
+                        }`}
+                      >
+                        <span>{label}</span>
+                        <span className={active ? "text-background/80" : "text-muted"}>
+                          {filterCounts[filterValue]}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {compactReviewItems.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                    {compactReviewItems.slice(0, 4).map((item) => (
+                      <div key={`compact:${item.id}`} className="rounded border border-border px-3 py-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-[10px] uppercase tracking-wide text-muted">
+                            {compactCardLabel(item)}
+                          </div>
+                          <span
+                            className={`inline-flex px-2 py-0.5 rounded border text-[10px] uppercase tracking-wide ${statusTone(item.status)}`}
+                          >
+                            {item.status.replace("_", " ")}
+                          </span>
+                        </div>
+                        <div className="text-sm font-medium mt-1">{item.title || item.name}</div>
+                        <div className="text-[11px] text-muted mt-1">{itemSummary(item)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="space-y-3 max-h-[32rem] overflow-y-auto pr-1">
                   {previewItems.map((item) => (
                     <div key={item.id} className="rounded border border-border p-3">
