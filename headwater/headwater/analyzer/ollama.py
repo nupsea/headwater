@@ -16,6 +16,7 @@ from headwater.analyzer.llm import (
     LLMTokenBudget,
     _cached_response,
     _parse_json_response,
+    _raw_response_allowed,
     estimate_llm_tokens,
     make_llm_request_hash,
 )
@@ -148,6 +149,10 @@ class OllamaProvider(LLMProvider):
                         prompt_hash=prompt_hash,
                         tokens_in=tokens_in,
                         tokens_out=tokens_out,
+                        raw_response_allowed=_raw_response_allowed(
+                            self._store,
+                            self._source_name,
+                        ),
                     )
                 except Exception as audit_err:
                     logger.warning("Failed to write LLM audit log: %s", audit_err)
@@ -176,6 +181,10 @@ class OllamaProvider(LLMProvider):
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cached=1,
+                raw_response_allowed=_raw_response_allowed(
+                    self._store,
+                    self._source_name,
+                ),
             )
         except Exception as audit_err:
             logger.warning("Failed to write cached LLM audit log: %s", audit_err)
@@ -192,6 +201,7 @@ class OllamaProvider(LLMProvider):
                 source_name=self._source_name,
                 prompt_hash=prompt_hash,
                 cached=0,
+                raw_response_allowed=True,
             )
         except Exception as audit_err:
             logger.warning("Failed to write budget LLM audit log: %s", audit_err)
@@ -208,6 +218,7 @@ class OllamaProvider(LLMProvider):
                 source_name=self._source_name,
                 prompt_hash=prompt_hash,
                 cached=0,
+                raw_response_allowed=True,
             )
         except Exception as audit_err:
             logger.warning("Failed to write source-budget LLM audit log: %s", audit_err)

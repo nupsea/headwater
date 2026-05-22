@@ -170,6 +170,10 @@ class AnthropicProvider(LLMProvider):
                         prompt_hash=prompt_hash,
                         tokens_in=tokens_in,
                         tokens_out=tokens_out,
+                        raw_response_allowed=_raw_response_allowed(
+                            self._store,
+                            self._source_name,
+                        ),
                     )
                 except Exception as audit_err:
                     logger.warning("Failed to write LLM audit log: %s", audit_err)
@@ -197,6 +201,10 @@ class AnthropicProvider(LLMProvider):
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cached=1,
+                raw_response_allowed=_raw_response_allowed(
+                    self._store,
+                    self._source_name,
+                ),
             )
         except Exception as audit_err:
             logger.warning("Failed to write cached LLM audit log: %s", audit_err)
@@ -213,6 +221,7 @@ class AnthropicProvider(LLMProvider):
                 source_name=self._source_name,
                 prompt_hash=prompt_hash,
                 cached=0,
+                raw_response_allowed=True,
             )
         except Exception as audit_err:
             logger.warning("Failed to write budget LLM audit log: %s", audit_err)
@@ -229,6 +238,7 @@ class AnthropicProvider(LLMProvider):
                 source_name=self._source_name,
                 prompt_hash=prompt_hash,
                 cached=0,
+                raw_response_allowed=True,
             )
         except Exception as audit_err:
             logger.warning("Failed to write source-budget LLM audit log: %s", audit_err)
@@ -284,6 +294,22 @@ def _cached_response(
     if getter is None:
         return None
     return getter(provider=provider, model=model, prompt_hash=prompt_hash)
+
+
+def _raw_response_allowed(
+    store: MetadataStore | None,
+    source_name: str | None,
+) -> bool:
+    if store is None:
+        return True
+    getter = getattr(store, "llm_raw_response_allowed", None)
+    if getter is None:
+        return True
+    try:
+        return bool(getter(source_name))
+    except Exception as err:
+        logger.warning("Failed to evaluate LLM audit storage policy: %s", err)
+        return False
 
 
 def make_cache_key(table_name: str, column_names: list[str]) -> str:

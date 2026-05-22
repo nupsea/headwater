@@ -151,6 +151,34 @@ async def test_ollama_audit_log() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_ollama_normalizes_audit_response_when_source_policy_blocks_raw() -> None:
+    store = MetadataStore(":memory:")
+    store.init()
+    store.upsert_source("orders", "json", "/data/orders", None)
+    store.upsert_source_meta("orders", config={"classification": "internal"})
+
+    settings = HeadwaterSettings(llm_provider="ollama")
+    provider = OllamaProvider(settings, store=store, source_name="orders")
+
+    expected = {"description": "Sensitive generated summary"}
+
+    async def mock_call(payload: dict) -> dict:
+        return expected
+
+    provider._call_ollama = mock_call  # type: ignore[method-assign]
+
+    result = await provider.analyze("Audit test prompt")
+    logs = store.get_llm_audit_log()
+
+    assert result == expected
+    assert logs[0]["response_storage_policy"] == "normalized"
+    assert len(logs[0]["response_hash"]) == 64
+    assert "Sensitive generated summary" not in logs[0]["response_text"]
+    assert '"top_level_keys":["description"]' in logs[0]["response_text"]
+    store.close()
+
+
+@pytest.mark.asyncio()
 async def test_ollama_uses_cached_audit_response_without_live_call() -> None:
     """OllamaProvider should replay cached responses for matching request hashes."""
     store = MetadataStore(":memory:")

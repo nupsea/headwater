@@ -1172,6 +1172,8 @@ def test_llm_audit_log_roundtrip(meta: MetadataStore):
     e = entries[0]
     assert e["provider"] == "anthropic"
     assert e["source_name"] == "orders"
+    assert e["response_storage_policy"] == "raw"
+    assert len(e["response_hash"]) == 64
     assert e["tokens_in"] == 100
     assert e["tokens_out"] == 50
 
@@ -1220,6 +1222,46 @@ def test_cached_llm_response_returns_latest_matching_hash(meta: MetadataStore):
         )
         is None
     )
+
+
+def test_normalized_llm_response_audit_is_not_replayable(meta: MetadataStore):
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="analyze",
+        response_text='{"description": "Contains sensitive generated text"}',
+        prompt_hash="normalized123",
+        raw_response_allowed=False,
+    )
+
+    entry = meta.get_llm_audit_log()[0]
+
+    assert entry["response_storage_policy"] == "normalized"
+    assert len(entry["response_hash"]) == 64
+    assert "sensitive generated text" not in entry["response_text"].lower()
+    assert '"top_level_keys":["description"]' in entry["response_text"]
+    assert (
+        meta.get_cached_llm_response(
+            provider="ollama",
+            model="llama3.1:8b",
+            prompt_hash="normalized123",
+        )
+        is None
+    )
+
+
+def test_llm_raw_response_policy_uses_source_classification(meta: MetadataStore):
+    meta.upsert_source("public_src", "json", "/data/public", None)
+    meta.upsert_source_meta(
+        "public_src",
+        config={"classification": "public", "allow_external_llm": True},
+    )
+    meta.upsert_source("internal_src", "json", "/data/internal", None)
+    meta.upsert_source_meta("internal_src", config={"classification": "internal"})
+
+    assert meta.llm_raw_response_allowed("public_src") is True
+    assert meta.llm_raw_response_allowed("internal_src") is False
+    assert meta.llm_raw_response_allowed("missing_src") is False
 
 
 def test_llm_token_usage_is_scoped_by_source_provider_and_model(meta: MetadataStore):

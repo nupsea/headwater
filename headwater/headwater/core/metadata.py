@@ -5,6 +5,7 @@ Metadata is always SQLite (POC) or Postgres (Phase 1+). Never DuckDB.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -187,6 +188,8 @@ CREATE TABLE IF NOT EXISTS llm_audit_log (
     prompt_hash TEXT,
     prompt_text TEXT NOT NULL,
     response_text TEXT,
+    response_hash TEXT,
+    response_storage_policy TEXT NOT NULL DEFAULT 'raw',
     tokens_in   INTEGER DEFAULT 0,
     tokens_out  INTEGER DEFAULT 0,
     cached      INTEGER DEFAULT 0,
@@ -465,6 +468,37 @@ CREATE TABLE IF NOT EXISTS quality_results (
 """
 
 
+def _prepare_llm_response_for_audit(
+    response_text: str,
+    *,
+    raw_response_allowed: bool,
+) -> tuple[str, str, str]:
+    response_text = str(response_text or "")
+    response_hash = hashlib.sha256(response_text.encode("utf-8")).hexdigest()
+    if raw_response_allowed:
+        return response_text, response_hash, "raw"
+    evidence = _normalized_llm_response_evidence(response_text, response_hash)
+    return json.dumps(evidence, sort_keys=True, separators=(",", ":")), response_hash, "normalized"
+
+
+def _normalized_llm_response_evidence(response_text: str, response_hash: str) -> dict:
+    evidence: dict[str, Any] = {
+        "status": "normalized",
+        "response_hash": response_hash,
+        "content_length": len(response_text),
+        "json_valid": False,
+        "top_level_keys": [],
+    }
+    try:
+        payload = json.loads(response_text) if response_text else None
+    except (TypeError, ValueError):
+        return evidence
+    evidence["json_valid"] = True
+    if isinstance(payload, dict):
+        evidence["top_level_keys"] = sorted(str(key) for key in payload)
+    return evidence
+
+
 class MetadataStore:
     """SQLite-backed metadata store with WAL mode for read concurrency."""
 
@@ -525,6 +559,10 @@ class MetadataStore:
             "ALTER TABLE evidence_records ADD COLUMN statement_timeout_seconds INTEGER",
             # Phase 12: source-scoped LLM budget accounting
             "ALTER TABLE llm_audit_log ADD COLUMN source_name TEXT",
+            # Phase 12: raw LLM response storage policy
+            "ALTER TABLE llm_audit_log ADD COLUMN response_hash TEXT",
+            "ALTER TABLE llm_audit_log ADD COLUMN response_storage_policy TEXT "
+            "NOT NULL DEFAULT 'raw'",
         ]
         # sync_events table for source activity history (briefing + sources page)
         self.con.executescript(
@@ -3215,20 +3253,27 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
         tokens_in: int = 0,
         tokens_out: int = 0,
         cached: int = 0,
+        raw_response_allowed: bool = True,
     ) -> None:
         """Write one row to the LLM audit log."""
+        stored_response, response_hash, storage_policy = _prepare_llm_response_for_audit(
+            response_text,
+            raw_response_allowed=raw_response_allowed,
+        )
         self.con.execute(
             "INSERT INTO llm_audit_log "
             "(source_name, provider, model, prompt_hash, prompt_text, response_text, "
-            "tokens_in, tokens_out, cached) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "response_hash, response_storage_policy, tokens_in, tokens_out, cached) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 source_name,
                 provider,
                 model,
                 prompt_hash,
                 prompt_text,
-                response_text,
+                stored_response,
+                response_hash,
+                storage_policy,
                 tokens_in,
                 tokens_out,
                 cached,
@@ -3260,6 +3305,7 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
               AND model = ?
               AND prompt_hash = ?
               AND COALESCE(response_text, '') <> ''
+              AND COALESCE(response_storage_policy, 'raw') = 'raw'
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -3287,6 +3333,25 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
             (provider, model, source_name),
         ).fetchone()
         return int(row["total_tokens"] if row else 0)
+
+    def llm_raw_response_allowed(self, source_name: str | None) -> bool:
+        """Return whether source policy permits storing raw LLM provider responses."""
+        if not source_name:
+            return True
+        row = self.get_source(source_name)
+        if not row:
+            return False
+        try:
+            config = json.loads(row.get("config_json") or "{}")
+        except (TypeError, ValueError):
+            config = {}
+        classification = str(
+            config.get("classification")
+            or config.get("resource_classification")
+            or config.get("sensitivity")
+            or "unknown"
+        ).strip().lower()
+        return classification == "public" and bool(config.get("allow_external_llm"))
 
     # -- Schema snapshots (US-401) -----------------------------------------
 
