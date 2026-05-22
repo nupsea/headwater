@@ -371,12 +371,15 @@ def _load_advisor_pack_items(
     project_keys = {_item_override_key(item) for item in items}
     loaded_by_key: dict[tuple[str, str | None, str | None, str], dict] = {}
     key_order: list[tuple[str, str | None, str | None, str]] = []
+    issue_items: list[dict] = []
     for pack_name in pack_names:
-        for item in _load_single_advisor_pack(
+        pack_loaded, pack_issues = _load_single_advisor_pack(
             pack_name,
             project_id=project_id,
             source_name=source_name,
-        ):
+        )
+        issue_items.extend(pack_issues)
+        for item in pack_loaded:
             override_key = _item_override_key(item)
             if override_key in project_keys:
                 continue
@@ -386,7 +389,7 @@ def _load_advisor_pack_items(
             else:
                 key_order.append(override_key)
             loaded_by_key[override_key] = item
-    return [loaded_by_key[key] for key in key_order]
+    return [loaded_by_key[key] for key in key_order] + issue_items
 
 
 def _active_advisor_pack_names(items: list[dict]) -> list[str]:
@@ -413,34 +416,68 @@ def _load_single_advisor_pack(
     source_name: str,
     _visited: set[str] | None = None,
     _stack: set[str] | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     normalized_name = _slugify(pack_name)
     if _visited is None:
         _visited = set()
     if _stack is None:
         _stack = set()
     if normalized_name in _stack:
-        return []
+        return [], [
+            _pack_issue_item(
+                project_id=project_id,
+                source_name=source_name,
+                pack_name=pack_name,
+                issue_kind="pack_cycle",
+                title=f"Resolve advisor pack cycle for {pack_name}",
+                question=f"Advisor pack '{pack_name}' depends on itself through a cycle.",
+                detail="Remove or reorder recursive pack dependencies before using this pack.",
+            )
+        ]
     if normalized_name in _visited:
-        return []
+        return [], []
 
     pack_dir = _metadata_root() / "packs" / normalized_name
     if not pack_dir.exists():
-        return []
+        return [], [
+            _pack_issue_item(
+                project_id=project_id,
+                source_name=source_name,
+                pack_name=pack_name,
+                issue_kind="pack_missing",
+                title=f"Resolve missing advisor pack {pack_name}",
+                question=f"Advisor pack '{pack_name}' is referenced but not installed.",
+                detail="Add the pack under metadata/packs or remove the project pack reference.",
+            )
+        ]
 
     _stack.add(normalized_name)
     manifest = _load_pack_manifest(pack_dir, pack_name)
     loaded: list[dict] = []
+    issues: list[dict] = []
     for dependency in manifest.get("dependencies", []):
-        loaded.extend(
-            _load_single_advisor_pack(
-                dependency,
-                project_id=project_id,
-                source_name=source_name,
-                _visited=_visited,
-                _stack=_stack,
-            )
+        dependency_loaded, dependency_issues = _load_single_advisor_pack(
+            dependency,
+            project_id=project_id,
+            source_name=source_name,
+            _visited=_visited,
+            _stack=_stack,
         )
+        loaded.extend(dependency_loaded)
+        issues.extend(dependency_issues)
+        if not dependency_loaded and dependency_issues:
+            issues.append(
+                _pack_issue_item(
+                    project_id=project_id,
+                    source_name=source_name,
+                    pack_name=str(manifest.get("name") or pack_name),
+                    issue_kind="dependency_missing",
+                    title=f"Resolve dependency for advisor pack {pack_name}",
+                    question=f"Advisor pack '{pack_name}' depends on '{dependency}', which is unavailable.",
+                    detail="Install the dependency pack or remove it from pack.yaml before relying on this pack.",
+                    dependency_name=str(dependency),
+                )
+            )
     for file_name, sections in _PACK_TYPED_FILE_SECTIONS.items():
         path = pack_dir / file_name
         if not path.exists():
@@ -462,7 +499,7 @@ def _load_single_advisor_pack(
                     loaded.append(item)
     _stack.remove(normalized_name)
     _visited.add(normalized_name)
-    return loaded
+    return loaded, _dedupe_pack_issues(issues)
 
 
 def _load_pack_manifest(pack_dir: Path, pack_name: str) -> dict:
@@ -592,6 +629,70 @@ def _with_pack_override_metadata(current: dict, previous: dict) -> dict:
         "value": current_value,
         "evidence": evidence,
     }
+
+
+def _pack_issue_item(
+    *,
+    project_id: str,
+    source_name: str,
+    pack_name: str,
+    issue_kind: str,
+    title: str,
+    question: str,
+    detail: str,
+    dependency_name: str | None = None,
+) -> dict:
+    value = {
+        "pack_name": pack_name,
+        "issue_kind": issue_kind,
+        "detail": detail,
+    }
+    if dependency_name:
+        value["dependency_name"] = dependency_name
+    return {
+        "id": _pack_issue_id(pack_name, issue_kind, dependency_name),
+        "project_id": project_id,
+        "source_name": source_name,
+        "item_type": "open_question",
+        "scope": "project",
+        "name": f"{pack_name}_{issue_kind}",
+        "title": title,
+        "value": {
+            **value,
+            "question": question,
+        },
+        "status": "needs_review",
+        "confidence": 1.0,
+        "source": "advisor_pack",
+        "evidence": [
+            {
+                "evidence_type": "advisor_pack_issue",
+                "source": "advisor_pack",
+                "summary": detail,
+                "payload": value,
+            }
+        ],
+    }
+
+
+def _pack_issue_id(pack_name: str, issue_kind: str, dependency_name: str | None) -> str:
+    parts = ["pack-issue", _slugify(pack_name), _slugify(issue_kind)]
+    if dependency_name:
+        parts.append(_slugify(dependency_name))
+    return ":".join(parts)
+
+
+def _dedupe_pack_issues(items: list[dict]) -> list[dict]:
+    by_id: dict[str, dict] = {}
+    order: list[str] = []
+    for item in items:
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            continue
+        if item_id not in by_id:
+            order.append(item_id)
+        by_id[item_id] = item
+    return [by_id[item_id] for item_id in order]
 
 
 def _pack_item_id(

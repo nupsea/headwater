@@ -135,6 +135,15 @@ function isResourceItem(item: ProjectContextItem) {
   );
 }
 
+function isPackIssueItem(item: ProjectContextItem) {
+  const value = item.value || {};
+  return (
+    item.source === "advisor_pack" &&
+    item.item_type === "open_question" &&
+    typeof value.issue_kind === "string"
+  );
+}
+
 function isHighImpactItem(item: ProjectContextItem) {
   return HIGH_IMPACT_TYPES.has(item.item_type);
 }
@@ -320,6 +329,7 @@ export function ProjectContextReview({
     (item) => item.status === "approved" || item.status === "locked"
   );
   const resourceItems = (context?.items ?? []).filter((item) => isResourceItem(item));
+  const packIssueItems = (context?.items ?? []).filter((item) => isPackIssueItem(item));
   const previewItems = visibleItems.slice(0, 12);
   const compactReviewItems = previewItems.filter((item) => COMPACT_CARD_TYPES.has(item.item_type));
   const readinessChecks = [
@@ -794,6 +804,39 @@ export function ProjectContextReview({
             </div>
 
             <div className="space-y-4">
+              <div className="rounded-lg border border-border bg-background p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold">Advisor Packs</h3>
+                  <span className="text-xs text-muted">
+                    {packIssueItems.length > 0 ? `${packIssueItems.length} issue(s)` : "Healthy"}
+                  </span>
+                </div>
+                <div className="text-xs text-muted mb-3">
+                  Pack provenance, dependency issues, and override signals from the active project context.
+                </div>
+                <div className="space-y-2">
+                  {packIssueItems.slice(0, 4).map((item) => {
+                    const pack = advisorPackMeta(item);
+                    return (
+                      <div key={item.id} className="rounded border border-warning/30 bg-warning/10 px-3 py-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium">{item.title || item.name}</div>
+                          <span className="text-[10px] uppercase tracking-wide text-warning">
+                            needs review
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-muted mt-1">
+                          {pack.packName ? `Pack ${pack.packName}` : "Advisor pack"} · {itemSummary(item)}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {packIssueItems.length === 0 && (
+                    <div className="text-sm text-muted">No unresolved advisor-pack issues.</div>
+                  )}
+                </div>
+              </div>
+
               <div className="rounded-lg border border-border bg-background p-4">
                 <h3 className="text-sm font-semibold mb-2">Resource Enrichment</h3>
                 <div className="text-xs text-muted mb-3">

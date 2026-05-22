@@ -1102,6 +1102,103 @@ def test_advisor_pack_dependencies_load_recursively_with_child_override(
     assert provider.business_lenses()[0]["evidence"][-1]["evidence_type"] == "advisor_pack_conflict"
 
 
+def test_missing_advisor_pack_surfaces_needs_review_item(
+    meta: MetadataStore, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(project_context_service, "_metadata_root", lambda: tmp_path)
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_project_context_item(
+        id="advisor_pack:missing_pack",
+        project_id="src",
+        source_name="src",
+        item_type="advisor_pack",
+        scope="project",
+        name="missing_pack",
+        title="Missing Pack",
+        value={"pack_name": "missing_pack", "extends": True},
+        status="approved",
+        confidence=1.0,
+        source="import",
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[TableInfo(name="encounters", columns=[ColumnInfo(name="status", dtype="varchar")])],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    issue = next(
+        item for item in bundle.items
+        if item.item_type == "open_question" and item.value.get("issue_kind") == "pack_missing"
+    )
+
+    assert issue.status == "needs_review"
+    assert issue.source == "advisor_pack"
+    assert issue.value["pack_name"] == "missing_pack"
+
+
+def test_missing_pack_dependency_surfaces_needs_review_item(
+    meta: MetadataStore, tmp_path, monkeypatch
+):
+    child_dir = tmp_path / "packs" / "healthcare-core"
+    child_dir.mkdir(parents=True)
+    (child_dir / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "healthcare_core",
+                "version": "2.0",
+                "dependencies": ["common_core"],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (child_dir / "business_lenses.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "business_lenses": [{"name": "care_quality", "scope": "project", "value": {"priority": 9}}],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(project_context_service, "_metadata_root", lambda: tmp_path)
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_project_context_item(
+        id="advisor_pack:healthcare_core",
+        project_id="src",
+        source_name="src",
+        item_type="advisor_pack",
+        scope="project",
+        name="healthcare_core",
+        title="Healthcare Core",
+        value={"pack_name": "healthcare_core", "extends": True},
+        status="approved",
+        confidence=1.0,
+        source="import",
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[TableInfo(name="encounters", columns=[ColumnInfo(name="status", dtype="varchar")])],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    issue = next(
+        item for item in bundle.items
+        if item.item_type == "open_question" and item.value.get("issue_kind") == "dependency_missing"
+    )
+
+    assert issue.status == "needs_review"
+    assert issue.value["pack_name"] == "healthcare_core"
+    assert issue.value["dependency_name"] == "common_core"
+
+
 def test_persist_pk_fk_stores_reload_safe_relationship_values(meta: MetadataStore):
     meta.upsert_source("src", "json", "/data", None)
     result = meta.persist_pk_fk(
