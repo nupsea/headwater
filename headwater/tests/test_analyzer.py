@@ -20,13 +20,14 @@ from headwater.analyzer.heuristics import (
 )
 from headwater.analyzer.llm import NoLLMProvider, _parse_json_response, make_cache_key
 from headwater.analyzer.metadata_retrieval import retrieve_metadata
-from headwater.analyzer.semantic import analyze
+from headwater.analyzer.semantic import _build_deep_table_prompt, analyze
 from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.connectors.json_loader import JsonLoader
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
     DiscoveryResult,
+    Relationship,
     SourceConfig,
     TableInfo,
 )
@@ -605,6 +606,109 @@ class TestLLMProvider:
         key1 = make_cache_key("sensors", ["sensor_id"])
         key2 = make_cache_key("sites", ["site_id"])
         assert key1 != key2
+
+
+class TestLLMPromptBuilder:
+    def test_deep_prompt_is_deterministic_for_sorted_scoped_inputs(self):
+        table = TableInfo(
+            name="orders",
+            row_count=12,
+            columns=[
+                ColumnInfo(name="customer_email", dtype="varchar", semantic_type="pii"),
+                ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                ColumnInfo(name="order_id", dtype="varchar", semantic_type="id"),
+            ],
+        )
+        reordered_table = TableInfo(
+            name="orders",
+            row_count=12,
+            columns=list(reversed(table.columns)),
+        )
+        profiles = [
+            ColumnProfile(
+                table_name="other_table",
+                column_name="amount",
+                dtype="float64",
+                distinct_count=9999,
+                top_values=[("wrong-scope", 99)],
+            ),
+            ColumnProfile(
+                table_name="orders",
+                column_name="customer_email",
+                dtype="varchar",
+                distinct_count=2,
+                top_values=[("alice@example.com", 2), ("bob@example.com", 1)],
+                detected_pattern="email",
+            ),
+            ColumnProfile(
+                table_name="orders",
+                column_name="amount",
+                dtype="float64",
+                distinct_count=2,
+                top_values=[("20.00", 2), ("10.00", 5)],
+                mean=12.5,
+            ),
+        ]
+        relationships = [
+            Relationship(
+                from_table="payments",
+                from_column="order_id",
+                to_table="orders",
+                to_column="order_id",
+                type="many_to_one",
+                confidence=0.9,
+                referential_integrity=0.95,
+                source="inferred_name",
+            ),
+            Relationship(
+                from_table="orders",
+                from_column="customer_id",
+                to_table="customers",
+                to_column="customer_id",
+                type="many_to_one",
+                confidence=0.9,
+                referential_integrity=0.8,
+                source="inferred_name",
+            ),
+        ]
+
+        prompt = _build_deep_table_prompt(table, profiles, relationships)
+        reordered_prompt = _build_deep_table_prompt(
+            reordered_table,
+            list(reversed(profiles)),
+            list(reversed(relationships)),
+        )
+
+        assert prompt == reordered_prompt
+        assert "alice@example.com" not in prompt
+        assert "bob@example.com" not in prompt
+        assert "[REDACTED]" in prompt
+        assert "wrong-scope" not in prompt
+        assert "top_values=['10.00', '20.00']" in prompt
+
+    def test_prompt_context_and_locked_descriptions_redact_credentials(self):
+        table = TableInfo(
+            name="sources",
+            row_count=1,
+            columns=[
+                ColumnInfo(
+                    name="source_id",
+                    dtype="varchar",
+                    description="Use postgresql://user:secret@localhost/db for lineage",
+                    locked=True,
+                )
+            ],
+        )
+
+        prompt = _build_deep_table_prompt(
+            table,
+            [],
+            [],
+            companion_context="Warehouse: postgresql://user:secret@localhost/db",
+        )
+
+        assert "user:secret" not in prompt
+        assert "user:***@localhost" in prompt
 
 
 # -- LLM response parser (US-604) -------------------------------------------
