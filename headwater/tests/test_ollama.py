@@ -7,7 +7,11 @@ import json
 import httpx
 import pytest
 
-from headwater.analyzer.llm import get_provider
+from headwater.analyzer.llm import (
+    LLM_REQUEST_TEMPLATE_VERSION,
+    get_provider,
+    make_llm_request_hash,
+)
 from headwater.analyzer.ollama import OllamaProvider
 from headwater.core.config import HeadwaterSettings
 from headwater.core.metadata import MetadataStore
@@ -128,5 +132,19 @@ async def test_ollama_audit_log() -> None:
     assert logs[0]["provider"] == "ollama"
     assert logs[0]["model"] == "llama3.1:8b"
     assert "Audit test prompt" in logs[0]["prompt_text"]
+    assert logs[0]["prompt_hash"] == make_llm_request_hash(
+        prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
+        input_payload={
+            "system": (
+                "You are a data analysis assistant. "
+                "Respond with valid JSON only. "
+                "Return a single JSON object matching the schema described in the user prompt."
+            ),
+            "prompt": "Audit test prompt",
+        },
+        provider="ollama",
+        model="llama3.1:8b",
+        configuration={"format": "json", "stream": False, "timeout": 120},
+    )
 
     store.close()

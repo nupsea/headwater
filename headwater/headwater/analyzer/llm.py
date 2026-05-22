@@ -15,6 +15,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+LLM_REQUEST_TEMPLATE_VERSION = "llm-provider-analyze-v1"
+_SENSITIVE_KEY_RE = re.compile(
+    r"(api[_-]?key|authorization|bearer|credential|password|secret|token)",
+    re.IGNORECASE,
+)
+_REDACTED_VALUE = "[REDACTED]"
+
 
 class LLMProvider:
     """Base LLM provider interface."""
@@ -83,7 +90,13 @@ class AnthropicProvider(LLMProvider):
         finally:
             if self._store is not None:
                 try:
-                    prompt_hash = make_cache_key_from_text(prompt)
+                    prompt_hash = make_llm_request_hash(
+                        prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
+                        input_payload={"system": _system, "prompt": prompt},
+                        provider="anthropic",
+                        model=self._model,
+                        configuration={"max_tokens": 4096},
+                    )
                     self._store.insert_llm_audit(
                         provider="anthropic",
                         model=self._model,
@@ -121,6 +134,51 @@ def make_cache_key(table_name: str, column_names: list[str]) -> str:
 def make_cache_key_from_text(text: str) -> str:
     """Generate a SHA-256 hash of arbitrary text (for prompt deduplication)."""
     return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def make_llm_request_hash(
+    *,
+    prompt_template_version: str,
+    input_payload: dict[str, Any],
+    provider: str,
+    model: str,
+    configuration: dict[str, Any] | None = None,
+) -> str:
+    """Generate a content-addressed hash for an auditable LLM request."""
+    envelope = {
+        "prompt_template_version": prompt_template_version,
+        "input_payload": redact_llm_payload(input_payload),
+        "provider": provider,
+        "model": model,
+        "configuration": redact_llm_payload(configuration or {}),
+    }
+    encoded = _stable_json(envelope)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def redact_llm_payload(value: Any) -> Any:
+    """Return a deterministic copy of payload data with sensitive keys redacted."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key in sorted(value):
+            if _SENSITIVE_KEY_RE.search(str(key)):
+                redacted[str(key)] = _REDACTED_VALUE
+            else:
+                redacted[str(key)] = redact_llm_payload(value[key])
+        return redacted
+    if isinstance(value, list | tuple):
+        return [redact_llm_payload(item) for item in value]
+    return value
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )
 
 
 def _parse_json_response(text: str) -> dict[str, Any]:

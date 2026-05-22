@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from headwater.analyzer.llm import LLMProvider, make_cache_key_from_text
+from headwater.analyzer.llm import (
+    LLM_REQUEST_TEMPLATE_VERSION,
+    LLMProvider,
+    make_llm_request_hash,
+)
 from headwater.core.config import HeadwaterSettings
 
 if TYPE_CHECKING:
@@ -85,7 +89,17 @@ class OllamaProvider(LLMProvider):
         finally:
             if self._store is not None:
                 try:
-                    prompt_hash = make_cache_key_from_text(prompt)
+                    prompt_hash = make_llm_request_hash(
+                        prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
+                        input_payload={"system": _system, "prompt": prompt},
+                        provider="ollama",
+                        model=self._model,
+                        configuration={
+                            "format": "json",
+                            "stream": False,
+                            "timeout": self._timeout,
+                        },
+                    )
                     self._store.insert_llm_audit(
                         provider="ollama",
                         model=self._model,
