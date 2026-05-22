@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -56,29 +57,38 @@ class TestSettings:
 
         monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
         get_settings.cache_clear()
-        app = create_app(in_memory=True)
-        with TestClient(app) as local_client:
-            resp = local_client.put(
-                "/api/settings/llm",
-                json={
-                    "provider": "none",
-                    "offline_mode": True,
-                    "max_tokens_per_run": 1234,
-                    "max_tokens_per_source": 5678,
-                },
-            )
+        try:
+            app = create_app(in_memory=True)
+            with TestClient(app) as local_client:
+                resp = local_client.put(
+                    "/api/settings/llm",
+                    json={
+                        "provider": "none",
+                        "offline_mode": True,
+                        "max_tokens_per_run": 1234,
+                        "max_tokens_per_source": 5678,
+                    },
+                )
 
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["offline_mode"] is True
-            assert data["max_tokens_per_run"] == 1234
-            assert data["max_tokens_per_source"] == 5678
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["offline_mode"] is True
+                assert data["max_tokens_per_run"] == 1234
+                assert data["max_tokens_per_source"] == 5678
 
-            fetched = local_client.get("/api/settings/llm").json()
-            assert fetched["offline_mode"] is True
-            assert fetched["max_tokens_per_run"] == 1234
-            assert fetched["max_tokens_per_source"] == 5678
-        get_settings.cache_clear()
+                fetched = local_client.get("/api/settings/llm").json()
+                assert fetched["offline_mode"] is True
+                assert fetched["max_tokens_per_run"] == 1234
+                assert fetched["max_tokens_per_source"] == 5678
+        finally:
+            for key in (
+                "HEADWATER_LLM_PROVIDER",
+                "HEADWATER_LLM_OFFLINE_MODE",
+                "HEADWATER_LLM_MAX_TOKENS_PER_RUN",
+                "HEADWATER_LLM_MAX_TOKENS_PER_SOURCE",
+            ):
+                os.environ.pop(key, None)
+            get_settings.cache_clear()
 
 
 class TestProjectContext:
