@@ -9,10 +9,13 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from headwater.analyzer.llm import (
+    _BUDGET_EXHAUSTED_RESPONSE,
     LLM_REQUEST_TEMPLATE_VERSION,
     LLMProvider,
+    LLMTokenBudget,
     _cached_response,
     _parse_json_response,
+    estimate_llm_tokens,
     make_llm_request_hash,
 )
 from headwater.core.config import HeadwaterSettings
@@ -32,6 +35,7 @@ class OllamaProvider(LLMProvider):
         self,
         settings: HeadwaterSettings,
         store: MetadataStore | None = None,
+        token_budget: LLMTokenBudget | None = None,
     ) -> None:
         self._base_url = settings.ollama_base_url.rstrip("/")
         # Use the configured model, but fall back to a sensible ollama default
@@ -44,6 +48,7 @@ class OllamaProvider(LLMProvider):
         self._store = store
         self._timeout = settings.ollama_timeout
         self._offline_mode = settings.llm_offline_mode
+        self._token_budget = token_budget or LLMTokenBudget(settings.llm_max_tokens_per_run)
 
     async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
         """Send prompt to Ollama and return parsed JSON response.
@@ -103,15 +108,21 @@ class OllamaProvider(LLMProvider):
         if self._offline_mode:
             self._insert_cached_audit(prompt, "", prompt_hash=prompt_hash)
             return {}
+        estimated_tokens = estimate_llm_tokens(_system) + estimate_llm_tokens(prompt)
+        if not self._token_budget.can_spend(estimated_tokens):
+            self._insert_budget_audit(prompt, prompt_hash=prompt_hash)
+            return {}
 
         try:
             result = await self._call_ollama(payload)
             response_text = json.dumps(result) if result else ""
+            self._token_budget.record(estimated_tokens)
         except httpx.TimeoutException:
             logger.warning("Ollama timeout, retrying once...")
             try:
                 result = await self._call_ollama(payload)
                 response_text = json.dumps(result) if result else ""
+                self._token_budget.record(estimated_tokens)
             except Exception as e:
                 logger.warning("Ollama retry failed: %s", e)
                 result = {}
@@ -159,6 +170,21 @@ class OllamaProvider(LLMProvider):
             )
         except Exception as audit_err:
             logger.warning("Failed to write cached LLM audit log: %s", audit_err)
+
+    def _insert_budget_audit(self, prompt: str, *, prompt_hash: str) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.insert_llm_audit(
+                provider="ollama",
+                model=self._model,
+                prompt_text=prompt,
+                response_text=_BUDGET_EXHAUSTED_RESPONSE,
+                prompt_hash=prompt_hash,
+                cached=0,
+            )
+        except Exception as audit_err:
+            logger.warning("Failed to write budget LLM audit log: %s", audit_err)
 
     async def _call_ollama(self, payload: dict) -> dict[str, Any]:
         """Make a single HTTP call to the Ollama API."""

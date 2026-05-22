@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from headwater.analyzer.llm import make_llm_request_hash, redact_llm_payload
+from headwater.analyzer.llm import (
+    LLMTokenBudget,
+    estimate_llm_tokens,
+    make_llm_request_hash,
+    redact_llm_payload,
+)
 
 
 def test_llm_request_hash_is_stable_for_sorted_payloads() -> None:
@@ -68,3 +73,26 @@ def test_llm_payload_redaction_is_recursive_and_deterministic() -> None:
             "safe": "value",
         },
     }
+
+
+def test_llm_token_budget_tracks_remaining_capacity() -> None:
+    budget = LLMTokenBudget(max_tokens=10)
+
+    assert budget.can_spend(6) is True
+    budget.record(6)
+    assert budget.remaining_tokens == 4
+    assert budget.can_spend(5) is False
+    assert budget.can_spend(4) is True
+
+
+def test_unlimited_llm_token_budget_always_allows_spend() -> None:
+    budget = LLMTokenBudget(max_tokens=0)
+
+    assert budget.remaining_tokens is None
+    assert budget.can_spend(1_000_000) is True
+
+
+def test_llm_token_estimate_is_deterministic_and_nonzero() -> None:
+    assert estimate_llm_tokens("abcd") == 1
+    assert estimate_llm_tokens("abcde") == 2
+    assert estimate_llm_tokens("") == 0

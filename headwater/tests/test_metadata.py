@@ -1380,13 +1380,19 @@ def test_save_and_load_settings(tmp_path):
         save_settings_to_file,
     )
 
-    settings = HeadwaterSettings(data_dir=tmp_path, llm_provider="ollama", llm_model="llama3.2")
+    settings = HeadwaterSettings(
+        data_dir=tmp_path,
+        llm_provider="ollama",
+        llm_model="llama3.2",
+        llm_max_tokens_per_run=1234,
+    )
     path = save_settings_to_file(settings)
 
     assert path.exists()
     data = json.loads(path.read_text())
     assert data["llm_provider"] == "ollama"
     assert data["llm_model"] == "llama3.2"
+    assert data["llm_max_tokens_per_run"] == 1234
     # Secrets should not be persisted
     assert "llm_api_key" not in data
 
@@ -1394,6 +1400,7 @@ def test_save_and_load_settings(tmp_path):
     loaded = _load_settings_from_file(tmp_path)
     assert loaded["llm_provider"] == "ollama"
     assert loaded["llm_model"] == "llama3.2"
+    assert loaded["llm_max_tokens_per_run"] == 1234
 
 
 def test_load_settings_missing_file(tmp_path):

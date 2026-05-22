@@ -21,6 +21,9 @@ _SENSITIVE_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _REDACTED_VALUE = "[REDACTED]"
+_BUDGET_EXHAUSTED_RESPONSE = json.dumps(
+    {"status": "partial", "reason": "llm_token_budget_exhausted"}
+)
 
 
 class LLMProvider:
@@ -38,6 +41,32 @@ class NoLLMProvider(LLMProvider):
         return {}
 
 
+class LLMTokenBudget:
+    """Run-scoped token budget for live LLM calls."""
+
+    def __init__(self, max_tokens: int = 0) -> None:
+        self.max_tokens = max(0, int(max_tokens or 0))
+        self.used_tokens = 0
+
+    @property
+    def limited(self) -> bool:
+        return self.max_tokens > 0
+
+    @property
+    def remaining_tokens(self) -> int | None:
+        if not self.limited:
+            return None
+        return max(0, self.max_tokens - self.used_tokens)
+
+    def can_spend(self, estimated_tokens: int) -> bool:
+        if not self.limited:
+            return True
+        return self.used_tokens + max(0, estimated_tokens) <= self.max_tokens
+
+    def record(self, tokens: int) -> None:
+        self.used_tokens += max(0, int(tokens or 0))
+
+
 class AnthropicProvider(LLMProvider):
     """Claude API provider using the Anthropic SDK."""
 
@@ -45,6 +74,7 @@ class AnthropicProvider(LLMProvider):
         self,
         settings: HeadwaterSettings,
         store: MetadataStore | None = None,
+        token_budget: LLMTokenBudget | None = None,
     ) -> None:
         if not settings.llm_api_key:
             raise ValueError("HEADWATER_LLM_API_KEY is required for Anthropic provider")
@@ -54,6 +84,7 @@ class AnthropicProvider(LLMProvider):
         self._model = settings.llm_model
         self._store = store
         self._offline_mode = settings.llm_offline_mode
+        self._token_budget = token_budget or LLMTokenBudget(settings.llm_max_tokens_per_run)
 
     async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
         """Send prompt to Claude and return parsed JSON response.
@@ -93,6 +124,10 @@ class AnthropicProvider(LLMProvider):
         if self._offline_mode:
             self._insert_cached_audit(prompt, "", prompt_hash=prompt_hash)
             return {}
+        estimated_tokens = estimate_llm_tokens(_system) + estimate_llm_tokens(prompt)
+        if not self._token_budget.can_spend(estimated_tokens):
+            self._insert_budget_audit(prompt, prompt_hash=prompt_hash)
+            return {}
         response_text = ""
         tokens_in = 0
         tokens_out = 0
@@ -106,6 +141,7 @@ class AnthropicProvider(LLMProvider):
             response_text = msg.content[0].text
             tokens_in = msg.usage.input_tokens
             tokens_out = msg.usage.output_tokens
+            self._token_budget.record(tokens_in + tokens_out)
             result = _parse_json_response(response_text)
         except anthropic.APIError as e:
             logger.warning("Anthropic API error: %s", e)
@@ -154,6 +190,21 @@ class AnthropicProvider(LLMProvider):
         except Exception as audit_err:
             logger.warning("Failed to write cached LLM audit log: %s", audit_err)
 
+    def _insert_budget_audit(self, prompt: str, *, prompt_hash: str) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.insert_llm_audit(
+                provider="anthropic",
+                model=self._model,
+                prompt_text=prompt,
+                response_text=_BUDGET_EXHAUSTED_RESPONSE,
+                prompt_hash=prompt_hash,
+                cached=0,
+            )
+        except Exception as audit_err:
+            logger.warning("Failed to write budget LLM audit log: %s", audit_err)
+
 
 def get_provider(
     settings: HeadwaterSettings,
@@ -161,11 +212,13 @@ def get_provider(
 ) -> LLMProvider:
     """Factory: return the appropriate LLM provider based on settings."""
     if settings.llm_provider == "anthropic":
-        return AnthropicProvider(settings, store=store)
+        budget = LLMTokenBudget(settings.llm_max_tokens_per_run)
+        return AnthropicProvider(settings, store=store, token_budget=budget)
     if settings.llm_provider == "ollama":
         from headwater.analyzer.ollama import OllamaProvider
 
-        return OllamaProvider(settings, store=store)
+        budget = LLMTokenBudget(settings.llm_max_tokens_per_run)
+        return OllamaProvider(settings, store=store, token_budget=budget)
     return NoLLMProvider()
 
 
@@ -193,6 +246,14 @@ def make_cache_key(table_name: str, column_names: list[str]) -> str:
 def make_cache_key_from_text(text: str) -> str:
     """Generate a SHA-256 hash of arbitrary text (for prompt deduplication)."""
     return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def estimate_llm_tokens(text: str) -> int:
+    """Conservative deterministic token estimate for pre-call budget gates."""
+    normalized = str(text or "")
+    if not normalized:
+        return 0
+    return max(1, (len(normalized) + 3) // 4)
 
 
 def make_llm_request_hash(

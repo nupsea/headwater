@@ -217,3 +217,26 @@ async def test_ollama_offline_mode_returns_empty_on_cache_miss() -> None:
     assert logs[0]["cached"] == 1
     assert logs[0]["response_text"] == ""
     store.close()
+
+
+@pytest.mark.asyncio()
+async def test_ollama_token_budget_exhaustion_skips_live_call() -> None:
+    """Budget exhaustion should produce an auditable partial-result state."""
+    store = MetadataStore(":memory:")
+    store.init()
+    settings = HeadwaterSettings(llm_provider="ollama", llm_max_tokens_per_run=1)
+    provider = OllamaProvider(settings, store=store)
+
+    async def fail_call(payload: dict) -> dict:
+        raise AssertionError("live call should not run")
+
+    provider._call_ollama = fail_call  # type: ignore[method-assign]
+
+    result = await provider.analyze("Prompt that is too large for the budget")
+    logs = store.get_llm_audit_log()
+
+    assert result == {}
+    assert len(logs) == 1
+    assert logs[0]["cached"] == 0
+    assert "llm_token_budget_exhausted" in logs[0]["response_text"]
+    store.close()
