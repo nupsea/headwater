@@ -104,10 +104,11 @@ def detect_insights(
     con: duckdb.DuckDBPyConnection,
     schema: str = "marts",
     discovery: DiscoveryResult | None = None,
-    dataset_context: DatasetContext | None = None,
+    context: DatasetContext | None = None,
     models: list[GeneratedModel] | None = None,
     project_id: str | None = None,
     metadata: RetrievedMetadata | None = None,
+    **compat_kwargs,
 ) -> list[StatisticalInsight]:
     """Scan all materialized tables in a schema for statistical patterns.
 
@@ -118,11 +119,16 @@ def detect_insights(
 
     Applies Benjamini-Hochberg FDR correction before returning.
     """
+    if "dataset_context" in compat_kwargs:
+        context = compat_kwargs.pop("dataset_context")
+    if compat_kwargs:
+        unexpected = ", ".join(sorted(compat_kwargs))
+        raise TypeError(f"Unexpected keyword argument(s): {unexpected}")
     return detect_insights_with_diagnostics(
         con,
         schema=schema,
         discovery=discovery,
-        dataset_context=dataset_context,
+        context=context,
         models=models,
         project_id=project_id,
         metadata=metadata,
@@ -133,12 +139,18 @@ def detect_insights_with_diagnostics(
     con: duckdb.DuckDBPyConnection,
     schema: str = "marts",
     discovery: DiscoveryResult | None = None,
-    dataset_context: DatasetContext | None = None,
+    context: DatasetContext | None = None,
     models: list[GeneratedModel] | None = None,
     project_id: str | None = None,
     metadata: RetrievedMetadata | None = None,
+    **compat_kwargs,
 ) -> InsightDetectionResult:
     """Detect insights and return per-table/family execution diagnostics."""
+    if "dataset_context" in compat_kwargs:
+        context = compat_kwargs.pop("dataset_context")
+    if compat_kwargs:
+        unexpected = ", ".join(sorted(compat_kwargs))
+        raise TypeError(f"Unexpected keyword argument(s): {unexpected}")
     insights: list[StatisticalInsight] = []
     diagnostics: list[InsightFamilyDiagnostic] = []
     scoped_models = _models_for_discovery(models, discovery)
@@ -152,7 +164,7 @@ def detect_insights_with_diagnostics(
         )
         semantic_schema = infer_semantic_schema(
             discovery,
-            dataset_context,
+            context,
             project_id=project_id,
             metadata=metadata,
         )
@@ -514,7 +526,7 @@ def _coverage_family(
 ) -> list[StatisticalInsight]:
     row = con.execute(
         f"""
-        SELECT MIN({start_expr}) AS min_ts, MAX({start_expr}) AS max_ts, COUNT(*) AS trips
+        SELECT MIN({start_expr}) AS min_ts, MAX({start_expr}) AS max_ts, COUNT(*) AS row_count
         FROM {table_ref}
         WHERE {start_expr} IS NOT NULL
         """
@@ -2103,8 +2115,6 @@ def _record_label(source_table: str) -> str:
     lowered = source_table.lower()
     if "trip" in lowered:
         return "trips"
-    if any(token in lowered for token in ("event", "incident", "complaint", "inspection")):
-        return "records"
     return "records"
 
 

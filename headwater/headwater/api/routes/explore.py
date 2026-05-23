@@ -19,6 +19,7 @@ from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.insights import compute_semantic_highlights, compute_top_insights
 from headwater.core.config import get_settings
 from headwater.core.models import DatasetContext, Relationship
+from headwater.explorer.advisory import LEGACY_PRIORITY_INSIGHTS_FIELD
 from headwater.explorer.nl_to_sql import ask
 from headwater.explorer.statistical import (
     detect_insights_with_diagnostics,
@@ -110,7 +111,7 @@ def _metadata_for_pipeline(
     return retrieve_metadata(discovery)
 
 
-def _dataset_context_for_pipeline(
+def _context_for_pipeline(
     request: Request,
     pipeline: dict,
     project_id: str | None = None,
@@ -192,7 +193,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
     extra_rels = _load_confirmed_relationships(request, pipeline.get("source_names"))
     metadata = _metadata_for_pipeline(request, pipeline, project_id)
     context = metadata.context
-    business_insights = compute_top_insights(
+    priority_insights = compute_top_insights(
         request.app.state.duckdb_con,
         discovery.tables,
         discovery.profiles,
@@ -214,7 +215,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         con=request.app.state.duckdb_con,
         catalog=catalog,
         extra_relationships=extra_rels,
-        business_insights=business_insights,
+        priority_insights=priority_insights,
         metadata=metadata,
         project_id=project_id,
     )
@@ -223,7 +224,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         con,
         schema="staging",
         discovery=discovery,
-        dataset_context=context,
+        context=context,
         models=all_models,
         project_id=project_id,
         metadata=metadata,
@@ -232,7 +233,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
         con,
         schema="marts",
         discovery=discovery,
-        dataset_context=context,
+        context=context,
         models=all_models,
         project_id=project_id,
         metadata=metadata,
@@ -242,7 +243,7 @@ async def get_suggestions(request: Request, project_id: str | None = None):
 
     return {
         "suggestions": [s.model_dump() for s in suggestions],
-        "business_insights": business_insights,
+        LEGACY_PRIORITY_INSIGHTS_FIELD: priority_insights,
         "semantic_highlights": semantic_highlights,
         "insights": _serialize_statistical_insights(statistical_insights, 10),
         "diagnostics": _serialize_diagnostics(diagnostics),
@@ -280,7 +281,7 @@ async def ask_question(request: Request, body: AskRequest, project_id: str | Non
         quality_results=quality_results,
         con=con,
         extra_relationships=extra_rels,
-        business_insights=compute_top_insights(
+        priority_insights=compute_top_insights(
             con,
             discovery.tables,
             discovery.profiles,
@@ -344,7 +345,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
     all_models = pipeline["staging_models"] + pipeline["mart_models"]
     metadata = _metadata_for_pipeline(request, pipeline, project_id)
     context = metadata.context
-    business_insights = compute_top_insights(con, discovery.tables, discovery.profiles, metadata)
+    priority_insights = compute_top_insights(con, discovery.tables, discovery.profiles, metadata)
     semantic_highlights = compute_semantic_highlights(
         con,
         discovery,
@@ -357,7 +358,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
         con,
         schema="staging",
         discovery=discovery,
-        dataset_context=context,
+        context=context,
         models=all_models,
         project_id=project_id,
         metadata=metadata,
@@ -366,7 +367,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
         con,
         schema="marts",
         discovery=discovery,
-        dataset_context=context,
+        context=context,
         models=all_models,
         project_id=project_id,
         metadata=metadata,
@@ -375,7 +376,7 @@ async def get_statistical_insights(request: Request, project_id: str | None = No
     diagnostics = staging_result.diagnostics + marts_result.diagnostics
 
     return {
-        "business_insights": business_insights,
+        LEGACY_PRIORITY_INSIGHTS_FIELD: priority_insights,
         "semantic_highlights": semantic_highlights,
         "insights": _serialize_statistical_insights(insights, _INSIGHTS_ENDPOINT_LIMIT),
         "diagnostics": _serialize_diagnostics(diagnostics),

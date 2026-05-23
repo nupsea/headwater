@@ -734,7 +734,14 @@ def _top_column_checks(
 
 def _forbidden_term_check(items: list[dict], forbidden_terms: list[str]) -> dict:
     serialized = json.dumps(items, sort_keys=True).lower()
-    leaks = [term for term in forbidden_terms if str(term).lower() in serialized]
+    leaks = []
+    for term in forbidden_terms:
+        normalized = str(term).strip().lower()
+        if not normalized:
+            continue
+        pattern = re.compile(rf"(?<![a-z0-9_]){re.escape(normalized)}(?![a-z0-9_])")
+        if pattern.search(serialized):
+            leaks.append(term)
     return {
         "name": "forbidden_terms",
         "category": "forbidden_terms",

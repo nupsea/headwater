@@ -62,6 +62,32 @@ def test_context_bundle_evaluation_reports_failed_gold_expectation():
     assert failures["forbidden_terms"]["actual"] == ["orders"]
 
 
+def test_forbidden_terms_use_word_boundaries():
+    result = evaluate_context_bundle(
+        {
+            "project_id": "src",
+            "source_names": ["src"],
+            "dataset_contexts": [],
+            "items": [
+                {
+                    "id": "open_question:1",
+                    "project_id": "src",
+                    "item_type": "open_question",
+                    "scope": "project",
+                    "name": "follow_up",
+                    "value": {"question": "Should we review order_status next?"},
+                }
+            ],
+            "resources": [],
+        },
+        {"forbidden_terms": ["order"]},
+    )
+
+    check = next(item for item in result["checks"] if item["name"] == "forbidden_terms")
+    assert check["passed"] is True
+    assert check["actual"] == []
+
+
 def test_context_evaluation_suite_aggregates_fixture_metrics():
     bundle = bootstrap_project_context(_orders_discovery(), project_id="src")
     gold = load_context_gold(GOLD)

@@ -41,8 +41,12 @@ from headwater.core.models import (
     SuggestedQuestion,
     TableInfo,
 )
+from headwater.explorer.advisory import iter_context_lenses
 from headwater.explorer.query_planner import QueryPlanner
-from headwater.explorer.readability import is_opaque_business_value, is_readable_dimension
+from headwater.explorer.readability import (
+    is_opaque_business_value as is_opaque_readability_value,
+    is_readable_dimension,
+)
 from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.sql_safety import validate_explore_sql
 from headwater.explorer.utils import resolve_table_ref, table_exists
@@ -68,7 +72,7 @@ _TEMPORAL_RESULT_RE = re.compile(
     r"(date|time|month|year|day|week|quarter|period|hour|minute)", re.IGNORECASE
 )
 _METRIC_RESULT_RE = re.compile(
-    r"(count|records|rows|trips|events|rides|amount|fare|tip|value|avg|average|mean|"
+    r"(count|records|rows|events|value|avg|average|mean|"
     r"median|min|max|sum|total|share|ratio|rate|duration|minutes?|hours?)",
     re.IGNORECASE,
 )
@@ -260,7 +264,7 @@ def ask(
     if result.error and has_llm:
         result = _repair_loop(question, sql, result.error, con, context, provider, metadata)
 
-    readability_warnings, follow_ups = _business_readability_feedback(
+    readability_warnings, follow_ups = _readability_feedback(
         question,
         result,
         suggestions or [],
@@ -1486,7 +1490,7 @@ def _add_metadata_vocabulary(vocab: set[str], metadata: RetrievedMetadata) -> No
         _add_vocab_text(vocab, item.column_name)
         for value in item.value.values():
             _add_vocab_value(vocab, value)
-    for lens in metadata.business_lenses:
+    for lens in iter_context_lenses(metadata):
         for value in lens.values():
             _add_vocab_value(vocab, value)
 
@@ -1656,7 +1660,7 @@ def _preflight_question_constraints(
         sql="",
         error=(
             "This project does not have a readable lookup for origin and destination IDs, "
-            "so route questions would return opaque codes instead of business labels."
+            "so route questions would return opaque codes instead of readable labels."
         ),
         suggestions=_alternative_questions_for_unreadable_result(
             question,
@@ -1691,7 +1695,7 @@ def _project_has_readable_route_dimensions(
     return False
 
 
-def _business_readability_feedback(
+def _readability_feedback(
     question: str,
     result: ExplorationResult,
     suggestions: list[SuggestedQuestion],
@@ -1710,15 +1714,15 @@ def _business_readability_feedback(
     )
     if route_like:
         warning = (
-            "This answer uses raw route or location IDs because the dataset does not "
+            "This answer uses raw route or location IDs because this project does not "
             "contain a readable lookup for those fields. The ranking may be correct, "
-            "but it is not yet business-readable."
+            "but it is not yet reader-friendly."
         )
     else:
         labels = ", ".join(f'"{column}"' for column in opaque_columns)
         warning = (
             f"This answer uses raw codes or IDs in {labels}. The query ran correctly, "
-            "but the result is not yet business-readable. Add a lookup table or "
+            "but the result is not yet reader-friendly. Add a lookup table or "
             "dictionary mapping to resolve those values."
         )
 
@@ -1742,7 +1746,7 @@ def _opaque_result_columns(data: list[dict[str, Any]]) -> list[str]:
         values = [row.get(column) for row in data[:20] if row.get(column) is not None]
         if len(values) < 2:
             continue
-        opaque = sum(1 for value in values if is_opaque_business_value(value))
+        opaque = sum(1 for value in values if is_opaque_readability_value(value))
         if opaque / len(values) >= 0.8:
             candidates.append(column)
     return candidates

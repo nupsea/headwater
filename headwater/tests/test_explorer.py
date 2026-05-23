@@ -3485,6 +3485,25 @@ roles:
             row_represents="trip",
             decisions="Operations and dispatch planning",
         )
+        metadata = retrieve_metadata(
+            discovery,
+            context,
+            context_items=[
+                {
+                    "id": "business_lens:dispatch",
+                    "project_id": "test",
+                    "source_name": "test",
+                    "item_type": "business_lens",
+                    "scope": "project",
+                    "name": "dispatch",
+                    "status": "approved",
+                    "value": {
+                        "label": "Dispatch Signals",
+                        "decision_terms": ["dispatch", "operations"],
+                    },
+                }
+            ],
+        )
 
         highlights = compute_semantic_highlights(
             duckdb_con,
@@ -3492,10 +3511,11 @@ roles:
             context,
             models,
             project_id="nytaxi",
+            metadata=metadata,
         )
 
         assert highlights
-        assert any(h["decision_lens"] == "Operations" for h in highlights)
+        assert any(h["decision_lens"] == "Dispatch Signals" for h in highlights)
         assert any("HVFHV wait time is highest" in h["detail"] for h in highlights)
         assert any("FHV location analysis is unreliable" in h["title"] for h in highlights)
         assert len({h["insight_type"] for h in highlights}) >= 3
