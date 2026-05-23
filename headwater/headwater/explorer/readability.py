@@ -12,9 +12,6 @@ _READABLE_LABEL_TOKENS = (
     "label",
     "description",
     "title",
-    "zone",
-    "borough",
-    "region",
 )
 
 LOW_SIGNAL_DIMENSION_TOKENS = (
@@ -44,22 +41,6 @@ BUSINESS_DIMENSION_TOKENS = (
     "payment",
 )
 
-BUILTIN_ENUM_LABEL_REGISTRY: dict[str, dict[object, str]] = {
-    "payment_type": {
-        0: "Flex fare",
-        1: "Credit card",
-        2: "Cash",
-        3: "No charge",
-        4: "Dispute",
-        5: "Unknown",
-        6: "Voided trip",
-    },
-}
-
-BUILTIN_ENUM_DIMENSION_LABELS = {
-    "payment_type": "payment method",
-}
-
 _OPAQUE_ALPHANUMERIC_RE = re.compile(r"^[A-Z]{1,4}\d{2,}$")
 _OPAQUE_BOOLEANISH_VALUES = {"y", "n", "yes", "no", "true", "false", "0", "1"}
 
@@ -77,11 +58,17 @@ def enum_mapping_for_column(
     metadata_mapping = metadata.enum_mappings.get(column_key) if metadata else None
     if metadata_mapping:
         return metadata_mapping
-    return BUILTIN_ENUM_LABEL_REGISTRY.get(column_key)
+    return None
 
 
-def enum_dimension_label(column_name: str, fallback: str) -> str:
-    return BUILTIN_ENUM_DIMENSION_LABELS.get(column_name.lower(), fallback)
+def enum_dimension_label(
+    column_name: str,
+    fallback: str,
+    metadata: RetrievedMetadata | None = None,
+) -> str:
+    if metadata is None:
+        return fallback
+    return _metadata_label(column_name, metadata) or fallback
 
 
 def enum_case_expression(
@@ -117,6 +104,22 @@ def is_readable_dimension(
         or enum_mapping_for_column(column_name, metadata) is not None
         or lookup_for_column(table_name, column_name, lookup_index) is not None
     )
+
+
+def _metadata_label(column_name: str, metadata: RetrievedMetadata) -> str | None:
+    keys = (
+        column_name.lower(),
+        column_name.lower().replace("_", " "),
+    )
+    for key in keys:
+        description = metadata.glossary.get(key)
+        if not description:
+            continue
+        first = re.split(r"[.;(]", description, maxsplit=1)[0].strip()
+        words = first.split()
+        if 1 < len(words) <= 6:
+            return first.lower()
+    return None
 
 
 def is_opaque_business_value(value: Any) -> bool:

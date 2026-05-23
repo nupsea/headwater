@@ -43,13 +43,20 @@ from headwater.core.models import (
     SuggestedQuestion,
     TableInfo,
 )
+from headwater.explorer.advisory import (
+    DEFAULT_PRIORITY_CATEGORY,
+    LEGACY_PRIORITY_INSIGHTS_FIELD,
+    LEGACY_PRIORITY_SOURCE,
+    context_lens_bonus,
+    context_lens_label,
+)
 from headwater.explorer.readability import (
-    BUSINESS_DIMENSION_TOKENS,
+    BUSINESS_DIMENSION_TOKENS as PRIORITY_DIMENSION_TOKENS,
     LOW_SIGNAL_DIMENSION_TOKENS,
     enum_case_expression,
     enum_dimension_label,
-    is_readable_dimension,
     is_low_signal_dimension,
+    is_readable_dimension,
 )
 from headwater.explorer.schema_graph import SchemaGraph
 from headwater.explorer.utils import resolve_table_ref, table_exists
@@ -94,8 +101,10 @@ def generate_suggestions(
     con: duckdb.DuckDBPyConnection | None = None,
     catalog=None,
     extra_relationships: list[Relationship] | None = None,
-    business_insights: list[dict] | None = None,
     metadata: RetrievedMetadata | None = None,
+    project_id: str | None = None,
+    priority_insights: list[dict] | None = None,
+    **compat_kwargs,
 ) -> list[SuggestedQuestion]:
     """Generate suggested questions from all available metadata.
 
@@ -109,8 +118,14 @@ def generate_suggestions(
 
     Returns at most MAX_TOTAL_SUGGESTIONS questions in priority order.
     """
+    legacy_priority_insights = compat_kwargs.pop(LEGACY_PRIORITY_INSIGHTS_FIELD, None)
+    if compat_kwargs:
+        unexpected = ", ".join(sorted(compat_kwargs))
+        raise TypeError(f"Unexpected keyword argument(s): {unexpected}")
+
     all_models = models or []
     metadata = metadata or retrieve_metadata(discovery)
+    priority_insights = priority_insights if priority_insights is not None else legacy_priority_insights
     profile_index = {(p.table_name, p.column_name): p for p in discovery.profiles}
 
     # Merge confirmed PK/FK relationships with discovered ones
@@ -140,13 +155,14 @@ def generate_suggestions(
     graph = SchemaGraph(discovery, all_models)
 
     buckets: dict[str, list[SuggestedQuestion]] = {
-        "business": _from_semantic_roles(
+        "priority": _from_semantic_roles(
             discovery,
             all_models,
             con,
             metadata,
-        ) + _from_business_insights(
-            business_insights,
+            project_id=project_id,
+        ) + _from_priority_insights(
+            priority_insights,
             con,
             discovery.tables,
             profile_index,
@@ -187,7 +203,7 @@ def generate_suggestions(
     seen: set[str] = set()
     candidates: list[SuggestedQuestion] = []
     for source in (
-        "business",
+        "priority",
         "catalog",
         "mart",
         "cross_table",
@@ -205,10 +221,10 @@ def generate_suggestions(
     result = _select_diverse_questions(candidates, metadata)
 
     logger.info(
-        "Generated %d suggestions: business=%d, catalog=%d, mart=%d, cross_table=%d, "
+        "Generated %d suggestions: priority=%d, catalog=%d, mart=%d, cross_table=%d, "
         "relationship=%d, semantic=%d, quality=%d",
         len(result),
-        len(buckets["business"]),
+        len(buckets["priority"]),
         len(buckets["catalog"]),
         len(buckets["mart"]),
         len(buckets["cross_table"]),
@@ -224,7 +240,7 @@ def _select_diverse_questions(
     metadata: RetrievedMetadata | None = None,
 ) -> list[SuggestedQuestion]:
     source_limits = {
-        "business": 5,
+        "priority": 5,
         "catalog": 3,
         "mart": 3,
         "cross_table": 3,
@@ -242,7 +258,7 @@ def _select_diverse_questions(
         "other": 3,
     }
     source_priority = {
-        "business": 0,
+        "priority": 0,
         "catalog": 1,
         "mart": 2,
         "cross_table": 3,
@@ -492,7 +508,7 @@ def _question_value_score(
         "other": 0,
     }
     score += shape_weight.get(shape, 0)
-    if question.source in {"business", "cross_table", "catalog"}:
+    if question.source in {LEGACY_PRIORITY_SOURCE, "cross_table", "catalog"}:
         score += 4
     elif question.source == "mart":
         score += 2
@@ -559,7 +575,7 @@ def _decision_question_bonus(question: str) -> int:
 def _is_part_to_whole_distribution_question(question: str) -> bool:
     if "distribution of" not in question or " by " not in question:
         return False
-    business_tokens = (
+    signal_tokens = (
         "payment",
         "method",
         "service",
@@ -569,11 +585,11 @@ def _is_part_to_whole_distribution_question(question: str) -> bool:
         "segment",
         "type",
     )
-    return any(token in question for token in business_tokens)
+    return any(token in question for token in signal_tokens)
 
 
-def _from_business_insights(
-    business_insights: list[dict] | None,
+def _from_priority_insights(
+    priority_insights: list[dict] | None,
     con: duckdb.DuckDBPyConnection | None,
     tables: list[TableInfo],
     profile_index: dict[tuple[str, str], ColumnProfile],
@@ -582,13 +598,13 @@ def _from_business_insights(
     metadata: RetrievedMetadata | None,
 ) -> list[SuggestedQuestion]:
     suggestions: list[SuggestedQuestion] = []
-    if not business_insights:
+    if not priority_insights:
         return suggestions
 
     table_map = {table.name: table for table in tables}
     lookup_index = build_lookup_index(tables, metadata, relationships)
     seen: set[str] = set()
-    for insight in business_insights[:8]:
+    for insight in priority_insights[:8]:
         table_name = insight.get("table")
         if not table_name or table_name not in table_map:
             continue
@@ -614,7 +630,7 @@ def _from_business_insights(
                 grain,
             )
             metric_label = _metric_question_label(
-                _business_metric_label(insight, metadata),
+                _priority_metric_label(insight, metadata),
                 metadata,
             )
             question = (
@@ -628,7 +644,7 @@ def _from_business_insights(
                 f"GROUP BY 1 ORDER BY 1 LIMIT 100"
             )
         elif insight_id.startswith("metric_driver:") and column:
-            if _should_skip_business_insight_dimension(table, str(column), profile_index):
+            if _should_skip_priority_insight_dimension(table, str(column), profile_index):
                 continue
             group_expr, select_expr, join_sql, display_label = _dimension_projection(
                 table,
@@ -639,7 +655,7 @@ def _from_business_insights(
                 models=models,
             )
             question = (
-                f"Which {display_label} drives {_business_metric_label(insight, metadata)} "
+                f"Which {display_label} drives {_priority_metric_label(insight, metadata)} "
                 f"in {_table_label(table_name, metadata)}?"
             )
             sql_hint = (
@@ -653,7 +669,7 @@ def _from_business_insights(
                 f"GROUP BY {group_expr} ORDER BY total_value DESC LIMIT 20"
             )
         elif insight_id.startswith("segment_concentration:") and column:
-            if _should_skip_business_insight_dimension(table, str(column), profile_index):
+            if _should_skip_priority_insight_dimension(table, str(column), profile_index):
                 continue
             group_expr, select_expr, join_sql, display_label = _dimension_projection(
                 table,
@@ -690,8 +706,8 @@ def _from_business_insights(
         suggestions.append(
             SuggestedQuestion(
                 question=question,
-                source="business",
-                category="Business Signals",
+                source=LEGACY_PRIORITY_SOURCE,
+                category=DEFAULT_PRIORITY_CATEGORY,
                 relevant_tables=[table_name],
                 sql_hint=sql_hint,
             )
@@ -704,9 +720,15 @@ def _from_semantic_roles(
     models: list[GeneratedModel],
     con: duckdb.DuckDBPyConnection | None,
     metadata: RetrievedMetadata | None,
+    project_id: str | None = None,
 ) -> list[SuggestedQuestion]:
     suggestions: list[SuggestedQuestion] = []
-    semantic_schema = infer_semantic_schema(discovery, metadata.context if metadata else None)
+    semantic_schema = infer_semantic_schema(
+        discovery,
+        metadata.context if metadata else None,
+        project_id=project_id,
+        metadata=metadata,
+    )
     lookup_index = build_lookup_index(
         discovery.tables,
         metadata,
@@ -739,7 +761,7 @@ def _from_semantic_roles(
                                 f"Which hour has the highest {row_label} volume "
                                 f"in {table_label}?"
                             ),
-                            source="business",
+                            source=LEGACY_PRIORITY_SOURCE,
                             category=_decision_category(metadata),
                             relevant_tables=[table.name],
                             sql_hint=(
@@ -785,7 +807,7 @@ def _from_semantic_roles(
                                 f"{_row_subject_metric(metadata, 'duration')} "
                                 f"compare in {table_label}?"
                             ),
-                            source="business",
+                            source=LEGACY_PRIORITY_SOURCE,
                             category=_decision_category(metadata),
                             relevant_tables=[table.name],
                             sql_hint=(
@@ -821,7 +843,7 @@ def _from_semantic_roles(
                                     f"Which {display_label} has the longest "
                                     f"{_row_subject_metric(metadata, 'duration')} in {table_label}?"
                                 ),
-                                source="business",
+                                source=LEGACY_PRIORITY_SOURCE,
                                 category=_decision_category(metadata),
                                 relevant_tables=[table.name],
                                 sql_hint=(
@@ -872,7 +894,7 @@ def _from_semantic_roles(
                                     f"Which routes have the longest "
                                     f"{_row_subject_metric(metadata, 'duration')} in {table_label}?"
                                 ),
-                                source="business",
+                                source=LEGACY_PRIORITY_SOURCE,
                                 category=_decision_category(metadata),
                                 relevant_tables=[table.name],
                                 sql_hint=(
@@ -917,7 +939,7 @@ def _from_semantic_roles(
                                 f"Which {display_label} has the highest "
                                 f"{_row_subject_metric(metadata, 'wait time')} in {table_label}?"
                             ),
-                            source="business",
+                            source=LEGACY_PRIORITY_SOURCE,
                             category=_decision_category(metadata),
                             relevant_tables=[table.name],
                             sql_hint=(
@@ -953,7 +975,7 @@ def _from_semantic_roles(
                                 f"Which {display_label} has the highest {row_label} volume "
                                 f"in {table_label}?"
                             ),
-                            source="business",
+                            source=LEGACY_PRIORITY_SOURCE,
                             category=_decision_category(metadata),
                             relevant_tables=[table.name],
                             sql_hint=(
@@ -1197,7 +1219,7 @@ def _metric_question_score(column_name: str) -> int:
         return -5
     score = 0
     strong_tokens = (
-        "amount", "total", "cost", "price", "fare", "revenue", "sales", "value",
+        "amount", "total", "cost", "price", "value", "revenue",
         "margin", "profit", "spend", "score", "severity", "duration", "elapsed",
         "distance", "miles", "rate", "percent", "ratio", "count", "qty", "quantity",
         "avg", "mean", "p90", "p95",
@@ -2163,7 +2185,7 @@ def _dimension_signal_score(
         score += 4
     elif any(token in lower for token in ("_code", "code_", "_num", "_id", "_key")):
         score -= 4
-    if any(token in lower for token in BUSINESS_DIMENSION_TOKENS):
+    if any(token in lower for token in PRIORITY_DIMENSION_TOKENS):
         score += 3
 
     if profile is None:
@@ -2206,7 +2228,7 @@ def _share_dimension_score(
     if distinct < 2 or distinct > 6:
         return -10
     score = 0
-    if any(token in lower for token in BUSINESS_DIMENSION_TOKENS):
+    if any(token in lower for token in PRIORITY_DIMENSION_TOKENS):
         score += 6
     if _column_label(column.name, metadata) != _humanize(column.name):
         score += 2
@@ -2298,7 +2320,7 @@ def _supports_hour_grain(table: TableInfo, column_name: str) -> bool:
     )
 
 
-def _business_metric_label(insight: dict, metadata: RetrievedMetadata | None = None) -> str:
+def _priority_metric_label(insight: dict, metadata: RetrievedMetadata | None = None) -> str:
     metric = str(insight.get("metric") or "")
     column = str(insight.get("column") or "")
     if metric == "record_volume":
@@ -2375,43 +2397,18 @@ def _context_question_bonus(
 ) -> int:
     if metadata is None or metadata.context is None or not metadata.context.decisions:
         return 0
-    decisions = metadata.context.decisions.lower()
-    q = question.lower()
-    score = 0
-    if (
-        any(token in decisions for token in ("operation", "dispatch", "capacity", "service"))
-        and any(
-            token in q
-            for token in ("changed over time", "how many", "duration", "wait", "hour")
-        )
-    ):
-        score += 3
-    if (
-        any(token in decisions for token in ("revenue", "pricing", "sales", "finance"))
-        and any(token in q for token in ("amount", "fare", "price", "revenue", "tip"))
-    ):
-        score += 3
-    if (
-        any(token in decisions for token in ("compliance", "quality", "audit", "risk"))
-        and any(token in q for token in ("missing values", "unexpected", "duplicates", "status"))
-    ):
-        score += 3
-    return score
+    lens_bonus = context_lens_bonus(question, metadata.context.decisions, metadata)
+    if lens_bonus:
+        return lens_bonus
+    question_terms = set(re.findall(r"[a-z0-9]+", question.lower()))
+    decision_terms = set(re.findall(r"[a-z0-9]+", metadata.context.decisions.lower()))
+    overlap = question_terms & decision_terms
+    return min(len(overlap), 3)
 
 
 def _decision_category(metadata: RetrievedMetadata | None) -> str:
-    decisions = (
-        metadata.context.decisions.lower()
-        if metadata and metadata.context and metadata.context.decisions
-        else ""
-    )
-    if any(token in decisions for token in ("revenue", "pricing", "sales", "finance")):
-        return "Revenue Signals"
-    if any(token in decisions for token in ("compliance", "quality", "audit", "risk")):
-        return "Compliance Signals"
-    if any(token in decisions for token in ("operation", "dispatch", "capacity", "service")):
-        return "Operational Signals"
-    return "Decision Signals"
+    decisions = metadata.context.decisions if metadata and metadata.context else None
+    return context_lens_label(metadata, decisions) or DEFAULT_PRIORITY_CATEGORY
 
 
 def _row_subject_metric(metadata: RetrievedMetadata | None, fallback: str) -> str:
@@ -2451,7 +2448,7 @@ def _fallback_row_subject_label(fallback: str) -> str:
     return "records"
 
 
-def _should_skip_business_insight_dimension(
+def _should_skip_priority_insight_dimension(
     table: TableInfo,
     column_name: str,
     profile_index: dict[tuple[str, str], ColumnProfile],
@@ -2508,7 +2505,7 @@ def _dimension_projection(
             enum_expr,
             enum_expr,
             "",
-            enum_dimension_label(column_name, _column_label(column_name, metadata)),
+            enum_dimension_label(column_name, _column_label(column_name, metadata), metadata),
         )
 
     lookup = lookup_for_column(table.name, column_name, lookup_index) if table is not None else None

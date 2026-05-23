@@ -1,484 +1,1192 @@
-# Headwater Implementation Plan
+# Headwater Domain-Agnostic Context Implementation Plan
 
-**Date:** April 30, 2026  
-**Status:** Active concise roadmap  
-**Archived predecessor:** `archives/IMPLEMENTATION_PLAN_2026-04-30_pre_docs_reset.md`
+**Status:** Active implementation plan  
+**Created:** May 19, 2026  
+**Amended:** May 20, 2026
+**Primary objective:** make Headwater produce useful, evidence-backed analysis
+for an arbitrary ingested dataset on day one, while ensuring business meaning
+lives only in reviewed project context.
 
-This file is now the active, short-form implementation plan. Historical detail
-has been archived so day-to-day planning stays aligned with the current product
-shape.
+Headwater's generic runtime should infer structure, shape, statistics,
+relationships, and generic semantic types. It should not know what a taxi trip,
+payment type, borough, claim, patient, factory line, shipment, account, or
+revenue metric means.
 
-## Current Objective
+Business meaning must enter through a project context layer that is generated
+during ingestion, enriched from user-provided resources, reviewed by users, and
+consumed by analyzer, explorer, insights, and assistants.
 
-Make Headwater credible on real organizational data across maturity levels:
+## Architecture Rule
+
+Generic code may do these things:
+
+- Discover schemas, tables, columns, dtypes, constraints, comments, profiles,
+  nulls, cardinality, uniqueness, distributions, and relationships.
+- Detect structural shapes: identifier, timestamp-like field, numeric measure,
+  low-cardinality dimension, free text, enum/code shape, lookup table, join path,
+  drift, and data quality risk.
+- Detect generic semantic types from values and formats: email, phone, URL,
+  UUID, IP address, ISO date/time variants, currency code, monetary amount,
+  percentage, latitude/longitude, country/state/postal codes, IBAN, and similar
+  non-business formats.
+- Generate project context proposals with confidence, evidence, provenance, and
+  review state.
+- Apply approved or locked project context.
+- Run generic statistical primitives: trend, anomaly, distribution, ranking,
+  correlation, change point, segment comparison, and quality checks.
+
+Generic code may not do these things:
+
+- Hard-code dataset, industry, or business terms.
+- Hard-code enum labels such as payment codes.
+- Prefer dimensions because they are named `zone`, `borough`, `site`,
+  `region`, `status`, `category`, or any other business term.
+- Classify an insight as revenue, compliance, service, location, route, or any
+  business lens through built-in keyword lists.
+- Generate domain-specific derived fields such as route, speed, wait time, claim
+  cycle time, patient stay, machine downtime, margin, or shipment delay unless
+  those definitions come from project context.
+- Scope projects through built-in aliases like taxi, TLC, FHV, yellow, or green.
+
+## Target Workflow
+
+The user-facing workflow should stay small:
 
 ```text
-files / OLTP / OLAP -> governed discovery -> reviewable semantics -> safe insights
+1. Ingest Source
+2. Discovery Summary
+3. Context Review
+4. Business Insights
+5. Explore / Ask
 ```
 
-The near-term goal is not connector breadth for its own sake. The goal is to
-prove that Headwater can connect to real sources, capture available metadata,
-profile large tables safely, ask users to confirm ambiguous semantics, and
-produce useful business insights.
-
-## Completed Baseline
-
-- Source catalog and sync event backbone.
-- Connector capability model and support status catalog.
-- OLTP/OLAP source evaluation layer with readiness, maturity mode, capability
-  gaps, and safe profiling policy recommendations exposed through the API and
-  Sources page.
-- Supported local/file connectors: CSV, JSON, DuckDB, SQLite.
-- Supported Postgres connector for table/column discovery, pushdown profiling,
-  bounded sampling, and read-only validation.
-- Preview MySQL connector.
-- Preview Snowflake connector for warehouse metadata, bounded profiles,
-  row-limited samples, row estimates, and read-only validation.
-- Discover & Access merged with dictionary review.
-- Persistent PK decisions across rediscovery.
-- Source-scoped state reset on disconnect.
-- Data & Query preview fallback for staging/source table names.
-- Smart quote normalization for pasted SQL.
-- Business-oriented Insights page with diversified visual patterns.
-- Explore initial load fixes.
-
-## Open Product Stories
-
-### Story A: Postgres OLTP Constraint Import
-
-**User story:** As a data engineer connecting an existing Postgres OLTP system,
-I need Headwater to import declared PKs, FKs, unique constraints, checks, and
-comments so it starts from system-of-record metadata rather than heuristics.
-
-**Implementation:**
-
-- Add connector contract methods for `list_constraints`, `list_indexes`, and
-  `list_comments`.
-- Implement Postgres catalog introspection from `pg_catalog` and
-  `information_schema`.
-- Mark declared PK/FK evidence as high confidence.
-- Preserve user overrides over imported constraints.
-- Surface imported-vs-inferred-vs-user-confirmed provenance in Discover & Access.
-
-**Acceptance criteria:**
-
-- Declared Postgres PKs and FKs appear immediately after sync.
-- Imported constraints survive refresh and rediscovery.
-- User rejections/overrides take precedence until source reset.
-- Tests cover composite PKs and multi-column FKs.
-
-### Story B: Manual FK Review and Editing
-
-**User story:** As a reviewer, I need to manually add, edit, or remove FK
-relationships when they are missing from source DDL or inferred incorrectly.
-
-**Implementation:**
-
-- Add FK editor controls in Discover & Access.
-- Allow selecting source column, target table, and target column.
-- Persist manual relationships through the metadata store.
-- Refresh Insights and relationship views after save.
-- Track relationship provenance and audit decisions.
-
-**Acceptance criteria:**
-
-- Users can add `table.column -> table.column` relationships without suggestions.
-- Manual FK decisions are visible in Keys & Relationships immediately.
-- Manual decisions persist across rediscovery.
-
-### Story C: AWS Redshift OLAP Connector
-
-**User story:** As an analytics engineer with Redshift, I need Headwater to
-observe warehouse schemas, metadata, and aggregate profiles without copying
-large fact tables locally.
-
-**Implementation:**
-
-- Add Redshift connector with observe mode.
-- Read schemas/tables/views/columns from Redshift catalog views.
-- Import table and column comments where available.
-- Use bounded aggregate profiling with configurable row/table limits.
-- Support read-only validation SQL with statement timeout.
-- Treat PK/FK declarations as informational, not necessarily enforced.
-
-**Acceptance criteria:**
-
-- A Redshift schema can be discovered without full table transfer.
-- Large tables are profiled through aggregates or samples only.
-- Connector reports profiling limits and skipped tables clearly.
-
-### Story D: AWS Athena and Glue Catalog Connector
-
-**User story:** As a team using S3 data lakes through Athena, I need Headwater
-to discover Glue catalog metadata and run safe aggregate queries for insights.
-
-**Implementation:**
-
-- Add Athena connector with Glue catalog discovery.
-- Read databases, tables, partitions, columns, comments, and table properties.
-- Use Athena query execution for aggregate profiling with output-location config.
-- Respect partition filters and maximum scanned bytes.
-- Capture Iceberg/Hive table metadata where exposed through Glue/Athena.
-
-**Acceptance criteria:**
-
-- Glue catalog tables appear in Discover & Access.
-- Partitioned tables show partition columns and freshness hints.
-- Profiling can be limited by partition/time filters and scan budget.
-
-### Story E: Smart Large-Table Profiling Policy
-
-**User story:** As an operator connecting large or multiple sources, I need
-Headwater to fetch metadata and aggregate summaries intelligently instead of
-pulling raw data or issuing unsafe full scans.
-
-**Implementation:**
-
-- Add source-level profiling policy:
-  - max tables
-  - max columns
-  - max sample rows
-  - max scanned bytes or estimated rows
-  - preferred time/partition filter
-  - aggregate-only mode
-- Add connector capability fields for cost controls and estimate support.
-- Store profiling coverage and skipped reasons.
-- Generate insights from aggregate profiles and sketches where raw samples are
-  unavailable.
-- Make UI show whether insight evidence came from full profile, sample, or
-  aggregate sketch.
-
-**Acceptance criteria:**
-
-- Large tables are never copied by default.
-- Users can see what was profiled, sampled, skipped, or estimated.
-- Insights remain explainable with evidence coverage.
-
-### Story F: Data Ecosystem Maturity Modes
-
-**User story:** As a data lead, I need Headwater to adapt to whether my org has
-raw OLTP, a basic warehouse, or a mature semantic layer.
-
-**Status:** Partially implemented. Headwater now classifies connector/source
-evaluation as files, OLTP, or OLAP and reports maturity mode from capability and
-observed source state. Deeper onboarding questions and semantic-layer detection
-remain open.
-
-**Implementation:**
-
-- Add source maturity classification:
-  - raw files
-  - OLTP with constraints
-  - warehouse with marts
-  - warehouse plus dbt/semantic layer
-  - governed catalog/lineage ecosystem
-- Tailor onboarding questions and evidence collection by maturity.
-- Prefer declared metadata where mature, heuristics where metadata is absent.
-
-**Acceptance criteria:**
-
-- Headwater explains which evidence sources it used.
-- Review queue changes based on maturity gaps.
-- Business insights prioritize trusted marts when available.
-
-### Story G: Cost-Aware Warehouse Insight Engine
-
-**User story:** As a data lead in a mature Snowflake/OLAP environment, I need
-Headwater to generate useful insights by running safe, evidence-backed warehouse
-queries directly against trusted marts and semantic models, without creating
-unbounded compute cost or presenting weak samples as truth.
-
-**Product direction:**
-
-Headwater should not treat mature OLAP systems like raw files. For warehouses,
-it should become a data product auditor and insight evidence planner:
-
-- Prefer governed marts, dbt models, semantic-layer metrics, and documented
-  dimensions over raw fact tables.
-- Generate insight candidates from metadata, model lineage, query history,
-  freshness, quality checks, and semantic definitions before querying data.
-- Run direct Snowflake aggregate queries only when the evidence planner can bound
-  cost and explain why the query is needed.
-- Label every insight by evidence type: `metadata_only`, `aggregate_pushdown`,
-  `stratified_sample`, `full_scan`, or `semantic_metric`.
-- Attach confidence, coverage, scan budget, and reproducibility metadata to each
-  generated insight.
-
-**Implementation:**
-
-- Add an insight planning stage before execution:
-  - classify source maturity and trusted model layer
-  - choose candidate tables/models/metrics
-  - estimate table size and cost risk
-  - choose full aggregate, approximate aggregate, stratified sample, or skip
-  - require a configured compute/scan budget
-- For Snowflake, use warehouse-native queries for:
-  - aggregate metric summaries
-  - time-window comparisons
-  - freshness and volume drift
-  - null/uniqueness/reference checks
-  - top contributors and segment outliers
-  - approximate distincts/quantiles where available
-- Prefer partition/time-window predicates for fact tables.
-- Use deterministic sampling only when aggregate evidence is insufficient.
-- Store generated SQL, query purpose, estimated cost tier, rows scanned where
-  available, and result confidence.
-- Surface “why this query was safe to run” beside each insight.
-- Refuse or downgrade insights when confidence, coverage, or budget constraints
-  are not met.
-
-**Acceptance criteria:**
-
-- Snowflake insight generation can run without copying source tables locally.
-- A max warehouse-query budget prevents unbounded scans by default.
-- Each insight includes evidence type, confidence, coverage, and generated SQL.
-- Mature semantic models are preferred over raw tables when available.
-- Expensive candidates are skipped with clear reasons rather than silently run.
-- Sample-derived insights are visibly labeled as directional, not authoritative.
-
-## Verification Gate for Next Milestone
-
-- Postgres constraint import tested against a real or containerized Postgres DB.
-- Manual FK editing works end-to-end in Discover & Access.
-- At least one AWS OLAP connector story is implemented behind preview status.
-- Large-table profiling policy is visible in source sync results.
-- Snowflake direct insight queries are mediated by a cost-aware evidence planner
-  and produce evidence labels/confidence metadata.
-- README, architecture, and progress docs remain current.
-
-## Next Wave Implementation and Evaluation Plan
-
-The next wave should be evaluated as a mature-data-system product, not as a
-demo pipeline. The core question is: can Headwater inspect an existing governed
-warehouse, decide what is safe to query, run only bounded evidence-gathering
-queries, and produce trustworthy recommendations with clear cost/confidence
-metadata?
-
-### Wave 1: Evidence and Cost Control Foundation
-
-**Status:** Started. Headwater now persists warehouse insight plans and evidence
-records, and exposes `/api/sources/{source_name}/insight-plan/dry-run`,
-`/api/evidence`, `/api/warehouse-insight-plans`, and
-`/api/warehouse-insight-plans/{plan_id}/execute`. The first planner produces
-metadata-only and aggregate-pushdown candidates, applies conservative
-row-count-based cost gates, persists skipped reasons, and executes only after
-explicit approval through connector read-only hooks. Timeout and query-id
-capture are now in place; live Snowflake validation and warehouse-side cost
-capture remain for the next slice.
-
-**Implementation steps:**
-
-- Add persisted evidence records for discovery/profile/insight outputs:
-  - `evidence_type`: `metadata_only`, `aggregate_pushdown`,
-    `stratified_sample`, `full_scan`, `semantic_metric`
-  - `source_type`, `source_name`, `table_name`, `model_name`, `metric_name`
-  - generated SQL or metadata query
-  - query purpose
-  - row/table coverage
-  - sample design and seed when applicable
-  - estimated and observed cost tier
-  - skipped/refused reason
-  - confidence score and confidence rationale
-- Add a source-level warehouse budget model:
-  - max query count per run
-  - max tables/models considered
-  - max rows sampled
-  - max estimated bytes/credits tier where available
-  - max runtime
-  - allowed warehouses/roles
-  - required time-window predicate for large fact tables
-- Extend connector capabilities to report:
-  - row-count estimate support
-  - bytes/partition estimate support
-  - query history support
-  - table statistics support
-  - semantic-model/dbt artifact support
-  - warehouse query tagging support
-- Add a planner dry-run mode that produces the proposed evidence plan without
-  executing warehouse queries.
-
-**Evaluation steps:**
-
-- Unit tests prove expensive candidates are refused when budgets are exceeded.
-- Unit tests prove every planned query has a purpose, evidence type, and budget
-  classification.
-- API tests prove dry-run plans can be reviewed before execution.
-- Golden fixtures cover small, medium, and large table metadata with different
-  allowed budgets.
-- UI tests confirm skipped/refused work is visible and understandable.
-
-**Done when:**
-
-- No direct insight query can run without a budget context.
-- Every evidence-producing query is auditable from persisted metadata.
-- The UI can show “what Headwater did not query and why.”
-
-### Wave 2: Snowflake Mature Warehouse Discovery
-
-**Implementation steps:**
-
-- Add live-tested Snowflake metadata import:
-  - databases/schemas/tables/views
-  - columns and nullable/type metadata
-  - table/column comments
-  - row-count estimates
-  - clustering/partition hints where available
-  - freshness signals from table metadata
-  - query history where allowed
-- Add Snowflake query tagging for Headwater-generated queries.
-- Add optional dbt artifact ingestion:
-  - `manifest.json`
-  - `catalog.json`
-  - exposures
-  - tests
-  - model descriptions
-  - metric/semantic definitions where present
-- Rank trusted model layers:
-  - semantic metrics/dbt semantic layer
-  - curated marts
-  - intermediate models
-  - staging/raw tables
-
-**Evaluation steps:**
-
-- Integration test against a real or ephemeral Snowflake account with:
-  - tiny dimension table
-  - large fact table
-  - documented mart
-  - missing comments
-  - stale table
-  - duplicate/ambiguous metric definition
-- Verify no full fact-table copy occurs.
-- Verify query tags appear in Snowflake query history.
-- Verify row-count/table metadata is imported without scanning table data.
-- Verify Headwater prefers marts over raw tables for insight planning.
-- Verify missing comments/tests/freshness issues appear as model improvement
-  recommendations.
-
-**Done when:**
-
-- Snowflake can be promoted from preview to supported for metadata-first
-  discovery after live integration coverage.
-- Headwater can produce a useful warehouse fitness report without sampling any
-  fact table rows.
-
-### Wave 3: Cost-Aware Insight Planner
-
-**Implementation steps:**
-
-- Build insight candidates before execution:
-  - metric over time
-  - segment concentration
-  - freshness/volume drift
-  - null/uniqueness drift
-  - referential integrity risk
-  - top contributor/outlier segment
-  - model usage/cost anomaly from query history
-- Score each candidate by:
-  - business relevance
-  - trusted-model availability
-  - estimated query cost
-  - expected statistical power
-  - freshness and coverage
-  - novelty versus previous runs
-- Select execution strategy:
-  - metadata-only recommendation
-  - aggregate pushdown
-  - approximate aggregate
-  - stratified sample
-  - refuse/skip
-- For samples, use statistically explicit designs:
-  - stratify by time window, high-cardinality business segment, status, and
-    known dimensions
-  - oversample rare-but-important classes when detectable
-  - preserve deterministic seeds
-  - calculate confidence intervals and minimum detectable effect where possible
-- Run Snowflake insight queries directly only through the planner.
-
-**Evaluation steps:**
-
-- Golden insight plans assert that:
-  - raw fact tables are avoided when trusted marts exist
-  - aggregate pushdown is preferred over row sampling
-  - large unpartitioned tables require a time predicate or are skipped
-  - sample-derived insights include directional labels and confidence intervals
-  - low-confidence candidates are downgraded or refused
-- Statistical tests on synthetic data verify:
-  - stratified sampling recovers known segment effects better than naive random
-    sampling under the same row budget
-  - rare-event scenarios are not overclaimed
-  - confidence intervals widen correctly when coverage is weak
-- Regression tests ensure generated SQL stays read-only and bounded.
-- Snapshot tests verify each insight includes evidence type, confidence,
-  coverage, generated SQL, and skip/refusal reasons.
-
-**Done when:**
-
-- Insights from mature warehouses are not presented unless they have adequate
-  evidence.
-- Sample-based insights are clearly directional and never mixed with
-  full-coverage aggregate claims.
-- The product can answer “why should I trust this insight?” and “what did it
-  cost to produce?”
-
-### Wave 4: Data Product and Platform Improvement Recommendations
-
-**Implementation steps:**
-
-- Add model-quality evaluators:
-  - ambiguous grain
-  - fanout join risk
-  - duplicated metrics across marts
-  - marts built directly from raw sources
-  - missing tests on primary keys, uniqueness, non-null, freshness
-  - stale or unused models
-  - expensive models with low usage
-- Add platform-quality evaluators:
-  - repeatedly slow/expensive queries
-  - oversized scans from missing predicates
-  - missing clustering/partition opportunities
-  - unused tables/models
-  - excessive intermediate layers
-- Add semantic-quality evaluators:
-  - conflicting metric names/definitions
-  - undocumented dimensions
-  - inconsistent temporal grains
-  - BI/query usage that bypasses governed marts
-- Generate improvement actions with severity, owner hint, affected assets,
-  supporting evidence, and recommended SQL/dbt/test changes.
-
-**Evaluation steps:**
-
-- Fixtures include intentionally flawed dbt/warehouse projects:
-  - duplicate revenue metrics
-  - customer/order fanout risk
-  - stale mart
-  - missing uniqueness test
-  - high-cost low-use model
-- Tests assert recommendations are specific, evidence-backed, and not generic.
-- Human-review eval rubric scores recommendations for:
-  - correctness
-  - actionability
-  - severity calibration
-  - noise/false positives
-  - whether the proposed fix is safe
-- Track acceptance/ignore rates as product feedback signals.
-
-**Done when:**
-
-- Headwater can produce a credible “data product review” for a mature warehouse.
-- Recommendations point to concrete model/platform/quality improvements, not
-  only business observations.
-
-### Missing Pieces to Resolve Before Implementation
-
-- Define the persistent evidence schema and migration plan.
-- Decide how Snowflake budgets are configured in UI/API/env.
-- Decide whether `snowflake-connector-python` remains optional or becomes an
-  install extra.
-- Add live Snowflake credentials/secrets strategy for CI or manual integration.
-- Decide first dbt artifact import path and expected file locations.
-- Define a minimal semantic metric contract independent of any one vendor.
-- Add UI surfaces for evidence labels, confidence, skipped work, and query cost.
-- Add a “dry run insight plan” screen before warehouse insight execution.
-- Define statistical thresholds for confidence labels and when to refuse claims.
+The detailed metadata universe should live behind that workflow:
+
+```text
+source ingestion
+-> structural discovery and profiling
+-> semantic type detection
+-> context bootstrap proposals
+-> resource/context enrichment
+-> prioritized review queue
+-> approved/locked project context
+-> analyzer/catalog/explorer/insights consume context
+-> drift-aware refresh
+-> generated context files and review docs
+```
+
+## Day-One Value Contract
+
+With zero project context and only an ingested source, Headwater must still
+produce useful generic value. For any supported table or multi-table source,
+the cold-start output must include:
+
+- row grain and row entity proposals
+- primary key and foreign key candidates
+- canonical time anchor candidates
+- top distributional facts and quality risks
+- top-K dimensions and measures by statistical usefulness
+- 3 to 5 structurally reasonable exploration questions
+- explicit uncertainty, evidence, and review status for every proposal
+
+This is the proof that "domain-agnostic" means useful on arbitrary data, not
+only free of hard-coded terms.
+
+## Context Layer Files
+
+The metadata store is authoritative at runtime. Files under
+`metadata/<project>/` are generated/importable projections for review, version
+control, and portability.
+
+```text
+metadata/<project>/
+  context.yaml
+  semantic_types.yaml
+  semantic_schema.yaml
+  derived_fields.yaml
+  insight_families.yaml
+  lookups.yaml
+  glossary.yaml
+  business_lenses.yaml
+  presentation.yaml
+  question_templates.yaml
+  column_policies.yaml
+  relationship_hints.yaml
+  resources.yaml
+  advisor_packs.yaml
+  REVIEW.md
+```
+
+Reusable vertical content should live in importable advisor packs:
+
+```text
+metadata/packs/<pack_name>/
+  pack.yaml
+  semantic_schema.yaml
+  insight_families.yaml
+  business_lenses.yaml
+  question_templates.yaml
+  column_policies.yaml
+  glossary.yaml
+```
+
+Project metadata may `extends` one or more packs and override individual items.
+Pack content is context, not generic runtime behavior.
+
+## Canonical Context Item Types
+
+The store should support these item types. Existing types should be reused where
+possible; new types should be added only when they map to a real consumer.
+
+- `dataset_summary`
+- `table_profile`
+- `row_grain`
+- `row_entity`
+- `time_anchor`
+- `pk_candidate`
+- `fk_candidate`
+- `column_semantics`
+- `semantic_role`
+- `semantic_type_rule`
+- `derived_field`
+- `relationship`
+- `relationship_hint`
+- `lookup`
+- `enum_mapping`
+- `glossary_term`
+- `business_lens`
+- `insight_family`
+- `insight_priority`
+- `question_template`
+- `visualization_hint`
+- `column_policy`
+- `project_alias`
+- `source_alias`
+- `table_alias`
+- `advisor_pack`
+- `resource`
+- `open_question`
+
+Every item must carry:
+
+- stable `id`
+- `project_id`
+- optional `source_name`, `table_name`, `column_name`
+- `item_type`
+- structured `value`
+- `status`: `proposed`, `approved`, `rejected`, `locked`, `needs_review`
+- calibrated `confidence` in `[0.0, 1.0]`
+- `source` producer
+- evidence records
+- drift state when applicable
+- version and snapshot identifiers
+- decision log references
+
+## Evidence And Confidence Model
+
+Every producer must emit evidence in the same shape:
+
+- `evidence_id`
+- `producer`: `profile`, `constraint`, `semantic_type`, `resource`, `llm`,
+  `user`, `import`, or `advisor_pack`
+- `method`
+- `input_snapshot_id`
+- `source_ref`
+- `observed_value`
+- `support_count`
+- `sample_size`
+- `confidence`
+- `created_at`
+
+Confidence uses a bounded `[0.0, 1.0]` scale. Producer anchors:
+
+| Producer | Confidence anchor |
+| --- | --- |
+| Exact declared source constraint | `0.98` before user review, `1.0` only after user approval or trusted import |
+| Exact regex/format semantic type match | `>=0.95` when support is high and conflicts are absent |
+| Distributional structural inference | `0.55` to `0.9` based on support and ambiguity |
+| Resource exact match | `0.75` to `0.95`; `1.0` only when source authority is confirmed |
+| Advisor pack proposal | `0.6` to `0.85` until mapped to project evidence |
+| LLM single-shot proposal | `<=0.7` until corroborated by another producer or evidence count threshold |
+| User-approved item | `1.0` unless drift invalidates the item |
+| User-rejected item | excluded from automatic re-proposal unless new evidence appears |
+
+When multiple producers vote, use a deterministic combiner that preserves
+evidence and does not let weak duplicate signals swamp strong evidence:
+
+- identical high-confidence evidence may raise confidence to a capped maximum
+- conflicting evidence lowers confidence and moves the item toward review
+- user decisions dominate machine producers until drift invalidates them
+- the combiner must be deterministic and covered by ordering tests
+
+## Review Prioritization
+
+The UI should not show all generated metadata equally. It should prioritize
+items that affect correctness or business value.
+
+Show prominently:
+
+- drift-invalidated approved or locked context
+- resource conflicts with approved or locked context
+- missing or ambiguous row grain
+- missing or ambiguous row entity
+- missing or ambiguous primary key
+- missing canonical time field
+- relationship changes
+- high-impact metric, dimension, or semantic role proposals used by insights
+- missing resource/domain context that blocks meaningful insight generation
+
+Show in secondary context panels:
+
+- proposed column descriptions
+- glossary terms
+- enum mappings
+- lookup mappings
+- display labels
+- question templates
+- visualization hints
+
+Keep hidden by default but available in files/API:
+
+- raw profile evidence
+- all bootstrap evidence
+- stable high-confidence structural proposals
+- raw resource extraction details
+- low-impact proposed context
+
+## Safety And Provenance
+
+These requirements cut across all phases and must be implemented before any LLM
+or NL-to-SQL surface is enabled by default.
+
+### PII And Resource Classification
+
+- Classify resources at ingest as `public`, `internal`, `sensitive`, or
+  `unknown`; default to `unknown`.
+- Require explicit configuration before `internal`, `sensitive`, or `unknown`
+  resources are sent to any external LLM provider.
+- Run redaction before any LLM call, including calls sourced from resources,
+  comments, catalog metadata, or sampled values.
+- Keep the existing invariant that raw rows are not sent to external LLMs.
+
+### SQL Safety
+
+- NL-to-SQL must route through a generic SQL safety layer.
+- Allow only read-only statement shapes.
+- Scope queries to the active project/source/schema allowlist.
+- Apply row, time, byte, and execution-time limits.
+- Block DDL, DML, multi-statement execution, unsafe functions, and unbounded
+  cross joins.
+- Persist the planned SQL, safety decision, and result limits as evidence.
+
+### Provenance, Versioning, And Rollback
+
+- Add an append-only `decision_log` per context item: who/what made the change,
+  timestamp, prior value, new value, evidence ids, reason, and source snapshot.
+- Snapshot discovery/profile/resource inputs on each ingest so run N can be
+  reconstructed.
+- Support reverting a specific context decision and replaying downstream
+  derived context and generated files.
+- Preserve approved/locked decisions across re-ingestion unless a defined drift
+  rule moves them to `needs_review`.
+
+### Telemetry Feedback Loop
+
+- Log every approve, reject, lock, edit, and defer event.
+- Capture item id, item type, producer, prior confidence, user action,
+  time-to-decision, and whether the item was later invalidated by drift.
+- Use the log for future ranking/calibration improvement; model training is a
+  non-goal for this plan.
+
+## Drift Semantics
+
+Drift must have concrete detector behavior and review consequences.
+
+| Drift type | Detector | Severity examples | Context consequence |
+| --- | --- | --- | --- |
+| Schema drift | table/column/type/constraint diff | removed column, type change, new key candidate | impacted items move to `needs_review` |
+| Distributional drift | null/cardinality/top-value/range/freshness diff | major null-rate jump, new dominant enum value | impacted semantic and policy items move to review when thresholds are exceeded |
+| Relationship drift | FK support, join cardinality, uniqueness diff | FK support drops, lookup becomes many-to-many | relationships, row grain, and downstream insights move to review |
+| Semantic drift | resource, glossary, pack, or context file update | metric definition changes, resource authority changes | derived context from the resource moves to review |
+
+Each detector must emit severity, affected items, evidence, and the rule that
+triggered the state change.
+
+## Phase 0: Audit And Guardrails
+
+**Goal:** identify and prevent hard-coded business/domain behavior in generic
+runtime code.
+
+### Implementation
+
+- Add a tracked audit document or test fixture containing known forbidden terms
+  and allowed locations.
+- Add an architecture boundary test that scans generic runtime modules for
+  domain/business vocabulary.
+- Allow domain vocabulary only in:
+  - `metadata/<project>/`
+  - `metadata/packs/<pack_name>/`
+  - tests explicitly marked as fixture/domain examples
+  - generated review docs
+  - comments that are not used by runtime behavior, where unavoidable
+- Start with the known violations:
+  - `headwater/explorer/readability.py`
+  - `headwater/api/project_scope.py`
+  - `headwater/analyzer/semantic_schema.py`
+  - `headwater/explorer/statistical.py`
+  - `headwater/api/routes/insights.py`
+  - `headwater/explorer/nl_to_sql.py`
+  - `headwater/explorer/suggestions.py`
+  - `headwater/explorer/visualization.py`
+  - `headwater/profiler/key_detection.py`
+
+### Verification
+
+- `uv run python -m pytest tests/test_architecture_boundaries.py -q`
+- `uv run ruff check headwater tests`
+
+### Exit Criteria
+
+- A failing test can catch newly added business vocabulary in generic modules.
+- Known violations are documented with target metadata destination.
+- Future phases can remove violations incrementally without losing visibility.
+
+## Phase 0.5: Semantic Type Library
+
+**Goal:** add a generic format/distributional semantic layer between raw
+structure and business context.
+
+### Implementation
+
+- Introduce a registered, extensible detector library for non-business semantic
+  types.
+- Initial detectors:
+  - email
+  - phone
+  - URL
+  - UUID
+  - IPv4 and IPv6
+  - ISO date/time variants
+  - monetary amount
+  - currency code
+  - percentage
+  - latitude and longitude
+  - country, subdivision, and postal code shapes
+  - IBAN and other checksum-backed account formats where safe
+- Each detector returns:
+  - semantic type
+  - confidence
+  - support count and sample size
+  - conflicting type evidence
+  - whether values are likely sensitive
+- Feed semantic type evidence into:
+  - column policies
+  - PII redaction
+  - visualization hints
+  - question generation
+  - cold-start summaries
+- Do not attach business labels or industry meanings in detector code.
+
+### Verification
+
+- Detector fixtures cover positive, negative, ambiguous, null-heavy, and mixed
+  format columns.
+- PII-sensitive detectors mark policy proposals without exposing raw values.
+- No detector contains domain/business vocabulary outside generic formats.
+
+### Exit Criteria
+
+- Generic semantic type evidence is available to context bootstrap and review.
+- PII, visualization, and question fallback behavior can use semantic type
+  evidence without project metadata.
+
+## Phase 1: Context Schema Expansion
+
+**Goal:** give project context enough structure to replace hard-coded registries
+and make row grain/entity first-class.
+
+### Implementation
+
+- Extend canonical context import/export to include:
+  - `derived_fields.yaml`
+  - `insight_families.yaml`
+  - `business_lenses.yaml`
+  - `presentation.yaml`
+  - `question_templates.yaml`
+  - `column_policies.yaml`
+  - `relationship_hints.yaml`
+  - `advisor_packs.yaml`
+- Add import/export support for these item types:
+  - `row_grain`
+  - `row_entity`
+  - `time_anchor`
+  - `pk_candidate`
+  - `fk_candidate`
+  - `enum_mapping`
+  - `derived_field`
+  - `insight_family`
+  - `business_lens`
+  - `question_template`
+  - `visualization_hint`
+  - `column_policy`
+  - `project_alias`
+  - `source_alias`
+  - `table_alias`
+  - `relationship_hint`
+  - `advisor_pack`
+- Add `ProjectContextProvider` accessors instead of ad hoc item traversal:
+  - row grain and row entity
+  - canonical time anchors
+  - key candidates and relationship hints
+  - aliases
+  - enum mappings
+  - value labels
+  - low-signal columns
+  - preferred dimensions
+  - business lenses
+  - insight family configs
+  - question templates
+  - visualization hints
+  - derived fields
+  - advisor pack inheritance and overrides
+- Bootstrap row-grain and row-entity proposals from:
+  - uniqueness ratios
+  - declared and inferred keys
+  - event-vs-state heuristics
+  - table/column naming evidence as weak evidence only
+  - time anchors and relationship topology
+
+### Verification
+
+- Context export includes all new files.
+- Context import round-trips every new file into canonical store records.
+- Approved and locked records are preserved on import and re-ingestion.
+- Tests cover at least one item per new context type.
+- Row grain, row entity, time anchor, PK, and FK proposals appear for a
+  zero-context fixture.
+
+### Exit Criteria
+
+- Generic runtime consumers can retrieve all business/domain hints from the
+  context provider.
+- YAML/Markdown remain projections, not separate runtime authority.
+- Row grain and row entity are reviewable, persisted, and versioned.
+
+## Phase 1.5: Confidence Calibration And Evidence Model
+
+**Goal:** make review ordering meaningful across heuristic, LLM, resource,
+imported, and user-produced context.
+
+### Implementation
+
+- Implement the canonical evidence schema described above.
+- Add producer-specific confidence anchors and enforce bounds in code.
+- Add the deterministic confidence combiner.
+- Require every context proposal to cite at least one evidence record.
+- Normalize evidence from:
+  - structural profiling
+  - declared constraints
+  - semantic type detectors
+  - resources
+  - LLM outputs
+  - advisor packs
+  - imports
+  - user decisions
+
+### Verification
+
+- Calibration fixtures assert ordering across producers:
+  - exact regex/format match outranks unsupported LLM guess
+  - user approval outranks machine producers
+  - conflicting evidence lowers confidence and moves items toward review
+  - declared constraints outrank inferred candidates unless drift conflicts
+- Confidence scores are deterministic across repeated runs on identical inputs.
+
+### Exit Criteria
+
+- The review queue can be sorted by impact, confidence, conflict, and drift with
+  stable semantics.
+- Every proposed item explains why it exists and how confident Headwater is.
+
+## Phase 2: Remove Hard-Coded Label And Enum Behavior
+
+**Goal:** make readable labels and enum translations context-driven.
+
+### Implementation
+
+- Remove `BUILTIN_ENUM_LABEL_REGISTRY` and
+  `BUILTIN_ENUM_DIMENSION_LABELS` from `explorer/readability.py`.
+- Replace readable-label token lists with structural and semantic-type rules:
+  - textual dtype
+  - non-id
+  - low/null-safe cardinality
+  - lookup relationship
+  - explicit context label hint
+  - generic semantic type evidence
+- Load enum mappings from:
+  - canonical `enum_mapping` items
+  - `lookups.yaml`
+  - resource-derived dictionary rows
+  - advisor pack mappings applied through project context
+- Add context bootstrap for enum candidates:
+  - low-cardinality code-like columns
+  - top values captured as proposed mappings without labels
+  - companion/resource labels when available
+
+### Verification
+
+- Existing taxi/payment behavior works only when metadata supplies the mapping.
+- A healthcare/manufacturing/finance fixture can define its own enum mapping and
+  see readable labels without code changes.
+- No built-in enum value labels remain in generic code.
+- The removal commit includes the replacement fixture and taxi accepted-delta
+  regression test.
+
+### Exit Criteria
+
+- Generic readability code has no business enum labels.
+- All readable business labels are traceable to context evidence.
+
+## Phase 3: Remove Project Alias Bias
+
+**Goal:** project scoping must use explicit metadata or structural source links,
+not hard-coded dataset aliases.
+
+### Implementation
+
+- Remove taxi/TLC/FHV/yellow/green alias logic from `api/project_scope.py`.
+- Add `project_alias`, `source_alias`, and `table_alias` context items.
+- Generate initial aliases from:
+  - project slug/display name
+  - source name
+  - table names
+  - user-provided resources
+  - imported metadata files
+  - advisor packs
+- Use aliases from `ProjectContextProvider` in project scoping.
+- Add UI/API review support for aliases only when they affect source/table
+  inclusion.
+
+### Verification
+
+- Taxi project scoping works only when aliases exist in project context.
+- Non-taxi projects can add aliases without code changes.
+- Tests prove no domain aliases are hard-coded in `project_scope.py`.
+- The removal commit includes the replacement fixture and taxi accepted-delta
+  regression test.
+
+### Exit Criteria
+
+- Project scoping is context-driven and domain-neutral.
+
+## Phase 4: Semantic Roles, Derived Fields, And Multi-Table Structure
+
+**Goal:** core semantic schema should infer only generic primitives and apply
+project-defined roles/derived fields.
+
+### Implementation
+
+- Keep generic primitives:
+  - timestamp-like field
+  - numeric measure
+  - identifier
+  - dimension
+  - text
+  - lookup key
+  - generic semantic type
+- Remove built-in role mappings for:
+  - `service_type`
+  - `origin_id`
+  - `destination_id`
+  - `location_id`
+  - `distance`
+  - `duration`
+  - `amount`
+  - `tip_amount`
+- Remove universal derived fields:
+  - `wait_min`
+  - `route_pair`
+  - `speed_per_hour`
+  - any domain-specific lifecycle metric
+- Add project-defined derived fields:
+  - expression template
+  - required roles
+  - output name
+  - output semantic type
+  - confidence/status/evidence
+- Keep only generic time buckets from approved timestamp roles:
+  - date bucket
+  - hour bucket
+  - weekday bucket
+- Add multi-table structural coverage:
+  - cross-table FK discovery
+  - fact-vs-dimension heuristics
+  - lookup-table promotion
+  - conformed dimension candidates
+  - source/table alias resolution across sources
+  - relationship confidence and support evidence
+
+### Verification
+
+- Without project metadata, a source receives only structural semantic roles.
+- With `metadata/nytaxi/derived_fields.yaml`, route/speed/wait behavior returns.
+- A healthcare fixture can define `length_of_stay` without code changes.
+- A manufacturing fixture can define `downtime_minutes` without code changes.
+- Multi-table fixtures produce FK, lookup, and conformed-dimension candidates.
+- The removal commit includes the replacement fixture and taxi accepted-delta
+  regression test.
+
+### Exit Criteria
+
+- `semantic_schema.py` contains no domain-specific role vocabulary beyond
+  generic primitives.
+- Business-specific derived fields are entirely context-driven.
+- Multi-table structure is inferred generically and reviewed through context.
+
+## Phase 5: Insight Families As Metadata
+
+**Goal:** generic insights should provide statistical primitives; project
+context should decide business families and language.
+
+### Implementation
+
+- Split insight execution into:
+  - generic statistical primitive engine
+  - project insight family planner
+  - business presentation layer
+- Keep generic primitives:
+  - coverage
+  - volume trend
+  - distribution
+  - ranking
+  - segment comparison
+  - anomaly
+  - change point
+  - correlation
+  - quality check
+- Move these into `insight_families.yaml`:
+  - location distribution
+  - path/route distribution
+  - distance efficiency
+  - wait/service patterns
+  - revenue leakage
+  - compliance risk
+  - patient stay
+  - manufacturing downtime
+  - finance margin or spend analysis
+- Remove hard-coded service labels and industry terms from
+  `explorer/statistical.py`.
+- Make family text templates context-driven:
+  - title template
+  - detail template
+  - required roles
+  - primitive query type
+  - ranking priority
+  - suppression rules
+
+### Verification
+
+- Existing taxi semantic insights work through `metadata/nytaxi/insight_families.yaml`.
+- A non-taxi fixture can define a project insight family without touching Python.
+- Generic fallback insights still work with no project family metadata.
+- The removal commit includes the replacement fixture and taxi accepted-delta
+  regression test.
+
+### Exit Criteria
+
+- No project-specific insight family or label exists in generic statistical code.
+- Every business-facing semantic insight can cite a context item or metadata file.
+
+## Phase 6: Business Lenses, Ranking, And Presentation Policies
+
+**Goal:** insight categories, dimension preferences, low-signal suppression, and
+visualization hints should be project context.
+
+### Implementation
+
+- Move business category tokens from `api/routes/insights.py` into
+  `business_lenses.yaml`.
+- Move preferred dimensions and low-signal columns into `column_policies.yaml`
+  and `presentation.yaml`.
+- Move visualization name hints into `presentation.yaml`.
+- Rank insights using:
+  - statistical significance
+  - support count
+  - evidence quality
+  - context-approved business lens priority
+  - user review status
+- Stop hard-coding categories like `Revenue`, `Compliance`, and `Operations`
+  unless supplied by context.
+
+### Verification
+
+- With no business lenses, insights are categorized generically.
+- With project lenses, insights receive project-specific categories and
+  priorities.
+- Visualization recommendations remain shape-driven when context is absent.
+- The removal commit includes the replacement fixture and taxi accepted-delta
+  regression test.
+
+### Exit Criteria
+
+- `insights.py` and `visualization.py` have no built-in business vocabulary.
+- Presentation behavior is explainable from result shape plus context.
+
+## Phase 7: NL-To-SQL And Suggestions Vocabulary Refactor
+
+**Goal:** generated questions and NL query behavior should be grounded in
+catalog/context, not built-in industry nouns.
+
+### Implementation
+
+- Move hard-coded metric/dimension/question vocabulary from:
+  - `explorer/nl_to_sql.py`
+  - `explorer/suggestions.py`
+  - `explorer/query_planner.py`
+  - `explorer/decomposition.py`
+- Add context-driven question templates:
+  - metric by dimension
+  - trend over time
+  - segment comparison
+  - top contributors
+  - quality risk
+  - project-defined business lens questions
+- Generate row nouns from:
+  - approved `row_entity`
+  - approved `row_grain`
+  - table/entity metadata
+  - fallback `records`
+- Use catalog metrics/dimensions and approved context roles for scoring.
+- Route generated SQL through the safety layer defined above.
+
+### Verification
+
+- Question suggestions for taxi, healthcare, manufacturing, and finance fixtures
+  differ only because their project context differs.
+- Removing project metadata falls back to structural suggestions.
+- No built-in industry nouns are needed for high-value questions.
+- Unsafe NL-to-SQL attempts are blocked with explainable safety decisions.
+- The removal commit includes the replacement fixture and taxi accepted-delta
+  regression test.
+
+### Exit Criteria
+
+- NL-to-SQL and suggestions consume context vocabularies and catalog artifacts.
+- Generic code contains only analytical verbs and structural concepts.
+- SQL execution is read-only, scoped, and bounded.
+
+## Phase 8A: Structural Bootstrap Proposals
+
+**Goal:** ingestion should generate rich zero-context proposals while staying
+domain-neutral.
+
+### Implementation
+
+- Generate context from structural evidence:
+  - table profiles
+  - column profiles
+  - declared constraints
+  - inferred relationships
+  - lookup shapes
+  - enum/code shapes
+  - semantic type evidence
+  - temporal coverage
+  - numeric distributions
+  - text columns
+  - duplicate/grain risks
+- Propose:
+  - row grain
+  - row entity
+  - PK/FK candidates
+  - canonical time anchors
+  - top-K dimensions and measures
+  - quality risks
+  - fallback questions
+- Never auto-approve business meaning.
+
+### Verification
+
+- New source ingestion creates context proposals automatically.
+- Approved/locked context survives re-ingestion.
+- Drift marks impacted context as `needs_review`.
+- Synthetic random-schema fixture produces the day-one contract outputs without
+  project metadata.
+
+### Exit Criteria
+
+- Ingestion is the main producer of structural project context proposals.
+- Zero-context sources produce useful reviewable output.
+
+## Phase 8B: Resource Extraction With Safety
+
+**Goal:** turn user-provided resources into evidence without weakening privacy
+or provenance boundaries.
+
+### Implementation
+
+- Add resource classification and override flow.
+- Extract from:
+  - CSV dictionaries
+  - Markdown/text notes
+  - YAML/dbt-like docs
+  - PDFs where dependencies are available
+  - URL text extraction where explicitly allowed/configured
+  - dbt manifest/catalog imports
+  - BI metric export imports
+- Redact content before any LLM call.
+- Persist resource extraction evidence separately from proposed context items.
+- Detect resource conflicts with approved context.
+
+### Verification
+
+- Resource imports produce evidence and proposals with calibrated confidence.
+- Sensitive or unknown resources are not sent to external LLM providers by
+  default.
+- Resource conflicts appear in the review queue.
+
+### Exit Criteria
+
+- Resources can enrich context while preserving classification, redaction, and
+  auditability.
+
+## Phase 8C: Context File Generation And Re-Import
+
+**Goal:** make reviewable files a faithful projection of the authoritative
+SQLite context store.
+
+### Implementation
+
+- Generate proposed metadata files after ingestion when enabled:
+  - write to `metadata/<project>/`
+  - preserve approved/locked store records
+  - include `REVIEW.md`
+  - include evidence and confidence summaries
+- Import generated files back into canonical records without semantic drift.
+- Support project-level `extends` for advisor packs.
+
+### Verification
+
+- Generated files can be imported back without changing meaning.
+- File diffs are stable across repeated runs with identical inputs.
+- Approved/locked context survives export/import/re-ingestion.
+
+### Exit Criteria
+
+- Files are portable and reviewable without becoming a second runtime authority.
+
+## Phase 8D: Optional Local ML And Embedding Assist
+
+**Goal:** add local matching assistance only as a gated, deterministic,
+never-auto-approve enhancement.
+
+### Implementation
+
+- Add an explicit feature flag; default off.
+- Use local ML/embedding assist for:
+  - term-to-column matching
+  - column grouping
+  - resource-to-table matching
+  - glossary clustering
+- Cache inputs and outputs by content hash.
+- Record model name/version and evidence ids.
+- Never approve automatically.
+
+### Verification
+
+- Offline mode works with feature flag off.
+- Cached replay yields identical proposals for tests.
+- No CI test requires live model access.
+
+### Exit Criteria
+
+- Local assist improves ranking when enabled but is not required for core
+  domain-agnostic behavior.
+
+## Phase 9: Cold-Start Day-One Deliverable
+
+**Goal:** make arbitrary-dataset usefulness a first-class acceptance target.
+
+### Implementation
+
+- Add a fixture-independent cold-start acceptance test that ingests a synthetic
+  random-schema dataset with no project metadata.
+- Assert production of:
+  - row grain proposal
+  - row entity proposal or explicit unknown with evidence
+  - time anchor candidate when time-like data exists
+  - PK/FK candidates when support exists
+  - top-K dimensions and measures
+  - top distributional facts and quality risks
+  - 3 to 5 fallback questions
+  - calibrated confidence and evidence for each proposal
+- Ensure all UI states render useful summaries without business metadata.
+
+### Verification
+
+- The cold-start test runs in CI without external services.
+- Structural suggestions degrade gracefully when the fixture omits keys, time, or
+  measures.
+
+### Exit Criteria
+
+- A user dropping an unknown CSV or connecting an unknown database receives
+  actionable structure, risks, and questions before adding context.
+
+## Phase 10: Cleaner User Workflow
+
+**Goal:** the UI should guide users through only the review that matters.
+
+### Implementation
+
+- Replace broad context item lists with a prioritized review queue.
+- Add filters:
+  - `Needs action`
+  - `Drift`
+  - `High impact`
+  - `Resources`
+  - `All context`
+- Add compact review cards for:
+  - row grain
+  - row entity
+  - canonical time
+  - primary/foreign keys
+  - semantic roles used by insights
+  - metric/dimension proposals used by catalog
+  - resource conflicts
+- Move raw metadata detail into:
+  - context files
+  - item detail drawer
+  - generated `REVIEW.md`
+- Show business insight readiness:
+  - structural discovery complete
+  - context coverage
+  - reviewed critical items
+  - resource coverage
+  - unresolved drift
+
+### Verification
+
+- A user can ingest a source and identify the next review action without reading
+  raw metadata dumps.
+- The full context remains accessible for audit/export/import.
+- UI tests or build verification cover context review states.
+
+### Exit Criteria
+
+- Ingestion to insights is clean and review-driven.
+- Detailed semantic data remains available without cluttering the primary flow.
+
+## Phase 11: Cross-Domain Evaluation Harness
+
+**Goal:** prove Headwater is domain-agnostic across materially different
+datasets using graded, repeatable metrics.
+
+### Fixtures
+
+- Generic operations/events dataset.
+- Healthcare-style fixture.
+- Manufacturing-style fixture.
+- Finance-style fixture.
+- Taxi fixture using only `metadata/nytaxi/`.
+- Synthetic random-schema cold-start fixture.
+
+### Gold Files
+
+Each fixture must define:
+
+- gold row grain
+- gold row entity where knowable
+- gold PK/FK candidates
+- gold time anchor
+- gold top-K dimensions and measures
+- gold question list or acceptable question intents
+- gold insight families where project metadata exists
+- gold "no business term leak" assertion
+- accepted deltas for taxi parity during migration
+
+### Scoring
+
+- Add a scoring script that records precision/recall or exact-match metrics per
+  gold category.
+- Track regression metrics per fixture across commits.
+- Fail CI when metrics drop below configured thresholds.
+- Keep fixture outputs reproducible through cached inputs and deterministic
+  prompts.
+
+### Required Assertions
+
+- No fixture requires Python code changes for domain-specific labels, insights,
+  aliases, question templates, or derived fields.
+- Removing project metadata degrades to structural insights, not wrong business
+  insights.
+- Adding metadata restores project-specific business value.
+- Review state and drift behavior work consistently across fixtures.
+
+### Verification
+
+- Focused architecture tests.
+- Analyzer/catalog tests.
+- Explorer/NL-to-SQL tests.
+- Insights tests.
+- Evaluation scoring script.
+- UI build.
+
+### Exit Criteria
+
+- The same generic pipeline works across all fixtures.
+- Domain behavior is traceable to project context.
+- Regressions are visible as numbers, not subjective fixture inspection.
+
+## Phase 12: LLM Determinism, Cost Controls, And Replay
+
+**Goal:** make LLM-assisted context enrichment reproducible, bounded, and safe.
+
+### Implementation
+
+- Build prompts deterministically from sorted, scoped, redacted inputs.
+- Cache LLM responses by content-addressed hash of:
+  - prompt template version
+  - redacted input payload
+  - model/provider
+  - configuration
+- Add per-source and per-run token budgets.
+- Add offline mode that disables live calls and uses cached responses only.
+- Add replay mode for tests.
+- Store raw provider responses only when classification policy allows it; store
+  normalized evidence otherwise.
+
+### Verification
+
+- CI can replay cached LLM outputs without network access.
+- Token budget exhaustion produces a clear partial-result state.
+- Prompt and response hashes make repeated runs auditable.
+
+### Exit Criteria
+
+- LLM assist is optional, reproducible, and safe to test.
+
+## Phase 13: Advisor Packs
+
+**Goal:** make vertical content reusable across projects without embedding it in
+generic code.
+
+### Implementation
+
+- Add importable advisor packs with metadata, version, dependencies, and
+  supported item types.
+- Allow project context to `extends` packs and override individual pack items.
+- Treat pack items as proposals unless a project explicitly locks or approves
+  them.
+- Track pack provenance in evidence and decision logs.
+- Add conflict handling when two packs propose incompatible context.
+
+### Verification
+
+- Healthcare, manufacturing, finance, and taxi packs can be imported into
+  different projects.
+- Project overrides take precedence over pack defaults.
+- Pack removal or version update moves affected derived items to review.
+
+### Exit Criteria
+
+- Vertical insight families, lenses, glossary terms, and templates are reusable
+  assets rather than project-local copy-paste.
+
+## Phase 14: Documentation And Operating Model
+
+**Goal:** make the architecture enforceable by humans and tests.
+
+### Implementation
+
+- Update `docs/ARCHITECTURE.md` with the context boundary.
+- Add a short guide for adding project metadata.
+- Add a guide for adding a new context item type.
+- Document confidence calibration and evidence producers.
+- Document review statuses and drift semantics.
+- Document resource classification, redaction, and SQL safety.
+- Document advisor packs.
+- Document LLM offline/replay behavior.
+- Document how assistants receive scoped context.
+- Document what must never be added to generic code.
+
+### Verification
+
+- Documentation references current APIs and file names.
+- Architecture boundary tests match the documentation.
+
+### Exit Criteria
+
+- New contributors have a clear rulebook.
+- The codebase has automated checks for the most important boundary.
+
+## Implementation Order
+
+Recommended execution sequence:
+
+1. Phase 0: audit and guardrails.
+2. Phase 0.5: semantic type library.
+3. Phase 1: context schema expansion.
+4. Phase 1.5: confidence calibration and evidence model.
+5. Phase 2: labels and enum mappings.
+6. Phase 3: project aliases.
+7. Phase 4: semantic roles, derived fields, and multi-table structure.
+8. Phase 5: insight families.
+9. Phase 6: business lenses and presentation.
+10. Phase 7: NL-to-SQL and suggestions.
+11. Phase 8A: structural bootstrap proposals.
+12. Phase 8B: resource extraction with safety.
+13. Phase 8C: context file generation and re-import.
+14. Phase 8D: optional local ML and embedding assist.
+15. Phase 9: cold-start day-one deliverable.
+16. Phase 10: UI workflow cleanup.
+17. Phase 11: cross-domain evaluation harness.
+18. Phase 12: LLM determinism, cost controls, and replay.
+19. Phase 13: advisor packs.
+20. Phase 14: documentation.
+
+Phases 2 through 7 must be implemented as small removals of one hard-coded
+registry at a time. Each removal commit must ship with:
+
+- a replacement context fixture
+- taxi parity or accepted-delta regression coverage
+- a forbidden-term boundary test update when needed
+- a note explaining any intentionally accepted degradation
+
+Main should not silently degrade between removal phases.
+
+## Definition Of Done
+
+This plan is complete when these measurable gates pass:
+
+- `0` hits on the forbidden-term scan in generic runtime modules, excluding
+  approved allowlist locations.
+- `100%` of domain-specific aliases, labels, roles, derived fields, insight
+  families, question templates, and presentation preferences come from project
+  context or advisor packs.
+- At least `4` distinct-vertical fixtures plus the synthetic cold-start fixture
+  pass the evaluation harness.
+- Cold-start ingestion produces row grain/entity, key candidates, time anchor
+  candidates where applicable, top-K dimensions/measures, distributional facts,
+  quality risks, and `3` to `5` fallback questions without project metadata.
+- Confidence calibration ordering tests pass across structural, semantic type,
+  resource, LLM, advisor pack, import, and user producers.
+- Generated context files export/import round-trip without semantic changes.
+- LLM replay tests pass offline from cached responses.
+- SQL safety tests block unsafe NL-to-SQL plans and enforce project scoping and
+  limits.
+- Drift tests cover schema, distributional, relationship, and semantic drift,
+  with affected approved items moved to `needs_review`.
+- Telemetry records approve/reject/edit/lock/defer actions with prior
+  confidence and time-to-decision.
+- UI build and context review tests cover prioritized review states.
+
+## Non-Goals
+
+These are intentionally out of scope for this plan:
+
+- Automatic approval of business logic.
+- Autonomous changes to marts, contracts, or source systems without human review.
+- Multi-tenant RBAC or managed-cloud account isolation.
+- Real-time streaming ingestion.
+- Training a ranking model from feedback telemetry.
+- Guaranteeing perfect business meaning from raw data without reviewed context.

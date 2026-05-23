@@ -1,0 +1,39 @@
+name: operations_events
+fixture: operations_events
+discovery_path: context_fixtures/operations_events.yaml
+row_grain:
+  events:
+    - event_uuid
+  sites:
+    - site_id
+row_entity:
+  events: event
+  sites: site
+time_anchor:
+  events: event_time
+pk_candidates:
+  events:
+    - event_uuid
+  sites:
+    - site_id
+fk_candidates:
+  - from_table: events
+    from_column: site_id
+    to_table: sites
+    to_column: site_id
+top_dimensions:
+  - table_name: events
+    column_name: event_type
+  - table_name: events
+    column_name: severity
+  - table_name: sites
+    column_name: region
+top_measures:
+  - table_name: events
+    column_name: duration_minutes
+min_fallback_questions: 4
+question_substrings:
+  - events
+  - time anchor
+forbidden_terms:
+  - patient

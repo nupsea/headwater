@@ -12,10 +12,15 @@ Works at three tiers:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 
+import yaml
+
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata
 from headwater.core.classification import is_dimension_column, is_metric_column
 from headwater.core.models import (
     ColumnInfo,
@@ -31,47 +36,64 @@ from headwater.core.models import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Built-in synonym families (~60 entries covering common BI vocabulary)
-# ---------------------------------------------------------------------------
+# Project-specific catalog vocabulary is loaded from metadata/<project>/catalog.yaml.
 
-_GEOGRAPHIC_SYNONYMS: dict[str, list[str]] = {
-    "county": ["borough", "district", "parish", "zone", "area", "neighborhood", "region"],
-    "city": ["town", "municipality", "metro"],
-    "state": ["province", "territory"],
-    "country": ["nation"],
-    "address": ["location", "street"],
-    "zip": ["postal_code", "zipcode"],
-}
 
-_TEMPORAL_SYNONYMS: dict[str, list[str]] = {
-    "date": ["day", "when"],
-    "month": ["period", "month_of"],
-    "year": ["fiscal_year", "calendar_year"],
-    "quarter": ["q1", "q2", "q3", "q4"],
-}
+def _metadata_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "metadata"
 
-_CATEGORICAL_SYNONYMS: dict[str, list[str]] = {
-    "type": ["kind", "category", "classification", "class"],
-    "status": ["state", "condition", "phase", "stage"],
-    "priority": ["severity", "urgency", "level"],
-    "source": ["origin", "channel", "medium"],
-    "result": ["outcome", "finding", "conclusion"],
-}
 
-_AGG_INTENT_WORDS = {"count", "total", "sum", "average", "avg", "mean", "max", "min"}
+def _slugify_metadata_key(value: str) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized.strip("-")
 
-# Map from column name pattern to agg_type
-_AGG_TYPE_PATTERNS: list[tuple[str, str]] = [
-    (r".*_count$|^count$|^total$|^num_", "count"),
-    (r".*_sum$|^sum_", "sum"),
-    (r".*_avg$|^avg_|.*_average$|^mean_", "avg"),
-    (r".*_rate$|.*_ratio$|.*_pct$|^pct_", "avg"),
-    (r".*_score$|.*score$", "avg"),
-    (r".*_amount$|.*_value$|.*_cost$|.*_price$|.*_budget$", "sum"),
-    (r".*_min$", "min"),
-    (r".*_max$", "max"),
-]
+
+def _compact_metadata_key(value: str) -> str:
+    return "".join(ch.lower() for ch in value if ch.isalnum())
+
+
+def _candidate_catalog_paths(source_name: str | None, project_id: str | None) -> list[Path]:
+    candidates: list[Path] = []
+    metadata_root = _metadata_root()
+    for name in [project_id, source_name]:
+        if not name:
+            continue
+        variants = [
+            str(name),
+            _slugify_metadata_key(str(name)),
+            _compact_metadata_key(str(name)),
+        ]
+        for variant in variants:
+            if not variant:
+                continue
+            path = metadata_root / variant / "catalog.yaml"
+            if path not in candidates:
+                candidates.append(path)
+    return candidates
+
+
+def _load_catalog_spec(
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> dict:
+    for path in _candidate_catalog_paths(source_name, project_id):
+        if not path.exists():
+            continue
+        try:
+            parsed = yaml.safe_load(path.read_text()) or {}
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        try:
+            parsed = json.loads(path.read_text())
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
 
 # ---------------------------------------------------------------------------
 # Slug / display name helpers
@@ -87,19 +109,28 @@ def _to_display_name(snake: str) -> str:
 
 def _metric_name(table: str, col_name: str, agg: str) -> str:
     """Generate a canonical metric name."""
-    # e.g. complaints + COUNT(*) -> complaint_count
     singular = table.rstrip("s") if table.endswith("s") else table
     if agg == "count" and col_name == "*":
         return f"{singular}_count"
     return f"{agg}_{table}_{col_name}"
 
 
-def _infer_agg_type(col: ColumnInfo) -> str:
+def _infer_agg_type(
+    col: ColumnInfo,
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> str:
     """Infer aggregation type from column name patterns."""
     name_lower = col.name.lower()
-    for pattern, agg in _AGG_TYPE_PATTERNS:
-        if re.match(pattern, name_lower):
-            return agg
+    spec = _load_catalog_spec(source_name, project_id)
+    for entry in spec.get("agg_type_patterns", []):
+        if not isinstance(entry, dict):
+            continue
+        pattern = entry.get("pattern")
+        agg_type = entry.get("agg_type")
+        if isinstance(pattern, str) and isinstance(agg_type, str) and re.match(pattern, name_lower):
+            return agg_type
     # Default: avg for most numeric columns
     return "avg"
 
@@ -109,23 +140,25 @@ def _infer_agg_type(col: ColumnInfo) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _expand_synonyms(name: str, description: str | None, sample_values: list[str]) -> list[str]:
+def _expand_synonyms(
+    name: str,
+    description: str | None,
+    sample_values: list[str],
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> list[str]:
     """Generate synonym list for a dimension from name, description, and values."""
     synonyms: set[str] = set()
     name_lower = name.lower()
     tokens = set(re.split(r"[_\s]+", name_lower))
 
-    # Check built-in synonym families
-    for families in (_GEOGRAPHIC_SYNONYMS, _TEMPORAL_SYNONYMS, _CATEGORICAL_SYNONYMS):
-        for key, syns in families.items():
-            if key in tokens or key in name_lower:
-                synonyms.update(syns)
-                synonyms.add(key)
-            for syn in syns:
-                if syn in tokens or syn in name_lower:
-                    synonyms.update(syns)
-                    synonyms.add(key)
-                    break
+    spec = _load_catalog_spec(source_name, project_id)
+    synonym_families = spec.get("synonyms", {})
+    if isinstance(synonym_families, dict):
+        for key, syns in synonym_families.items():
+            if (key in tokens or key == name_lower) and isinstance(syns, list):
+                synonyms.update(str(syn) for syn in syns)
 
     # Add individual name tokens as synonyms (if meaningful)
     noise = {"id", "of", "the", "is", "in", "at", "by", "to", "for", "and", "or"}
@@ -148,6 +181,9 @@ def _expand_synonyms(name: str, description: str | None, sample_values: list[str
 def build_catalog(
     discovery: DiscoveryResult,
     relationships: list[Relationship] | None = None,
+    *,
+    project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> SemanticCatalog:
     """Build a SemanticCatalog from an enriched DiscoveryResult.
 
@@ -171,8 +207,22 @@ def build_catalog(
     entities: list[EntityDefinition] = []
 
     for table in discovery.tables:
-        table_metrics = _extract_metrics(table, profile_map)
-        table_dimensions = _extract_dimensions(table, profile_map, rel_map, pk_tables)
+        table_metrics = _extract_metrics(
+            table,
+            profile_map,
+            source_name=discovery.source.name,
+            project_id=project_id,
+            metadata=metadata,
+        )
+        table_dimensions = _extract_dimensions(
+            table,
+            profile_map,
+            rel_map,
+            pk_tables,
+            source_name=discovery.source.name,
+            project_id=project_id,
+            metadata=metadata,
+        )
 
         metrics.extend(table_metrics)
         dimensions.extend(table_dimensions)
@@ -224,6 +274,10 @@ def build_catalog(
 def _extract_metrics(
     table: TableInfo,
     profile_map: dict[str, dict[str, ColumnProfile]],
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[MetricDefinition]:
     """Extract metric definitions from a table's columns."""
     logger.debug("Extracting metrics from table %s (%d columns)", table.name, len(table.columns))
@@ -250,10 +304,11 @@ def _extract_metrics(
 
     for col in table.columns:
         profile = table_profiles.get(col.name)
-        if not is_metric_column(col, profile):
+        role_hint, semantic_hint = _context_column_hints(metadata, table.name, col.name)
+        if not _is_metric_candidate(col, profile, role_hint, semantic_hint):
             continue
 
-        agg_type = _infer_agg_type(col)
+        agg_type = _infer_agg_type(col, source_name=source_name, project_id=project_id)
         name = f"{agg_type}_{table.name}_{col.name}"
         display = f"{_to_display_name(agg_type)} {_to_display_name(col.name)}"
 
@@ -266,11 +321,20 @@ def _extract_metrics(
             expression = f'{agg_type.upper()}("{col.name}")'
 
         # Null-aware: if column has significant nulls, note in description
-        desc_parts = [col.description or f"{col.name} from {table.name}"]
+        desc_parts = [
+            _context_description(
+                metadata,
+                table.name,
+                col.name,
+                col.description,
+                table.name,
+            )
+        ]
         if profile and profile.null_rate > 0.1:
             desc_parts.append(f"Note: {profile.null_rate:.0%} of values are NULL")
 
         confidence = col.confidence if col.confidence > 0 else 0.5
+        source = "human" if role_hint or semantic_hint else "heuristic"
 
         metrics.append(
             MetricDefinition(
@@ -283,7 +347,7 @@ def _extract_metrics(
                 agg_type=agg_type,
                 synonyms=_metric_synonyms(col.name, agg_type),
                 confidence=round(confidence, 3),
-                source="heuristic",
+                source=source,
             )
         )
 
@@ -317,6 +381,10 @@ def _extract_dimensions(
     profile_map: dict[str, dict[str, ColumnProfile]],
     rel_map: dict[str, list[Relationship]],
     pk_tables: set[str],
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[DimensionDefinition]:
     """Extract dimension definitions from a table's columns."""
     logger.debug("Extracting dimensions from table %s", table.name)
@@ -325,6 +393,7 @@ def _extract_dimensions(
 
     for col in table.columns:
         profile = table_profiles.get(col.name)
+        role_hint, semantic_hint = _context_column_hints(metadata, table.name, col.name)
 
         # Skip FK columns -- they become join paths, not dimensions themselves
         if col.semantic_type == "foreign_key":
@@ -333,7 +402,7 @@ def _extract_dimensions(
         if col.is_primary_key or col.semantic_type in ("id", "primary_key"):
             continue
 
-        if not is_dimension_column(col, profile):
+        if not _is_dimension_candidate(col, profile, role_hint, semantic_hint):
             continue
 
         # Get sample values from profile
@@ -354,14 +423,26 @@ def _extract_dimensions(
                 join_nullable = rel.referential_integrity < 0.5
 
         name = f"{table.name}_{col.name}"
-        synonyms = _expand_synonyms(col.name, col.description, sample_values)
+        synonyms = _expand_synonyms(
+            col.name,
+            col.description,
+            sample_values,
+            source_name=source_name,
+            project_id=project_id,
+        )
         confidence = col.confidence if col.confidence > 0 else 0.5
 
         dimensions.append(
             DimensionDefinition(
                 name=name,
                 display_name=_to_display_name(col.name),
-                description=col.description or f"{col.name} from {table.name}",
+                description=_context_description(
+                    metadata,
+                    table.name,
+                    col.name,
+                    col.description,
+                    table.name,
+                ),
                 column=col.name,
                 table=table.name,
                 dtype=col.dtype,
@@ -369,7 +450,7 @@ def _extract_dimensions(
                 sample_values=sample_values,
                 cardinality=cardinality,
                 confidence=round(confidence, 3),
-                source="heuristic",
+                source="human" if role_hint or semantic_hint else "heuristic",
                 join_path=join_path,
                 join_nullable=join_nullable,
             )
@@ -463,6 +544,74 @@ def _build_profile_map(
     for p in profiles:
         result.setdefault(p.table_name, {})[p.column_name] = p
     return result
+
+
+def _context_column_hints(
+    metadata: RetrievedMetadata | None,
+    table_name: str,
+    column_name: str,
+) -> tuple[str | None, str | None]:
+    if metadata is None:
+        return None, None
+    hint = metadata.column_hints.get((table_name, column_name), {})
+    role = hint.get("role")
+    semantic_type = hint.get("semantic_type")
+    locked = metadata.locked_roles.get((table_name, column_name))
+    if locked and not role and not semantic_type:
+        role = locked
+        semantic_type = locked
+    return (
+        str(role).strip() if isinstance(role, str) and role.strip() else None,
+        str(semantic_type).strip()
+        if isinstance(semantic_type, str) and semantic_type.strip()
+        else None,
+    )
+
+
+def _is_metric_candidate(
+    col: ColumnInfo,
+    profile: ColumnProfile | None,
+    role_hint: str | None,
+    semantic_hint: str | None,
+) -> bool:
+    explicit = {value for value in (role_hint, semantic_hint) if value}
+    if explicit & {"dimension", "event_ts", "service_type"}:
+        return False
+    if explicit & {"metric", "measure", "kpi", "amount", "count", "distance", "duration"}:
+        return True
+    return is_metric_column(col, profile)
+
+
+def _is_dimension_candidate(
+    col: ColumnInfo,
+    profile: ColumnProfile | None,
+    role_hint: str | None,
+    semantic_hint: str | None,
+) -> bool:
+    explicit = {value for value in (role_hint, semantic_hint) if value}
+    if explicit & {"metric", "measure", "kpi", "amount", "count"}:
+        return False
+    if "dimension" in explicit:
+        return not col.is_primary_key
+    return is_dimension_column(col, profile)
+
+
+def _context_description(
+    metadata: RetrievedMetadata | None,
+    table_name: str,
+    column_name: str,
+    fallback: str | None,
+    fallback_table: str,
+) -> str:
+    if metadata is not None:
+        hint = metadata.column_hints.get((table_name, column_name), {})
+        description = hint.get("description")
+        if isinstance(description, str) and description.strip():
+            return description.strip()
+        glossary = metadata.glossary.get(column_name.lower())
+        if glossary:
+            return glossary
+    return fallback or f"{column_name} from {fallback_table}"
 
 
 def _build_rel_map(

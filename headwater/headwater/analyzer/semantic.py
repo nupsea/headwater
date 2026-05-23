@@ -15,6 +15,7 @@ from headwater.analyzer.heuristics import (
     generate_deep_table_description,
 )
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider, make_cache_key
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
@@ -24,8 +25,24 @@ from headwater.core.models import (
     TableInfo,
     TableSemanticDetail,
 )
+from headwater.core.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
+
+_REDACTED_PROMPT_VALUE = "[REDACTED]"
+_SENSITIVE_PROFILE_PATTERNS = {"email", "iban", "phone"}
+_SENSITIVE_COLUMN_NAME_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "email",
+    "password",
+    "phone",
+    "secret",
+    "ssn",
+    "token",
+)
 
 
 def analyze(
@@ -34,6 +51,8 @@ def analyze(
     *,
     store: object | None = None,
     source_name: str = "source",
+    project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> DiscoveryResult:
     """Enrich a DiscoveryResult with semantic descriptions and domain classification.
 
@@ -44,18 +63,44 @@ def analyze(
     checkpointed to SQLite immediately after LLM processing so partial work
     survives timeouts and restarts.
     """
+    resolved_source_name = source_name if source_name != "source" else discovery.source.name
     if provider is None or isinstance(provider, NoLLMProvider):
-        return _analyze_heuristic(discovery)
+        return _analyze_heuristic(
+            discovery,
+            source_name=resolved_source_name,
+            project_id=project_id,
+            metadata=metadata,
+        )
 
     # LLM mode: run async enrichment
     return asyncio.run(
-        _analyze_with_llm(discovery, provider, store=store, source_name=source_name)
+        _analyze_with_llm(
+            discovery,
+            provider,
+            store=store,
+            source_name=resolved_source_name,
+            project_id=project_id,
+            metadata=metadata,
+        )
     )
 
 
-def _analyze_heuristic(discovery: DiscoveryResult) -> DiscoveryResult:
+def _analyze_heuristic(
+    discovery: DiscoveryResult,
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
+) -> DiscoveryResult:
     """Enrich using heuristics only -- no LLM calls."""
-    enrich_tables(discovery.tables, discovery.profiles, discovery.relationships)
+    enrich_tables(
+        discovery.tables,
+        discovery.profiles,
+        discovery.relationships,
+        source_name=source_name or discovery.source.name,
+        project_id=project_id,
+        metadata=metadata,
+    )
     discovery.domains = build_domain_map(discovery.tables)
 
     # Deep semantic descriptions
@@ -70,6 +115,8 @@ async def _analyze_with_llm(
     *,
     store: object | None = None,
     source_name: str = "source",
+    project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> DiscoveryResult:
     """Enrich using LLM with heuristic fallback per table.
 
@@ -77,7 +124,14 @@ async def _analyze_with_llm(
     after successful LLM enrichment so partial work survives failures.
     """
     # First apply heuristics as baseline
-    enrich_tables(discovery.tables, discovery.profiles, discovery.relationships)
+    enrich_tables(
+        discovery.tables,
+        discovery.profiles,
+        discovery.relationships,
+        source_name=source_name or discovery.source.name,
+        project_id=project_id,
+        metadata=metadata,
+    )
 
     # Build profile lookup
     profile_map: dict[str, list[ColumnProfile]] = {}
@@ -259,7 +313,7 @@ def _build_deep_table_prompt(
     heuristic_lines = _build_heuristic_lines(table)
     locked_section = _build_locked_section(table)
     companion_section = (
-        f"\nCompanion documentation (use as context):\n{companion_context}\n"
+        f"\nCompanion documentation (use as context):\n{_redact_prompt_text(companion_context)}\n"
         if companion_context
         else ""
     )
@@ -282,7 +336,7 @@ Respond as JSON:
   "description": "Concise 1-2 sentence summary",
   "domain": "Business domain",
   "narrative": "3-5 sentence narrative: what this table is, its purpose, related tables",
-  "row_semantics": "What each row represents (e.g., 'Each row is a daily air quality reading')",
+  "row_semantics": "What each row represents",
   "business_process": "The business process this table captures",
   "temporal_grain": "daily|monthly|yearly|event-based|snapshot|none",
   "key_dimensions": ["primary grouping columns"],
@@ -312,7 +366,9 @@ def _build_compact_table_prompt(
     col_lines = _build_column_lines(table, profiles)
     rel_lines = _build_relationship_lines(table, relationships)
     companion_section = (
-        f"\nDocumentation context:\n{companion_context}\n" if companion_context else ""
+        f"\nDocumentation context:\n{_redact_prompt_text(companion_context)}\n"
+        if companion_context
+        else ""
     )
 
     return f"""Analyze this database table.
@@ -344,15 +400,25 @@ def _build_column_lines(
     profiles: list[ColumnProfile],
 ) -> list[str]:
     """Build column summary lines with stats for prompt."""
-    profile_map = {p.column_name: p for p in profiles}
+    profile_map = {
+        p.column_name: p
+        for p in sorted(profiles, key=_profile_sort_key)
+        if p.table_name == table.name
+    }
     col_lines = []
-    for col in table.columns:
+    for col in sorted(table.columns, key=_column_sort_key):
         p = profile_map.get(col.name)
         line = f"  - {col.name} ({col.dtype})"
         if p:
             parts = [f"nulls={p.null_rate:.0%}", f"distinct={p.distinct_count}"]
             if p.top_values:
-                top3 = [v for v, _ in p.top_values[:3]]
+                top3 = [
+                    _redact_prompt_stat_value(value, col, p)
+                    for value, _count in sorted(
+                        p.top_values,
+                        key=lambda item: (-int(item[1]), str(item[0])),
+                    )[:3]
+                ]
                 parts.append(f"top_values={top3}")
             if p.min_value is not None:
                 parts.append(f"range=[{p.min_value}, {p.max_value}]")
@@ -375,7 +441,7 @@ def _build_relationship_lines(
 ) -> list[str]:
     """Build relationship lines for prompt."""
     rel_lines = []
-    for r in relationships:
+    for r in sorted(relationships, key=_relationship_sort_key):
         if r.from_table == table.name or r.to_table == table.name:
             rel_lines.append(
                 f"  - {r.from_table}.{r.from_column} -> "
@@ -387,7 +453,7 @@ def _build_relationship_lines(
 def _build_heuristic_lines(table: TableInfo) -> list[str]:
     """Build heuristic classification lines for the deep prompt."""
     lines = []
-    for col in table.columns:
+    for col in sorted(table.columns, key=_column_sort_key):
         if col.locked:
             continue
         parts = []
@@ -405,8 +471,8 @@ def _build_heuristic_lines(table: TableInfo) -> list[str]:
 def _build_locked_section(table: TableInfo) -> str:
     """Build locked columns section for prompt."""
     locked_col_lines = [
-        f"  - {c.name}: LOCKED -- ground truth: {c.description!r}"
-        for c in table.columns
+        f"  - {c.name}: LOCKED -- ground truth: {_redact_prompt_text(c.description)!r}"
+        for c in sorted(table.columns, key=_column_sort_key)
         if c.locked and c.description
     ]
     if not locked_col_lines:
@@ -414,6 +480,52 @@ def _build_locked_section(table: TableInfo) -> str:
     return "\nLocked columns (do not re-classify, use as ground truth):\n" + "\n".join(
         locked_col_lines
     )
+
+
+def _column_sort_key(column: ColumnInfo) -> tuple[str, str]:
+    return (column.name.lower(), column.name)
+
+
+def _profile_sort_key(profile: ColumnProfile) -> tuple[str, str]:
+    return (profile.table_name.lower(), profile.column_name.lower())
+
+
+def _relationship_sort_key(relationship: Relationship) -> tuple[str, str, str, str, str]:
+    return (
+        relationship.from_table.lower(),
+        relationship.from_column.lower(),
+        relationship.to_table.lower(),
+        relationship.to_column.lower(),
+        relationship.type,
+    )
+
+
+def _redact_prompt_stat_value(
+    value: object,
+    column: ColumnInfo,
+    profile: ColumnProfile,
+) -> str:
+    if _column_requires_prompt_redaction(column, profile):
+        return _REDACTED_PROMPT_VALUE
+    return _redact_prompt_text(value)
+
+
+def _redact_prompt_text(value: object) -> str:
+    return str(redact_secrets("" if value is None else str(value)))
+
+
+def _column_requires_prompt_redaction(
+    column: ColumnInfo,
+    profile: ColumnProfile | None = None,
+) -> bool:
+    semantic_type = (column.semantic_type or "").strip().lower()
+    if semantic_type == "pii":
+        return True
+    detected_pattern = ((profile.detected_pattern if profile else None) or "").strip().lower()
+    if detected_pattern in _SENSITIVE_PROFILE_PATTERNS:
+        return True
+    column_name = column.name.lower()
+    return any(part in column_name for part in _SENSITIVE_COLUMN_NAME_PARTS)
 
 
 def _apply_llm_result(
@@ -518,7 +630,7 @@ def derive_relationships_from_llm(
     """Discover new FK relationships from LLM semantic_type=foreign_key.
 
     For columns the LLM tagged as 'foreign_key', try to match them to
-    PK columns in other tables using name patterns (e.g. zone_id -> zones.id).
+    PK columns in other tables using generic *_id name patterns.
     Returns only NEW relationships not already in discovery.relationships.
     """
     existing = {
@@ -577,13 +689,12 @@ def _infer_fk_target(
 ) -> tuple[str, str] | None:
     """Infer FK target from column name pattern.
 
-    zone_id -> zones.zone_id or zones.id
-    site_id -> sites.site_id or sites.id
+    <entity>_id -> <entities>.<entity>_id or <entities>.id
     """
     name = col_name.lower()
     if not name.endswith("_id"):
         return None
-    stem = name[: -len("_id")]  # "zone"
+    stem = name[: -len("_id")]
 
     # Try plural forms
     for candidate in [stem + "s", stem + "es", stem]:

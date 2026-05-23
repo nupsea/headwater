@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from headwater.core.types import SuggestionSource
+
 # ---------------------------------------------------------------------------
 # Source configuration
 # ---------------------------------------------------------------------------
@@ -48,7 +50,7 @@ class CompanionDoc(BaseModel):
 
 
 class DatasetContext(BaseModel):
-    """User-supplied framing for a dataset.
+    """User-supplied framing for a project source.
 
     This is optional context that improves semantic inference and insight
     generation. It must never gate baseline profiling or exploration.
@@ -63,6 +65,71 @@ class DatasetContext(BaseModel):
     quality_caveats: str | None = None
     external_references: list[str] = Field(default_factory=list)
     updated_at: datetime | None = None
+
+
+class ContextEvidence(BaseModel):
+    """Evidence attached to a proposed project-context item."""
+
+    evidence_type: str
+    source: str
+    summary: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    evidence_id: str | None = None
+    producer: str | None = None
+    method: str | None = None
+    input_snapshot_id: str | None = None
+    source_ref: str | None = None
+    observed_value: Any | None = None
+    support_count: int | None = None
+    sample_size: int | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class ProjectContextItem(BaseModel):
+    """Canonical project-context item produced by bootstrap or review."""
+
+    id: str
+    project_id: str
+    source_name: str | None = None
+    item_type: str
+    scope: str = "project"
+    name: str
+    title: str | None = None
+    table_name: str | None = None
+    column_name: str | None = None
+    value: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["proposed", "approved", "rejected", "locked", "needs_review"] = "proposed"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    source: str = "bootstrap"
+    evidence: list[ContextEvidence] = Field(default_factory=list)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ProjectContextResource(BaseModel):
+    """External or discovered resource that enriches project context."""
+
+    id: str
+    project_id: str
+    source_name: str | None = None
+    resource_type: str
+    title: str
+    location: str | None = None
+    status: Literal["active", "archived"] = "active"
+    source: str = "bootstrap"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ProjectContextBundle(BaseModel):
+    """Reviewable and machine-usable project context payload."""
+
+    project_id: str
+    source_names: list[str] = Field(default_factory=list)
+    dataset_contexts: list[DatasetContext] = Field(default_factory=list)
+    items: list[ProjectContextItem] = Field(default_factory=list)
+    resources: list[ProjectContextResource] = Field(default_factory=list)
 
 
 class SemanticColumnRole(BaseModel):
@@ -119,11 +186,11 @@ class ColumnInfo(BaseModel):
 class ColumnSemanticDetail(BaseModel):
     """Rich semantic description for a single column (deep inference output)."""
 
-    business_description: str | None = None  # Rich business-level explanation
+    business_description: str | None = None  # Rich project-level explanation
     data_quality_notes: str | None = None  # Observations from profiling stats
     business_rules: list[str] = Field(default_factory=list)
     semantic_group: str | None = None  # e.g. "location_identifiers", "measurement_values"
-    example_interpretation: str | None = None  # "A value of 35 means 35 ug/m3"
+    example_interpretation: str | None = None  # "A value of 35 means 35 units"
 
 
 class TableSemanticDetail(BaseModel):
@@ -131,7 +198,7 @@ class TableSemanticDetail(BaseModel):
 
     narrative: str | None = None  # 3-5 sentence explanation
     row_semantics: str | None = None  # "Each row represents a daily reading..."
-    business_process: str | None = None  # "Captures the EPA AQS monitoring workflow"
+    business_process: str | None = None  # "Captures the source workflow"
     temporal_grain: str | None = None  # daily|monthly|event-based|snapshot|none
     key_dimensions: list[str] = Field(default_factory=list)
     key_metrics: list[str] = Field(default_factory=list)
@@ -355,10 +422,7 @@ class SuggestedQuestion(BaseModel):
     """A natural language question the system can answer from materialized models."""
 
     question: str
-    source: Literal[
-        "business", "mart", "relationship", "quality", "semantic",
-        "statistical", "catalog", "cross_table",
-    ]
+    source: SuggestionSource
     category: str  # e.g. "Air Quality", "Inspections", "Trends"
     relevant_tables: list[str] = Field(default_factory=list)
     sql_hint: str | None = None  # Optional pre-generated SQL
@@ -552,7 +616,7 @@ class ProjectProgress(BaseModel):
 
 
 class Project(BaseModel):
-    """Top-level container for a dataset or data group."""
+    """Top-level container for a project data group."""
 
     id: str  # UUID
     slug: str  # URL-safe name: "riverton-env-health"

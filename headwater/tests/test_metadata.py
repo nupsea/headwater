@@ -4,8 +4,25 @@ from __future__ import annotations
 
 import json
 
+import yaml
+
 from headwater.core.metadata import MetadataStore
-from headwater.core.models import ContractCheckResult, QualityReport
+from headwater.core.models import (
+    ColumnInfo,
+    ColumnProfile,
+    ContractCheckResult,
+    DiscoveryResult,
+    QualityReport,
+    SourceConfig,
+    TableInfo,
+)
+from headwater.services.context_bootstrap import bootstrap_project_context
+from headwater.services import project_context as project_context_service
+from headwater.services.project_context import (
+    load_project_context_bundle,
+    load_retrieved_metadata,
+    project_context_provider,
+)
 
 
 def test_init_creates_tables(meta: MetadataStore):
@@ -28,6 +45,9 @@ def test_init_creates_tables(meta: MetadataStore):
     assert "llm_audit_log" in names
     assert "warehouse_insight_plans" in names
     assert "evidence_records" in names
+    assert "project_context_items" in names
+    assert "project_context_evidence" in names
+    assert "project_context_resources" in names
 
 
 def test_upsert_and_get_source(meta: MetadataStore):
@@ -126,6 +146,33 @@ def test_delete_source_clears_source_scoped_state(meta: MetadataStore):
         source_name="src",
         reviewer="tester",
     )
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "dataset_summary:src",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "dataset_summary",
+                "scope": "project",
+                "name": "dataset_summary",
+                "value": {"table_count": 1},
+                "evidence": [],
+            }
+        ],
+        resources=[
+            {
+                "id": "resource:src:doc",
+                "project_id": "src",
+                "source_name": "src",
+                "resource_type": "markdown",
+                "title": "Doc",
+                "location": "README.md",
+                "metadata": {},
+            }
+        ],
+    )
     meta.con.execute(
         "INSERT INTO contracts (id, model_name, rule_type, expression) "
         "VALUES ('rule_1', 'mart_readings', 'row_count', 'count(*) > 0')"
@@ -139,6 +186,8 @@ def test_delete_source_clears_source_scoped_state(meta: MetadataStore):
     assert meta.get_columns("readings", "src") == []
     assert meta.get_profiles("src") == []
     assert meta.get_relationships("src") == []
+    assert meta.list_project_context_items("src") == []
+    assert meta.list_project_context_resources("src") == []
     assert meta.get_decisions("pk_candidate", "src.readings.reading_id") == []
     assert meta.get_models("src") == []
     contract = meta.con.execute(
@@ -196,6 +245,958 @@ def test_relationship_roundtrip(meta: MetadataStore):
     rels = meta.get_relationships("src")
     assert len(rels) == 1
     assert rels[0]["from_table"] == "sites"
+
+
+def test_project_context_roundtrip_and_preserve_reviewed_items(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.order_id",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "order_id",
+                "table_name": "orders",
+                "column_name": "order_id",
+                "value": {"semantic_type": "id"},
+                "confidence": 0.95,
+                "evidence": [
+                    {
+                        "evidence_type": "profile",
+                        "source": "profiler",
+                        "summary": "Uniqueness ratio is 1.0",
+                        "payload": {"uniqueness_ratio": 1.0},
+                    }
+                ],
+            }
+        ],
+        resources=[
+            {
+                "id": "resource:src:dictionary",
+                "project_id": "src",
+                "source_name": "src",
+                "resource_type": "markdown",
+                "title": "Dictionary",
+                "location": "docs/dictionary.md",
+                "metadata": {"matched_tables": ["orders"]},
+            }
+        ],
+    )
+
+    items = meta.list_project_context_items("src")
+    resources = meta.list_project_context_resources("src")
+    assert len(items) == 1
+    assert items[0]["value"]["semantic_type"] == "id"
+    assert items[0]["evidence"][0]["payload"]["uniqueness_ratio"] == 1.0
+    assert len(resources) == 1
+    assert resources[0]["metadata"]["matched_tables"] == ["orders"]
+
+    meta.con.execute(
+        "UPDATE project_context_items SET status = 'approved' WHERE id = ?",
+        ("column_semantics:orders.order_id",),
+    )
+    meta.con.commit()
+
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.order_id",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "order_id",
+                "table_name": "orders",
+                "column_name": "order_id",
+                "value": {"semantic_type": "foreign_key"},
+                "confidence": 0.2,
+                "evidence": [],
+            }
+        ],
+    )
+
+    refreshed = meta.list_project_context_items("src")[0]
+    assert refreshed["status"] == "approved"
+    assert refreshed["value"]["semantic_type"] == "id"
+
+
+def test_context_bootstrap_emits_phase_one_structural_items():
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                row_count=2,
+                columns=[
+                    ColumnInfo(name="order_id", dtype="int64"),
+                    ColumnInfo(name="created_at", dtype="timestamp"),
+                    ColumnInfo(name="status", dtype="varchar"),
+                ],
+            )
+        ],
+        profiles=[
+            ColumnProfile(
+                table_name="orders",
+                column_name="order_id",
+                dtype="int64",
+                distinct_count=2,
+                uniqueness_ratio=1.0,
+            ),
+            ColumnProfile(
+                table_name="orders",
+                column_name="created_at",
+                dtype="timestamp",
+                distinct_count=2,
+                uniqueness_ratio=1.0,
+            ),
+        ],
+    )
+
+    bundle = bootstrap_project_context(discovery, project_id="src")
+    items = {item.item_type: item for item in bundle.items if item.table_name == "orders"}
+
+    assert items["row_grain"].value["columns"] == ["order_id"]
+    assert items["row_entity"].value["entity"] == "order"
+    assert items["time_anchor"].value["column"] == "created_at"
+    assert any(
+        item.item_type == "pk_candidate" and item.value["columns"] == ["order_id"]
+        for item in bundle.items
+    )
+
+
+def test_context_bootstrap_emits_semantic_type_evidence_and_sensitive_policy():
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="contacts",
+                row_count=10,
+                columns=[
+                    ColumnInfo(name="contact_email", dtype="varchar"),
+                    ColumnInfo(name="amount", dtype="double"),
+                ],
+            )
+        ],
+        profiles=[
+            ColumnProfile(
+                table_name="contacts",
+                column_name="contact_email",
+                dtype="varchar",
+                top_values=[("a@example.com", 6), ("b@example.org", 4)],
+                distinct_count=2,
+            ),
+            ColumnProfile(
+                table_name="contacts",
+                column_name="amount",
+                dtype="double",
+                min_value=1.0,
+                max_value=99.0,
+                distinct_count=10,
+            ),
+        ],
+    )
+
+    bundle = bootstrap_project_context(discovery, project_id="src")
+    email_context = next(
+        item for item in bundle.items if item.id == "column_semantics:contacts.contact_email"
+    )
+    amount_context = next(
+        item for item in bundle.items if item.id == "column_semantics:contacts.amount"
+    )
+    policy = next(
+        item for item in bundle.items if item.id == "column_policy:contacts.contact_email"
+    )
+
+    assert email_context.value["semantic_type_evidence"][0]["semantic_type"] == "email"
+    assert email_context.value["profile"]["top_values"] == [
+        {"redacted": True, "count": 6},
+        {"redacted": True, "count": 4},
+    ]
+    assert policy.value["policy"] == "sensitive"
+    assert policy.value["semantic_type"] == "email"
+    assert policy.value["allow_llm"] is False
+    assert amount_context.value["semantic_type_evidence"][0]["semantic_type"] == (
+        "monetary_amount"
+    )
+
+
+def test_project_context_snapshot_round_trip(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    run_id = meta.start_run("src")
+    meta.upsert_project_context_item(
+        id="row_grain:orders",
+        project_id="src",
+        source_name="src",
+        item_type="row_grain",
+        name="orders",
+        value={"columns": ["order_id"]},
+        status="proposed",
+        confidence=0.82,
+    )
+
+    snapshot_id = meta.save_project_context_snapshot(
+        run_id,
+        project_id="src",
+        source_name="src",
+    )
+
+    snapshots = meta.list_project_context_snapshots("src")
+    assert snapshots[0]["id"] == snapshot_id
+    assert snapshots[0]["run_id"] == run_id
+    assert snapshots[0]["snapshot"]["summary"]["item_count"] == 1
+    assert snapshots[0]["snapshot"]["items"][0]["id"] == "row_grain:orders"
+
+    snapshot = meta.get_project_context_snapshot("src", run_id)
+    assert snapshot is not None
+    assert snapshot["snapshot"]["items"][0]["value"] == {"columns": ["order_id"]}
+    assert meta.get_project_context_snapshot("src", 999_999) is None
+
+
+def test_context_bootstrap_emits_cold_start_day_one_summary():
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="csv", path="/data/random.csv"),
+        tables=[
+            TableInfo(
+                name="events",
+                row_count=100,
+                columns=[
+                    ColumnInfo(name="event_id", dtype="int64"),
+                    ColumnInfo(name="event_time", dtype="timestamp"),
+                    ColumnInfo(name="category", dtype="varchar"),
+                    ColumnInfo(name="amount", dtype="double"),
+                    ColumnInfo(name="email", dtype="varchar"),
+                ],
+            )
+        ],
+        profiles=[
+            ColumnProfile(
+                table_name="events",
+                column_name="event_id",
+                dtype="int64",
+                distinct_count=100,
+                uniqueness_ratio=1.0,
+            ),
+            ColumnProfile(
+                table_name="events",
+                column_name="category",
+                dtype="varchar",
+                distinct_count=3,
+                top_values=[("new", 40), ("open", 35), ("closed", 25)],
+            ),
+            ColumnProfile(
+                table_name="events",
+                column_name="amount",
+                dtype="double",
+                distinct_count=90,
+                min_value=1.0,
+                max_value=400.0,
+            ),
+            ColumnProfile(
+                table_name="events",
+                column_name="email",
+                dtype="varchar",
+                distinct_count=2,
+                top_values=[("a@example.com", 6), ("b@example.org", 4)],
+            ),
+        ],
+    )
+
+    bundle = bootstrap_project_context(discovery, project_id="src")
+    summary = next(item for item in bundle.items if item.item_type == "cold_start_summary")
+
+    assert summary.value["top_dimensions"][0]["column_name"] == "category"
+    assert summary.value["top_measures"][0]["column_name"] == "amount"
+    assert summary.value["distributional_facts"][0]["value"] == "new"
+    assert summary.value["sensitive_columns"][0]["column_name"] == "email"
+    assert 3 <= len(summary.value["fallback_questions"]) <= 5
+    assert any("row" in question.lower() for question in summary.value["fallback_questions"])
+
+
+def test_update_project_context_item_allows_user_review_edits(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "value": {"semantic_type": "dimension"},
+                "confidence": 0.61,
+                "evidence": [],
+            }
+        ],
+    )
+
+    updated = meta.update_project_context_item(
+        "column_semantics:orders.status_code",
+        project_id="src",
+        status="locked",
+        value={
+            "semantic_type": "dimension",
+            "role": "dimension",
+            "description": "Business lifecycle status for the order.",
+        },
+        confidence=0.99,
+        source="user",
+        evidence=[
+            {
+                "evidence_type": "review",
+                "source": "user",
+                "summary": "Confirmed by reviewer.",
+                "payload": {"reviewer": "tester"},
+            }
+        ],
+    )
+
+    assert updated is not None
+    assert updated["status"] == "locked"
+    assert updated["value"]["description"] == "Business lifecycle status for the order."
+    assert updated["confidence"] == 0.99
+    assert updated["source"] == "user"
+    assert updated["evidence"][0]["evidence_type"] == "review"
+
+
+def test_replace_project_context_preserves_non_bootstrap_needs_review_items(
+    meta: MetadataStore,
+):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "value": {"semantic_type": "dimension", "description": "Reviewed label"},
+                "status": "needs_review",
+                "confidence": 0.45,
+                "source": "context_drift",
+                "evidence": [],
+            }
+        ],
+    )
+
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "value": {"semantic_type": "metric", "description": "Bootstrap overwrite"},
+                "status": "proposed",
+                "confidence": 0.11,
+                "source": "bootstrap",
+                "evidence": [],
+            }
+        ],
+    )
+
+    refreshed = meta.get_project_context_item(
+        "column_semantics:orders.status_code",
+        project_id="src",
+    )
+    assert refreshed is not None
+    assert refreshed["status"] == "needs_review"
+    assert refreshed["source"] == "context_drift"
+    assert refreshed["value"]["description"] == "Reviewed label"
+
+
+def test_load_retrieved_metadata_uses_store_backed_project_context(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_dataset_context(
+        "src",
+        {
+            "source_name": "src",
+            "row_represents": "an order event",
+        },
+    )
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "lookup:status_lookup",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "lookup",
+                "scope": "table",
+                "name": "status_lookup",
+                "table_name": "status_lookup",
+                "value": {
+                    "key_column": "status_code",
+                    "label_column": "status_label",
+                },
+                "evidence": [],
+            },
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "status": "approved",
+                "value": {
+                    "description": "Order lifecycle status.",
+                    "role": "dimension",
+                },
+                "evidence": [],
+            },
+            {
+                "id": "insight_family:order_health",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "insight_family",
+                "scope": "project",
+                "name": "order_health",
+                "status": "approved",
+                "value": {
+                    "required_roles": ["event_ts"],
+                    "priority": 12,
+                },
+                "evidence": [],
+            },
+            {
+                "id": "business_lens:operations",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "business_lens",
+                "scope": "project",
+                "name": "operations",
+                "status": "approved",
+                "value": {"label": "Operations Signals", "terms": ["fulfillment"]},
+                "evidence": [],
+            },
+            {
+                "id": "visualization_hint:orders_line",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "visualization_hint",
+                "scope": "project",
+                "name": "orders_line",
+                "status": "approved",
+                "value": {"chart_type": "line", "columns": ["created_at", "orders"]},
+                "evidence": [],
+            },
+        ],
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                columns=[ColumnInfo(name="status_code", dtype="varchar")],
+            ),
+            TableInfo(
+                name="status_lookup",
+                columns=[
+                    ColumnInfo(name="status_code", dtype="varchar"),
+                    ColumnInfo(name="status_label", dtype="varchar"),
+                ],
+            ),
+        ],
+    )
+
+    metadata = load_retrieved_metadata(meta, discovery, project_id="src")
+
+    assert metadata.context is not None
+    assert metadata.context.row_represents == "an order event"
+    assert metadata.lookup_tables["status_lookup"]["label_column"] == "status_label"
+    assert metadata.glossary["status_code"] == "Order lifecycle status."
+    assert metadata.locked_roles[("orders", "status_code")] == "dimension"
+    assert metadata.insight_families[0]["key"] == "order_health"
+    assert metadata.insight_families[0]["priority"] == 12
+    assert metadata.business_lenses[0]["label"] == "Operations Signals"
+    assert metadata.visualization_hints[0]["chart_type"] == "line"
+
+
+def test_load_retrieved_metadata_includes_glossary_term_items(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "glossary:triage",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "glossary_term",
+                "scope": "project",
+                "name": "triage",
+                "value": {"definition": "Initial intake and prioritization of work."},
+                "status": "approved",
+                "confidence": 0.9,
+                "evidence": [],
+            }
+        ],
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                columns=[ColumnInfo(name="status_code", dtype="varchar")],
+            )
+        ],
+    )
+
+    metadata = load_retrieved_metadata(meta, discovery, project_id="src")
+
+    assert metadata.glossary["triage"] == "Initial intake and prioritization of work."
+
+
+def test_project_context_provider_exposes_phase_one_accessors(meta: MetadataStore):
+    meta.upsert_source("src", "json", "/data", None)
+    meta.replace_project_context(
+        "src",
+        source_name="src",
+        items=[
+            {
+                "id": "row_grain:orders",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "row_grain",
+                "scope": "table",
+                "name": "orders",
+                "table_name": "orders",
+                "status": "approved",
+                "value": {"columns": ["order_id"]},
+                "confidence": 0.95,
+                "evidence": [],
+            },
+            {
+                "id": "row_entity:orders",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "row_entity",
+                "scope": "table",
+                "name": "orders",
+                "table_name": "orders",
+                "status": "approved",
+                "value": {"entity": "order"},
+                "confidence": 0.9,
+                "evidence": [],
+            },
+            {
+                "id": "time_anchor:orders",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "time_anchor",
+                "scope": "table",
+                "name": "created_at",
+                "table_name": "orders",
+                "column_name": "created_at",
+                "status": "approved",
+                "value": {"column": "created_at"},
+                "confidence": 0.9,
+                "evidence": [],
+            },
+            {
+                "id": "pk_candidate:orders.order_id",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "pk_candidate",
+                "scope": "table",
+                "name": "orders.order_id",
+                "table_name": "orders",
+                "column_name": "order_id",
+                "status": "approved",
+                "value": {"columns": ["order_id"]},
+                "confidence": 0.95,
+                "evidence": [],
+            },
+            {
+                "id": "column_policy:orders.status",
+                "project_id": "src",
+                "source_name": "src",
+                "item_type": "column_policy",
+                "scope": "column",
+                "name": "status",
+                "table_name": "orders",
+                "column_name": "status",
+                "status": "approved",
+                "value": {"preferred_dimension": True},
+                "confidence": 0.8,
+                "evidence": [],
+            },
+        ],
+    )
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                columns=[
+                    ColumnInfo(name="order_id", dtype="int64"),
+                    ColumnInfo(name="status", dtype="varchar"),
+                    ColumnInfo(name="created_at", dtype="timestamp"),
+                ],
+            )
+        ],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    provider = project_context_provider(bundle)
+
+    assert provider.row_grain("orders")["value"]["columns"] == ["order_id"]
+    assert provider.row_entity("orders")["value"]["entity"] == "order"
+    assert provider.time_anchor("orders")["value"]["column"] == "created_at"
+    assert provider.pk_candidates("orders")[0]["column_name"] == "order_id"
+    assert provider.preferred_dimensions()[0]["column_name"] == "status"
+
+
+def test_load_project_context_bundle_applies_advisor_pack_items(
+    meta: MetadataStore, tmp_path, monkeypatch
+):
+    pack_dir = tmp_path / "packs" / "healthcare-core"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "healthcare_core",
+                "version": "2026.05",
+                "supported_item_types": ["business_lens", "question_template", "column_policy"],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (pack_dir / "business_lenses.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "business_lenses": [
+                    {
+                        "name": "care_quality",
+                        "title": "Care quality",
+                        "scope": "project",
+                        "value": {"priority": 7},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (pack_dir / "question_templates.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "question_templates": [
+                    {
+                        "name": "quality_by_unit",
+                        "title": "Quality by unit",
+                        "scope": "table",
+                        "table": "encounters",
+                        "value": {"template": "Which units have the highest readmission risk?"},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (pack_dir / "column_policies.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "column_policies": [
+                    {
+                        "name": "encounter_status_low_signal",
+                        "table": "encounters",
+                        "column": "status",
+                        "value": {"low_signal": True},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(project_context_service, "_metadata_root", lambda: tmp_path)
+    meta.upsert_source("src", "json", "/data", None)
+
+    meta.upsert_project_context_item(
+        id="advisor_pack:healthcare_core",
+        project_id="src",
+        source_name="src",
+        item_type="advisor_pack",
+        scope="project",
+        name="healthcare_core",
+        title="Healthcare Core",
+        value={"pack_name": "healthcare_core", "extends": True},
+        status="approved",
+        confidence=1.0,
+        source="import",
+    )
+    meta.upsert_project_context_item(
+        id="column_policy:encounters.status",
+        project_id="src",
+        source_name="src",
+        item_type="column_policy",
+        scope="column",
+        name="status",
+        table_name="encounters",
+        column_name="status",
+        value={"preferred_dimension": True},
+        status="approved",
+        confidence=0.95,
+        source="user",
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[TableInfo(name="encounters", columns=[ColumnInfo(name="status", dtype="varchar")])],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    provider = project_context_provider(bundle)
+
+    assert [item["name"] for item in provider.advisor_packs()] == ["healthcare_core"]
+    assert provider.business_lenses()[0]["name"] == "care_quality"
+    assert provider.business_lenses()[0]["source"] == "advisor_pack"
+    assert provider.business_lenses()[0]["value"]["pack_version"] == "2026.05"
+    assert provider.question_templates()[0]["value"]["template"].startswith("Which units")
+    assert provider.low_signal_columns() == set()
+    assert provider.preferred_dimensions()[0]["column_name"] == "status"
+    assert any(
+        item.source == "advisor_pack" and item.item_type == "question_template"
+        for item in bundle.items
+    )
+
+
+def test_advisor_pack_dependencies_load_recursively_with_child_override(
+    meta: MetadataStore, tmp_path, monkeypatch
+):
+    base_dir = tmp_path / "packs" / "common-core"
+    base_dir.mkdir(parents=True)
+    (base_dir / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "common_core",
+                "version": "1.0",
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (base_dir / "business_lenses.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "business_lenses": [
+                    {
+                        "name": "care_quality",
+                        "scope": "project",
+                        "value": {"priority": 2},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+
+    child_dir = tmp_path / "packs" / "healthcare-core"
+    child_dir.mkdir(parents=True)
+    (child_dir / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "healthcare_core",
+                "version": "2.0",
+                "dependencies": ["common_core"],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (child_dir / "business_lenses.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "business_lenses": [
+                    {
+                        "name": "care_quality",
+                        "scope": "project",
+                        "value": {"priority": 9},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(project_context_service, "_metadata_root", lambda: tmp_path)
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_project_context_item(
+        id="advisor_pack:healthcare_core",
+        project_id="src",
+        source_name="src",
+        item_type="advisor_pack",
+        scope="project",
+        name="healthcare_core",
+        title="Healthcare Core",
+        value={"pack_name": "healthcare_core", "extends": True},
+        status="approved",
+        confidence=1.0,
+        source="import",
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[TableInfo(name="encounters", columns=[ColumnInfo(name="status", dtype="varchar")])],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    provider = project_context_provider(bundle)
+
+    assert provider.business_lenses()[0]["value"]["priority"] == 9
+    assert provider.business_lenses()[0]["value"]["pack_name"] == "healthcare_core"
+    assert provider.business_lenses()[0]["value"]["pack_version"] == "2.0"
+    assert provider.business_lenses()[0]["value"]["overrides_pack"] == "common_core"
+    assert provider.business_lenses()[0]["evidence"][-1]["evidence_type"] == "advisor_pack_conflict"
+
+
+def test_missing_advisor_pack_surfaces_needs_review_item(
+    meta: MetadataStore, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(project_context_service, "_metadata_root", lambda: tmp_path)
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_project_context_item(
+        id="advisor_pack:missing_pack",
+        project_id="src",
+        source_name="src",
+        item_type="advisor_pack",
+        scope="project",
+        name="missing_pack",
+        title="Missing Pack",
+        value={"pack_name": "missing_pack", "extends": True},
+        status="approved",
+        confidence=1.0,
+        source="import",
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[TableInfo(name="encounters", columns=[ColumnInfo(name="status", dtype="varchar")])],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    issue = next(
+        item for item in bundle.items
+        if item.item_type == "open_question" and item.value.get("issue_kind") == "pack_missing"
+    )
+
+    assert issue.status == "needs_review"
+    assert issue.source == "advisor_pack"
+    assert issue.value["pack_name"] == "missing_pack"
+
+
+def test_missing_pack_dependency_surfaces_needs_review_item(
+    meta: MetadataStore, tmp_path, monkeypatch
+):
+    child_dir = tmp_path / "packs" / "healthcare-core"
+    child_dir.mkdir(parents=True)
+    (child_dir / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "healthcare_core",
+                "version": "2.0",
+                "dependencies": ["common_core"],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+    (child_dir / "business_lenses.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "pack",
+                "business_lenses": [{"name": "care_quality", "scope": "project", "value": {"priority": 9}}],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(project_context_service, "_metadata_root", lambda: tmp_path)
+    meta.upsert_source("src", "json", "/data", None)
+    meta.upsert_project_context_item(
+        id="advisor_pack:healthcare_core",
+        project_id="src",
+        source_name="src",
+        item_type="advisor_pack",
+        scope="project",
+        name="healthcare_core",
+        title="Healthcare Core",
+        value={"pack_name": "healthcare_core", "extends": True},
+        status="approved",
+        confidence=1.0,
+        source="import",
+    )
+
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="src", type="json", path="/data"),
+        tables=[TableInfo(name="encounters", columns=[ColumnInfo(name="status", dtype="varchar")])],
+    )
+
+    bundle = load_project_context_bundle(meta, discovery, project_id="src")
+    issue = next(
+        item for item in bundle.items
+        if item.item_type == "open_question" and item.value.get("issue_kind") == "dependency_missing"
+    )
+
+    assert issue.status == "needs_review"
+    assert issue.value["pack_name"] == "healthcare_core"
+    assert issue.value["dependency_name"] == "common_core"
 
 
 def test_persist_pk_fk_stores_reload_safe_relationship_values(meta: MetadataStore):
@@ -375,10 +1376,11 @@ def test_quality_report_updates_contract_lifecycle(meta: MetadataStore):
 
 
 def test_record_decision_basic(meta: MetadataStore):
-    meta.record_decision("model", "stg_zones", "approved")
+    decision_id = meta.record_decision("model", "stg_zones", "approved")
     decisions = meta.get_decisions()
     assert len(decisions) == 1
     d = decisions[0]
+    assert d["id"] == decision_id
     assert d["artifact_type"] == "model"
     assert d["artifact_id"] == "stg_zones"
     assert d["action"] == "approved"
@@ -419,6 +1421,48 @@ def test_get_decisions_filtered_by_artifact(meta: MetadataStore):
     assert all(d["artifact_id"] == "stg_zones" for d in decisions)
 
 
+def test_get_decision_by_id(meta: MetadataStore):
+    meta.record_decision("model", "stg_zones", "approved")
+    decision_id = meta.get_decisions()[0]["id"]
+
+    decision = meta.get_decision(decision_id)
+
+    assert decision is not None
+    assert decision["id"] == decision_id
+    assert decision["artifact_id"] == "stg_zones"
+    assert meta.get_decision(999_999) is None
+
+
+def test_record_context_feedback(meta: MetadataStore):
+    decision_id = meta.record_decision("project_context_item", "item-1", "approved")
+
+    feedback_id = meta.record_context_feedback(
+        decision_id=decision_id,
+        project_id="src",
+        item_id="item-1",
+        item_type="column_semantics",
+        action="approved",
+        producer="user",
+        prior_confidence=0.42,
+        new_confidence=0.95,
+        time_to_decision_seconds=12,
+        evidence_count=2,
+        payload={"prior_status": "proposed", "new_status": "approved"},
+    )
+
+    feedback = meta.list_context_feedback("src")
+    assert feedback[0]["id"] == feedback_id
+    assert feedback[0]["decision_id"] == decision_id
+    assert feedback[0]["item_id"] == "item-1"
+    assert feedback[0]["action"] == "approved"
+    assert feedback[0]["prior_confidence"] == 0.42
+    assert feedback[0]["new_confidence"] == 0.95
+    assert feedback[0]["time_to_decision_seconds"] == 12
+    assert feedback[0]["evidence_count"] == 2
+    assert feedback[0]["payload"]["new_status"] == "approved"
+    assert meta.list_context_feedback("other") == []
+
+
 def test_payload_json_column_exists(meta: MetadataStore):
     """Verify decisions table has payload_json column (migration)."""
     cols = meta.con.execute("PRAGMA table_info(decisions)").fetchall()
@@ -446,6 +1490,7 @@ def test_llm_audit_log_roundtrip(meta: MetadataStore):
         "claude-sonnet-4-5",
         prompt_text="analyze this table",
         response_text='{"description": "test"}',
+        source_name="orders",
         tokens_in=100,
         tokens_out=50,
     )
@@ -453,8 +1498,137 @@ def test_llm_audit_log_roundtrip(meta: MetadataStore):
     assert len(entries) == 1
     e = entries[0]
     assert e["provider"] == "anthropic"
+    assert e["source_name"] == "orders"
+    assert e["response_storage_policy"] == "raw"
+    assert len(e["response_hash"]) == 64
     assert e["tokens_in"] == 100
     assert e["tokens_out"] == 50
+
+
+def test_cached_llm_response_returns_latest_matching_hash(meta: MetadataStore):
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="first",
+        response_text='{"value": 1}',
+        prompt_hash="abc123",
+        tokens_in=10,
+        tokens_out=5,
+    )
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="second",
+        response_text='{"value": 2}',
+        prompt_hash="abc123",
+        tokens_in=20,
+        tokens_out=7,
+    )
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="empty failure",
+        response_text="",
+        prompt_hash="abc123",
+    )
+
+    cached = meta.get_cached_llm_response(
+        provider="ollama",
+        model="llama3.1:8b",
+        prompt_hash="abc123",
+    )
+
+    assert cached["prompt_text"] == "second"
+    assert cached["response_text"] == '{"value": 2}'
+    assert cached["tokens_in"] == 20
+    assert (
+        meta.get_cached_llm_response(
+            provider="ollama",
+            model="other-model",
+            prompt_hash="abc123",
+        )
+        is None
+    )
+
+
+def test_normalized_llm_response_audit_is_not_replayable(meta: MetadataStore):
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="analyze",
+        response_text='{"description": "Contains sensitive generated text"}',
+        prompt_hash="normalized123",
+        raw_response_allowed=False,
+    )
+
+    entry = meta.get_llm_audit_log()[0]
+
+    assert entry["response_storage_policy"] == "normalized"
+    assert len(entry["response_hash"]) == 64
+    assert "sensitive generated text" not in entry["response_text"].lower()
+    assert '"top_level_keys":["description"]' in entry["response_text"]
+    assert (
+        meta.get_cached_llm_response(
+            provider="ollama",
+            model="llama3.1:8b",
+            prompt_hash="normalized123",
+        )
+        is None
+    )
+
+
+def test_llm_raw_response_policy_uses_source_classification(meta: MetadataStore):
+    meta.upsert_source("public_src", "json", "/data/public", None)
+    meta.upsert_source_meta(
+        "public_src",
+        config={"classification": "public", "allow_external_llm": True},
+    )
+    meta.upsert_source("internal_src", "json", "/data/internal", None)
+    meta.upsert_source_meta("internal_src", config={"classification": "internal"})
+
+    assert meta.llm_raw_response_allowed("public_src") is True
+    assert meta.llm_raw_response_allowed("internal_src") is False
+    assert meta.llm_raw_response_allowed("missing_src") is False
+
+
+def test_llm_token_usage_is_scoped_by_source_provider_and_model(meta: MetadataStore):
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="a",
+        response_text="{}",
+        source_name="orders",
+        tokens_in=10,
+        tokens_out=5,
+    )
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="cached",
+        response_text="{}",
+        source_name="orders",
+        tokens_in=100,
+        tokens_out=50,
+        cached=1,
+    )
+    meta.insert_llm_audit(
+        "ollama",
+        "llama3.1:8b",
+        prompt_text="other source",
+        response_text="{}",
+        source_name="finance",
+        tokens_in=20,
+        tokens_out=10,
+    )
+
+    assert (
+        meta.get_llm_token_usage(
+            provider="ollama",
+            model="llama3.1:8b",
+            source_name="orders",
+        )
+        == 15
+    )
 
 
 # -- v3: Activity log -------------------------------------------------------
@@ -617,13 +1791,23 @@ def test_save_and_load_settings(tmp_path):
         save_settings_to_file,
     )
 
-    settings = HeadwaterSettings(data_dir=tmp_path, llm_provider="ollama", llm_model="llama3.2")
+    settings = HeadwaterSettings(
+        data_dir=tmp_path,
+        llm_provider="ollama",
+        llm_model="llama3.2",
+        llm_offline_mode=True,
+        llm_max_tokens_per_run=1234,
+        llm_max_tokens_per_source=5678,
+    )
     path = save_settings_to_file(settings)
 
     assert path.exists()
     data = json.loads(path.read_text())
     assert data["llm_provider"] == "ollama"
     assert data["llm_model"] == "llama3.2"
+    assert data["llm_offline_mode"] is True
+    assert data["llm_max_tokens_per_run"] == 1234
+    assert data["llm_max_tokens_per_source"] == 5678
     # Secrets should not be persisted
     assert "llm_api_key" not in data
 
@@ -631,6 +1815,9 @@ def test_save_and_load_settings(tmp_path):
     loaded = _load_settings_from_file(tmp_path)
     assert loaded["llm_provider"] == "ollama"
     assert loaded["llm_model"] == "llama3.2"
+    assert loaded["llm_offline_mode"] is True
+    assert loaded["llm_max_tokens_per_run"] == 1234
+    assert loaded["llm_max_tokens_per_source"] == 5678
 
 
 def test_load_settings_missing_file(tmp_path):

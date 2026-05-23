@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sqlite3
 from pathlib import Path
 
 import pyarrow as pa
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from headwater.api.app import create_app
-from headwater.core.models import ExplorationResult
 from headwater.api.routes.explore import (
     _diversify_statistical_insights,
     _rank_statistical_insights,
 )
-from headwater.core.models import StatisticalInsight
+from headwater.core.models import ExplorationResult, StatisticalInsight
 
 SAMPLE_DATA = str(Path(__file__).resolve().parent.parent.parent / "data" / "sample")
 
@@ -45,6 +47,689 @@ class TestStatus:
         assert data["tables"] == 8
 
 
+class TestSettings:
+    def test_llm_settings_roundtrip_replay_and_budget_controls(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from headwater.core.config import get_settings
+
+        monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+        get_settings.cache_clear()
+        try:
+            app = create_app(in_memory=True)
+            with TestClient(app) as local_client:
+                resp = local_client.put(
+                    "/api/settings/llm",
+                    json={
+                        "provider": "none",
+                        "offline_mode": True,
+                        "max_tokens_per_run": 1234,
+                        "max_tokens_per_source": 5678,
+                    },
+                )
+
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["offline_mode"] is True
+                assert data["max_tokens_per_run"] == 1234
+                assert data["max_tokens_per_source"] == 5678
+
+                fetched = local_client.get("/api/settings/llm").json()
+                assert fetched["offline_mode"] is True
+                assert fetched["max_tokens_per_run"] == 1234
+                assert fetched["max_tokens_per_source"] == 5678
+        finally:
+            for key in (
+                "HEADWATER_LLM_PROVIDER",
+                "HEADWATER_LLM_OFFLINE_MODE",
+                "HEADWATER_LLM_MAX_TOKENS_PER_RUN",
+                "HEADWATER_LLM_MAX_TOKENS_PER_SOURCE",
+            ):
+                os.environ.pop(key, None)
+            get_settings.cache_clear()
+
+
+class TestProjectContext:
+    def test_discovery_bootstraps_project_context(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        resp = client.get("/api/projects/source/context")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["project_id"] == "source"
+        assert body["summary"]["item_count"] > 0
+        assert body["summary"]["item_types"]["dataset_summary"] == 1
+        assert "column_semantics" in body["summary"]["item_types"]
+        assert "row_grain" in body["summary"]["item_types"]
+        assert "row_entity" in body["summary"]["item_types"]
+        assert "pk_candidate" in body["summary"]["item_types"]
+
+    def test_discovery_snapshots_project_context(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        resp = client.get("/api/projects/source/context/snapshots")
+        assert resp.status_code == 200
+        snapshots = resp.json()["snapshots"]
+        assert len(snapshots) == 1
+        latest = snapshots[0]
+        assert latest["project_id"] == "source"
+        assert latest["source_name"] == "source"
+        assert latest["run_id"] > 0
+        assert latest["snapshot"]["summary"]["item_count"] > 0
+        assert "row_grain" in latest["snapshot"]["summary"]["item_types"]
+
+        detail = client.get(f"/api/projects/source/context/snapshots/{latest['run_id']}")
+        assert detail.status_code == 200
+        snapshot = detail.json()["snapshot"]
+        assert snapshot["run_id"] == latest["run_id"]
+        assert any(item["item_type"] == "row_grain" for item in snapshot["items"])
+
+    def test_user_can_add_context_resource(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "url",
+                "title": "Business glossary",
+                "location": "https://example.com/glossary",
+                "metadata": {"use_for": ["glossary"]},
+            },
+        )
+        assert create.status_code == 200
+        created = create.json()
+        assert created["source"] == "user"
+        assert created["metadata"]["classification"] == "unknown"
+        assert created["metadata"]["external_llm_allowed"] is False
+
+        resp = client.get("/api/projects/source/context")
+        resources = resp.json()["resources"]
+        titles = {resource["title"] for resource in resources}
+        assert "Business glossary" in titles
+
+    def test_public_context_resource_can_be_explicitly_allowed_for_external_llm(
+        self,
+        client,
+    ):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "url",
+                "title": "Public glossary",
+                "location": "https://example.com/glossary",
+                "metadata": {
+                    "classification": "public",
+                    "allow_external_llm": True,
+                },
+            },
+        )
+
+        assert create.status_code == 200
+        created = create.json()
+        assert created["metadata"]["classification"] == "public"
+        assert created["metadata"]["external_llm_allowed"] is True
+
+    def test_local_resource_addition_enriches_project_context(self, client, tmp_path):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        glossary = tmp_path / "complaints_glossary.md"
+        glossary.write_text(
+            "\n".join(
+                [
+                    "assigned_to: Staff member assigned to investigate and resolve the complaint.",
+                    "status: Workflow status of the complaint case.",
+                    (
+                        "Confirm whether date_acknowledged should be treated "
+                        "as the first service-response timestamp?"
+                    ),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "markdown",
+                "title": "Complaints glossary",
+                "location": str(glossary),
+                "metadata": {"use_for": ["glossary", "semantic_roles"]},
+            },
+        )
+        assert create.status_code == 200
+        created = create.json()
+        assert created["metadata"]["enrichment"]["items_created"] >= 2
+        assert created["metadata"]["enrichment"]["evidence_id"]
+        extraction_evidence = created["metadata"]["extraction_evidence"][0]
+        assert extraction_evidence["resource_id"] == created["id"]
+        assert extraction_evidence["created_item_ids"]
+        assert extraction_evidence["classification"] == "unknown"
+        assert "complaints" in created["metadata"]["matched_tables"]
+
+        context = client.get("/api/projects/source/context").json()
+        assigned_to = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "complaints"
+            and item["column_name"] == "assigned_to"
+        )
+        assert assigned_to["value"]["description"].startswith("Staff member assigned")
+
+        extracted_question = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "open_question"
+            and "date_acknowledged" in str(item["value"].get("question") or "")
+        )
+        assert extracted_question["status"] == "needs_review"
+
+    def test_inline_resource_content_enriches_project_context(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "markdown",
+                "title": "Inline glossary",
+                "content": "\n".join(
+                    [
+                        "# complaints",
+                        "assigned_to: Staff member assigned to investigate the complaint.",
+                    ]
+                ),
+                "metadata": {"use_for": ["glossary"]},
+            },
+        )
+        assert create.status_code == 200
+        created = create.json()
+        assert created["metadata"]["enrichment"]["items_created"] >= 1
+
+        context = client.get("/api/projects/source/context").json()
+        assigned_to = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "complaints"
+            and item["column_name"] == "assigned_to"
+        )
+        assert assigned_to["value"]["description"].startswith("Staff member assigned")
+
+    def test_reingest_marks_missing_reviewed_context_as_needs_review(self, client, tmp_path):
+        source_dir = tmp_path / "orders_source"
+        source_dir.mkdir()
+        orders = source_dir / "orders.json"
+        orders.write_text(
+            "\n".join(
+                [
+                    json.dumps({"order_id": 1, "status_code": "open", "amount": 12.5}),
+                    json.dumps({"order_id": 2, "status_code": "closed", "amount": 7.0}),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        discover = client.post("/api/discover", params={"source_path": str(source_dir)})
+        assert discover.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        target = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "orders"
+            and item["column_name"] == "status_code"
+        )
+        review = client.post(
+            f"/api/projects/source/context/items/{target['id']}/approve",
+            json={
+                "reason": "Confirmed with source owner",
+                "confidence": 0.99,
+                "value": {
+                    **target["value"],
+                    "description": "Reviewed workflow status for the order.",
+                    "role": "dimension",
+                },
+            },
+        )
+        assert review.status_code == 200
+
+        orders.write_text(
+            "\n".join(
+                [
+                    json.dumps({"order_id": 1, "amount": 12.5}),
+                    json.dumps({"order_id": 2, "amount": 7.0}),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        rediscover = client.post("/api/discover", params={"source_path": str(source_dir)})
+        assert rediscover.status_code == 200
+        drift_summary = rediscover.json()["context_drift"]
+        assert drift_summary["items_flagged"] >= 1
+        assert drift_summary["drift_type_counts"]["schema"] >= 1
+        assert drift_summary["severity_counts"]["critical"] >= 1
+
+        refreshed = client.get("/api/projects/source/context").json()
+        updated = next(item for item in refreshed["items"] if item["id"] == target["id"])
+        assert updated["status"] == "needs_review"
+        assert updated["source"] == "context_drift"
+        assert updated["confidence"] == 0.25
+        assert "no longer present" in updated["value"]["drift_reason"]
+        assert updated["value"]["drift_type"] == "schema"
+        assert updated["value"]["drift_severity"] == "critical"
+        assert updated["value"]["drift_detector"] == "schema.column_presence"
+        assert updated["value"]["drift_review_action"] == "needs_review"
+        assert updated["evidence"][-1]["evidence_type"] == "schema_drift"
+        assert updated["evidence"][-1]["payload"]["code"] == "column_missing"
+        assert updated["evidence"][-1]["payload"]["severity"] == "critical"
+        assert updated["evidence"][-1]["payload"]["review_action"] == "needs_review"
+
+        history = client.get("/api/projects/source/context/history").json()
+        assert history["project_id"] == "source"
+        assert len(history["drift_reports"]) >= 1
+        assert any(
+            entry["artifact_type"] == "project_context_item"
+            for entry in history["decisions"]
+        )
+        decision = next(
+            entry
+            for entry in history["decisions"]
+            if entry["artifact_type"] == "project_context_item"
+            and entry["artifact_id"] == target["id"]
+            and entry["action"] == "approved"
+        )
+        payload = json.loads(decision["payload_json"])
+        assert payload["item_id"] == target["id"]
+        assert payload["item_type"] == "column_semantics"
+        assert payload["producer"] == "user"
+        assert payload["prior_status"] == target["status"]
+        assert payload["new_status"] == "approved"
+        assert payload["prior_confidence"] == target["confidence"]
+        assert payload["new_confidence"] == 0.99
+        assert payload["new_value"]["description"] == "Reviewed workflow status for the order."
+        assert payload["source_snapshot"]["column_name"] == "status_code"
+        assert isinstance(payload["time_to_decision_seconds"], int)
+
+    def test_markdown_table_heading_scopes_resource_enrichment(self, client, tmp_path):
+        source_dir = tmp_path / "support_source"
+        source_dir.mkdir()
+        (source_dir / "orders.json").write_text(
+            "\n".join(
+                [
+                    json.dumps({"order_id": 1, "status_code": "open"}),
+                    json.dumps({"order_id": 2, "status_code": "closed"}),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (source_dir / "returns.json").write_text(
+            "\n".join(
+                [
+                    json.dumps({"return_id": 1, "status_code": "requested"}),
+                    json.dumps({"return_id": 2, "status_code": "approved"}),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        discover = client.post("/api/discover", params={"source_path": str(source_dir)})
+        assert discover.status_code == 200
+
+        glossary = tmp_path / "returns_glossary.md"
+        glossary.write_text(
+            "\n".join(
+                [
+                    "# returns",
+                    "status_code: Workflow status for the return request lifecycle.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        create = client.post(
+            "/api/projects/source/context/resources",
+            json={
+                "resource_type": "markdown",
+                "title": "Returns glossary",
+                "location": str(glossary),
+            },
+        )
+        assert create.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        returns_status = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "returns"
+            and item["column_name"] == "status_code"
+        )
+        orders_status = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == "orders"
+            and item["column_name"] == "status_code"
+        )
+        assert (
+            returns_status["value"]["description"]
+            == "Workflow status for the return request lifecycle."
+        )
+        assert orders_status["value"].get("description") != returns_status["value"]["description"]
+
+    def test_user_can_review_context_item(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        item = next(
+            entry for entry in context["items"] if entry["item_type"] == "column_semantics"
+        )
+
+        review = client.patch(
+            f"/api/projects/source/context/items/{item['id']}",
+            json={
+                "status": "approved",
+                "confidence": 0.98,
+                "reason": "Validated during context review",
+                "value": {
+                    **item["value"],
+                    "description": "Reviewed business meaning.",
+                    "role": "dimension",
+                },
+            },
+        )
+        assert review.status_code == 200
+        reviewed = review.json()
+        assert reviewed["status"] == "approved"
+        assert reviewed["source"] == "user"
+        assert reviewed["value"]["description"] == "Reviewed business meaning."
+
+        refreshed = client.get("/api/projects/source/context").json()
+        updated = next(entry for entry in refreshed["items"] if entry["id"] == item["id"])
+        assert updated["status"] == "approved"
+        assert updated["value"]["description"] == "Reviewed business meaning."
+
+        feedback = client.get("/api/projects/source/context/feedback").json()["feedback"]
+        event = next(entry for entry in feedback if entry["item_id"] == item["id"])
+        assert event["action"] == "approved"
+        assert event["item_type"] == item["item_type"]
+        assert event["prior_confidence"] == item["confidence"]
+        assert event["new_confidence"] == 0.98
+        assert isinstance(event["time_to_decision_seconds"], int)
+        assert event["payload"]["prior_status"] == item["status"]
+        assert event["payload"]["new_status"] == "approved"
+
+    def test_user_can_revert_context_item_decision(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        item = next(
+            entry for entry in context["items"] if entry["item_type"] == "column_semantics"
+        )
+        approve = client.post(
+            f"/api/projects/source/context/items/{item['id']}/approve",
+            json={
+                "reason": "Confirmed during review",
+                "confidence": 0.97,
+                "value": {
+                    **item["value"],
+                    "description": "Reviewed meaning to roll back.",
+                    "role": "dimension",
+                },
+            },
+        )
+        assert approve.status_code == 200
+
+        history = client.get("/api/projects/source/context/history").json()
+        decision = next(
+            entry
+            for entry in history["decisions"]
+            if entry["artifact_type"] == "project_context_item"
+            and entry["artifact_id"] == item["id"]
+            and entry["action"] == "approved"
+        )
+
+        revert = client.post(
+            f"/api/projects/source/context/decisions/{decision['id']}/revert",
+            json={"reason": "Undo accidental approval"},
+        )
+
+        assert revert.status_code == 200
+        reverted = revert.json()
+        assert reverted["reverted_decision_id"] == decision["id"]
+        assert reverted["item"]["id"] == item["id"]
+        assert reverted["item"]["status"] == item["status"]
+        assert reverted["item"]["confidence"] == item["confidence"]
+        assert reverted["item"]["source"] == item["source"]
+        assert reverted["item"]["value"] == item["value"]
+
+        refreshed = client.get("/api/projects/source/context").json()
+        current = next(entry for entry in refreshed["items"] if entry["id"] == item["id"])
+        assert current["value"] == item["value"]
+
+        revert_history = client.get("/api/projects/source/context/history").json()
+        revert_decision = next(
+            entry
+            for entry in revert_history["decisions"]
+            if entry["artifact_type"] == "project_context_item"
+            and entry["artifact_id"] == item["id"]
+            and entry["action"] == "reverted"
+        )
+        payload = json.loads(revert_decision["payload_json"])
+        assert payload["reverted_decision_id"] == decision["id"]
+        assert payload["prior_status"] == "approved"
+        assert payload["new_status"] == item["status"]
+        assert payload["new_value"] == item["value"]
+
+    def test_project_context_export_renders_yaml_and_review_markdown(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        context = client.get("/api/projects/source/context").json()
+        item = next(
+            entry for entry in context["items"] if entry["item_type"] == "column_semantics"
+        )
+        client.post(
+            f"/api/projects/source/context/items/{item['id']}/lock",
+            json={
+                "reason": "Keep reviewed meaning stable",
+                "confidence": 0.99,
+                "value": {
+                    **item["value"],
+                    "description": "Locked business definition.",
+                    "role": "identifier",
+                    "semantic_type": "id",
+                },
+            },
+        )
+
+        exported = client.get("/api/projects/source/context/export")
+        assert exported.status_code == 200
+        files = exported.json()["files"]
+
+        assert "context.yaml" in files
+        assert "semantic_types.yaml" in files
+        assert "semantic_schema.yaml" in files
+        assert "derived_fields.yaml" in files
+        assert "insight_families.yaml" in files
+        assert "business_lenses.yaml" in files
+        assert "presentation.yaml" in files
+        assert "question_templates.yaml" in files
+        assert "column_policies.yaml" in files
+        assert "relationship_hints.yaml" in files
+        assert "advisor_packs.yaml" in files
+        assert "REVIEW.md" in files
+        assert "version: 1" in files["context.yaml"]
+        assert "cold_start_summary:" in files["context.yaml"]
+        assert "row_grains:" in files["context.yaml"]
+        assert "pk_candidates:" in files["context.yaml"]
+        assert "Locked business definition." in files["semantic_types.yaml"]
+        assert "role: identifier" in files["semantic_schema.yaml"]
+        assert "# Project Context Review: source" in files["REVIEW.md"]
+        assert "## Cold Start Summary" in files["REVIEW.md"]
+        advisor_packs = yaml.safe_load(files["advisor_packs.yaml"])
+        assert advisor_packs["extends"] == []
+        assert advisor_packs["advisor_packs"] == []
+
+    def test_project_context_import_merges_exported_files(self, client):
+        discover = client.post("/api/discover", params={"source_path": SAMPLE_DATA})
+        assert discover.status_code == 200
+
+        exported = client.get("/api/projects/source/context/export")
+        assert exported.status_code == 200
+        files = exported.json()["files"]
+        context_yaml = yaml.safe_load(files["context.yaml"])
+        context_yaml["cold_start_summary"]["fallback_questions"] = [
+            "Imported cold-start question?"
+        ]
+        files["context.yaml"] = yaml.safe_dump(
+            context_yaml,
+            sort_keys=False,
+            allow_unicode=False,
+        )
+        semantic_types = yaml.safe_load(files["semantic_types.yaml"])
+        target = next(
+            column
+            for column in semantic_types["columns"]
+            if column.get("table") and column.get("column")
+        )
+        target["description"] = "Imported canonical identifier"
+        files["semantic_types.yaml"] = yaml.safe_dump(
+            semantic_types,
+            sort_keys=False,
+            allow_unicode=False,
+        )
+        files["column_policies.yaml"] = yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "source",
+                "column_policies": [
+                    {
+                        "id": "column_policy:complaints.assigned_to",
+                        "name": "assigned_to_low_signal",
+                        "title": "Low signal reviewer",
+                        "scope": "column",
+                        "table": "complaints",
+                        "column": "assigned_to",
+                        "status": "approved",
+                        "confidence": 0.91,
+                        "value": {"low_signal": True},
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        )
+        files["advisor_packs.yaml"] = yaml.safe_dump(
+            {
+                "version": 1,
+                "project_id": "source",
+                "extends": ["healthcare_core"],
+                "advisor_packs": [
+                    {
+                        "id": "advisor_pack:finance_ops",
+                        "name": "finance_ops",
+                        "title": "Finance Ops",
+                        "scope": "project",
+                        "status": "approved",
+                        "confidence": 0.93,
+                        "value": {
+                            "pack_name": "finance_ops",
+                            "version": "2026.05",
+                        },
+                        "version": "2026.05",
+                        "dependencies": ["common_core"],
+                        "supported_item_types": ["business_lens", "question_template"],
+                        "description": "Finance operations starter pack",
+                    }
+                ],
+            },
+            sort_keys=False,
+            allow_unicode=False,
+        )
+
+        imported = client.post(
+            "/api/projects/source/context/import",
+            json={"files": files},
+        )
+        assert imported.status_code == 200
+        body = imported.json()
+        assert body["items_upserted"] > 0
+        assert "semantic_types.yaml" in body["files_processed"]
+        assert "column_policies.yaml" in body["files_processed"]
+
+        context = client.get("/api/projects/source/context").json()
+        updated = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "column_semantics"
+            and item["table_name"] == target["table"]
+            and item["column_name"] == target["column"]
+        )
+        assert updated["value"].get("description") == "Imported canonical identifier"
+        assert updated["status"] == target.get("status", "proposed")
+        assert updated["source"] == "import"
+        cold_start = next(
+            item
+            for item in context["items"]
+            if item["item_type"] == "cold_start_summary"
+        )
+        assert cold_start["value"]["fallback_questions"] == [
+            "Imported cold-start question?"
+        ]
+        policy = next(
+            item
+            for item in context["items"]
+            if item["id"] == "column_policy:complaints.assigned_to"
+        )
+        assert policy["item_type"] == "column_policy"
+        assert policy["value"]["low_signal"] is True
+        imported_packs = {
+            item["name"]: item
+            for item in context["items"]
+            if item["item_type"] == "advisor_pack"
+        }
+        assert "healthcare_core" in imported_packs
+        assert imported_packs["healthcare_core"]["value"]["extends"] is True
+        assert imported_packs["healthcare_core"]["value"]["pack_name"] == "healthcare_core"
+        assert "finance_ops" in imported_packs
+        assert imported_packs["finance_ops"]["value"]["pack_version"] == "2026.05"
+        assert imported_packs["finance_ops"]["value"]["dependencies"] == ["common_core"]
+        assert imported_packs["finance_ops"]["value"]["supported_item_types"] == [
+            "business_lens",
+            "question_template",
+        ]
+        assert imported_packs["finance_ops"]["value"]["description"] == "Finance operations starter pack"
+
+        reexported = client.get("/api/projects/source/context/export")
+        assert reexported.status_code == 200
+        advisor_packs = yaml.safe_load(reexported.json()["files"]["advisor_packs.yaml"])
+        assert advisor_packs["extends"] == ["healthcare_core", "finance_ops"]
+        finance_pack = next(
+            entry for entry in advisor_packs["advisor_packs"] if entry["name"] == "finance_ops"
+        )
+        assert finance_pack["version"] == "2026.05"
+        assert finance_pack["dependencies"] == ["common_core"]
+        assert finance_pack["supported_item_types"] == ["business_lens", "question_template"]
+        assert finance_pack["description"] == "Finance operations starter pack"
+        assert finance_pack["value"]["pack_version"] == "2026.05"
+
+
 class TestInsightRanking:
     def test_semantic_insights_rank_before_generic_anomaly(self):
         anomaly = StatisticalInsight(
@@ -58,10 +743,10 @@ class TestInsightRanking:
             support_count=1000,
         )
         semantic = StatisticalInsight(
-            metric="duration_min",
+            metric="event_date",
             table_name="events",
-            insight_type="peak_period",
-            description="Weekday events take longer than weekend events",
+            insight_type="coverage_period",
+            description="Events cover a complete reporting window",
             magnitude=2.3,
             severity="info",
             support_count=50_000,
@@ -454,7 +1139,11 @@ class TestSourcesCatalog:
             r["status"] == "succeeded" and r["payload"]["dry_run"] is False
             for r in evidence
         )
-        assert all("rows" not in r["payload"] for r in evidence if isinstance(r.get("payload"), dict))
+        assert all(
+            "rows" not in r["payload"]
+            for r in evidence
+            if isinstance(r.get("payload"), dict)
+        )
         assert any(r["query_id"] == "fake-query-id-123" for r in evidence)
         saved_plan = client.get("/api/warehouse-insight-plans", params={"source": "snow"}).json()[
             "plans"

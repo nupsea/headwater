@@ -7,7 +7,7 @@ import os
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from headwater.core.config import get_settings, save_settings_to_file
 from headwater.core.draft_secrets import DraftSecretDependencyError, DraftSecretStore
@@ -23,6 +23,9 @@ class LLMSettingsResponse(BaseModel):
     model: str
     ollama_base_url: str
     openai_compat_base_url: str | None
+    offline_mode: bool
+    max_tokens_per_run: int
+    max_tokens_per_source: int
     has_api_key: bool
     has_openai_compat_key: bool
 
@@ -36,6 +39,9 @@ class LLMSettingsUpdate(BaseModel):
     ollama_base_url: str | None = None
     openai_compat_base_url: str | None = None
     openai_compat_api_key: str | None = None
+    offline_mode: bool | None = None
+    max_tokens_per_run: int | None = Field(default=None, ge=0)
+    max_tokens_per_source: int | None = Field(default=None, ge=0)
 
 
 class LLMVerifyResponse(BaseModel):
@@ -65,6 +71,9 @@ async def get_llm_settings(request: Request) -> LLMSettingsResponse:
         model=settings.llm_model,
         ollama_base_url=settings.ollama_base_url,
         openai_compat_base_url=settings.openai_compat_base_url,
+        offline_mode=settings.llm_offline_mode,
+        max_tokens_per_run=settings.llm_max_tokens_per_run,
+        max_tokens_per_source=settings.llm_max_tokens_per_source,
         has_api_key=bool(settings.llm_api_key),
         has_openai_compat_key=bool(settings.openai_compat_api_key),
     )
@@ -167,6 +176,20 @@ async def update_llm_settings(
         os.environ["HEADWATER_OPENAI_COMPAT_API_KEY"] = body.openai_compat_api_key
         changes.append("openai_compat_api_key=***")
 
+    if body.offline_mode is not None:
+        os.environ["HEADWATER_LLM_OFFLINE_MODE"] = "true" if body.offline_mode else "false"
+        changes.append(f"offline_mode={body.offline_mode}")
+
+    if body.max_tokens_per_run is not None:
+        os.environ["HEADWATER_LLM_MAX_TOKENS_PER_RUN"] = str(body.max_tokens_per_run)
+        changes.append(f"max_tokens_per_run={body.max_tokens_per_run}")
+
+    if body.max_tokens_per_source is not None:
+        os.environ["HEADWATER_LLM_MAX_TOKENS_PER_SOURCE"] = str(
+            body.max_tokens_per_source
+        )
+        changes.append(f"max_tokens_per_source={body.max_tokens_per_source}")
+
     # Clear the cached settings so next call gets fresh values
     get_settings.cache_clear()
 
@@ -195,6 +218,9 @@ async def update_llm_settings(
         model=settings.llm_model,
         ollama_base_url=settings.ollama_base_url,
         openai_compat_base_url=settings.openai_compat_base_url,
+        offline_mode=settings.llm_offline_mode,
+        max_tokens_per_run=settings.llm_max_tokens_per_run,
+        max_tokens_per_source=settings.llm_max_tokens_per_source,
         has_api_key=bool(settings.llm_api_key),
         has_openai_compat_key=bool(settings.openai_compat_api_key),
     )

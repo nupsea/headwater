@@ -1,0 +1,85 @@
+source:
+  name: patient_encounters
+  type: csv
+  path: /data/health
+tables:
+  - name: encounters
+    row_count: 1200
+    columns:
+      - name: encounter_id
+        dtype: int64
+        is_primary_key: true
+      - name: patient_id
+        dtype: int64
+        semantic_type: foreign_key
+      - name: admitted_at
+        dtype: timestamp
+        role: temporal
+      - name: department
+        dtype: varchar
+        semantic_type: dimension
+      - name: discharge_disposition
+        dtype: varchar
+        semantic_type: dimension
+      - name: length_of_stay_days
+        dtype: double
+        semantic_type: metric
+  - name: patients
+    row_count: 700
+    columns:
+      - name: patient_id
+        dtype: int64
+        is_primary_key: true
+      - name: age_band
+        dtype: varchar
+        semantic_type: dimension
+profiles:
+  - table_name: encounters
+    column_name: encounter_id
+    dtype: int64
+    distinct_count: 1200
+    uniqueness_ratio: 1.0
+  - table_name: patients
+    column_name: patient_id
+    dtype: int64
+    distinct_count: 700
+    uniqueness_ratio: 1.0
+  - table_name: encounters
+    column_name: department
+    dtype: varchar
+    distinct_count: 9
+    top_values:
+      - [emergency, 400]
+      - [cardiology, 180]
+      - [orthopedics, 150]
+  - table_name: encounters
+    column_name: discharge_disposition
+    dtype: varchar
+    distinct_count: 5
+    top_values:
+      - [home, 800]
+      - [transfer, 210]
+      - [rehab, 120]
+  - table_name: patients
+    column_name: age_band
+    dtype: varchar
+    distinct_count: 6
+    top_values:
+      - [65-74, 220]
+      - [55-64, 180]
+      - [75-84, 140]
+  - table_name: encounters
+    column_name: length_of_stay_days
+    dtype: double
+    distinct_count: 40
+    min_value: 0.0
+    max_value: 35.0
+relationships:
+  - from_table: encounters
+    from_column: patient_id
+    to_table: patients
+    to_column: patient_id
+    type: many_to_one
+    confidence: 0.92
+    referential_integrity: 1.0
+    source: inferred_name

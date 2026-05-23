@@ -201,8 +201,13 @@ async def get_source_route(request: Request, name: str):
     if not row:
         raise HTTPException(status_code=404, detail=f"Source '{name}' not found.")
     detail = _row_to_detail(store, row)
-    detail["events"] = [_sanitize_event(event) for event in store.list_events(source_name=name, limit=20)]
-    detail["runs"] = [_sanitize_sync_run(run) for run in store.list_sync_runs(source_name=name, limit=10)]
+    detail["events"] = [
+        _sanitize_event(event) for event in store.list_events(source_name=name, limit=20)
+    ]
+    detail["runs"] = [
+        _sanitize_sync_run(run)
+        for run in store.list_sync_runs(source_name=name, limit=10)
+    ]
     return detail
 
 
@@ -290,7 +295,9 @@ async def update_source(request: Request, name: str, body: SourceUpdate):
     )
     store.upsert_source_meta(
         name,
-        display_name=body.display_name if body.display_name is not None else row.get("display_name"),
+        display_name=(
+            body.display_name if body.display_name is not None else row.get("display_name")
+        ),
         host=body.host if body.host is not None else row.get("host"),
         config=body.config if body.config is not None else None,
         status="idle",

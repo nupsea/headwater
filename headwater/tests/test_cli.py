@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from typer.testing import CliRunner
 
 from headwater.cli.main import app
@@ -79,3 +81,97 @@ class TestCLIGenerate:
     def test_generate_bad_path(self):
         result = runner.invoke(app, ["generate", "/nonexistent"])
         assert result.exit_code == 1
+
+
+class TestCLIContextEval:
+    def test_context_eval_default_gold(self):
+        result = runner.invoke(app, ["context-eval"])
+        assert result.exit_code == 0
+        assert "Context evaluation" in result.output
+        assert "PASS orders" in result.output
+
+    def test_context_eval_json_output(self):
+        result = runner.invoke(app, ["context-eval", "--json"])
+        assert result.exit_code == 0
+        assert '"passed": true' in result.output
+        assert '"fixture_count": 8' in result.output
+        assert '"category_metrics"' in result.output
+        assert '"min_category_score": null' in result.output
+
+    def test_context_eval_reports_category_threshold_failure(self, tmp_path):
+        gold = tmp_path / "context_bad.yaml"
+        gold.write_text(
+            "\n".join(
+                [
+                    "name: orders",
+                    "fixture: orders",
+                    "row_grain:",
+                    "  orders:",
+                    "    - not_the_key",
+                    "time_anchor:",
+                    "  orders: created_at",
+                    "thresholds:",
+                    "  min_score: 0.0",
+                    "  category_min_scores:",
+                    "    row_grain: 1.0",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["context-eval", "--gold", str(gold)])
+        assert result.exit_code == 1
+        assert "threshold category:row_grain" in result.output
+
+    def test_context_eval_reports_accepted_deltas(self, tmp_path):
+        gold = tmp_path / "context_delta.yaml"
+        gold.write_text(
+            "\n".join(
+                [
+                    "name: orders",
+                    "fixture: orders",
+                    "row_grain:",
+                    "  orders:",
+                    "    - not_the_key",
+                    "time_anchor:",
+                    "  orders: created_at",
+                    "accepted_deltas:",
+                    "  - check: row_grain:orders",
+                    "    reason: temporary migration parity gap",
+                    "    until: metadata migration complete",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["context-eval", "--gold", str(gold)])
+
+        assert result.exit_code == 0
+        assert "accepted_deltas=1" in result.output
+        assert "accepted_delta row_grain:orders" in result.output
+        assert "temporary migration parity gap" in result.output
+
+    def test_context_eval_writes_metrics_artifact(self, tmp_path):
+        metrics_path = tmp_path / "metrics" / "context-eval.json"
+
+        result = runner.invoke(
+            app,
+            ["context-eval", "--metrics-out", str(metrics_path)],
+        )
+
+        assert result.exit_code == 0
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        assert metrics["schema_version"] == 1
+        assert metrics["passed"] is True
+        assert metrics["metrics"]["fixture_count"] == 8
+        assert metrics["categories"]["semantic_role"]["exact_match_score"] == 1.0
+        assert metrics["categories"]["absent_category"]["exact_match_score"] == 1.0
+        assert metrics["categories"]["row_grain"]["exact_match_score"] == 1.0
+        assert metrics["fixtures"][0]["failure_names"] == []
+
+    def test_context_eval_bad_path(self):
+        result = runner.invoke(app, ["context-eval", "--gold", "/nonexistent"])
+        assert result.exit_code == 1
+        assert "No context gold fixtures found" in result.output

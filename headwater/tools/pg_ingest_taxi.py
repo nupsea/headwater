@@ -14,7 +14,6 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
-
 DEFAULT_DSN = "postgresql://headwater_taxi:headwater_taxi@localhost:5435/ny_taxi"
 DEFAULT_DATA_DIR = "/Users/sethurama/DEV/LM/OPEN_DATA/NY_TAXI"
 
@@ -62,10 +61,13 @@ def create_table(cur, schema: str, table: str, arrow_schema: pa.Schema) -> list[
     column_names = [snake_case(name) for name in arrow_schema.names]
     columns_sql = [
         f"{quote_ident(name)} {postgres_type(field.type)}"
-        for name, field in zip(column_names, arrow_schema)
+        for name, field in zip(column_names, arrow_schema, strict=True)
     ]
     cur.execute(f"DROP TABLE IF EXISTS {quote_ident(schema)}.{quote_ident(table)}")
-    cur.execute(f"CREATE TABLE {quote_ident(schema)}.{quote_ident(table)} ({', '.join(columns_sql)})")
+    cur.execute(
+        f"CREATE TABLE {quote_ident(schema)}.{quote_ident(table)} "
+        f"({', '.join(columns_sql)})"
+    )
     return column_names
 
 
@@ -148,7 +150,8 @@ def main() -> None:
 
         for parquet_path in files:
             rows = ingest_file(conn, parquet_path, args.schema, args.batch_size)
-            print(f"loaded {args.schema}.{parquet_path.stem.replace('-', '_')}: {rows:,} rows", flush=True)
+            table_name = parquet_path.stem.replace("-", "_")
+            print(f"loaded {args.schema}.{table_name}: {rows:,} rows", flush=True)
     finally:
         conn.close()
 

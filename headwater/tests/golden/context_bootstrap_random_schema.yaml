@@ -1,0 +1,35 @@
+name: random_schema
+fixture: random_schema
+discovery_path: context_fixtures/random_schema.yaml
+row_grain:
+  wide_records:
+    - record_key
+row_entity:
+  wide_records: wide record
+time_anchor:
+  wide_records: event_ts
+pk_candidates:
+  wide_records:
+    - record_key
+fk_candidates: []
+top_dimensions:
+  - table_name: wide_records
+    column_name: batch_code
+top_measures:
+  - table_name: wide_records
+    column_name: value_num
+min_fallback_questions: 4
+question_substrings:
+  - wide_records
+  - row
+question_intents:
+  - name: row_grain
+    all_of:
+      - row
+      - wide_records
+  - name: structural_analysis
+    any_of:
+      - dimensions
+      - measures
+forbidden_terms:
+  - patient

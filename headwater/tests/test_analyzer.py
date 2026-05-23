@@ -7,6 +7,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from headwater.analyzer import semantic_schema as semantic_schema_module
 from headwater.analyzer.heuristics import (
     _refine_semantic_type,
     build_domain_map,
@@ -18,12 +19,23 @@ from headwater.analyzer.heuristics import (
     generate_table_description,
 )
 from headwater.analyzer.llm import NoLLMProvider, _parse_json_response, make_cache_key
-from headwater.analyzer.semantic import analyze
+from headwater.analyzer.metadata_retrieval import retrieve_metadata
+from headwater.analyzer.semantic import _build_deep_table_prompt, analyze
+from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.connectors.json_loader import JsonLoader
-from headwater.core.models import ColumnInfo, ColumnProfile, SourceConfig, TableInfo
+from headwater.core.models import (
+    ColumnInfo,
+    ColumnProfile,
+    DiscoveryResult,
+    Relationship,
+    SourceConfig,
+    TableInfo,
+)
 from headwater.profiler.engine import discover
+from headwater.services.context_evaluation import load_context_eval_cases
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sample"
+GOLD_DIR = Path(__file__).resolve().parent / "golden"
 
 
 @pytest.fixture()
@@ -35,6 +47,10 @@ def discovery_result():
     loader.load_to_duckdb(con, "env_health")
     source = SourceConfig(name="sample", type="json", path=str(SAMPLE_DIR))
     return discover(con, "env_health", source)
+
+
+def _nytaxi_fixture_discovery() -> DiscoveryResult:
+    return load_context_eval_cases([GOLD_DIR / "context_bootstrap_nytaxi.yaml"])[0]["discovery"]
 
 
 # -- Heuristics ------------------------------------------------------------
@@ -191,32 +207,383 @@ class TestHeuristics:
         assert classify_semantic_type("zone_id") == "id"
 
     def test_semantic_type_metric(self):
-        assert classify_semantic_type("violation_count") == "metric"
+        assert classify_semantic_type("violation_count", project_id="sample") == "metric"
 
     def test_semantic_type_temporal(self):
-        assert classify_semantic_type("created_at") == "temporal"
+        assert classify_semantic_type("created_at", project_id="sample") == "temporal"
 
     def test_semantic_type_geographic(self):
-        assert classify_semantic_type("latitude") == "geographic"
+        assert classify_semantic_type("latitude", project_id="sample") == "geographic"
 
     def test_complaint_type_311_is_dimension(self):
-        assert classify_semantic_type("complaint_type_311") == "dimension"
+        assert classify_semantic_type("complaint_type_311", project_id="sample") == "dimension"
 
     def test_census_tract_is_dimension(self):
-        assert classify_semantic_type("census_tract") == "dimension"
+        assert classify_semantic_type("census_tract", project_id="sample") == "dimension"
 
     def test_site_num_is_dimension(self):
-        assert classify_semantic_type("site_num") == "dimension"
+        assert classify_semantic_type("site_num", project_id="sample") == "dimension"
 
     def test_community_board_is_dimension(self):
-        assert classify_semantic_type("community_board") == "dimension"
+        assert classify_semantic_type("community_board", project_id="sample") == "dimension"
 
     def test_complaint_no_is_dimension(self):
-        assert classify_semantic_type("complaint_no") == "dimension"
+        assert classify_semantic_type("complaint_no", project_id="sample") == "dimension"
 
     def test_type_suffix_with_version(self):
         """Type columns with numeric suffixes are still dimensions."""
-        assert classify_semantic_type("incident_type_2") == "dimension"
+        assert classify_semantic_type("incident_type_2", project_id="sample") == "dimension"
+
+    def test_enrich_tables_applies_approved_project_context_hints(self):
+        tables = [
+            TableInfo(
+                name="tickets",
+                row_count=1000,
+                columns=[ColumnInfo(name="ticket_reference", dtype="varchar")],
+            )
+        ]
+        profiles = [
+            ColumnProfile(
+                table_name="tickets",
+                column_name="ticket_reference",
+                dtype="varchar",
+                distinct_count=800,
+                uniqueness_ratio=0.8,
+            )
+        ]
+        metadata = retrieve_metadata(
+            DiscoveryResult(
+                source=SourceConfig(name="source", type="json"),
+                tables=tables,
+                profiles=profiles,
+                relationships=[],
+            ),
+            context_items=[
+                {
+                    "id": "column_semantics:tickets.ticket_reference",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "ticket_reference",
+                    "table_name": "tickets",
+                    "column_name": "ticket_reference",
+                    "status": "approved",
+                    "value": {
+                        "description": "Analyst-assigned ticket reference.",
+                        "role": "dimension",
+                        "semantic_type": "dimension",
+                    },
+                }
+            ],
+        )
+
+        enrich_tables(tables, profiles, [], metadata=metadata)
+
+        column = tables[0].columns[0]
+        assert column.description == "Analyst-assigned ticket reference."
+        assert column.semantic_type == "dimension"
+        assert column.role == "dimension"
+        assert column.confidence >= 0.95
+
+
+class TestSemanticSchema:
+    def test_generic_schema_does_not_hardcode_taxi_aliases(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="adhoc", type="csv"),
+            tables=[
+                TableInfo(
+                    name="rides",
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="pulocationid", dtype="varchar"),
+                        ColumnInfo(name="fare", dtype="double"),
+                    ],
+                )
+            ],
+            profiles=[],
+            relationships=[],
+        )
+
+        schema = infer_semantic_schema(discovery)
+        roles = roles_for_table(schema, "rides")
+
+        assert "lifecycle_start_ts" not in roles
+        assert "lifecycle_end_ts" not in roles
+        assert "origin_id" not in roles
+        assert "amount" not in roles
+
+    def test_nytaxi_fixture_without_metadata_keeps_generic_roles(self):
+        discovery = _nytaxi_fixture_discovery().model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        schema = infer_semantic_schema(discovery)
+        roles = roles_for_table(schema, "trips")
+
+        assert "event_ts" in roles
+        assert "measure" in roles
+        assert "lifecycle_start_ts" not in roles
+        assert "lifecycle_end_ts" not in roles
+        assert "origin_id" not in roles
+        assert "destination_id" not in roles
+        assert "distance" not in roles
+        assert "amount" not in roles
+
+    def test_nytaxi_fixture_metadata_restores_project_roles(self):
+        discovery = _nytaxi_fixture_discovery()
+
+        schema = infer_semantic_schema(discovery, project_id="nytaxi")
+        roles = roles_for_table(schema, "trips")
+
+        assert roles["lifecycle_start_ts"].column_name == "pickup_datetime"
+        assert roles["lifecycle_end_ts"].column_name == "dropoff_datetime"
+        assert roles["origin_id"].column_name == "PULocationID"
+        assert roles["destination_id"].column_name == "DOLocationID"
+        assert roles["distance"].column_name == "trip_distance"
+        assert roles["amount"].column_name == "fare_amount"
+
+    def test_nytaxi_fixture_derived_fields_are_metadata_driven(self):
+        discovery = _nytaxi_fixture_discovery()
+        generic_discovery = discovery.model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        generic_schema = infer_semantic_schema(generic_discovery)
+        metadata_schema = infer_semantic_schema(discovery, project_id="nytaxi")
+        generic_derived = {field.name for field in generic_schema.derived_fields}
+        metadata_derived = {field.name: field for field in metadata_schema.derived_fields}
+
+        assert "duration_min" not in generic_derived
+        assert "speed_per_hour" not in generic_derived
+        assert metadata_derived["duration_min"].role == "duration_minutes"
+        assert metadata_derived["duration_min"].required_roles == [
+            "lifecycle_start_ts",
+            "lifecycle_end_ts",
+        ]
+        assert '"pickup_datetime"' in metadata_derived["duration_min"].expression
+        assert '"dropoff_datetime"' in metadata_derived["duration_min"].expression
+        assert metadata_derived["speed_per_hour"].role == "speed_per_hour"
+        assert '"trip_distance"' in metadata_derived["speed_per_hour"].expression
+
+    def test_project_metadata_can_restore_dataset_specific_aliases(self, monkeypatch, tmp_path):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="ny_taxi_postgres", type="postgres"),
+            tables=[
+                TableInfo(
+                    name="trips",
+                    columns=[
+                        ColumnInfo(name="pickup_datetime", dtype="timestamp"),
+                        ColumnInfo(name="dropoff_datetime", dtype="timestamp"),
+                        ColumnInfo(name="pulocationid", dtype="varchar"),
+                        ColumnInfo(name="fare", dtype="double"),
+                    ],
+                )
+            ],
+            profiles=[],
+            relationships=[],
+        )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "nytaxi"
+        project_dir.mkdir(parents=True)
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: lifecycle_start_ts
+    pattern: "(^|_)pickup_datetime$"
+    confidence: 0.92
+    reason: lifecycle start timestamp
+  - role: lifecycle_end_ts
+    pattern: "(^|_)dropoff_datetime$"
+    confidence: 0.92
+    reason: lifecycle end timestamp
+  - role: origin_id
+    pattern: "^pulocationid$"
+    confidence: 0.88
+    reason: origin/location identifier
+  - role: amount
+    pattern: "^fare$"
+    confidence: 0.78
+    reason: monetary amount
+"""
+        )
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
+
+        schema = infer_semantic_schema(discovery, project_id="nytaxi")
+        roles = roles_for_table(schema, "trips")
+
+        assert roles["lifecycle_start_ts"].column_name == "pickup_datetime"
+        assert roles["lifecycle_end_ts"].column_name == "dropoff_datetime"
+        assert roles["origin_id"].column_name == "pulocationid"
+        assert roles["amount"].column_name == "fare"
+
+    def test_project_context_can_confirm_semantic_roles(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="source", type="json"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    columns=[ColumnInfo(name="occurred_at", dtype="timestamp")],
+                )
+            ],
+            profiles=[
+                ColumnProfile(
+                    table_name="events",
+                    column_name="occurred_at",
+                    dtype="timestamp",
+                    distinct_count=10,
+                )
+            ],
+            relationships=[],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "column_semantics:events.occurred_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "occurred_at",
+                    "table_name": "events",
+                    "column_name": "occurred_at",
+                    "status": "approved",
+                    "value": {"role": "event_ts"},
+                }
+            ],
+        )
+
+        schema = infer_semantic_schema(discovery, metadata=metadata)
+        roles = roles_for_table(schema, "events")
+
+        assert roles["event_ts"].column_name == "occurred_at"
+        assert roles["event_ts"].source == "context"
+
+    def test_generic_derived_fields_are_only_time_buckets(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="source", type="json"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    columns=[
+                        ColumnInfo(name="started_at", dtype="timestamp"),
+                        ColumnInfo(name="resolved_at", dtype="timestamp"),
+                    ],
+                )
+            ],
+            profiles=[],
+            relationships=[],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "column_semantics:events.started_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "started_at",
+                    "table_name": "events",
+                    "column_name": "started_at",
+                    "status": "approved",
+                    "value": {"role": "lifecycle_start_ts"},
+                },
+                {
+                    "id": "column_semantics:events.resolved_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "resolved_at",
+                    "table_name": "events",
+                    "column_name": "resolved_at",
+                    "status": "approved",
+                    "value": {"role": "lifecycle_end_ts"},
+                },
+            ],
+        )
+
+        schema = infer_semantic_schema(discovery, metadata=metadata)
+        derived_names = {field.name for field in schema.derived_fields}
+
+        assert {"event_date", "event_hour", "day_of_week"} <= derived_names
+        assert "duration_min" not in derived_names
+
+    def test_project_context_can_define_derived_fields(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="source", type="json"),
+            tables=[
+                TableInfo(
+                    name="events",
+                    columns=[
+                        ColumnInfo(name="started_at", dtype="timestamp"),
+                        ColumnInfo(name="resolved_at", dtype="timestamp"),
+                    ],
+                )
+            ],
+            profiles=[],
+            relationships=[],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "column_semantics:events.started_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "started_at",
+                    "table_name": "events",
+                    "column_name": "started_at",
+                    "status": "approved",
+                    "value": {"role": "lifecycle_start_ts"},
+                },
+                {
+                    "id": "column_semantics:events.resolved_at",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "column_semantics",
+                    "scope": "column",
+                    "name": "resolved_at",
+                    "table_name": "events",
+                    "column_name": "resolved_at",
+                    "status": "approved",
+                    "value": {"role": "lifecycle_end_ts"},
+                },
+                {
+                    "id": "derived_field:events.elapsed_minutes",
+                    "project_id": "source",
+                    "source_name": "source",
+                    "item_type": "derived_field",
+                    "scope": "table",
+                    "name": "elapsed_minutes",
+                    "table_name": "events",
+                    "status": "approved",
+                    "confidence": 0.91,
+                    "value": {
+                        "name": "elapsed_minutes",
+                        "role": "duration_minutes",
+                        "required_roles": ["lifecycle_start_ts", "lifecycle_end_ts"],
+                        "expression": (
+                            "date_diff('second', {lifecycle_start_ts}, "
+                            "{lifecycle_end_ts}) / 60.0"
+                        ),
+                    },
+                },
+            ],
+        )
+
+        schema = infer_semantic_schema(discovery, metadata=metadata)
+        derived = {field.name: field for field in schema.derived_fields}
+
+        assert derived["elapsed_minutes"].role == "duration_minutes"
+        assert '"started_at"' in derived["elapsed_minutes"].expression
+        assert '"resolved_at"' in derived["elapsed_minutes"].expression
 
 
 # -- LLM provider -----------------------------------------------------------
@@ -239,6 +606,109 @@ class TestLLMProvider:
         key1 = make_cache_key("sensors", ["sensor_id"])
         key2 = make_cache_key("sites", ["site_id"])
         assert key1 != key2
+
+
+class TestLLMPromptBuilder:
+    def test_deep_prompt_is_deterministic_for_sorted_scoped_inputs(self):
+        table = TableInfo(
+            name="orders",
+            row_count=12,
+            columns=[
+                ColumnInfo(name="customer_email", dtype="varchar", semantic_type="pii"),
+                ColumnInfo(name="amount", dtype="float64", semantic_type="metric"),
+                ColumnInfo(name="order_id", dtype="varchar", semantic_type="id"),
+            ],
+        )
+        reordered_table = TableInfo(
+            name="orders",
+            row_count=12,
+            columns=list(reversed(table.columns)),
+        )
+        profiles = [
+            ColumnProfile(
+                table_name="other_table",
+                column_name="amount",
+                dtype="float64",
+                distinct_count=9999,
+                top_values=[("wrong-scope", 99)],
+            ),
+            ColumnProfile(
+                table_name="orders",
+                column_name="customer_email",
+                dtype="varchar",
+                distinct_count=2,
+                top_values=[("alice@example.com", 2), ("bob@example.com", 1)],
+                detected_pattern="email",
+            ),
+            ColumnProfile(
+                table_name="orders",
+                column_name="amount",
+                dtype="float64",
+                distinct_count=2,
+                top_values=[("20.00", 2), ("10.00", 5)],
+                mean=12.5,
+            ),
+        ]
+        relationships = [
+            Relationship(
+                from_table="payments",
+                from_column="order_id",
+                to_table="orders",
+                to_column="order_id",
+                type="many_to_one",
+                confidence=0.9,
+                referential_integrity=0.95,
+                source="inferred_name",
+            ),
+            Relationship(
+                from_table="orders",
+                from_column="customer_id",
+                to_table="customers",
+                to_column="customer_id",
+                type="many_to_one",
+                confidence=0.9,
+                referential_integrity=0.8,
+                source="inferred_name",
+            ),
+        ]
+
+        prompt = _build_deep_table_prompt(table, profiles, relationships)
+        reordered_prompt = _build_deep_table_prompt(
+            reordered_table,
+            list(reversed(profiles)),
+            list(reversed(relationships)),
+        )
+
+        assert prompt == reordered_prompt
+        assert "alice@example.com" not in prompt
+        assert "bob@example.com" not in prompt
+        assert "[REDACTED]" in prompt
+        assert "wrong-scope" not in prompt
+        assert "top_values=['10.00', '20.00']" in prompt
+
+    def test_prompt_context_and_locked_descriptions_redact_credentials(self):
+        table = TableInfo(
+            name="sources",
+            row_count=1,
+            columns=[
+                ColumnInfo(
+                    name="source_id",
+                    dtype="varchar",
+                    description="Use postgresql://user:secret@localhost/db for lineage",
+                    locked=True,
+                )
+            ],
+        )
+
+        prompt = _build_deep_table_prompt(
+            table,
+            [],
+            [],
+            companion_context="Warehouse: postgresql://user:secret@localhost/db",
+        )
+
+        assert "user:secret" not in prompt
+        assert "user:***@localhost" in prompt
 
 
 # -- LLM response parser (US-604) -------------------------------------------
@@ -464,7 +934,7 @@ class TestRefineSemanticType:
                 mean=5.2,
             ),
         ]
-        enriched = enrich_tables([table], profiles, [])
+        enriched = enrich_tables([table], profiles, [], project_id="sample")
 
         cols = {c.name: c for c in enriched[0].columns}
         # complaint_number: .*number$ -> dimension -> refined to id

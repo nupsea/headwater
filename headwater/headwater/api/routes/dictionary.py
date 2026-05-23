@@ -15,8 +15,8 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from headwater.api.project_scope import scoped_pipeline
 from headwater.analyzer.heuristics import generate_clarifying_questions
+from headwater.api.project_scope import scoped_pipeline
 from headwater.core.models import (
     CatalogItemSummary,
     DataDictionaryColumn,

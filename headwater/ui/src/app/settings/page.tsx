@@ -53,6 +53,9 @@ export default function SettingsPage() {
   const [ollamaUrl, setOllamaUrl] = useState("http://localhost:11434");
   const [openaiUrl, setOpenaiUrl] = useState("");
   const [openaiKey, setOpenaiKey] = useState("");
+  const [offlineMode, setOfflineMode] = useState(false);
+  const [maxRunTokens, setMaxRunTokens] = useState("0");
+  const [maxSourceTokens, setMaxSourceTokens] = useState("0");
 
   // Ollama model list
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
@@ -96,6 +99,9 @@ export default function SettingsPage() {
         setModel(s.model);
         setOllamaUrl(s.ollama_base_url || "http://localhost:11434");
         setOpenaiUrl(s.openai_compat_base_url || "");
+        setOfflineMode(s.offline_mode);
+        setMaxRunTokens(String(s.max_tokens_per_run ?? 0));
+        setMaxSourceTokens(String(s.max_tokens_per_source ?? 0));
       })
       .catch(() => setError("Could not load settings. Is the API running?"))
       .finally(() => setLoading(false));
@@ -121,7 +127,10 @@ export default function SettingsPage() {
       if (apiKey) body.api_key = apiKey;
       if (ollamaUrl) body.ollama_base_url = ollamaUrl;
       if (openaiUrl) body.openai_compat_base_url = openaiUrl;
-      if (openaiKey) body.api_key = openaiKey;
+      if (openaiKey) body.openai_compat_api_key = openaiKey;
+      body.offline_mode = offlineMode;
+      body.max_tokens_per_run = Number.parseInt(maxRunTokens, 10) || 0;
+      body.max_tokens_per_source = Number.parseInt(maxSourceTokens, 10) || 0;
 
       const prevProvider = settings?.provider;
       const updated = await api.updateLLMSettings(body);
@@ -399,6 +408,47 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {/* Replay and budget controls */}
+      <div className="bg-card border border-border rounded-lg p-5 mb-6">
+        <h2 className="text-sm font-semibold mb-3">Replay and Budgets</h2>
+        <div className="space-y-4">
+          <label className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              checked={offlineMode}
+              onChange={(e) => setOfflineMode(e.target.checked)}
+            />
+            <span className="text-sm">Offline replay only</span>
+          </label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-muted mb-1">
+                Max tokens per run
+              </label>
+              <input
+                type="number"
+                min="0"
+                value={maxRunTokens}
+                onChange={(e) => setMaxRunTokens(e.target.value)}
+                className="w-full px-3 py-2 border border-border rounded bg-background text-sm font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1">
+                Max tokens per source
+              </label>
+              <input
+                type="number"
+                min="0"
+                value={maxSourceTokens}
+                onChange={(e) => setMaxSourceTokens(e.target.value)}
+                className="w-full px-3 py-2 border border-border rounded bg-background text-sm font-mono"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Current saved configuration */}
       {settings && (
         <div className="bg-card border border-border rounded-lg p-5 mb-6">
@@ -411,6 +461,22 @@ export default function SettingsPage() {
             <div>
               <span className="text-xs text-muted block">Model</span>
               <span className="font-mono">{settings.model}</span>
+            </div>
+            <div>
+              <span className="text-xs text-muted block">Offline Replay</span>
+              <span>{settings.offline_mode ? "Enabled" : "Disabled"}</span>
+            </div>
+            <div>
+              <span className="text-xs text-muted block">Run Token Budget</span>
+              <span className="font-mono">{settings.max_tokens_per_run}</span>
+            </div>
+            <div>
+              <span className="text-xs text-muted block">
+                Source Token Budget
+              </span>
+              <span className="font-mono">
+                {settings.max_tokens_per_source}
+              </span>
             </div>
             {settings.provider === "anthropic" && (
               <div>

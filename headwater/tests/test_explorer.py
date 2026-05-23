@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import duckdb
 import polars as pl
 import pytest
 
+from headwater.analyzer import semantic_schema as semantic_schema_module
 from headwater.analyzer.llm import LLMProvider
 from headwater.analyzer.metadata_retrieval import retrieve_metadata
 from headwater.api.routes.insights import (
@@ -15,7 +17,6 @@ from headwater.api.routes.insights import (
     compute_semantic_highlights,
     compute_top_insights,
 )
-from headwater.explorer import statistical as statistical_module
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
@@ -33,6 +34,7 @@ from headwater.core.models import (
     TableInfo,
     VisualizationSpec,
 )
+from headwater.explorer import statistical as statistical_module
 from headwater.explorer.nl_to_sql import (
     _build_vocabulary,
     _check_grounding,
@@ -54,8 +56,34 @@ from headwater.explorer.statistical import (
     detect_insights,
     detect_insights_with_diagnostics,
 )
-from headwater.explorer.suggestions import _select_diverse_questions, generate_suggestions
+from headwater.explorer.suggestions import (
+    _decision_category,
+    _select_diverse_questions,
+    generate_suggestions,
+)
 from headwater.explorer.visualization import _classify_columns, recommend_visualization
+from headwater.services.context_evaluation import load_context_eval_cases
+
+GOLD_DIR = Path(__file__).resolve().parent / "golden"
+
+
+def _payment_type_dictionary_doc(table_name: str = "yellow_trips") -> CompanionDoc:
+    return CompanionDoc(
+        filename="dictionary.csv",
+        content=(
+            "column_name: payment_type | "
+            "description: payment method. "
+            "1=Credit card; 2=Cash; 3=No charge; 4=Dispute"
+        ),
+        doc_type="csv",
+        matched_tables=[table_name],
+        confidence=0.9,
+    )
+
+
+def _nytaxi_fixture_discovery() -> DiscoveryResult:
+    return load_context_eval_cases([GOLD_DIR / "context_bootstrap_nytaxi.yaml"])[0]["discovery"]
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -251,6 +279,35 @@ class TestModels:
 
 
 class TestSuggestions:
+    def test_business_lens_labels_decision_category_from_context(self):
+        discovery = DiscoveryResult(source=SourceConfig(name="src", type="json"), tables=[])
+        metadata = retrieve_metadata(
+            discovery,
+            DatasetContext(
+                source_name="src",
+                decisions="Prioritize delivery exceptions and late orders.",
+            ),
+            context_items=[
+                {
+                    "id": "business_lens:fulfillment",
+                    "project_id": "src",
+                    "source_name": "src",
+                    "item_type": "business_lens",
+                    "scope": "project",
+                    "name": "fulfillment",
+                    "status": "approved",
+                    "value": {
+                        "label": "Fulfillment Signals",
+                        "decision_terms": ["delivery", "late"],
+                        "question_terms": ["orders"],
+                        "priority": 7,
+                    },
+                }
+            ],
+        )
+
+        assert _decision_category(metadata) == "Fulfillment Signals"
+
     def test_generates_mart_suggestions(self, sample_discovery, sample_models):
         questions = generate_suggestions(
             discovery=sample_discovery,
@@ -416,7 +473,7 @@ class TestSuggestions:
 
     def test_semantic_suggestions_include_heatmap_scatter_and_share_prompts(self):
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="orders",
@@ -539,9 +596,13 @@ class TestSuggestions:
         assert questions[0].sql_hint is not None
         assert any("changed over time" in q.question.lower() for q in questions)
 
-    def test_semantic_role_questions_are_generated_for_operational_workflows(self):
+    def test_semantic_role_questions_are_generated_for_operational_workflows(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="work_orders", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="work_orders",
@@ -573,6 +634,36 @@ class TestSuggestions:
                 ),
             ],
         )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "work-orders"
+        project_dir.mkdir(parents=True)
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: request_ts
+    pattern: "^requested_at$"
+    confidence: 0.9
+    reason: work order request timestamp
+  - role: lifecycle_start_ts
+    pattern: "^started_at$"
+    confidence: 0.92
+    reason: work order start timestamp
+  - role: lifecycle_end_ts
+    pattern: "^resolved_at$"
+    confidence: 0.92
+    reason: work order resolution timestamp
+  - role: origin_id
+    pattern: "^site_id$"
+    confidence: 0.88
+    reason: work site identifier
+  - role: service_type
+    pattern: "^work_type$"
+    confidence: 0.82
+    reason: work order type
+"""
+        )
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
         metadata = retrieve_metadata(
             discovery,
             DatasetContext(
@@ -582,7 +673,11 @@ class TestSuggestions:
             ),
         )
 
-        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+        questions = generate_suggestions(
+            discovery=discovery,
+            metadata=metadata,
+            project_id="work-orders",
+        )
         business_qs = [q for q in questions if q.source == "business"]
 
         assert business_qs
@@ -590,6 +685,35 @@ class TestSuggestions:
         assert any("which hour has the highest work orders volume" in q for q in prompts)
         assert any("weekday and weekend work order duration compare" in q for q in prompts)
         assert any("highest work order wait time" in q for q in prompts)
+
+    def test_nytaxi_fixture_suggestions_are_metadata_driven(self):
+        discovery = _nytaxi_fixture_discovery()
+        generic_discovery = discovery.model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        generic_questions = generate_suggestions(discovery=generic_discovery)
+        metadata_questions = generate_suggestions(
+            discovery=discovery,
+            project_id="nytaxi",
+        )
+        generic_prompts = [question.question.lower() for question in generic_questions]
+        metadata_prompts = [question.question.lower() for question in metadata_questions]
+
+        assert any("changed over time" in question for question in generic_prompts)
+        assert not any("which routes have the longest" in question for question in generic_prompts)
+        assert not any(
+            "which pulocationid has the longest" in question
+            for question in generic_prompts
+        )
+        assert any(
+            "which hour has the highest trips volume" in question
+            for question in metadata_prompts
+        )
+        assert any(
+            "weekday and weekend duration compare" in question
+            for question in metadata_prompts
+        )
 
     def test_encoded_dimension_questions_use_readable_labels(self, duckdb_con):
         duckdb_con.execute(
@@ -604,7 +728,7 @@ class TestSuggestions:
             """
         )
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="yellow_trips",
@@ -631,6 +755,7 @@ class TestSuggestions:
                     distinct_count=4,
                 ),
             ],
+            companion_docs=[_payment_type_dictionary_doc()],
         )
         models = [
             GeneratedModel(
@@ -678,7 +803,7 @@ class TestSuggestions:
             """
         )
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="orders",
@@ -776,7 +901,7 @@ class TestSuggestions:
             """
         )
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="service_events",
@@ -901,7 +1026,7 @@ class TestSuggestions:
             """
         )
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="tlc_trips",
@@ -974,7 +1099,7 @@ class TestSuggestions:
 
     def test_route_questions_are_suppressed_without_readable_lookup(self):
         discovery = DiscoveryResult(
-            source=SourceConfig(name="test", type="json", path="/data"),
+            source=SourceConfig(name="nytaxi", type="json", path="/data"),
             tables=[
                 TableInfo(
                     name="tlc_trips",
@@ -1207,6 +1332,7 @@ class TestSuggestions:
                     distinct_count=6,
                 ),
             ],
+            companion_docs=[_payment_type_dictionary_doc()],
         )
 
         questions = generate_suggestions(discovery=discovery)
@@ -1260,6 +1386,7 @@ class TestSuggestions:
                     distinct_count=3,
                 ),
             ],
+            companion_docs=[_payment_type_dictionary_doc()],
         )
         models = [
             GeneratedModel(
@@ -1437,7 +1564,7 @@ class TestSuggestions:
 
         assert not any("which hour has the highest" in q.question.lower() for q in questions)
 
-    def test_duration_questions_allow_multi_day_programs(self):
+    def test_duration_questions_allow_multi_day_programs(self, monkeypatch, tmp_path):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
             tables=[
@@ -1453,8 +1580,30 @@ class TestSuggestions:
                 )
             ],
         )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "programs"
+        project_dir.mkdir(parents=True)
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: lifecycle_start_ts
+    pattern: "^start_date$"
+    confidence: 0.9
+    reason: program start date
+  - role: lifecycle_end_ts
+    pattern: "^end_date$"
+    confidence: 0.9
+    reason: program end date
+  - role: service_type
+    pattern: "^type$"
+    confidence: 0.8
+    reason: program type
+"""
+        )
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
 
-        questions = generate_suggestions(discovery=discovery)
+        questions = generate_suggestions(discovery=discovery, project_id="programs")
         question = next(
             q
             for q in questions
@@ -1506,6 +1655,7 @@ class TestSuggestions:
                     distinct_count=100,
                 ),
             ],
+            companion_docs=[_payment_type_dictionary_doc("trips")],
         )
 
         questions = generate_suggestions(
@@ -1869,7 +2019,11 @@ class TestSuggestions:
         assert len(trend_questions) <= 3
         assert any("highest value" in q.question.lower() for q in questions)
 
-    def test_decision_questions_rank_ahead_of_generic_volume_prompts(self):
+    def test_decision_questions_rank_ahead_of_generic_volume_prompts(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         discovery = DiscoveryResult(
             source=SourceConfig(name="test", type="json", path="/data"),
             tables=[
@@ -1941,12 +2095,50 @@ class TestSuggestions:
                 ),
             ],
         )
+        metadata_root = tmp_path / "metadata"
+        project_dir = metadata_root / "service-events"
+        project_dir.mkdir(parents=True)
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: request_ts
+    pattern: "^requested_at$"
+    confidence: 0.9
+    reason: service request timestamp
+  - role: lifecycle_start_ts
+    pattern: "^started_at$"
+    confidence: 0.92
+    reason: service start timestamp
+  - role: lifecycle_end_ts
+    pattern: "^resolved_at$"
+    confidence: 0.92
+    reason: service resolution timestamp
+  - role: origin_id
+    pattern: "^origin_id$"
+    confidence: 0.88
+    reason: service origin
+  - role: destination_id
+    pattern: "^destination_id$"
+    confidence: 0.88
+    reason: service destination
+  - role: service_type
+    pattern: "^service_type$"
+    confidence: 0.82
+    reason: service type
+"""
+        )
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
         metadata = retrieve_metadata(
             discovery,
             DatasetContext(source_name="test", row_represents="service event"),
         )
 
-        questions = generate_suggestions(discovery=discovery, metadata=metadata)
+        questions = generate_suggestions(
+            discovery=discovery,
+            metadata=metadata,
+            project_id="service-events",
+        )
         top_questions = [q.question.lower() for q in questions[:3]]
 
         assert any("changed over time" in q for q in top_questions)
@@ -2785,7 +2977,10 @@ class TestStatistical:
         }
 
     def test_family_catalog_loads_project_metadata_extensions(self):
-        family_keys = {family["key"] for family in _load_family_spec(project_id="nytaxi")["families"]}
+        family_keys = {
+            family["key"]
+            for family in _load_family_spec(project_id="nytaxi")["families"]
+        }
 
         assert {
             "temporal_coverage",
@@ -2800,6 +2995,105 @@ class TestStatistical:
             "distance_efficiency",
             "lead_time_pattern",
         }.issubset(family_keys)
+
+    def test_nytaxi_fixture_insight_diagnostics_are_metadata_driven(self, duckdb_con):
+        duckdb_con.execute("CREATE SCHEMA IF NOT EXISTS eval")
+        duckdb_con.execute(
+            """
+            CREATE OR REPLACE TABLE eval.stg_trips AS
+            SELECT
+                TIMESTAMP '2026-01-01 00:00:00' + i * INTERVAL 1 HOUR AS pickup_datetime,
+                TIMESTAMP '2026-01-01 00:20:00' + i * INTERVAL 1 HOUR AS dropoff_datetime,
+                i % 10 AS PULocationID,
+                (i + 1) % 10 AS DOLocationID,
+                CASE WHEN i % 2 = 0 THEN 'CMT' ELSE 'VTS' END AS vendor_id,
+                1 + (i % 4) AS passenger_count,
+                1.5 + (i % 12) AS trip_distance,
+                7.5 + (i % 20) AS fare_amount
+            FROM range(48) AS t(i)
+            """
+        )
+        discovery = _nytaxi_fixture_discovery()
+        generic_discovery = discovery.model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        generic = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="eval",
+            discovery=generic_discovery,
+        )
+        with_metadata = detect_insights_with_diagnostics(
+            duckdb_con,
+            schema="eval",
+            discovery=discovery,
+            project_id="nytaxi",
+        )
+
+        generic_families = {diagnostic.family for diagnostic in generic.diagnostics}
+        metadata_families = {diagnostic.family for diagnostic in with_metadata.diagnostics}
+
+        assert {
+            "temporal_coverage",
+            "temporal_volume",
+            "duration_distribution",
+            "data_quality",
+        }.issubset(generic_families)
+        assert "location_distribution" not in generic_families
+        assert "path_distribution" not in generic_families
+        assert "distance_efficiency" not in generic_families
+        assert {
+            "duration_peak_window",
+            "location_distribution",
+            "path_distribution",
+            "distance_efficiency",
+        }.issubset(metadata_families)
+
+    def test_family_catalog_merges_canonical_context_items(self):
+        discovery = DiscoveryResult(
+            source=SourceConfig(name="src", type="json", path="/data"),
+            tables=[],
+        )
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "insight_family:temporal_volume",
+                    "project_id": "src",
+                    "source_name": "src",
+                    "item_type": "insight_family",
+                    "scope": "project",
+                    "name": "temporal_volume",
+                    "status": "approved",
+                    "value": {
+                        "priority": 21,
+                        "required_roles": ["custom_event_ts"],
+                    },
+                },
+                {
+                    "id": "insight_family:draft",
+                    "project_id": "src",
+                    "source_name": "src",
+                    "item_type": "insight_family",
+                    "scope": "project",
+                    "name": "draft",
+                    "status": "proposed",
+                    "value": {"required_roles": []},
+                },
+            ],
+        )
+
+        families = {
+            family["key"]: family
+            for family in _load_family_spec(metadata=metadata)["families"]
+        }
+
+        assert families["temporal_volume"]["priority"] == 21
+        assert families["temporal_volume"]["required_roles"] == ["custom_event_ts"]
+        assert families["temporal_volume"]["context_item_id"] == (
+            "insight_family:temporal_volume"
+        )
+        assert "draft" not in families
 
     def test_semantic_model_lineage_maps_mart_table(self, duckdb_con):
         duckdb_con.execute(
@@ -3070,7 +3364,34 @@ families:
     priority: 7
 """
         )
+        (project_dir / "semantic_schema.yaml").write_text(
+            """
+version: 1
+roles:
+  - role: request_ts
+    pattern: "^requested_at$"
+    confidence: 0.9
+    reason: work order request timestamp
+  - role: lifecycle_start_ts
+    pattern: "^started_at$"
+    confidence: 0.92
+    reason: work order start timestamp
+  - role: lifecycle_end_ts
+    pattern: "^resolved_at$"
+    confidence: 0.92
+    reason: work order resolution timestamp
+  - role: origin_id
+    pattern: "^site_id$"
+    confidence: 0.88
+    reason: work site identifier
+  - role: service_type
+    pattern: "^work_type$"
+    confidence: 0.82
+    reason: work order type
+"""
+        )
         monkeypatch.setattr(statistical_module, "_metadata_root", lambda: metadata_root)
+        monkeypatch.setattr(semantic_schema_module, "_metadata_root", lambda: metadata_root)
 
         insights = detect_insights(
             duckdb_con,
@@ -3164,6 +3485,25 @@ families:
             row_represents="trip",
             decisions="Operations and dispatch planning",
         )
+        metadata = retrieve_metadata(
+            discovery,
+            context,
+            context_items=[
+                {
+                    "id": "business_lens:dispatch",
+                    "project_id": "test",
+                    "source_name": "test",
+                    "item_type": "business_lens",
+                    "scope": "project",
+                    "name": "dispatch",
+                    "status": "approved",
+                    "value": {
+                        "label": "Dispatch Signals",
+                        "decision_terms": ["dispatch", "operations"],
+                    },
+                }
+            ],
+        )
 
         highlights = compute_semantic_highlights(
             duckdb_con,
@@ -3171,10 +3511,11 @@ families:
             context,
             models,
             project_id="nytaxi",
+            metadata=metadata,
         )
 
         assert highlights
-        assert any(h["decision_lens"] == "Operations" for h in highlights)
+        assert any(h["decision_lens"] == "Dispatch Signals" for h in highlights)
         assert any("HVFHV wait time is highest" in h["detail"] for h in highlights)
         assert any("FHV location analysis is unreliable" in h["title"] for h in highlights)
         assert len({h["insight_type"] for h in highlights}) >= 3
@@ -3389,7 +3730,10 @@ families:
         )
 
         first = _semantic_highlight_id(insight, "Latitude is missing for 12% of monitor records.")
-        second = _semantic_highlight_id(insight, "Latitude values outside valid bounds appear in 3 rows.")
+        second = _semantic_highlight_id(
+            insight,
+            "Latitude values outside valid bounds appear in 3 rows.",
+        )
 
         assert first != second
 
@@ -3525,7 +3869,10 @@ families:
         ]
 
         assert origin_insights
-        assert any("North Hub" in insight["title"] or "North Hub" in insight["detail"] for insight in origin_insights)
+        assert any(
+            "North Hub" in insight["title"] or "North Hub" in insight["detail"]
+            for insight in origin_insights
+        )
         assert all("A drives" not in insight["title"] for insight in origin_insights)
         assert all("A represents" not in insight["detail"] for insight in origin_insights)
 
@@ -3595,10 +3942,15 @@ families:
             discovery.profiles,
             retrieve_metadata(discovery),
         )
-        status_insights = [insight for insight in insights if insight.get("column") == "status_code"]
+        status_insights = [
+            insight for insight in insights if insight.get("column") == "status_code"
+        ]
 
         assert status_insights
-        assert any("Pending" in insight["title"] or "Pending" in insight["detail"] for insight in status_insights)
+        assert any(
+            "Pending" in insight["title"] or "Pending" in insight["detail"]
+            for insight in status_insights
+        )
         assert all(not insight["title"].startswith("P ") for insight in status_insights)
         assert all("P accounts for" not in insight["detail"] for insight in status_insights)
 
@@ -3745,6 +4097,18 @@ class TestNlToSql:
 
     def test_rejects_select_with_drop(self):
         assert _is_read_only("SELECT 1; DROP TABLE foo") is False
+
+    def test_rejects_multiple_select_statements(self):
+        assert _is_read_only("SELECT 1; SELECT 2") is False
+
+    def test_rejects_admin_statements(self):
+        assert _is_read_only("PRAGMA show_tables") is False
+        assert _is_read_only("ATTACH 'other.duckdb' AS other") is False
+        assert _is_read_only("INSTALL httpfs") is False
+
+    def test_ignores_comments_when_checking_shape(self):
+        assert _is_read_only("-- explain\nSELECT * FROM foo") is True
+        assert _is_read_only("/* explain */ WITH cte AS (SELECT 1) SELECT * FROM cte") is True
 
     def test_questions_similar_exact(self):
         assert _questions_similar("what is the average", "what is the average") is True
@@ -4014,7 +4378,11 @@ class TestAutoRepair:
         ]
 
         sql = _heuristic_sql(
-            "Which subscription-general-detail-latest billing channel has the highest account-financial-summary-total payments in prst audience profile pivot history?",
+            (
+                "Which subscription-general-detail-latest billing channel has the highest "
+                "account-financial-summary-total payments in prst audience profile pivot "
+                "history?"
+            ),
             discovery,
             models,
             con=duckdb_con,
@@ -4049,6 +4417,97 @@ class TestGrounding:
         vocab = _build_vocabulary(sample_discovery, sample_models)
         assert "air" in vocab  # from mart_air_quality_daily
         assert "quality" in vocab
+
+    def test_vocabulary_includes_project_context_terms(self, sample_discovery):
+        metadata = retrieve_metadata(
+            sample_discovery,
+            DatasetContext(
+                source_name="test",
+                row_represents="monitoring observation",
+                decisions="Prioritize exceedance response.",
+            ),
+            context_items=[
+                {
+                    "id": "glossary:exceedance",
+                    "project_id": "test",
+                    "source_name": "test",
+                    "item_type": "glossary_term",
+                    "scope": "project",
+                    "name": "exceedance",
+                    "status": "approved",
+                    "value": {
+                        "definition": "A reading above an accepted compliance threshold."
+                    },
+                }
+            ],
+        )
+
+        vocab = _build_vocabulary(sample_discovery, [], metadata)
+
+        assert "exceedance" in vocab
+        assert "compliance" in vocab
+        assert "observation" in vocab
+
+    def test_grounding_accepts_project_context_terms(self, sample_discovery):
+        metadata = retrieve_metadata(
+            sample_discovery,
+            context_items=[
+                {
+                    "id": "glossary:exceedance",
+                    "project_id": "test",
+                    "source_name": "test",
+                    "item_type": "glossary_term",
+                    "scope": "project",
+                    "name": "exceedance",
+                    "status": "approved",
+                    "value": {
+                        "definition": "A reading above an accepted compliance threshold."
+                    },
+                }
+            ],
+        )
+
+        warnings = _check_grounding(
+            "How many exceedance readings are there?",
+            sample_discovery,
+            [],
+            metadata=metadata,
+        )
+
+        assert warnings == []
+
+    def test_nytaxi_fixture_grounding_uses_metadata_backed_suggestions(self):
+        discovery = _nytaxi_fixture_discovery()
+        generic_discovery = discovery.model_copy(
+            update={"source": SourceConfig(name="adhoc", type="csv", path="/data/nytaxi")}
+        )
+
+        metadata_questions = generate_suggestions(
+            discovery=discovery,
+            project_id="nytaxi",
+        )
+        duration_question = next(
+            question.question
+            for question in metadata_questions
+            if "weekday and weekend duration compare" in question.question.lower()
+        )
+
+        generic_warnings = _check_grounding(
+            duration_question,
+            generic_discovery,
+            [],
+            suggestions=[],
+        )
+        metadata_warnings = _check_grounding(
+            duration_question,
+            discovery,
+            [],
+            suggestions=metadata_questions,
+        )
+
+        assert any("duration" in warning.lower() for warning in generic_warnings)
+        assert any("weekday" in warning.lower() for warning in generic_warnings)
+        assert metadata_warnings == []
 
     def test_grounded_question_returns_no_warnings(self, sample_discovery):
         warnings = _check_grounding(
@@ -4410,7 +4869,8 @@ class TestGrounding:
         question = next(
             q
             for q in questions
-            if "highest fare amount" in q.question.lower() and "payment method" in q.question.lower()
+            if "highest fare amount" in q.question.lower()
+            and "payment type" in q.question.lower()
         )
 
         result = ask(
@@ -4953,6 +5413,47 @@ class TestSuggestionQuality:
 
 
 class TestVisualization:
+    def test_context_visualization_hint_overrides_shape_default(self):
+        discovery = DiscoveryResult(source=SourceConfig(name="src", type="json"), tables=[])
+        metadata = retrieve_metadata(
+            discovery,
+            context_items=[
+                {
+                    "id": "visualization_hint:status_heatmap",
+                    "project_id": "src",
+                    "source_name": "src",
+                    "item_type": "visualization_hint",
+                    "scope": "project",
+                    "name": "status_heatmap",
+                    "status": "approved",
+                    "value": {
+                        "chart_type": "heatmap",
+                        "columns": ["period", "status", "orders"],
+                        "x_axis": "period",
+                        "y_axis": "status",
+                        "question_terms": ["status"],
+                        "title": "Status Heatmap",
+                    },
+                }
+            ],
+        )
+        data = [
+            {"period": "2026-01", "status": "Open", "orders": 5},
+            {"period": "2026-02", "status": "Closed", "orders": 8},
+        ]
+
+        viz = recommend_visualization(
+            ["period", "status", "orders"],
+            data,
+            "Show orders by status",
+            metadata,
+        )
+
+        assert viz.chart_type == "heatmap"
+        assert viz.x_axis == "period"
+        assert viz.y_axis == "status"
+        assert viz.title == "Status Heatmap"
+
     def test_kpi_single_metric(self):
         viz = recommend_visualization(
             ["avg_value"],

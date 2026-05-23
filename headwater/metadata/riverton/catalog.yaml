@@ -1,0 +1,27 @@
+version: 1
+agg_type_patterns:
+  - pattern: ".*_count$|^count$|^total$|^num_"
+    agg_type: count
+  - pattern: ".*_sum$|^sum_"
+    agg_type: sum
+  - pattern: ".*_avg$|^avg_|.*_average$|^mean_"
+    agg_type: avg
+  - pattern: ".*_rate$|.*_ratio$|.*_pct$|^pct_"
+    agg_type: avg
+  - pattern: ".*_score$|.*score$"
+    agg_type: avg
+  - pattern: ".*_value$"
+    agg_type: sum
+  - pattern: ".*_min$"
+    agg_type: min
+  - pattern: ".*_max$"
+    agg_type: max
+  - pattern: ".*_amount$|.*_cost$|.*_price$|.*_budget$"
+    agg_type: sum
+synonyms:
+  county: [borough, district]
+  category: [type, kind]
+  date: [day, when]
+  month: [period, month_of]
+  year: [fiscal_year, calendar_year]
+  quarter: [q1, q2, q3, q4]

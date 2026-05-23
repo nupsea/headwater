@@ -11,13 +11,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from headwater.core.models import DatasetContext, DiscoveryResult, Relationship, TableInfo
-
-_LOOKUP_ID_RE = re.compile(r"(^id$|_id$|locationid$|code$|key$|_num$|number$)", re.I)
-_LOOKUP_LABEL_RE = re.compile(
-    r"(name|label|description|zone|borough|region|title|status|category|type|display|text|value)",
-    re.I,
+from headwater.core.models import (
+    DatasetContext,
+    DiscoveryResult,
+    ProjectContextItem,
+    ProjectContextResource,
+    Relationship,
+    TableInfo,
 )
+
+_LOOKUP_ID_RE = re.compile(r"(^id$|_id$|code$|key$|_num$|number$)", re.I)
 _TEXTUAL_DTYPES = ("varchar", "char", "text", "string")
 
 
@@ -30,25 +33,206 @@ class RetrievedMetadata:
     lookup_tables: dict[str, dict[str, str]] = field(default_factory=dict)
     enum_mappings: dict[str, dict[str, str]] = field(default_factory=dict)
     locked_roles: dict[tuple[str, str], str] = field(default_factory=dict)
+    context_items: list[ProjectContextItem] = field(default_factory=list)
+    resources: list[ProjectContextResource] = field(default_factory=list)
+    open_questions: list[dict] = field(default_factory=list)
+    table_profiles: dict[str, dict] = field(default_factory=dict)
+    column_hints: dict[tuple[str, str], dict] = field(default_factory=dict)
+    insight_families: list[dict] = field(default_factory=list)
+    business_lenses: list[dict] = field(default_factory=list)
+    visualization_hints: list[dict] = field(default_factory=list)
 
 
 def retrieve_metadata(
     discovery: DiscoveryResult,
     context: DatasetContext | None = None,
+    *,
+    context_items: list[ProjectContextItem | dict] | None = None,
+    resources: list[ProjectContextResource | dict] | None = None,
 ) -> RetrievedMetadata:
     """Return local metadata signals for a discovery result."""
+    normalized_items = _normalize_context_items(context_items)
+    normalized_resources = _normalize_context_resources(resources)
+    glossary = _glossary_from_docs(discovery)
+    glossary.update(_glossary_from_context_items(normalized_items))
+    lookup_tables = _lookup_candidates(discovery)
+    lookup_tables.update(_lookup_candidates_from_context_items(normalized_items))
+    locked_roles = {
+        (table.name, col.name): col.role or col.semantic_type or ""
+        for table in discovery.tables
+        for col in table.columns
+        if col.locked and (col.role or col.semantic_type)
+    }
+    locked_roles.update(_locked_roles_from_context_items(normalized_items))
     return RetrievedMetadata(
         context=context,
-        glossary=_glossary_from_docs(discovery),
-        lookup_tables=_lookup_candidates(discovery),
-        enum_mappings=_enum_mappings_from_docs(discovery),
-        locked_roles={
-            (table.name, col.name): col.role or col.semantic_type or ""
-            for table in discovery.tables
-            for col in table.columns
-            if col.locked and (col.role or col.semantic_type)
-        },
+        glossary=glossary,
+        lookup_tables=lookup_tables,
+        enum_mappings=_merged_enum_mappings(discovery, normalized_items),
+        locked_roles=locked_roles,
+        context_items=normalized_items,
+        resources=normalized_resources,
+        open_questions=_open_questions_from_context_items(normalized_items),
+        table_profiles=_table_profiles_from_context_items(normalized_items),
+        column_hints=_column_hints_from_context_items(normalized_items),
+        insight_families=_insight_families_from_context_items(normalized_items),
+        business_lenses=_context_values(normalized_items, "business_lens"),
+        visualization_hints=_context_values(normalized_items, "visualization_hint"),
     )
+
+
+def _normalize_context_items(
+    context_items: list[ProjectContextItem | dict] | None,
+) -> list[ProjectContextItem]:
+    items: list[ProjectContextItem] = []
+    for item in context_items or []:
+        if isinstance(item, ProjectContextItem):
+            items.append(item)
+        else:
+            items.append(ProjectContextItem.model_validate(item))
+    return items
+
+
+def _normalize_context_resources(
+    resources: list[ProjectContextResource | dict] | None,
+) -> list[ProjectContextResource]:
+    normalized: list[ProjectContextResource] = []
+    for resource in resources or []:
+        if isinstance(resource, ProjectContextResource):
+            normalized.append(resource)
+        else:
+            normalized.append(ProjectContextResource.model_validate(resource))
+    return normalized
+
+
+def _glossary_from_context_items(items: list[ProjectContextItem]) -> dict[str, str]:
+    glossary: dict[str, str] = {}
+    for item in items:
+        if item.item_type == "column_semantics":
+            description = str(item.value.get("description") or "").strip()
+            if item.column_name and description:
+                normalized = _normalize_glossary_description(description)
+                if normalized:
+                    glossary.setdefault(item.column_name.lower(), normalized)
+        elif item.item_type == "glossary_term":
+            term = str(item.name or "").strip().lower()
+            definition = str(item.value.get("definition") or "").strip()
+            if term and definition:
+                normalized = _normalize_glossary_description(definition)
+                if normalized:
+                    glossary.setdefault(term, normalized)
+        elif item.item_type == "enum_mapping":
+            label = (
+                item.value.get("label")
+                or item.value.get("display_label")
+                or item.value.get("dimension_label")
+            )
+            if item.column_name and isinstance(label, str) and label.strip():
+                glossary.setdefault(item.column_name.lower(), label.strip())
+    return glossary
+
+
+def _lookup_candidates_from_context_items(
+    items: list[ProjectContextItem],
+) -> dict[str, dict[str, str]]:
+    lookups: dict[str, dict[str, str]] = {}
+    for item in items:
+        if item.item_type != "lookup" or not item.table_name:
+            continue
+        key_column = item.value.get("key_column")
+        label_column = item.value.get("label_column")
+        if isinstance(key_column, str) and isinstance(label_column, str):
+            lookups[item.table_name] = {
+                "id_column": key_column,
+                "label_column": label_column,
+            }
+    return lookups
+
+
+def _locked_roles_from_context_items(items: list[ProjectContextItem]) -> dict[tuple[str, str], str]:
+    locked_roles: dict[tuple[str, str], str] = {}
+    for item in items:
+        if item.item_type != "column_semantics":
+            continue
+        if item.status not in {"approved", "locked"}:
+            continue
+        if not item.table_name or not item.column_name:
+            continue
+        role = item.value.get("role") or item.value.get("semantic_type")
+        if isinstance(role, str) and role.strip():
+            locked_roles[(item.table_name, item.column_name)] = role.strip()
+    return locked_roles
+
+
+def _open_questions_from_context_items(items: list[ProjectContextItem]) -> list[dict]:
+    return [
+        {
+            "id": item.id,
+            "table_name": item.table_name,
+            "column_name": item.column_name,
+            "title": item.title,
+            "question": item.value.get("question"),
+            "confidence": item.confidence,
+        }
+        for item in items
+        if item.item_type == "open_question"
+    ]
+
+
+def _table_profiles_from_context_items(items: list[ProjectContextItem]) -> dict[str, dict]:
+    return {
+        item.table_name: dict(item.value)
+        for item in items
+        if item.item_type == "table_profile" and item.table_name
+    }
+
+
+def _column_hints_from_context_items(
+    items: list[ProjectContextItem],
+) -> dict[tuple[str, str], dict]:
+    hints: dict[tuple[str, str], dict] = {}
+    for item in items:
+        if item.item_type != "column_semantics":
+            continue
+        if not item.table_name or not item.column_name:
+            continue
+        hints[(item.table_name, item.column_name)] = dict(item.value)
+    return hints
+
+
+def _insight_families_from_context_items(items: list[ProjectContextItem]) -> list[dict]:
+    families: list[dict] = []
+    for item in items:
+        if item.item_type != "insight_family":
+            continue
+        if item.status not in {"approved", "locked"}:
+            continue
+        family = dict(item.value)
+        key = family.get("key") or item.name
+        if not isinstance(key, str) or not key.strip():
+            continue
+        family["key"] = key.strip()
+        family.setdefault("source", "project_context")
+        family.setdefault("context_item_id", item.id)
+        if "priority" not in family:
+            family["priority"] = 5
+        families.append(family)
+    return families
+
+
+def _context_values(items: list[ProjectContextItem], item_type: str) -> list[dict]:
+    values: list[dict] = []
+    for item in items:
+        if item.item_type != item_type:
+            continue
+        if item.status not in {"approved", "locked"}:
+            continue
+        value = dict(item.value)
+        value.setdefault("key", item.name)
+        value.setdefault("source", "project_context")
+        value.setdefault("context_item_id", item.id)
+        values.append(value)
+    return values
 
 
 def _glossary_from_docs(discovery: DiscoveryResult) -> dict[str, str]:
@@ -91,6 +275,38 @@ def _enum_mappings_from_docs(discovery: DiscoveryResult) -> dict[str, dict[str, 
     return mappings
 
 
+def _merged_enum_mappings(
+    discovery: DiscoveryResult,
+    items: list[ProjectContextItem],
+) -> dict[str, dict[str, str]]:
+    mappings = _enum_mappings_from_docs(discovery)
+    mappings.update(_enum_mappings_from_context_items(items))
+    return mappings
+
+
+def _enum_mappings_from_context_items(items: list[ProjectContextItem]) -> dict[str, dict[str, str]]:
+    mappings: dict[str, dict[str, str]] = {}
+    for item in items:
+        if item.item_type != "enum_mapping" or item.status == "rejected":
+            continue
+        labels = item.value.get("labels") or item.value.get("mapping") or item.value.get("values")
+        if not isinstance(labels, dict) or not labels:
+            continue
+        normalized = {str(key): str(value) for key, value in labels.items() if value is not None}
+        if not normalized:
+            continue
+        keys = []
+        if item.column_name:
+            keys.append(item.column_name.lower())
+        if item.table_name and item.column_name:
+            keys.append(f"{item.table_name.lower()}.{item.column_name.lower()}")
+        if item.name:
+            keys.append(item.name.lower())
+        for key in keys:
+            mappings[key] = normalized
+    return mappings
+
+
 def _lookup_candidates(discovery: DiscoveryResult) -> dict[str, dict[str, str]]:
     candidates: dict[str, dict[str, str]] = {}
     for table in discovery.tables:
@@ -114,7 +330,10 @@ def infer_lookup_candidate(table: TableInfo) -> dict[str, str] | None:
         return None
 
     label_candidates = [
-        (col.name, _lookup_label_score(col.name, col.dtype, col.semantic_type or "", col.role or ""))
+        (
+            col.name,
+            _lookup_label_score(col.name, col.dtype, col.semantic_type or "", col.role or ""),
+        )
         for col in table.columns
     ]
     label_candidates = [item for item in label_candidates if item[1] > 0]
@@ -128,7 +347,7 @@ def infer_lookup_candidate(table: TableInfo) -> dict[str, str] | None:
     if not label_options:
         return None
     label_column, label_score = max(label_options, key=lambda item: item[1])
-    if label_score < 6:
+    if label_score < 6 and len(table.columns) > 2:
         return None
 
     return {"id_column": id_column, "label_column": label_column}
@@ -151,11 +370,6 @@ def lookup_match_keys(name: str) -> list[str]:
 
     suffix_tokens = {"id", "code", "key"}
     directional_prefixes = {
-        "pu",
-        "do",
-        "pickup",
-        "dropoff",
-        "drop",
         "origin",
         "destination",
         "dest",
@@ -273,13 +487,10 @@ def _lookup_id_score(name: str, semantic_type: str, role: str) -> int:
 
 
 def _lookup_label_score(name: str, dtype: str, semantic_type: str, role: str) -> int:
-    lower = name.lower()
     if _LOOKUP_ID_RE.search(name):
         return -1
 
     score = 0
-    if _LOOKUP_LABEL_RE.search(name):
-        score += 6
     if any(token in (dtype or "").lower() for token in _TEXTUAL_DTYPES):
         score += 4
     if semantic_type == "dimension":

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import defaultdict
+from pathlib import Path
 
+import yaml
+
+from headwater.analyzer.metadata_retrieval import RetrievedMetadata
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
@@ -24,7 +29,6 @@ _NOISE_TOKENS = frozenset(
         "type",
         "code",
         "at",
-        "status",
         "flag",
         "count",
         "rate",
@@ -40,85 +44,127 @@ _NOISE_TOKENS = frozenset(
     }
 )
 
-# Column name patterns -> semantic type
-_SEMANTIC_TYPE_PATTERNS: list[tuple[str, str]] = [
+_CONF_EXACT_ID_PATTERN = 0.9
+_CONF_SPECIFIC_NAME_PATTERN = 0.85
+_CONF_BROAD_NAME_PATTERN = 0.7
+_CONF_STANDALONE_DIM = 0.8
+_CONF_PROFILE_OVERRIDE = 0.75
+_CONF_PROFILE_INFER = 0.5
+_CONF_NO_SIGNAL = 0.0
+
+# Column name patterns -> semantic type. Keep this list domain-neutral.
+_DEFAULT_SEMANTIC_TYPE_PATTERNS: list[tuple[str, str, float]] = [
     (r".*_id$", "id"),
     (r"^id$", "id"),
     (r".*email.*", "pii"),
     (r".*phone.*", "pii"),
     (r".*ssn.*", "pii"),
-    (r".*name$", "dimension"),
-    (r".*_name$", "dimension"),
-    (r".*_type($|_\d+$)", "dimension"),  # complaint_type, complaint_type_311
-    (r".*type$", "dimension"),
-    (r".*category.*", "dimension"),
-    (r".*status.*", "dimension"),
-    # Common standalone dimension words (administrative, organizational)
-    (r"^county$", "dimension"),
-    (r"^borough$", "dimension"),
-    (r"^city$", "dimension"),
-    (r"^state$", "dimension"),
-    (r"^country$", "dimension"),
-    (r"^region$", "dimension"),
-    (r"^district$", "dimension"),
-    (r"^ward$", "dimension"),
-    (r"^province$", "dimension"),
-    (r"^department$", "dimension"),
-    (r"^zone$", "dimension"),
-    (r"^sector$", "dimension"),
-    (r"^priority$", "dimension"),
-    (r"^severity$", "dimension"),
-    (r"^channel$", "dimension"),
-    (r"^source$", "dimension"),
-    (r"^platform$", "dimension"),
-    (r"^tier$", "dimension"),
-    (r"^level$", "dimension"),
-    (r"^class$", "dimension"),
-    (r"^group$", "dimension"),
-    (r"^gender$", "dimension"),
-    (r"^race$", "dimension"),
-    (r"^ethnicity$", "dimension"),
-    # Codes, flags, indicators -- numeric but NOT metrics (must precede metric patterns)
-    (r".*_code$", "dimension"),
-    (r".*code$", "dimension"),
-    (r".*flag$", "dimension"),
-    (r".*indicator$", "dimension"),
-    (r".*number$", "dimension"),
-    (r".*_num$", "dimension"),  # site_num
-    (r".*_no$", "dimension"),  # complaint_no
-    (r".*_tract$|^tract$", "dimension"),  # census_tract
-    (r".*_board$|^board$", "dimension"),  # community_board
-    # Temporal singletons
-    (r"^year$", "temporal"),
-    (r"^month$", "temporal"),
-    (r".*date.*", "temporal"),
-    (r".*_at$", "temporal"),
-    (r".*timestamp.*", "temporal"),
-    (r".*_count$|^count$", "metric"),
-    (r".*score.*", "metric"),
-    (r".*_rate$|^rate$", "metric"),
-    (r".*amount.*", "metric"),
-    (r".*budget.*", "metric"),
-    (r".*pct_.*", "metric"),
-    (r".*_value$|^value$", "metric"),
-    (r".*_measure$|.*measure_.*", "metric"),
-    # Aggregate / summary metric patterns (generic, not dataset-specific)
-    (r".*_days$|^days_.*", "metric"),
-    (r".*percentile.*", "metric"),
-    (r".*median.*", "metric"),
-    (r".*_total$|^total_.*", "metric"),
-    (r".*_avg$|.*_average$", "metric"),
-    (r".*_max$|.*_min$|^max_.*|^min_.*", "metric"),
-    (r".*_sum$|^sum_.*", "metric"),
-    (r".*latitude.*", "geographic"),
-    (r".*longitude.*", "geographic"),
-    (r"^lat$", "geographic"),
-    (r"^lon$", "geographic"),
-    (r".*address.*", "geographic"),
-    (r".*description.*", "text"),
-    (r".*narrative.*", "text"),
-    (r".*notes.*", "text"),
 ]
+_DEFAULT_SEMANTIC_TYPE_PATTERNS = [
+    (
+        pattern,
+        sem_type,
+        _CONF_EXACT_ID_PATTERN
+        if pattern in {r".*_id$", r"^id$"}
+        else _CONF_SPECIFIC_NAME_PATTERN
+        if sem_type in {"id", "metric", "pii", "temporal"}
+        else _CONF_BROAD_NAME_PATTERN,
+    )
+    for pattern, sem_type in _DEFAULT_SEMANTIC_TYPE_PATTERNS
+]
+
+
+def _metadata_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "metadata"
+
+
+def _slugify_metadata_key(value: str) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized.strip("-")
+
+
+def _compact_metadata_key(value: str) -> str:
+    return "".join(ch.lower() for ch in value if ch.isalnum())
+
+
+def _candidate_type_spec_paths(source_name: str | None, project_id: str | None) -> list[Path]:
+    candidates: list[Path] = []
+    metadata_root = _metadata_root()
+    for name in [project_id, source_name]:
+        if not name:
+            continue
+        variants = [
+            str(name),
+            _slugify_metadata_key(str(name)),
+            _compact_metadata_key(str(name)),
+        ]
+        for variant in variants:
+            if not variant:
+                continue
+            path = metadata_root / variant / "semantic_types.yaml"
+            if path not in candidates:
+                candidates.append(path)
+    return candidates
+
+
+def _parse_type_spec(path: Path) -> dict | None:
+    try:
+        parsed = yaml.safe_load(path.read_text()) or {}
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    try:
+        parsed = json.loads(path.read_text())
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        return None
+    return None
+
+
+def _metadata_type_patterns(
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> list[tuple[str, str, float]]:
+    for path in _candidate_type_spec_paths(source_name, project_id):
+        if not path.exists():
+            continue
+        parsed = _parse_type_spec(path)
+        if not parsed:
+            continue
+        patterns = parsed.get("patterns")
+        if not isinstance(patterns, list):
+            continue
+        result: list[tuple[str, str, float]] = []
+        for entry in patterns:
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("pattern"), str)
+                or not isinstance(entry.get("semantic_type"), str)
+            ):
+                continue
+            result.append(
+                (
+                    entry["pattern"],
+                    entry["semantic_type"],
+                    float(entry.get("confidence", _CONF_BROAD_NAME_PATTERN)),
+                )
+            )
+        return result
+    return []
+
+
+def _semantic_type_patterns(
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> list[tuple[str, str, float]]:
+    return [
+        *_metadata_type_patterns(source_name, project_id),
+        *_DEFAULT_SEMANTIC_TYPE_PATTERNS,
+    ]
 
 
 def generate_table_description(table: TableInfo) -> str:
@@ -262,7 +308,7 @@ def _derive_cluster_label(
 def _common_prefix_token(names: list[str]) -> str | None:
     """Find the longest shared leading token across a list of snake_case names.
 
-    E.g. ["aqs_sites", "aqs_monitors", "aqs_daily"] -> "aqs"
+    For example, ["src_alpha", "src_beta"] -> "src".
     """
     token_lists = [n.lower().split("_") for n in names]
     if not token_lists:
@@ -297,93 +343,34 @@ def generate_column_description(col_name: str, table_name: str) -> str:
     return human
 
 
-def classify_semantic_type(col_name: str) -> str | None:
+def classify_semantic_type(
+    col_name: str,
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> str | None:
     """Classify a column's semantic type from its name."""
     lower = col_name.lower()
-    for pattern, sem_type in _SEMANTIC_TYPE_PATTERNS:
+    for pattern, sem_type, _confidence in _semantic_type_patterns(source_name, project_id):
         if re.match(pattern, lower):
             return sem_type
     return None
 
 
-# Confidence levels for different classification sources
-_CONF_EXACT_ID_PATTERN = 0.9  # _id$, ^id$
-_CONF_SPECIFIC_NAME_PATTERN = 0.85  # .*email.*, .*_count$
-_CONF_BROAD_NAME_PATTERN = 0.7  # .*type$, .*name$
-_CONF_STANDALONE_DIM = 0.8  # ^county$, ^state$ etc
-_CONF_PROFILE_OVERRIDE = 0.75  # Profile-based refinement overrides name
-_CONF_PROFILE_INFER = 0.5  # Profile-based inference with no name match
-_CONF_NO_SIGNAL = 0.0  # Nothing matched
-
-# Patterns grouped by confidence level
-_HIGH_CONF_PATTERNS = {
-    r".*_id$",
-    r"^id$",
-    r".*email.*",
-    r".*phone.*",
-    r".*ssn.*",
-    r".*_count$|^count$",
-    r".*score.*",
-    r".*_rate$|^rate$",
-    r".*amount.*",
-    r".*budget.*",
-    r".*latitude.*",
-    r".*longitude.*",
-    r".*_days$|^days_.*",
-    r".*percentile.*",
-    r".*median.*",
-    r".*_total$|^total_.*",
-    r".*_avg$|.*_average$",
-    r".*_max$|.*_min$|^max_.*|^min_.*",
-    r".*_sum$|^sum_.*",
-    # Temporal singletons
-    r"^year$",
-    r"^month$",
-    r".*date.*",
-    r".*_at$",
-    r".*timestamp.*",
-}
-_STANDALONE_DIM_PATTERNS = {
-    r"^county$",
-    r"^borough$",
-    r"^city$",
-    r"^state$",
-    r"^country$",
-    r"^region$",
-    r"^district$",
-    r"^ward$",
-    r"^province$",
-    r"^department$",
-    r"^zone$",
-    r"^sector$",
-    r"^priority$",
-    r"^severity$",
-    r"^channel$",
-    r"^source$",
-    r"^platform$",
-    r"^tier$",
-    r"^level$",
-    r"^class$",
-    r"^group$",
-    r"^gender$",
-    r"^race$",
-    r"^ethnicity$",
-}
-
-
-def classify_semantic_type_with_confidence(col_name: str) -> tuple[str | None, float]:
+def classify_semantic_type_with_confidence(
+    col_name: str,
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
+) -> tuple[str | None, float]:
     """Classify a column's semantic type from its name with confidence score.
 
     Returns (semantic_type, confidence).
     """
     lower = col_name.lower()
-    for pattern, sem_type in _SEMANTIC_TYPE_PATTERNS:
+    for pattern, sem_type, confidence in _semantic_type_patterns(source_name, project_id):
         if re.match(pattern, lower):
-            if pattern in _HIGH_CONF_PATTERNS:
-                return sem_type, _CONF_EXACT_ID_PATTERN
-            if pattern in _STANDALONE_DIM_PATTERNS:
-                return sem_type, _CONF_STANDALONE_DIM
-            return sem_type, _CONF_BROAD_NAME_PATTERN
+            return sem_type, confidence
     return None, _CONF_NO_SIGNAL
 
 
@@ -402,7 +389,7 @@ def _refine_semantic_type(
     is_numeric = any(t in dtype for t in ("int", "float", "double", "decimal"))
 
     # Rule 1: High uniqueness overrides "dimension" -> "id"
-    # e.g. complaint_number matched .*number$ but has 0.95 uniqueness
+    # A numeric label-like column with high uniqueness is usually an identifier.
     if current == "dimension" and is_numeric and profile.uniqueness_ratio > 0.9:
         return "id"
 
@@ -412,8 +399,7 @@ def _refine_semantic_type(
 
     # Rule 3: NULL type + numeric + continuous distribution -> "metric"
     # If it has stddev > 0 and a meaningful range, it's continuous data,
-    # not categorical -- even if cardinality is low (e.g. hazardous_days
-    # has only 10 distinct values but is clearly a count metric).
+    # not categorical -- even if cardinality is low.
     if (
         current is None
         and is_numeric
@@ -432,7 +418,6 @@ def _refine_semantic_type(
         return "dimension"
 
     # Rule 5: NULL type + low cardinality + numeric but no variance -> "dimension"
-    # (e.g. status codes with 5 distinct integer values and no stddev)
     if (
         current is None
         and is_numeric
@@ -543,6 +528,10 @@ def enrich_tables(
     tables: list[TableInfo],
     profiles: list[ColumnProfile],
     relationships: list[Relationship],
+    *,
+    source_name: str | None = None,
+    project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[TableInfo]:
     """Enrich tables with heuristic descriptions, domains, semantic types, and confidence.
 
@@ -585,8 +574,19 @@ def enrich_tables(
         for col in table.columns:
             if col.locked:
                 continue
-            col.description = generate_column_description(col.name, table.name)
-            sem_type, name_conf = classify_semantic_type_with_confidence(col.name)
+            context_hint = metadata.column_hints.get((table.name, col.name), {}) if metadata else {}
+            approved_role = metadata.locked_roles.get((table.name, col.name)) if metadata else None
+            col.description = _context_description_override(
+                col.name,
+                table.name,
+                metadata,
+                context_hint,
+            )
+            sem_type, name_conf = classify_semantic_type_with_confidence(
+                col.name,
+                source_name=source_name,
+                project_id=project_id,
+            )
             col.semantic_type = sem_type
             col.confidence = name_conf
 
@@ -605,6 +605,14 @@ def enrich_tables(
                 )
 
             col.role = _classify_role(col, profile)
+            context_semantic = _context_semantic_override(approved_role, context_hint)
+            context_role = _context_role_override(approved_role, context_hint)
+            if context_semantic:
+                col.semantic_type = context_semantic
+                col.confidence = max(col.confidence, 0.95)
+            if context_role:
+                col.role = context_role
+                col.confidence = max(col.confidence, 0.95)
 
         # Pass 2: sibling consistency -- align columns with similar names
         _apply_sibling_consistency(table, profile_index)
@@ -614,19 +622,99 @@ def enrich_tables(
     return enriched
 
 
+def _context_description_override(
+    col_name: str,
+    table_name: str,
+    metadata: RetrievedMetadata | None,
+    context_hint: dict,
+) -> str:
+    description = context_hint.get("description")
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+    if metadata is not None:
+        glossary = metadata.glossary.get(col_name.lower())
+        if glossary:
+            return glossary
+    return generate_column_description(col_name, table_name)
+
+
+def _context_semantic_override(approved_role: str | None, context_hint: dict) -> str | None:
+    explicit = [
+        context_hint.get("semantic_type"),
+        context_hint.get("role"),
+        approved_role,
+    ]
+    for value in explicit:
+        normalized = _normalize_context_semantic_type(value)
+        if normalized:
+            return normalized
+    return None
+
+
+def _context_role_override(approved_role: str | None, context_hint: dict) -> str | None:
+    explicit = [
+        context_hint.get("role"),
+        context_hint.get("semantic_type"),
+        approved_role,
+    ]
+    for value in explicit:
+        normalized = _normalize_context_role(value)
+        if normalized:
+            return normalized
+    return None
+
+
+def _normalize_context_semantic_type(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"id", "foreign_key", "primary_key", "dimension", "metric", "text", "pii"}:
+        return normalized
+    if normalized in {"measure", "amount", "count", "distance", "duration", "kpi"}:
+        return "metric"
+    if normalized in {"event_ts", "request_ts", "lifecycle_start_ts", "lifecycle_end_ts"}:
+        return "temporal"
+    if normalized == "service_type":
+        return "dimension"
+    return None
+
+
+def _normalize_context_role(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"metric", "dimension", "temporal", "identifier", "text"}:
+        return normalized
+    if normalized in {"measure", "amount", "count", "distance", "duration", "kpi"}:
+        return "metric"
+    if normalized in {"event_ts", "request_ts", "lifecycle_start_ts", "lifecycle_end_ts"}:
+        return "temporal"
+    if normalized == "service_type":
+        return "dimension"
+    if normalized in {
+        "id",
+        "foreign_key",
+        "primary_key",
+        "location_id",
+        "origin_id",
+        "destination_id",
+    }:
+        return "identifier"
+    return None
+
+
 def _apply_sibling_consistency(
     table: TableInfo,
     profile_index: dict[tuple[str, str], ColumnProfile],
 ) -> None:
     """Align sibling columns to the majority role when they share a name pattern.
 
-    Groups columns by shared tokens (e.g. "days_with_aqi", "good_days",
-    "hazardous_days" all share "days"). If a group has >= 3 members and
+    Groups columns by shared non-noise tokens. If a group has >= 3 members and
     the majority share a role, dissenting columns with LOW confidence
     are flipped to match.
 
-    This prevents "moderate_days" = dimension while "good_days" = metric
-    just because distinct_count crossed an arbitrary threshold.
+    This avoids inconsistent roles caused by individual columns sitting near a
+    profile threshold.
     """
     # Only act on unlocked, non-high-confidence columns
     unlocked = [c for c in table.columns if not c.locked and c.confidence < 0.8]
@@ -865,7 +953,7 @@ def generate_deep_table_description(
     # Classify columns by role
     dims = [c for c in table.columns if c.role == "dimension"]
     metrics = [c for c in table.columns if c.role == "metric"]
-    temporals = [c for c in table.columns if c.role == "temporal"]
+    temporals = [c for c in table.columns if _is_temporal_column(c)]
     identifiers = [c for c in table.columns if c.role == "identifier"]
     geos = [c for c in table.columns if c.role == "geographic"]
     texts = [c for c in table.columns if c.role == "text"]
@@ -984,15 +1072,6 @@ def _infer_temporal_grain(
         if profile is None:
             continue
 
-        # Check column name for grain hints
-        lower = col.name.lower()
-        if "year" in lower:
-            return "yearly"
-        if "month" in lower:
-            return "monthly"
-        if "week" in lower:
-            return "weekly"
-
         # Check date range vs distinct count
         if profile.min_date and profile.max_date and profile.distinct_count > 0:
             from datetime import datetime
@@ -1017,6 +1096,19 @@ def _infer_temporal_grain(
                 continue
 
     return "event-based"
+
+
+def _is_temporal_column(col: ColumnInfo) -> bool:
+    semantic = (col.semantic_type or "").lower()
+    role = (col.role or "").lower()
+    dtype = str(col.dtype or "").lower()
+    name = col.name.lower()
+    return (
+        role == "temporal"
+        or semantic == "temporal"
+        or any(token in dtype for token in ("date", "time", "timestamp", "datetime"))
+        or any(token in name for token in ("date", "time", "timestamp", "_ts"))
+    )
 
 
 def _build_column_semantic_detail(

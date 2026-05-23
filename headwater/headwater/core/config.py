@@ -17,6 +17,9 @@ _PERSISTED_KEYS = frozenset(
     {
         "llm_provider",
         "llm_model",
+        "llm_offline_mode",
+        "llm_max_tokens_per_run",
+        "llm_max_tokens_per_source",
         "ollama_base_url",
         "ollama_timeout",
         "openai_compat_base_url",
@@ -41,6 +44,9 @@ class HeadwaterSettings(BaseSettings):
     llm_provider: Literal["none", "anthropic", "ollama", "openai_compat"] = "none"
     llm_api_key: str | None = None
     llm_model: str = "claude-sonnet-4-20250514"
+    llm_offline_mode: bool = False
+    llm_max_tokens_per_run: int = 0
+    llm_max_tokens_per_source: int = 0
 
     # Ollama (local LLM)
     ollama_base_url: str = "http://localhost:11434"

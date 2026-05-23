@@ -14,6 +14,7 @@ from headwater.analyzer.companion import (
 )
 from headwater.analyzer.metadata_retrieval import retrieve_metadata
 from headwater.core.models import ColumnInfo, CompanionDoc, DiscoveryResult, SourceConfig, TableInfo
+from headwater.explorer.readability import enum_dimension_label, enum_mapping_for_column
 
 
 @pytest.fixture()
@@ -244,6 +245,147 @@ def test_retrieve_metadata_extracts_enum_mappings_from_dictionary_rows() -> None
         "S": "Shipped",
         "C": "Cancelled",
     }
+    assert enum_mapping_for_column("payment_type") is None
+    assert enum_dimension_label("payment_type", "payment type") == "payment type"
+
+
+def test_retrieve_metadata_merges_canonical_project_context_items() -> None:
+    discovery = DiscoveryResult(
+        source=SourceConfig(name="test", type="json", path="/data"),
+        tables=[
+            TableInfo(
+                name="orders",
+                row_count=10,
+                columns=[ColumnInfo(name="status_code", dtype="varchar")],
+            ),
+            TableInfo(
+                name="status_lookup",
+                row_count=3,
+                columns=[
+                    ColumnInfo(name="status_code", dtype="varchar", semantic_type="id"),
+                    ColumnInfo(name="status_label", dtype="varchar"),
+                ],
+            ),
+        ],
+    )
+
+    metadata = retrieve_metadata(
+        discovery,
+        context_items=[
+            {
+                "id": "column_semantics:orders.status_code",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "column_semantics",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "status": "approved",
+                "confidence": 0.97,
+                "value": {
+                    "description": "Order lifecycle status.",
+                    "role": "dimension",
+                },
+            },
+            {
+                "id": "lookup:status_lookup",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "lookup",
+                "scope": "table",
+                "name": "status_lookup",
+                "table_name": "status_lookup",
+                "value": {
+                    "key_column": "status_code",
+                    "label_column": "status_label",
+                },
+            },
+            {
+                "id": "enum_mapping:orders.status_code",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "enum_mapping",
+                "scope": "column",
+                "name": "status_code",
+                "table_name": "orders",
+                "column_name": "status_code",
+                "status": "approved",
+                "value": {
+                    "label": "order status",
+                    "labels": {
+                        "P": "Pending",
+                        "S": "Shipped",
+                    }
+                },
+            },
+            {
+                "id": "insight_family:order_lifecycle",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "insight_family",
+                "scope": "project",
+                "name": "order_lifecycle",
+                "status": "approved",
+                "confidence": 0.92,
+                "value": {
+                    "required_roles": ["event_ts", "dimension"],
+                    "priority": 11,
+                },
+            },
+            {
+                "id": "business_lens:fulfillment",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "business_lens",
+                "scope": "project",
+                "name": "fulfillment",
+                "status": "approved",
+                "value": {
+                    "label": "Fulfillment Signals",
+                    "decision_terms": ["delivery"],
+                    "question_terms": ["late"],
+                    "priority": 4,
+                },
+            },
+            {
+                "id": "visualization_hint:status_heatmap",
+                "project_id": "test",
+                "source_name": "test",
+                "item_type": "visualization_hint",
+                "scope": "project",
+                "name": "status_heatmap",
+                "status": "approved",
+                "value": {
+                    "chart_type": "heatmap",
+                    "columns": ["status_code", "created_date", "orders"],
+                },
+            },
+        ],
+    )
+
+    assert metadata.glossary["status_code"] == "Order lifecycle status."
+    assert metadata.lookup_tables["status_lookup"] == {
+        "id_column": "status_code",
+        "label_column": "status_label",
+    }
+    assert metadata.enum_mappings["status_code"] == {
+        "P": "Pending",
+        "S": "Shipped",
+    }
+    assert metadata.glossary["status_code"] == "Order lifecycle status."
+    assert metadata.locked_roles[("orders", "status_code")] == "dimension"
+    assert metadata.insight_families == [
+        {
+            "key": "order_lifecycle",
+            "required_roles": ["event_ts", "dimension"],
+            "priority": 11,
+            "source": "project_context",
+            "context_item_id": "insight_family:order_lifecycle",
+        }
+    ]
+    assert metadata.business_lenses[0]["label"] == "Fulfillment Signals"
+    assert metadata.visualization_hints[0]["chart_type"] == "heatmap"
 
 
 def test_nonexistent_path_returns_empty() -> None:

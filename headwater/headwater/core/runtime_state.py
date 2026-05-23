@@ -25,6 +25,7 @@ class PipelineRuntimeState(MutableMapping[str, Any]):
     quality_report: Any = None
     graph_store: Any = None
     vector_store: Any = None
+    project_context: Any = None
     project: Any = None
     source_names: list[str] = field(default_factory=list)
     table_names: list[str] | None = None
@@ -55,6 +56,7 @@ class PipelineRuntimeState(MutableMapping[str, Any]):
             "quality_report": self.quality_report,
             "graph_store": self.graph_store,
             "vector_store": self.vector_store,
+            "project_context": self.project_context,
             "project": self.project,
             "source_names": self.source_names,
             "table_names": self.table_names,
@@ -72,6 +74,7 @@ class PipelineRuntimeState(MutableMapping[str, Any]):
             quality_report=values.get("quality_report"),
             graph_store=values.get("graph_store"),
             vector_store=values.get("vector_store"),
+            project_context=values.get("project_context"),
             project=values.get("project"),
             source_names=list(values.get("source_names", [])),
             table_names=values.get("table_names"),
@@ -90,6 +93,7 @@ class PipelineRuntimeState(MutableMapping[str, Any]):
         self.quality_report = None
         self.graph_store = None
         self.vector_store = None
+        self.project_context = None
         self.project = None
         self.source_names = []
         self.table_names = None

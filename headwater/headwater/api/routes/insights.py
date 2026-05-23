@@ -19,24 +19,45 @@ from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_
 from headwater.api.project_scope import scoped_pipeline
 from headwater.api.routes.project import _compute_maturity, _compute_progress
 from headwater.core.models import DatasetContext
+from headwater.explorer.advisory import (
+    DEFAULT_DECISION_LENS,
+    QUALITY_DECISION_LENS,
+    context_lens_label,
+)
 from headwater.explorer.readability import (
     enum_case_expression,
     enum_dimension_label,
     enum_mapping_for_column,
     is_low_signal_dimension,
-    is_opaque_business_value,
+    is_opaque_business_value as is_opaque_readability_value,
 )
 from headwater.explorer.statistical import (
     detect_insights_with_diagnostics,
     insight_type_priority_weights,
 )
 from headwater.explorer.utils import resolve_table_ref
+from headwater.services.project_context import load_retrieved_metadata
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _RAW_ROUTE_RE = re.compile(r"route is (?P<origin>.+?) -> (?P<dest>.+?):", re.IGNORECASE)
 _RAW_GEO_RE = re.compile(r"^(?P<label>.+?) has the longest high-volume ", re.IGNORECASE)
+
+
+def _metadata_for_project(
+    request: Request,
+    discovery,
+    project_id: str | None = None,
+) -> RetrievedMetadata:
+    store = getattr(request.app.state, "metadata_store", None)
+    if store is None:
+        return retrieve_metadata(discovery)
+    try:
+        return load_retrieved_metadata(store, discovery, project_id=project_id)
+    except Exception:
+        logger.debug("Project context unavailable for insights")
+        return retrieve_metadata(discovery)
 
 
 @router.get("/insights")
@@ -242,10 +263,8 @@ async def get_insights(request: Request, project_id: str | None = None):
     data_profile = _compute_data_profile(
         tables, profiles, relationships, completeness_pct, quality_report
     )
-    store = request.app.state.metadata_store
-    context_row = store.get_dataset_context(discovery.source.name) if store else None
-    context = DatasetContext(**context_row) if context_row else None
-    metadata = retrieve_metadata(discovery, context)
+    metadata = _metadata_for_project(request, discovery, project_id)
+    context = metadata.context
     top_insights = _compute_top_insights(
         request.app.state.duckdb_con,
         tables,
@@ -257,6 +276,7 @@ async def get_insights(request: Request, project_id: str | None = None):
         discovery,
         context,
         staging_models + mart_models,
+        metadata=metadata,
     )
 
     # --- Workflow state ---
@@ -414,7 +434,7 @@ def _compute_data_profile(tables, profiles, relationships, completeness_pct, qua
 
 
 # ---------------------------------------------------------------------------
-# Top Insights -- business-readable patterns from actual data values
+# Top Insights -- reader-friendly patterns from actual data values
 # ---------------------------------------------------------------------------
 
 
@@ -691,7 +711,7 @@ def _is_code_like_column(name: str) -> bool:
 
 
 def _is_opaque_value(value: object) -> bool:
-    return is_opaque_business_value(value)
+    return is_opaque_readability_value(value)
 
 
 def _resolve_dimension_projection(
@@ -705,7 +725,7 @@ def _resolve_dimension_projection(
         return (
             None,
             enum_expr,
-            enum_dimension_label(dimension.name, _humanize_name(dimension.name)),
+            enum_dimension_label(dimension.name, _humanize_name(dimension.name), metadata),
         )
     if not _is_code_like_column(dimension.name):
         return None, dimension.name, _humanize_name(dimension.name)
@@ -1027,7 +1047,7 @@ def _rank_dimension_column(column) -> tuple[int, int]:
     return (0, 2)
 
 
-def _is_business_dimension_column(
+def _is_priority_dimension_column(
     table,
     column,
     profile,
@@ -1055,7 +1075,7 @@ def _compute_top_insights(
 ) -> list[dict]:
     """Find CXO-readable patterns from actual records.
 
-    The output avoids schema-quality commentary and favors business outcome
+    The output avoids schema-quality commentary and favors reader-facing impact
     statements: when activity peaked, which segment dominates, and what groups
     drive measurable totals.
     """
@@ -1077,7 +1097,7 @@ def _compute_top_insights(
         dimension_cols = [
             c for c in table.columns
             if (
-                _is_business_dimension_column(
+                _is_priority_dimension_column(
                     table,
                     c,
                     column_profiles.get(c.name),
@@ -1111,7 +1131,7 @@ def compute_top_insights(
     profiles,
     metadata: RetrievedMetadata | None = None,
 ) -> list[dict]:
-    """Public helper for business-readable insights reused by Explore."""
+    """Public helper for reader-friendly insights reused by Explore."""
     return _compute_top_insights(con, tables, profiles, metadata)
 
 
@@ -1127,24 +1147,15 @@ _SEMANTIC_HIGHLIGHT_ORDER = [
 ]
 
 
-def _decision_lens(context: DatasetContext | None, insight) -> str:
-    text = " ".join(
-        value
-        for value in (
-            context.decisions if context else None,
-            context.quality_caveats if context else None,
-        )
-        if value
-    ).lower()
+def _decision_lens(
+    context: DatasetContext | None,
+    insight,
+    metadata: RetrievedMetadata | None = None,
+) -> str:
     if insight.insight_type == "data_quality":
-        return "Data Quality"
-    if any(token in insight.metric.lower() for token in ("amount", "fare", "revenue", "price")):
-        return "Revenue"
-    if any(token in text for token in ("compliance", "audit", "regulation", "risk")):
-        return "Compliance"
-    if any(token in text for token in ("pricing", "margin", "revenue", "sales")):
-        return "Revenue"
-    return "Operations"
+        return QUALITY_DECISION_LENS
+    decisions = context.decisions if context else None
+    return context_lens_label(metadata, decisions) or DEFAULT_DECISION_LENS
 
 
 def _replace_record_label(text: str, row_represents: str | None) -> str:
@@ -1271,8 +1282,6 @@ def _semantic_highlight_score(insight) -> float:
         * max(abs(insight.magnitude), 1.0)
         * max((insight.support_count or 0) ** 0.25, 1.0)
     )
-    if insight.metric == "wait_min" or "wait time" in insight.description.lower():
-        score *= 1.5
     return score
 
 
@@ -1297,10 +1306,16 @@ def compute_semantic_highlights(
     models,
     limit: int = 5,
     project_id: str | None = None,
+    metadata: RetrievedMetadata | None = None,
 ) -> list[dict]:
-    """Convert semantic-family insights into business-facing findings."""
-    metadata = retrieve_metadata(discovery, context)
-    semantic_schema = infer_semantic_schema(discovery, context)
+    """Convert semantic-family insights into reader-facing findings."""
+    metadata = metadata or retrieve_metadata(discovery, context)
+    semantic_schema = infer_semantic_schema(
+        discovery,
+        context,
+        project_id=project_id,
+        metadata=metadata,
+    )
     semantic_roles = {
         table.name: roles_for_table(semantic_schema, table.name)
         for table in discovery.tables
@@ -1311,9 +1326,10 @@ def compute_semantic_highlights(
         con,
         schema="staging",
         discovery=discovery,
-        dataset_context=context,
+        context=context,
         models=models,
         project_id=project_id,
+        metadata=metadata,
     )
     highlight_types = set(_SEMANTIC_HIGHLIGHT_ORDER) | {"coverage_period"}
     candidates = [
@@ -1346,7 +1362,7 @@ def compute_semantic_highlights(
         )
         if detail is None:
             return False
-        lens = _decision_lens(context, insight)
+        lens = _decision_lens(context, insight, metadata)
         if context and context.decisions:
             detail = f"{detail} Relevant for {lens.lower()} decisions."
         selected.append(
@@ -1380,73 +1396,12 @@ def compute_semantic_highlights(
         if candidate is not None:
             append_highlight(candidate)
         if len(selected) >= limit:
-            return selected[:limit]
-
-    for insight in ranked_candidates:
-        if seen_tables.get(insight.table_name, 0) >= max_per_table:
-            continue
-        if (
-            insight.insight_type in {"volume_distribution", "peak_period"}
-            and insight.insight_type in seen_types
-        ):
-            continue
-        append_highlight(insight)
-        if len(selected) >= limit:
             break
-    if not any(item["metric"] == "wait_min" for item in selected):
-        wait_candidate = next(
-            (
-                insight
-                for insight in ranked_candidates
-                if insight.metric == "wait_min" or "wait time" in insight.description.lower()
-            ),
-            None,
-        )
-        if wait_candidate is not None:
-            detail = _replace_record_label(
-                wait_candidate.description,
-                context.row_represents if context else None,
-            )
-            detail = _semantic_highlight_detail(
-                con,
-                wait_candidate,
-                detail,
-                semantic_roles.get(wait_candidate.table_name, {}),
-                lookup_index,
-                models,
-                lookup_cache,
-            )
-            if detail is None:
-                return selected[:limit]
-            lens = _decision_lens(context, wait_candidate)
-            if context and context.decisions:
-                detail = f"{detail} Relevant for {lens.lower()} decisions."
-            wait_item = {
-                "id": _semantic_highlight_id(wait_candidate, detail),
-                "title": _semantic_highlight_title(detail),
-                "detail": detail,
-                "table": wait_candidate.table_name,
-                "metric": wait_candidate.metric,
-                "insight_type": wait_candidate.insight_type,
-                "severity": wait_candidate.severity,
-                "confidence_level": wait_candidate.confidence_level,
-                "support_count": wait_candidate.support_count,
-                "decision_lens": lens,
-                "metadata_signals": {
-                    "has_context": metadata.context is not None,
-                    "glossary_terms": len(metadata.glossary),
-                    "lookup_tables": len(metadata.lookup_tables),
-                },
-            }
-            if len(selected) >= limit:
-                selected[-1] = wait_item
-            else:
-                selected.append(wait_item)
-    return selected
+    return selected[:limit]
 
 
 # ---------------------------------------------------------------------------
-# Workflow state -- where is this dataset in the journey?
+# Workflow state -- where is this project data in the journey?
 # ---------------------------------------------------------------------------
 
 _PHASES = [
@@ -1469,7 +1424,7 @@ def _compute_workflow_state(
     quality_report,
     column_issues,
 ):
-    """Determine which workflow phase the dataset is in."""
+    """Determine which workflow phase the project data is in."""
     phases = []
 
     # Phase 1: Discovery -- did we find tables?
@@ -1723,7 +1678,7 @@ def _compute_advisory_actions(
                 "detail": (
                     f"{', '.join(m.name for m in pending_marts[:3])}"
                     + (f" and {len(pending_marts) - 3} more" if len(pending_marts) > 3 else "")
-                    + " -- mart models encode business logic and need human approval"
+                    + " -- mart models encode project-specific logic and need human approval"
                 ),
                 "link": "/models",
             }

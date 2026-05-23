@@ -11,6 +11,7 @@ app = typer.Typer(
     help="Headwater -- Advisory data platform for data professionals.",
     no_args_is_help=True,
 )
+DEFAULT_CONTEXT_GOLD = Path("tests/golden")
 
 
 @app.command()
@@ -500,6 +501,117 @@ def generate(
     )
 
 
+@app.command("context-eval")
+def context_eval(
+    gold: Path = typer.Option(  # noqa: B008
+        DEFAULT_CONTEXT_GOLD,
+        "--gold",
+        help="Gold YAML/JSON file or directory containing context_*.yaml fixtures.",
+    ),
+    pattern: str = typer.Option(
+        "context_*.yaml",
+        "--pattern",
+        help="Glob pattern used when --gold points to a directory.",
+    ),
+    min_score: float = typer.Option(
+        1.0,
+        "--min-score",
+        min=0.0,
+        max=1.0,
+        help="Minimum score required for every fixture.",
+    ),
+    min_category_score: float | None = typer.Option(
+        None,
+        "--min-category-score",
+        min=0.0,
+        max=1.0,
+        help="Minimum score required for every emitted category.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the full evaluation result as JSON.",
+    ),
+    metrics_out: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--metrics-out",
+        help="Write compact regression metrics JSON to this path.",
+    ),
+) -> None:
+    """Run context bootstrap gold-fixture evaluation."""
+    import json
+
+    from headwater.services.context_evaluation import (
+        build_context_eval_metrics,
+        evaluate_context_suite,
+        load_context_eval_cases,
+    )
+
+    gold_paths = _context_eval_gold_paths(gold, pattern)
+    if not gold_paths:
+        typer.echo(f"No context gold fixtures found under: {gold}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        cases = load_context_eval_cases(gold_paths)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    result = evaluate_context_suite(
+        cases,
+        min_score=min_score,
+        min_category_score=min_category_score,
+    )
+    if metrics_out is not None:
+        metrics_out.parent.mkdir(parents=True, exist_ok=True)
+        metrics_out.write_text(
+            json.dumps(build_context_eval_metrics(result), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    if json_output:
+        typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        metrics = result["metrics"]
+        typer.echo(
+            "Context evaluation: "
+            f"{metrics['passed_checks']}/{metrics['total_checks']} checks passed "
+            f"across {metrics['fixture_count']} fixture(s); "
+            f"score={result['score']:.4f}, min_score={min_score:.4f}, "
+            f"accepted_deltas={metrics['accepted_delta_checks']}"
+        )
+        for fixture in result["fixtures"]:
+            status = "PASS" if fixture["passed"] else "FAIL"
+            fixture_metrics = fixture["metrics"]
+            typer.echo(
+                f"  {status} {fixture['name']} score={fixture['score']:.4f} "
+                f"accepted_deltas={fixture_metrics['accepted_delta_checks']}"
+            )
+            for accepted_delta in fixture["accepted_deltas"]:
+                delta = accepted_delta.get("accepted_delta") or {}
+                suffix = f" until={delta['until']}" if delta.get("until") else ""
+                typer.echo(
+                    "    - accepted_delta "
+                    f"{accepted_delta['name']}: reason={delta.get('reason')}{suffix}"
+                )
+            for threshold_failure in fixture["threshold_failures"]:
+                typer.echo(
+                    "    - threshold "
+                    f"{threshold_failure['scope']}:{threshold_failure['name']} "
+                    f"expected>={threshold_failure['expected']:.4f} "
+                    f"actual={threshold_failure['actual']:.4f}"
+                )
+            for failure in fixture["failures"]:
+                typer.echo(
+                    "    - "
+                    f"{failure['name']}: expected={failure['expected']} "
+                    f"actual={failure['actual']}"
+                )
+
+    if not result["passed"]:
+        raise typer.Exit(1)
+
+
 @app.command()
 def status() -> None:
     """Show current Headwater status and configuration."""
@@ -553,3 +665,15 @@ def _resolve_data_path(dataset: str) -> Path:
                 return c
         return candidates[0]  # Return first candidate for error message
     return Path(dataset).resolve()
+
+
+def _context_eval_gold_paths(gold: Path, pattern: str) -> list[Path]:
+    """Resolve context evaluation gold files from a file or directory."""
+    gold_path = gold.resolve()
+    if not gold_path.exists() and gold == DEFAULT_CONTEXT_GOLD:
+        gold_path = Path(__file__).resolve().parents[2] / DEFAULT_CONTEXT_GOLD
+    if gold_path.is_file():
+        return [gold_path]
+    if gold_path.is_dir():
+        return sorted(path for path in gold_path.glob(pattern) if path.is_file())
+    return []

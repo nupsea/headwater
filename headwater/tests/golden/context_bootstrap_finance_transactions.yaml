@@ -1,0 +1,39 @@
+name: finance_transactions
+fixture: finance_transactions
+discovery_path: context_fixtures/finance_transactions.yaml
+row_grain:
+  transactions:
+    - transaction_id
+  accounts:
+    - account_id
+row_entity:
+  transactions: transaction
+  accounts: account
+time_anchor:
+  transactions: posted_at
+pk_candidates:
+  transactions:
+    - transaction_id
+  accounts:
+    - account_id
+fk_candidates:
+  - from_table: transactions
+    from_column: account_id
+    to_table: accounts
+    to_column: account_id
+top_dimensions:
+  - table_name: accounts
+    column_name: account_segment
+  - table_name: transactions
+    column_name: merchant_category
+  - table_name: transactions
+    column_name: transaction_status
+top_measures:
+  - table_name: transactions
+    column_name: amount_usd
+min_fallback_questions: 4
+question_substrings:
+  - transactions
+  - measures
+forbidden_terms:
+  - patient

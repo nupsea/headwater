@@ -17,6 +17,7 @@ from headwater.connectors.registry import get_connector
 from headwater.core.config import get_settings
 from headwater.core.models import SourceConfig
 from headwater.core.runtime_state import get_runtime_state
+from headwater.services.context_bootstrap import bootstrap_project_context
 from headwater.services.discovery_persistence import (
     persist_catalog_data,
     persist_discovery_data,
@@ -38,6 +39,7 @@ from headwater.services.pipeline_runner import (
 from headwater.services.pipeline_runner import (
     run_pipeline,
 )
+from headwater.services.project_context import load_retrieved_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +244,8 @@ def re_enrich(request: Request, force: bool = False):
         force,
     )
     store = getattr(request.app.state, "metadata_store", None)
-    provider = get_provider(settings, store=store)
+    source_name = getattr(getattr(discovery, "source", None), "name", "source")
+    provider = get_provider(settings, store=store, source_name=source_name)
     logger.info("Re-enrich: provider class=%s", type(provider).__name__)
 
     # Count already LLM-enriched vs remaining tables.
@@ -283,9 +286,20 @@ def re_enrich(request: Request, force: bool = False):
         )
 
     # Re-run semantic analysis with per-table checkpointing
-    source_name = "source"
+    metadata = (
+        load_retrieved_metadata(store, discovery, project_id=source_name)
+        if store is not None
+        else None
+    )
     try:
-        analyze(discovery, provider, store=store, source_name=source_name)
+        analyze(
+            discovery,
+            provider,
+            store=store,
+            source_name=source_name,
+            project_id=source_name,
+            metadata=metadata,
+        )
     except Exception as exc:
         logger.exception("Re-enrich analysis failed")
         raise HTTPException(
@@ -305,11 +319,37 @@ def re_enrich(request: Request, force: bool = False):
         for col in table.columns
         if col.description or col.semantic_type
     )
+    project_context = bootstrap_project_context(discovery, project_id=source_name)
+    pipeline["project_context"] = project_context
+    metadata = None
+    if store is not None:
+        store.upsert_source(
+            source_name,
+            discovery.source.type,
+            discovery.source.path,
+            discovery.source.uri,
+            mode=discovery.source.mode,
+        )
+        store.replace_project_context(
+            source_name,
+            source_name=source_name,
+            items=[item.model_dump(mode="json") for item in project_context.items],
+            resources=[
+                resource.model_dump(mode="json")
+                for resource in project_context.resources
+            ],
+        )
 
     # --- Propagate enrichment downstream ---
     # Rebuild catalog from enriched discovery (new descriptions improve
     # metric/dimension extraction and entity narratives)
-    catalog = build_catalog(discovery)
+    if store is not None:
+        metadata = load_retrieved_metadata(store, discovery, project_id=source_name)
+    catalog = build_catalog(
+        discovery,
+        project_id=source_name,
+        metadata=metadata,
+    )
     pipeline["catalog"] = catalog
     logger.info(
         "Re-enrich: rebuilt catalog: %d metrics, %d dims, %d entities",

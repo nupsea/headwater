@@ -14,7 +14,6 @@ from headwater.connectors.registry import CONNECTOR_CATALOG, get_connector
 from headwater.connectors.schema_filter import SchemaTableFilter
 from headwater.core.exceptions import ConnectorError
 
-
 # ---------------------------------------------------------------------------
 # URI parsing
 # ---------------------------------------------------------------------------
@@ -164,7 +163,6 @@ class TestRedshiftSchemaFilter:
         """Verify that filter params in the URI are parsed (connect will fail
         without a real server, but the filter state should be set before the
         connection attempt)."""
-        connector = RedshiftConnector()
         # We can't call connect() without a real server, but we can verify
         # the URI parsing extracts filter params correctly.
         from headwater.connectors.redshift_loader import _parse_redshift_uri

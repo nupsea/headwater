@@ -15,6 +15,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+LLM_REQUEST_TEMPLATE_VERSION = "llm-provider-analyze-v1"
+_SENSITIVE_KEY_RE = re.compile(
+    r"(api[_-]?key|authorization|bearer|credential|password|secret|token)",
+    re.IGNORECASE,
+)
+_REDACTED_VALUE = "[REDACTED]"
+_BUDGET_EXHAUSTED_RESPONSE = json.dumps(
+    {"status": "partial", "reason": "llm_token_budget_exhausted"}
+)
+_SOURCE_BUDGET_EXHAUSTED_RESPONSE = json.dumps(
+    {"status": "partial", "reason": "llm_source_token_budget_exhausted"}
+)
+
 
 class LLMProvider:
     """Base LLM provider interface."""
@@ -31,6 +44,32 @@ class NoLLMProvider(LLMProvider):
         return {}
 
 
+class LLMTokenBudget:
+    """Run-scoped token budget for live LLM calls."""
+
+    def __init__(self, max_tokens: int = 0) -> None:
+        self.max_tokens = max(0, int(max_tokens or 0))
+        self.used_tokens = 0
+
+    @property
+    def limited(self) -> bool:
+        return self.max_tokens > 0
+
+    @property
+    def remaining_tokens(self) -> int | None:
+        if not self.limited:
+            return None
+        return max(0, self.max_tokens - self.used_tokens)
+
+    def can_spend(self, estimated_tokens: int) -> bool:
+        if not self.limited:
+            return True
+        return self.used_tokens + max(0, estimated_tokens) <= self.max_tokens
+
+    def record(self, tokens: int) -> None:
+        self.used_tokens += max(0, int(tokens or 0))
+
+
 class AnthropicProvider(LLMProvider):
     """Claude API provider using the Anthropic SDK."""
 
@@ -38,6 +77,8 @@ class AnthropicProvider(LLMProvider):
         self,
         settings: HeadwaterSettings,
         store: MetadataStore | None = None,
+        token_budget: LLMTokenBudget | None = None,
+        source_name: str | None = None,
     ) -> None:
         if not settings.llm_api_key:
             raise ValueError("HEADWATER_LLM_API_KEY is required for Anthropic provider")
@@ -46,6 +87,10 @@ class AnthropicProvider(LLMProvider):
         self._client = anthropic.AsyncAnthropic(api_key=settings.llm_api_key)
         self._model = settings.llm_model
         self._store = store
+        self._offline_mode = settings.llm_offline_mode
+        self._token_budget = token_budget or LLMTokenBudget(settings.llm_max_tokens_per_run)
+        self._source_name = source_name
+        self._source_token_budget = max(0, int(settings.llm_max_tokens_per_source or 0))
 
     async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
         """Send prompt to Claude and return parsed JSON response.
@@ -60,6 +105,38 @@ class AnthropicProvider(LLMProvider):
             "You MUST respond with valid JSON only — no prose, no markdown fences, no explanation. "
             "Return a single JSON object matching the schema described in the user prompt."
         )
+        prompt_hash = make_llm_request_hash(
+            prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
+            input_payload={"system": _system, "prompt": prompt},
+            provider="anthropic",
+            model=self._model,
+            configuration={"max_tokens": 4096},
+        )
+        cached = _cached_response(
+            self._store,
+            provider="anthropic",
+            model=self._model,
+            prompt_hash=prompt_hash,
+        )
+        if cached is not None:
+            self._insert_cached_audit(
+                prompt,
+                cached.get("response_text") or "",
+                prompt_hash=prompt_hash,
+                tokens_in=int(cached.get("tokens_in") or 0),
+                tokens_out=int(cached.get("tokens_out") or 0),
+            )
+            return _parse_json_response(cached.get("response_text") or "")
+        if self._offline_mode:
+            self._insert_cached_audit(prompt, "", prompt_hash=prompt_hash)
+            return {}
+        estimated_tokens = estimate_llm_tokens(_system) + estimate_llm_tokens(prompt)
+        if not self._token_budget.can_spend(estimated_tokens):
+            self._insert_budget_audit(prompt, prompt_hash=prompt_hash)
+            return {}
+        if not self._source_budget_allows(estimated_tokens):
+            self._insert_source_budget_audit(prompt, prompt_hash=prompt_hash)
+            return {}
         response_text = ""
         tokens_in = 0
         tokens_out = 0
@@ -73,6 +150,7 @@ class AnthropicProvider(LLMProvider):
             response_text = msg.content[0].text
             tokens_in = msg.usage.input_tokens
             tokens_out = msg.usage.output_tokens
+            self._token_budget.record(tokens_in + tokens_out)
             result = _parse_json_response(response_text)
         except anthropic.APIError as e:
             logger.warning("Anthropic API error: %s", e)
@@ -83,33 +161,155 @@ class AnthropicProvider(LLMProvider):
         finally:
             if self._store is not None:
                 try:
-                    prompt_hash = make_cache_key_from_text(prompt)
                     self._store.insert_llm_audit(
                         provider="anthropic",
                         model=self._model,
                         prompt_text=prompt,
                         response_text=response_text,
+                        source_name=self._source_name,
                         prompt_hash=prompt_hash,
                         tokens_in=tokens_in,
                         tokens_out=tokens_out,
+                        raw_response_allowed=_raw_response_allowed(
+                            self._store,
+                            self._source_name,
+                        ),
                     )
                 except Exception as audit_err:
                     logger.warning("Failed to write LLM audit log: %s", audit_err)
         return result
 
+    def _insert_cached_audit(
+        self,
+        prompt: str,
+        response_text: str,
+        *,
+        prompt_hash: str,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+    ) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.insert_llm_audit(
+                provider="anthropic",
+                model=self._model,
+                prompt_text=prompt,
+                response_text=response_text,
+                source_name=self._source_name,
+                prompt_hash=prompt_hash,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cached=1,
+                raw_response_allowed=_raw_response_allowed(
+                    self._store,
+                    self._source_name,
+                ),
+            )
+        except Exception as audit_err:
+            logger.warning("Failed to write cached LLM audit log: %s", audit_err)
+
+    def _insert_budget_audit(self, prompt: str, *, prompt_hash: str) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.insert_llm_audit(
+                provider="anthropic",
+                model=self._model,
+                prompt_text=prompt,
+                response_text=_BUDGET_EXHAUSTED_RESPONSE,
+                source_name=self._source_name,
+                prompt_hash=prompt_hash,
+                cached=0,
+                raw_response_allowed=True,
+            )
+        except Exception as audit_err:
+            logger.warning("Failed to write budget LLM audit log: %s", audit_err)
+
+    def _insert_source_budget_audit(self, prompt: str, *, prompt_hash: str) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.insert_llm_audit(
+                provider="anthropic",
+                model=self._model,
+                prompt_text=prompt,
+                response_text=_SOURCE_BUDGET_EXHAUSTED_RESPONSE,
+                source_name=self._source_name,
+                prompt_hash=prompt_hash,
+                cached=0,
+                raw_response_allowed=True,
+            )
+        except Exception as audit_err:
+            logger.warning("Failed to write source-budget LLM audit log: %s", audit_err)
+
+    def _source_budget_allows(self, estimated_tokens: int) -> bool:
+        if self._source_token_budget <= 0 or not self._source_name or self._store is None:
+            return True
+        usage = self._store.get_llm_token_usage(
+            provider="anthropic",
+            model=self._model,
+            source_name=self._source_name,
+        )
+        return usage + max(0, estimated_tokens) <= self._source_token_budget
+
 
 def get_provider(
     settings: HeadwaterSettings,
     store: MetadataStore | None = None,
+    source_name: str | None = None,
 ) -> LLMProvider:
     """Factory: return the appropriate LLM provider based on settings."""
     if settings.llm_provider == "anthropic":
-        return AnthropicProvider(settings, store=store)
+        budget = LLMTokenBudget(settings.llm_max_tokens_per_run)
+        return AnthropicProvider(
+            settings,
+            store=store,
+            token_budget=budget,
+            source_name=source_name,
+        )
     if settings.llm_provider == "ollama":
         from headwater.analyzer.ollama import OllamaProvider
 
-        return OllamaProvider(settings, store=store)
+        budget = LLMTokenBudget(settings.llm_max_tokens_per_run)
+        return OllamaProvider(
+            settings,
+            store=store,
+            token_budget=budget,
+            source_name=source_name,
+        )
     return NoLLMProvider()
+
+
+def _cached_response(
+    store: MetadataStore | None,
+    *,
+    provider: str,
+    model: str,
+    prompt_hash: str,
+) -> dict | None:
+    if store is None:
+        return None
+    getter = getattr(store, "get_cached_llm_response", None)
+    if getter is None:
+        return None
+    return getter(provider=provider, model=model, prompt_hash=prompt_hash)
+
+
+def _raw_response_allowed(
+    store: MetadataStore | None,
+    source_name: str | None,
+) -> bool:
+    if store is None:
+        return True
+    getter = getattr(store, "llm_raw_response_allowed", None)
+    if getter is None:
+        return True
+    try:
+        return bool(getter(source_name))
+    except Exception as err:
+        logger.warning("Failed to evaluate LLM audit storage policy: %s", err)
+        return False
 
 
 def make_cache_key(table_name: str, column_names: list[str]) -> str:
@@ -121,6 +321,59 @@ def make_cache_key(table_name: str, column_names: list[str]) -> str:
 def make_cache_key_from_text(text: str) -> str:
     """Generate a SHA-256 hash of arbitrary text (for prompt deduplication)."""
     return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def estimate_llm_tokens(text: str) -> int:
+    """Conservative deterministic token estimate for pre-call budget gates."""
+    normalized = str(text or "")
+    if not normalized:
+        return 0
+    return max(1, (len(normalized) + 3) // 4)
+
+
+def make_llm_request_hash(
+    *,
+    prompt_template_version: str,
+    input_payload: dict[str, Any],
+    provider: str,
+    model: str,
+    configuration: dict[str, Any] | None = None,
+) -> str:
+    """Generate a content-addressed hash for an auditable LLM request."""
+    envelope = {
+        "prompt_template_version": prompt_template_version,
+        "input_payload": redact_llm_payload(input_payload),
+        "provider": provider,
+        "model": model,
+        "configuration": redact_llm_payload(configuration or {}),
+    }
+    encoded = _stable_json(envelope)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def redact_llm_payload(value: Any) -> Any:
+    """Return a deterministic copy of payload data with sensitive keys redacted."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key in sorted(value):
+            if _SENSITIVE_KEY_RE.search(str(key)):
+                redacted[str(key)] = _REDACTED_VALUE
+            else:
+                redacted[str(key)] = redact_llm_payload(value[key])
+        return redacted
+    if isinstance(value, list | tuple):
+        return [redact_llm_payload(item) for item in value]
+    return value
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )
 
 
 def _parse_json_response(text: str) -> dict[str, Any]:

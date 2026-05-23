@@ -22,6 +22,8 @@ from headwater.core.models import DatasetContext, SourceConfig
 from headwater.core.runtime_state import get_runtime_state
 from headwater.drift.schema import build_snapshot_from_discovery, compare_schemas
 from headwater.profiler.engine import discover
+from headwater.services.context_bootstrap import bootstrap_project_context
+from headwater.services.context_drift import reconcile_project_context_drift
 from headwater.services.discovery_persistence import (
     persist_catalog_data,
     persist_discovery_data,
@@ -32,6 +34,7 @@ from headwater.services.model_impacts import (
     invalidated_model_names,
 )
 from headwater.services.pipeline_assets import build_graph_and_index
+from headwater.services.project_context import load_retrieved_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -86,16 +89,60 @@ async def run_discovery(
         discovery.companion_docs = companion_docs
     logger.info("Companion docs: %d found", len(discovery.companion_docs))
 
+    store = request.app.state.metadata_store
+    store.upsert_source(
+        source_name,
+        discovery.source.type,
+        discovery.source.path,
+        discovery.source.uri,
+        mode=discovery.source.mode,
+    )
+    metadata = load_retrieved_metadata(store, discovery, project_id=source_name)
+
     # Semantic analysis (heuristic-only in discovery route)
-    analyze(discovery)
+    analyze(
+        discovery,
+        store=store,
+        source_name=source_name,
+        project_id=source_name,
+        metadata=metadata,
+    )
     logger.info("Semantic analysis complete")
 
-    store = request.app.state.metadata_store
     store.apply_key_decisions_to_discovery(discovery)
     logger.info("Applied persisted key decisions")
 
+    project_context = bootstrap_project_context(discovery, project_id=source_name)
+    store.replace_project_context(
+        source_name,
+        source_name=source_name,
+        items=[item.model_dump(mode="json") for item in project_context.items],
+        resources=[resource.model_dump(mode="json") for resource in project_context.resources],
+    )
+    logger.info(
+        "Project context bootstrapped: %d items, %d resources",
+        len(project_context.items),
+        len(project_context.resources),
+    )
+    run_id = persist_discovery_data(request.app.state.metadata_store, discovery, source_name)
+    persist_semantic_data(request.app.state.metadata_store, discovery, source_name)
+    context_drift = reconcile_project_context_drift(
+        store,
+        discovery,
+        project_id=source_name,
+        source_name=source_name,
+        drift_report=store.get_latest_drift_report(source_name),
+    )
+    if run_id is not None:
+        store.save_project_context_snapshot(
+            run_id,
+            project_id=source_name,
+            source_name=source_name,
+        )
+    metadata = load_retrieved_metadata(store, discovery, project_id=source_name)
+
     # Build semantic catalog (heuristic tier 0)
-    catalog = build_catalog(discovery)
+    catalog = build_catalog(discovery, project_id=source_name, metadata=metadata)
     logger.info(
         "Catalog built: %d metrics, %d dimensions, %d entities (confidence=%.2f)",
         len(catalog.metrics),
@@ -114,13 +161,7 @@ async def run_discovery(
     runtime_state = get_runtime_state(request)
     runtime_state["graph_store"] = assets.graph_store
     runtime_state["vector_store"] = assets.vector_store
-
-    # Persist all discovery data to metadata store
-    logger.info("Persisting discovery data to metadata store...")
-    persist_discovery_data(request.app.state.metadata_store, discovery, source_name)
-
-    # Persist semantic details and companion docs
-    persist_semantic_data(request.app.state.metadata_store, discovery, source_name)
+    runtime_state["project_context"] = project_context
 
     # Persist catalog to metadata store
     persist_catalog_data(request.app.state.metadata_store, catalog, evaluation, source_name)
@@ -135,6 +176,7 @@ async def run_discovery(
         "relationships": len(discovery.relationships),
         "domains": discovery.domains,
         "companion_docs": len(discovery.companion_docs),
+        "context_drift": context_drift,
         "catalog": {
             "metrics": len(catalog.metrics),
             "dimensions": len(catalog.dimensions),
@@ -340,9 +382,13 @@ async def get_semantic_schema(request: Request, project_id: str | None = None):
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
     store = request.app.state.metadata_store
-    context_row = store.get_dataset_context(discovery.source.name)
-    context = DatasetContext(**context_row) if context_row else None
-    schema = infer_semantic_schema(discovery, context)
+    metadata = load_retrieved_metadata(store, discovery, project_id=project_id)
+    schema = infer_semantic_schema(
+        discovery,
+        metadata.context,
+        project_id=project_id,
+        metadata=metadata,
+    )
     return {
         **schema.model_dump(mode="json"),
         "ambiguous_count": len(ambiguous_roles(schema)),
@@ -361,9 +407,13 @@ async def confirm_semantic_schema(
     if not discovery:
         raise HTTPException(status_code=400, detail="No discovery run yet.")
     store = request.app.state.metadata_store
-    context_row = store.get_dataset_context(discovery.source.name)
-    context = DatasetContext(**context_row) if context_row else None
-    schema = infer_semantic_schema(discovery, context)
+    metadata = load_retrieved_metadata(store, discovery, project_id=project_id)
+    schema = infer_semantic_schema(
+        discovery,
+        metadata.context,
+        project_id=project_id,
+        metadata=metadata,
+    )
 
     confirmed = 0
     updates_by_table: dict[str, list[dict]] = {}

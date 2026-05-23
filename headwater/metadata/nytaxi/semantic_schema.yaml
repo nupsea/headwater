@@ -1,0 +1,50 @@
+version: 1
+roles:
+  - role: lifecycle_start_ts
+    pattern: "(pickup|start|begin|opened|created|order(ed)?|event).*((_?date|_?time|_?ts|datetime)|_at)$|(^|_)pickup_datetime$"
+    confidence: 0.92
+    reason: lifecycle start timestamp
+  - role: lifecycle_end_ts
+    pattern: "(dropoff|end|finish|closed|resolved|delivered|completed).*((_?date|_?time|_?ts|datetime)|_at)$|(^|_)dropoff_datetime$"
+    confidence: 0.92
+    reason: lifecycle end timestamp
+  - role: request_ts
+    pattern: "(request|dispatch|book|created).*((_?date|_?time|_?ts|datetime)|_at)$"
+    confidence: 0.86
+    reason: request or dispatch timestamp
+  - role: origin_id
+    pattern: "(^|_)(origin|source|from|pickup|pu|start|departure).*(?:_?id|location|zone|station|site|place)$|^pulocationid$"
+    confidence: 0.88
+    reason: origin/location identifier
+  - role: destination_id
+    pattern: "(^|_)(destination|dest|target|to|dropoff|do|end|arrival).*(?:_?id|location|zone|station|site|place)$|^dolocationid$"
+    confidence: 0.88
+    reason: destination/location identifier
+  - role: location_id
+    pattern: "(^|_)(location|zone|site|place|station|region).*(_?id|code)?$"
+    confidence: 0.68
+    reason: location identifier
+  - role: duration
+    pattern: "(duration|elapsed|trip_time|travel_time|time_seconds|time_min)"
+    confidence: 0.88
+    reason: duration measure
+  - role: amount
+    pattern: "(amount|fare|price|cost|charge|revenue|sales|total|payment|pay)$"
+    confidence: 0.78
+    reason: monetary amount
+  - role: tip_amount
+    pattern: "(tip|gratuity)"
+    confidence: 0.9
+    reason: tip amount
+  - role: distance
+    pattern: "(distance|miles|kilometers|km|mi|trip_miles)$"
+    confidence: 0.9
+    reason: distance measure
+  - role: count
+    pattern: "(^|_)(count|qty|quantity|units|passenger_count|num_)"
+    confidence: 0.72
+    reason: count measure
+  - role: service_type
+    pattern: "(service|provider|vendor|type|category|class|mode)$"
+    confidence: 0.72
+    reason: service or category

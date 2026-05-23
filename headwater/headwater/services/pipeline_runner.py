@@ -21,6 +21,8 @@ from headwater.generator.staging import generate_staging_models
 from headwater.profiler.engine import discover
 from headwater.quality.checker import check_contracts
 from headwater.quality.report import build_report
+from headwater.services.context_bootstrap import bootstrap_project_context
+from headwater.services.context_drift import reconcile_project_context_drift
 from headwater.services.contract_lifecycle import apply_contract_statuses
 from headwater.services.discovery_persistence import (
     persist_catalog_data,
@@ -34,10 +36,20 @@ from headwater.services.pipeline_state import (
     persist_models,
     persist_quality_report,
 )
+from headwater.services.project_context import load_retrieved_metadata
 
 logger = logging.getLogger(__name__)
 
-DB_SCHEMES = {"postgresql", "postgres", "mysql", "mysql+pymysql", "sqlite", "snowflake", "redshift", "redshift+iam"}
+DB_SCHEMES = {
+    "postgresql",
+    "postgres",
+    "mysql",
+    "mysql+pymysql",
+    "sqlite",
+    "snowflake",
+    "redshift",
+    "redshift+iam",
+}
 DEFAULT_MAX_TABLES = 50
 DEFAULT_SAMPLE_ROWS = 10_000
 MAX_TABLES_CAP = 500
@@ -161,12 +173,69 @@ def run_pipeline(
         match_docs_to_tables(companion_docs, table_names)
         discovery_result.companion_docs = companion_docs
 
-    analyze(discovery_result, store=metadata_store, source_name=source_name)
+    if metadata_store is not None:
+        metadata_store.upsert_source(
+            source_name,
+            discovery_result.source.type,
+            discovery_result.source.path,
+            discovery_result.source.uri,
+            mode=discovery_result.source.mode,
+        )
+        existing_metadata = load_retrieved_metadata(
+            metadata_store,
+            discovery_result,
+            project_id=source_name,
+        )
+    else:
+        existing_metadata = None
+    analyze(
+        discovery_result,
+        store=metadata_store,
+        source_name=source_name,
+        project_id=source_name,
+        metadata=existing_metadata,
+    )
     if metadata_store is not None:
         metadata_store.apply_key_decisions_to_discovery(discovery_result)
     pipeline["discovery"] = discovery_result
 
-    catalog = build_catalog(discovery_result)
+    project_context = bootstrap_project_context(discovery_result, project_id=source_name)
+    pipeline["project_context"] = project_context
+    metadata = None
+    context_drift = {"items_flagged": 0, "item_ids": []}
+    if metadata_store is not None:
+        metadata_store.replace_project_context(
+            source_name,
+            source_name=source_name,
+            items=[item.model_dump(mode="json") for item in project_context.items],
+            resources=[resource.model_dump(mode="json") for resource in project_context.resources],
+        )
+        run_id = persist_discovery_data(metadata_store, discovery_result, source_name)
+        persist_semantic_data(metadata_store, discovery_result, source_name)
+        context_drift = reconcile_project_context_drift(
+            metadata_store,
+            discovery_result,
+            project_id=source_name,
+            source_name=source_name,
+            drift_report=metadata_store.get_latest_drift_report(source_name),
+        )
+        if run_id is not None:
+            metadata_store.save_project_context_snapshot(
+                run_id,
+                project_id=source_name,
+                source_name=source_name,
+            )
+        metadata = load_retrieved_metadata(
+            metadata_store,
+            discovery_result,
+            project_id=source_name,
+        )
+
+    catalog = build_catalog(
+        discovery_result,
+        project_id=source_name,
+        metadata=metadata,
+    )
     pipeline["catalog"] = catalog
     logger.info(
         "Catalog built: %d metrics, %d dimensions, %d entities (confidence=%.2f)",
@@ -194,8 +263,6 @@ def run_pipeline(
     pipeline["graph_store"] = assets.graph_store
     pipeline["vector_store"] = assets.vector_store
 
-    persist_discovery_data(metadata_store, discovery_result, source_name)
-    persist_semantic_data(metadata_store, discovery_result, source_name)
     persist_catalog_data(metadata_store, catalog, evaluation, source_name)
     logger.info("Metadata persistence complete")
 
@@ -259,6 +326,7 @@ def run_pipeline(
         "catalog_entities": len(catalog.entities),
         "catalog_confidence": catalog.confidence,
         "auto_confirmed": auto_stats,
+        "context_drift": context_drift,
         "profiling_policy": profiling_policy,
         "tables_skipped": skipped_tables,
         "tables_skipped_count": len(skipped_tables),

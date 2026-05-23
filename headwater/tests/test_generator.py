@@ -514,7 +514,11 @@ class TestMartGenerator:
             ],
         )
 
-        model = next(m for m in generate_mart_models(discovery) if m.name == "mart_orders_by_customers")
+        model = next(
+            m
+            for m in generate_mart_models(discovery)
+            if m.name == "mart_orders_by_customers"
+        )
 
         assert 'f."customer_id" = d."client_key"' in model.sql
         assert "f.customer_id = d.customer_id" not in model.sql
@@ -587,7 +591,11 @@ class TestMartGenerator:
             relationships=[],
         )
 
-        model = next(m for m in generate_mart_models(discovery) if m.name == "mart_daily_pm25_summary")
+        model = next(
+            m
+            for m in generate_mart_models(discovery)
+            if m.name == "mart_daily_pm25_summary"
+        )
 
         assert 'AVG("_1st_max_value") AS avg__1st_max_value' in model.sql
         assert 'MIN("_90th_percentile_aqi") AS min__90th_percentile_aqi' in model.sql
