@@ -1,0 +1,131 @@
+This file provides additional detail on potential intended uses of the synthetic radiology workflow dataset, with a particular focus on machine learning applications.
+
+1. General scope
+
+The dataset has been generated from a discrete-event simulation model of a radiology department, using realistic arrival patterns, service-time distributions and resource configurations. All data are synthetic but are structurally consistent with radiology workflows observed in real hospitals (patient arrivals, administrative steps, waiting room activities, and imaging examinations for different modalities).
+
+The core files are:
+- cases.csv: one row per simulated patient case (visit).
+- exams.csv: one row per radiology exam (per case and modality).
+- events.csv: one row per event in the patient trajectory (administrative, waiting, scan-related, etc.).
+
+These tables, combined, support both traditional supervised learning on tabular data and more advanced sequence- and time-based models.
+
+
+2. Supervised learning examples
+
+2.1. Predicting total throughput time per case (regression)
+
+Target:
+- From cases.csv, the column "throughput_time" can be interpreted as the total time a patient spends in the system.
+
+Possible input features:
+- patient_type
+- exam_count
+- encoded exam_types (e.g., presence of CT, XRAY, MRI, US, etc.)
+- hour of arrival (parsed from "arrival_time")
+- day of week (derived from "arrival_time")
+
+Typical models:
+- Linear/regularized regression
+- Random Forest / Gradient Boosted Trees
+- Tabular neural networks
+
+Use case:
+- Estimating expected length of stay for new patients given their modality mix and arrival time profile.
+
+
+2.2. Predicting total waiting time before exams
+
+Target:
+- From cases.csv, the column "total_wait_time" (aggregated across the full visit).
+- Alternatively, from exams.csv, a per-exam target such as "wait_before_exam" (if included in the exam-level table).
+
+Possible input features:
+- modality (CT, XRAY, MRI, CBCT, US, MAMMO, OTHER)
+- patient_type
+- exam position within the visit (first exam vs. later exams)
+- arrival hour and weekday
+- scenario identifier (if multiple scenarios are simulated)
+
+Typical models:
+- Same as above (regression models).
+- Can be used to analyze which modalities and time slots are most prone to long waits.
+
+
+2.3. Classifying risk of long wait or long stay (classification)
+
+Targets:
+- Define a binary or multi-class label based on thresholds, for example:
+  - "high_wait" = 1 if total_wait_time > 60 minutes, else 0
+  - "high_throughput" = 1 if throughput_time > 120 minutes, else 0
+
+Features:
+- Same as in the previous sections (patient_type, modality indicators, arrival time, etc.).
+
+Typical models:
+- Logistic regression
+- Tree-based ensemble methods (Random Forest, XGBoost, LightGBM)
+- Calibration analysis for probability estimates
+
+Use case:
+- Stratifying patients according to expected congestion or delay risk at the time of arrival.
+
+
+3. Sequence and time-series learning
+
+3.1. Learning from event sequences (events.csv)
+
+events.csv can be represented as an ordered sequence of activities for each case_id:
+
+- case_id
+- exam_id (when applicable)
+- activity
+- timestamp_start, timestamp_end
+- modality (if associated with an imaging step)
+
+Possible approaches:
+- Encode event sequences as:
+  - categorical activity tokens for sequence models (RNNs, Transformers),
+  - n-grams of activities for simpler models,
+  - time deltas between consecutive events.
+- Train models for:
+  - next-activity prediction,
+  - remaining-time prediction,
+  - classification of abnormal or inefficient trajectories.
+
+Use case:
+- Process mining combined with machine learning: predicting whether a case is likely to experience unusually long delays based on its partial trajectory.
+
+
+3.2. Time-based analysis with resource_usage
+
+Although the resource_usage files are not part of the three main CSVs, they provide time-series information at the resource level (utilisation, queue length, etc.). These can be merged or resampled to construct:
+
+- system load indicators over time,
+- modality-specific congestion indices,
+- covariates for time-dependent models.
+
+Use case:
+- Building models that relate system state (for example, average MRI utilisation) to patient-level outcomes (waiting times per MRI exam).
+
+
+4. Reinforcement learning (simulated policies)
+
+Because the dataset emerges from a simulation model with known structure, it is particularly suitable as a baseline or calibration resource for reinforcement learning experiments, even if RL itself is not applied directly on the static CSV files.
+
+Examples:
+- Designing routing policies (e.g., to different X-ray rooms) and prioritisation rules (for emergency vs. outpatient cases).
+- Exploring alternative scheduling or staffing configurations.
+- Training RL agents in a separate simulation environment calibrated using the distributions and arrival patterns described in the metadata JSON files.
+
+In this context, the CSVs can be used to:
+- validate that the simulated environment reproduces realistic distributions,
+- compare the performance of new policies against the baseline contained in the dataset.
+
+
+5. Limitations and considerations
+
+- All data are synthetic and should not be interpreted as measurements from real patients or a specific real hospital.
+- Models trained on this dataset are best suited for methodological research, benchmarking, and exploratory analysis in radiology operations and patient-flow management.
+- When transferring any learned policy or model to real-world settings, further validation and recalibration with real operational data should be taken into consideration.

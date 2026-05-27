@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Headwater 2</title>
+<style>
+  :root{
+    --bg:#fbfbfd; --panel:#fff; --soft:#f5f5f7; --ink:#1d1d1f; --sec:#6e6e73; --ter:#86868b;
+    --hair:#e6e6ea; --hair2:#d2d2d7; --blue:#0a84ff; --blue2:#0071e3;
+    --good:#34c759; --amber:#ff9f0a; --red:#ff3b30;
+    --r:14px; --shadow:0 1px 2px rgba(0,0,0,.04),0 8px 30px rgba(0,0,0,.05);
+  }
+  *{box-sizing:border-box}html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display",Inter,system-ui,sans-serif;
+    font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;letter-spacing:-.006em}
+  .ribbon{background:#1d1d1f;color:#a1a1a6;text-align:center;font-size:11px;padding:4px;letter-spacing:.02em}
+  /* top bar */
+  .topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:18px;padding:12px 22px;
+    background:rgba(251,251,253,.72);backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--hair)}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:-.02em}
+  .drop{width:20px;height:20px;border-radius:50% 50% 50% 0;transform:rotate(45deg);background:linear-gradient(135deg,#5ac8fa,#0a84ff)}
+  .psel{display:flex;align-items:center;gap:7px;background:var(--soft);border:1px solid var(--hair);border-radius:999px;
+    padding:6px 12px;font-weight:600;font-size:13px;cursor:pointer}.psel:hover{background:#ececf0}.psel .car{color:var(--ter)}
+  .nav{display:flex;gap:2px;margin:0 auto;background:var(--soft);border-radius:999px;padding:3px}
+  .nav a{padding:7px 16px;border-radius:999px;font-size:13px;font-weight:500;color:var(--sec);cursor:pointer;transition:.18s}
+  .nav a:hover{color:var(--ink)} .nav a.on{background:#fff;color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.08);font-weight:600}
+  .tright{display:flex;align-items:center;gap:12px}
+  .tbadge{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:var(--sec)}
+  .icobtn{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;color:var(--sec);cursor:pointer}.icobtn:hover{background:var(--soft)}
+  /* layout */
+  main{max-width:1080px;margin:0 auto;padding:30px 24px 80px}
+  .view{display:none;animation:fade .3s ease}.view.active{display:block}@keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  h1{font-size:26px;font-weight:700;letter-spacing:-.02em;margin:0 0 4px}
+  h2{font-size:16px;font-weight:600;margin:0 0 12px;letter-spacing:-.01em}
+  .lead{color:var(--sec);font-size:15px;margin:0 0 22px}
+  .muted{color:var(--sec)}.ter{color:var(--ter)}.sm{font-size:12.5px}
+  .card{background:var(--panel);border:1px solid var(--hair);border-radius:18px;padding:22px;margin:0 0 16px;box-shadow:var(--shadow)}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.spread{justify-content:space-between}
+  .btn{border:1px solid var(--hair2);background:#fff;color:var(--ink);border-radius:980px;padding:9px 18px;font:inherit;font-size:13.5px;font-weight:600;cursor:pointer;transition:.18s}
+  .btn:hover{background:var(--soft)} .btn-primary{background:var(--blue);border-color:var(--blue);color:#fff}.btn-primary:hover{background:var(--blue2)}
+  .btn-sm{padding:7px 13px;font-size:12.5px}
+  .link{color:var(--blue);cursor:pointer;font-weight:500}.disc{color:var(--blue);font-size:13px;cursor:pointer;display:inline-block;margin-top:6px}.hide{display:none}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .tile{background:var(--panel);border:1px solid var(--hair);border-radius:16px;padding:18px;cursor:pointer;transition:.18s;box-shadow:var(--shadow)}
+  .tile:hover{transform:translateY(-2px);border-color:#d7d7dc}.tile .h{font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:5px}.tile .s{color:var(--sec);font-size:13px}
+  /* trust ring */
+  .ring{transform:rotate(-90deg)}.ring .bg{fill:none;stroke:#ececef;stroke-width:7}.ring .fg{fill:none;stroke-width:7;stroke-linecap:round;transition:stroke-dashoffset 1.1s cubic-bezier(.2,.8,.2,1)}
+  .ringwrap{position:relative;display:inline-grid;place-items:center}.ringtxt{position:absolute;text-align:center}.ringtxt .pct{font-size:23px;font-weight:700;letter-spacing:-.02em}.ringtxt .lbl{font-size:10px;color:var(--ter);font-weight:600;letter-spacing:.04em}
+  .hero{display:flex;gap:26px;align-items:center}
+  .next{flex:1;background:linear-gradient(135deg,#f0f7ff,#eefaff);border:1px solid #dbeeff;border-radius:14px;padding:15px 18px;display:flex;justify-content:space-between;align-items:center;gap:14px}
+  /* stepper */
+  .steps{display:flex;align-items:center;gap:0;margin:6px 0 22px}
+  .stp{display:flex;align-items:center;gap:9px;cursor:pointer}
+  .stp .b{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:#fff;border:1.5px solid var(--hair2);color:var(--ter);font-size:12px;font-weight:700;transition:.2s}
+  .stp .t{font-size:13.5px;color:var(--sec);font-weight:500}
+  .stp.on .b{background:var(--blue);border-color:var(--blue);color:#fff}.stp.on .t{color:var(--ink);font-weight:600}
+  .stp.done .b{background:var(--good);border-color:var(--good);color:#fff}.stp.done .t{color:var(--ink)}
+  .stpline{flex:1;height:1.5px;background:var(--hair2);margin:0 12px;min-width:24px}
+  .pill{display:inline-flex;align-items:center;gap:6px;background:var(--soft);border-radius:999px;padding:4px 11px;font-size:12px;font-weight:600;color:var(--sec)}
+  .cnt{background:var(--amber);color:#fff;border-radius:999px;padding:0 7px;font-size:11px;font-weight:700}
+  /* explore */
+  .explore{display:grid;grid-template-columns:248px 1fr;gap:0;border:1px solid var(--hair);border-radius:18px;overflow:hidden;background:#fff;box-shadow:var(--shadow);min-height:560px}
+  .dexp{background:var(--soft);border-right:1px solid var(--hair);padding:14px}
+  .dexp .dh{display:flex;justify-content:space-between;align-items:center;font-size:12px;font-weight:700;color:var(--ter);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+  .dexp .acts{display:flex;gap:4px}.miniico{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;cursor:pointer;color:var(--sec)}.miniico:hover{background:#e8e8ec}
+  .search{width:100%;border:1px solid var(--hair2);border-radius:9px;padding:7px 10px;font:inherit;font-size:13px;background:#fff;margin-bottom:10px}
+  .tnode{font-weight:600;font-size:13px;padding:7px 8px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:7px;color:var(--ink)}.tnode:hover{background:#ececf0}
+  .tnode .chev{color:var(--ter);font-size:10px;transition:.15s}.tnode.open .chev{transform:rotate(90deg)}
+  .tcol{font-size:12px;color:var(--sec);padding:4px 8px 4px 28px;cursor:pointer;font-family:ui-monospace,Menlo,monospace}.tcol:hover{color:var(--blue)}
+  .epane{padding:0}
+  .etabs{display:flex;align-items:center;gap:2px;border-bottom:1px solid var(--hair);padding:8px 10px 0;background:#fcfcfd}
+  .etab{display:flex;align-items:center;gap:7px;padding:8px 13px;border-radius:9px 9px 0 0;font-size:13px;font-weight:500;color:var(--sec);cursor:pointer}
+  .etab.on{background:#fff;color:var(--ink);font-weight:600;box-shadow:0 -1px 0 var(--blue) inset}
+  .etab .x{color:var(--ter);font-size:13px}.eplus{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;cursor:pointer;color:var(--sec)}.eplus:hover{background:var(--soft)}
+  .ebody{padding:18px}
+  .toolbar{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .runbtn{background:var(--good);border:none;color:#fff;border-radius:9px;padding:8px 16px;font-weight:600;font-size:13px;cursor:pointer;display:inline-flex;gap:7px;align-items:center}.runbtn:hover{filter:brightness(1.04)}
+  .editor{background:#1d1d1f;color:#e8e8ed;border-radius:12px;padding:15px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;white-space:pre-wrap;border:1px solid #2a2a2e}
+  .editor textarea{width:100%;background:transparent;border:none;color:#e8e8ed;font:inherit;resize:vertical;outline:none}
+  .restabs{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--hair);margin-top:16px;padding-bottom:6px}
+  .toggle{display:flex;gap:2px;background:var(--soft);border-radius:8px;padding:2px}.toggle .t{width:30px;height:26px;display:grid;place-items:center;border-radius:6px;cursor:pointer;color:var(--sec)}.toggle .t.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+  table.dt{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:12px}table.dt th,table.dt td{border-bottom:1px solid var(--hair);padding:9px 10px;text-align:left}table.dt th{color:var(--ter);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em}
+  .mono{font-family:ui-monospace,Menlo,monospace}
+  .chart{display:flex;align-items:flex-end;gap:6px;height:150px;padding-top:8px;margin-top:12px}.bar{flex:1;background:linear-gradient(#5ac8fa,#0a84ff);border-radius:5px 5px 0 0;min-width:7px;transition:height .7s cubic-bezier(.2,.8,.2,1)}
+  .xaxis{display:flex;justify-content:space-between;color:var(--ter);font-size:11px;margin-top:5px}
+  input.cell,select.cell{border:1px solid var(--hair2);border-radius:8px;padding:6px 8px;font:inherit;font-size:12.5px;width:100%;background:#fff}
+  .lock{cursor:pointer;font-size:15px}
+  /* resolve */
+  .qcard{border:1px solid #d6eaff;border-radius:16px;padding:20px;background:linear-gradient(180deg,#f5faff,#eff7ff)}
+  .imp{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}.imp.high{color:var(--red)}.imp.med{color:var(--amber)}.imp.low{color:var(--ter)}
+  .opt{display:flex;align-items:center;gap:9px;margin:7px 0;font-size:14px}
+  .queue{margin-top:16px;border-top:1px solid var(--hair);padding-top:14px}.qrow{display:flex;justify-content:space-between;padding:7px 0;color:var(--sec);font-size:13px}.qrow.done{color:var(--good)}
+  .bucket{border:1px solid var(--hair);border-radius:14px;margin:9px 0;overflow:hidden;background:#fff}.bh{display:flex;gap:11px;align-items:center;padding:14px 16px;cursor:pointer}.bh:hover{background:#fcfcfd}.bh .ic{font-weight:800;width:18px;text-align:center}.bh .bt{font-weight:600}.bh .sx{color:var(--sec);font-size:13px}.bb{padding:0 16px 14px 45px;color:var(--sec);font-size:13px}
+  .verdict{background:linear-gradient(135deg,#fffaf2,#fff6ea);border:1px solid #ffe9cc;border-radius:14px;padding:17px;font-size:14.5px}
+  .warn{background:#fff8f0;border:1px solid #ffe1c2;color:#9a4b00;border-radius:12px;padding:13px;font-size:13px;margin:14px 0}
+  .chkrow{display:flex;align-items:center;gap:11px;border:1px solid var(--hair);border-radius:12px;padding:12px 14px;margin:7px 0;background:#fff}
+  .seq{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--soft);border-radius:11px;padding:13px;margin:8px 0}.zone{color:var(--blue);font-weight:700}
+  .flow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0}.node{border:1px solid var(--hair);border-radius:13px;padding:11px 16px;background:#fff;text-align:center;min-width:96px;box-shadow:var(--shadow)}.node b{display:block}.node span{font-size:11.5px;color:var(--sec)}.arr{color:var(--ter);font-size:20px}
+  .conn{border:1px solid var(--hair2);border-radius:12px;padding:14px;text-align:center;cursor:pointer;background:#fff;font-weight:600;font-size:13px}.conn:hover{border-color:var(--blue)}.conn.sel{border-color:var(--blue);background:#f0f7ff;color:var(--blue2)}
+  .progress{height:5px;border-radius:999px;background:#ececef;overflow:hidden;margin-top:16px}.progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,#5ac8fa,#0a84ff);transition:width 1.6s ease}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid #cfe6ff;border-top-color:var(--blue);border-radius:50%;animation:sp .8s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
+  .menu{position:absolute;background:#fff;border:1px solid var(--hair);border-radius:12px;box-shadow:0 10px 40px rgba(0,0,0,.14);padding:6px;min-width:230px;z-index:30}
+  .menu .mi{padding:9px 12px;border-radius:8px;cursor:pointer;font-size:13.5px;display:flex;justify-content:space-between;align-items:center}.menu .mi:hover{background:var(--soft)}.menu .sep{height:1px;background:var(--hair);margin:5px 0}
+</style>
+</head>
+<body>
+<div class="ribbon">PROTOTYPE — Apple-inspired. Project at top · Explore = Catalog + Query · step-by-step Workflow.</div>
+
+<div class="topbar">
+  <div class="brand"><span class="drop"></span> Headwater</div>
+  <div class="psel" onclick="toggleMenu(event)"><span id="pselName">Registration Workflow</span> <span class="car">⌄</span></div>
+  <div class="nav" id="nav">
+    <a data-area="overview" class="on" onclick="navTo('overview')">Overview</a>
+    <a data-area="explore" onclick="navTo('explore')">Explore</a>
+    <a data-area="workflow" onclick="navTo('workflow')">Workflow</a>
+    <a data-area="deliver" onclick="navTo('deliver')">Deliver</a>
+  </div>
+  <div class="tright">
+    <span class="tbadge" id="tbadge"></span>
+    <div class="icobtn" title="Help">?</div>
+  </div>
+</div>
+
+<main>
+  <!-- OVERVIEW -->
+  <section class="view active" data-view="overview">
+    <h1 id="ovTitle">Registration Workflow</h1>
+    <p class="lead" id="ovGoal">Reduce patient registration wait time before imaging · radiology</p>
+    <div class="card"><div class="hero">
+      <div class="ringwrap"><svg width="132" height="132" class="ring" viewBox="0 0 132 132"><circle class="bg" cx="66" cy="66" r="58"/><circle class="fg" id="ovRing" cx="66" cy="66" r="58" stroke="#0a84ff"/></svg><div class="ringtxt"><div class="pct" id="ovPct">62%</div><div class="lbl" id="ovLbl">FORMING</div></div></div>
+      <div style="flex:1">
+        <h2 style="margin:0 0 6px">Readiness for this goal</h2>
+        <p class="muted" style="margin:0 0 14px">You can analyze arrival and wait patterns. The registration boundary is user-defined and 88% of modality is unlabeled — fine for this goal.</p>
+        <div class="next"><div><b>Resolve 4 things only you can know</b><div class="muted sm">Raises trust and sharpens the verdict</div></div><button class="btn btn-primary btn-sm" onclick="navTo('workflow');setStep('resolve')">Resolve →</button></div>
+      </div>
+    </div></div>
+    <div class="grid3">
+      <div class="tile" onclick="navTo('explore')"><div class="h">🗂 Explore</div><div class="s">Browse the catalog · query across tables</div></div>
+      <div class="tile" onclick="navTo('workflow')"><div class="h">🧭 Workflow</div><div class="s">Understand → Resolve → Readiness</div></div>
+      <div class="tile" onclick="navTo('deliver')"><div class="h">📊 Deliver</div><div class="s">Draft answer · export audit report</div></div>
+    </div>
+  </section>
+
+  <!-- EXPLORE -->
+  <section class="view" data-view="explore">
+    <h1>Explore</h1><p class="lead">Browse the catalog and query across tables · radiology</p>
+    <div class="explore">
+      <div class="dexp">
+        <div class="dh"><span>Data explorer</span><div class="acts"><div class="miniico" title="Refresh">⟳</div><div class="miniico" title="Connect source" onclick="openConnect()">+</div></div></div>
+        <input class="search" placeholder="Find data"/>
+        <div class="tnode open" onclick="this.classList.toggle('open')"><span class="chev">▶</span> 🗄 radiology</div>
+        <div>
+          <div class="tnode" onclick="openTab('table','cases',event)"><span class="chev" style="opacity:0">▶</span> ▦ cases</div>
+          <div class="tnode" onclick="openTab('table','exams',event)"><span class="chev" style="opacity:0">▶</span> ▦ exams</div>
+          <div class="tnode" onclick="openTab('table','events',event)"><span class="chev" style="opacity:0">▶</span> ▦ events</div>
+        </div>
+      </div>
+      <div class="epane">
+        <div class="etabs" id="etabs"></div>
+        <div class="ebody" id="ebody"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- WORKFLOW -->
+  <section class="view" data-view="workflow">
+    <h1>Workflow</h1><p class="lead">Guided, step by step. The trust verdict builds as you go.</p>
+    <div class="steps" id="wfsteps">
+      <div class="stp" data-s="understand" onclick="setStep('understand')"><span class="b">1</span><span class="t">Understand</span></div>
+      <span class="stpline"></span>
+      <div class="stp" data-s="resolve" onclick="setStep('resolve')"><span class="b">2</span><span class="t">Resolve</span> <span class="cnt" id="wfResCnt" style="margin-left:6px">4</span></div>
+      <span class="stpline"></span>
+      <div class="stp" data-s="readiness" onclick="setStep('readiness')"><span class="b">3</span><span class="t">Readiness</span></div>
+    </div>
+
+    <div class="wpanel" id="w_understand">
+      <div class="card"><div class="row spread"><h2 style="margin:0">Here's what this data is</h2><button class="btn btn-sm">↻ Re-run</button></div>
+        <div class="flow"><div class="node"><b>cases</b><span>1 visit</span></div><span class="arr">→</span><div class="node"><b>events</b><span>27,343 steps</span></div></div>
+        <p class="muted sm">A patient imaging journey, logged as events.</p>
+        <div class="seq" style="margin-top:10px">Arrival → Recepcion → Front/BackOffice → Room assign → Wait → Exam<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="zone">└──── registration zone? ────┘</span></div>
+        <p class="sm" style="margin-top:12px"><b>Relevant:</b> cases.arrival_time · cases.total_wait_time · events.activity · events.timestamp_start/end</p>
+        <div class="disc" onclick="tog('uev')">Show evidence</div><div id="uev" class="hide sm muted" style="margin-top:6px">cases: 3,193 rows, PK case_id. events→cases 100% referential. Arrival peaks 08:00–12:00.</div></div>
+      <div class="row spread"><span></span><button class="btn btn-primary" onclick="setStep('resolve')">Looks right — Resolve →</button></div>
+    </div>
+
+    <div class="wpanel hide" id="w_resolve">
+      <div class="row spread"><h2 style="margin:0">A few things only you can know</h2><span class="muted sm" id="qprog">1 of 4</span></div>
+      <p class="muted sm" style="margin-bottom:14px">Resolving raises trust and sharpens your verdict.</p>
+      <div class="qcard" data-q="0"><div class="imp high">High impact · defines your core metric</div><h2 style="margin:7px 0">Where does “registration” end?</h2><p class="sm muted">Steps: Arrival → Recepcion → FrontOffice → AsignacionSala</p><div class="opt"><input type="radio" name="reg"> Recepcion</div><div class="opt"><input type="radio" name="reg" checked> FrontOffice <span class="ter sm">best guess</span></div><div class="opt"><input type="radio" name="reg"> AsignacionSala</div><div class="row" style="margin-top:12px"><button class="btn btn-primary" onclick="resolveStep()">Confirm</button><button class="btn" onclick="resolveStep()">I don’t know — mark as gap</button></div></div>
+      <div class="qcard hide" data-q="1"><div class="imp med">Medium impact</div><h2 style="margin:7px 0">What do patient_type codes mean?</h2><p class="sm muted">A · H · S · D</p><div class="row" style="gap:8px"><input type="text" class="search" placeholder="A ="><input type="text" class="search" placeholder="H ="><input type="text" class="search" placeholder="S ="><input type="text" class="search" placeholder="D ="></div><div class="row" style="margin-top:12px"><button class="btn btn-primary" onclick="resolveStep()">Confirm</button><button class="btn" onclick="resolveStep()">I don’t know</button></div></div>
+      <div class="qcard hide" data-q="2"><div class="imp med">Medium impact</div><h2 style="margin:7px 0">events.modality empty on 88% of rows</h2><p class="sm muted">Missing, or not applicable?</p><div class="opt"><input type="radio" name="mod" checked> Not applicable</div><div class="opt"><input type="radio" name="mod"> Missing</div><div class="row" style="margin-top:12px"><button class="btn btn-primary" onclick="resolveStep()">Confirm</button><button class="btn" onclick="resolveStep()">I don’t know</button></div></div>
+      <div class="qcard hide" data-q="3"><div class="imp low">Low impact</div><h2 style="margin:7px 0">“UltraSound” vs “US” — same thing?</h2><div class="row" style="margin-top:12px"><button class="btn btn-primary" onclick="resolveStep()">Yes, merge</button><button class="btn" onclick="resolveStep()">Not sure</button></div></div>
+      <div class="queue" id="queue"></div>
+    </div>
+
+    <div class="wpanel hide" id="w_readiness">
+      <div class="hero" style="margin-bottom:16px"><div class="ringwrap"><svg width="100" height="100" class="ring" viewBox="0 0 100 100"><circle class="bg" cx="50" cy="50" r="44"/><circle class="fg" id="rdRing" cx="50" cy="50" r="44" stroke="#0a84ff"/></svg><div class="ringtxt"><div class="pct" id="rdPct" style="font-size:18px">62%</div></div></div><div class="verdict" style="flex:1">You can analyze arrival and wait patterns. The registration-complete boundary is user-defined (FrontOffice) and 88% of modality is unlabeled — fine for this goal, blocking for device questions.</div></div>
+      <div class="bucket"><div class="bh" onclick="tog('b1')"><span class="ic" style="color:var(--good)">✓</span><span class="bt">You have</span><span class="sx">7-day event log · 3,193 visits · arrival + wait</span></div><div id="b1" class="bb hide">Full workflow event log; arrival timestamps; per-visit wait/throughput.</div></div>
+      <div class="bucket"><div class="bh" onclick="tog('b2')"><span class="ic" style="color:var(--good)">✓</span><span class="bt">Trustworthy</span><span class="sx">clean case grain · joins verified</span></div><div id="b2" class="bb hide">case_id unique; events→cases 100% referential integrity.</div></div>
+      <div class="bucket"><div class="bh" onclick="tog('b3')"><span class="ic" style="color:var(--amber)">⚠</span><span class="bt">Risky</span><span class="sx">two duration formats · odd weekday pattern</span></div><div id="b3" class="bb hide">00:10 vs “0 days 00:22:00” — normalize. Sun/Thu high, Fri low — confirm.</div></div>
+      <div class="bucket"><div class="bh" onclick="tog('b4')"><span class="ic" style="color:var(--red)">✗</span><span class="bt">Missing / gaps</span><span class="sx">no explicit “registration complete” · patient_type</span></div><div id="b4" class="bb hide">No event flags registration completion. patient_type unlabeled unless resolved.</div></div>
+      <div class="bucket"><div class="bh" onclick="tog('b5')"><span class="ic" style="color:var(--red)">⚡</span><span class="bt">Misleading</span><span class="sx">‘ExaminacionExtra?’ contains a literal ‘?’</span></div><div id="b5" class="bb hide">A stray ‘?’ in a category value — a data-entry artifact.</div></div>
+      <div class="row spread" style="margin-top:16px"><button class="btn" onclick="setStep('resolve')">Improve</button><button class="btn btn-primary" onclick="navTo('deliver')">Go to Deliver →</button></div>
+    </div>
+  </section>
+
+  <!-- DELIVER -->
+  <section class="view" data-view="deliver">
+    <h1>Deliver</h1><p class="lead">Answer the question and share it — grounded in the data you’ve vouched for.</p>
+    <div class="card"><h2>Draft answer</h2>
+      <div class="editor" style="white-space:pre-wrap">SELECT patient_type, hour_day_of_arrival, avg(total_wait_time) AS avg_wait
+FROM cases GROUP BY 1, 2 ORDER BY 2;</div>
+      <div class="row" style="margin-top:12px"><button class="btn">Edit</button><button class="runbtn" onclick="runChart()">▶ Run</button></div>
+      <div id="chartWrap" class="hide" style="margin-top:16px"><div class="muted sm">Average wait by arrival hour</div><div class="chart" id="chart"></div><div class="xaxis"><span>6h</span><span>10h</span><span>14h</span><span>18h</span><span>22h</span></div></div>
+    </div>
+    <div class="warn">⚠ Not yet certified: patient_type is a gap. This dashboard carries a <b>“Draft — Uncertified”</b> stamp until resolved.</div>
+    <div class="row"><button class="btn">Save as Draft</button><button class="btn btn-primary">Export audit report (.md)</button><button class="btn" onclick="navTo('workflow');setStep('resolve')">Resolve to certify</button></div>
+  </section>
+
+  <!-- CONNECT (overlay-ish) -->
+  <section class="view" data-view="connect">
+    <h1>Connect a data source</h1><p class="lead">Reuses Headwater’s existing connectors · 2 of 3 used</p>
+    <div class="card"><div class="grid3" style="margin-bottom:12px"><div class="conn sel" onclick="selConn(this)">Files (CSV/JSON)</div><div class="conn" onclick="selConn(this)">Postgres</div><div class="conn" onclick="selConn(this)">MySQL</div><div class="conn" onclick="selConn(this)">Snowflake</div><div class="conn" onclick="selConn(this)">Redshift</div><div class="conn" onclick="selConn(this)">SQLite / DuckDB</div></div><input type="text" class="search" placeholder="Path or connection string — e.g. data/newsource/"/></div>
+    <div class="row"><button class="btn" onclick="navTo('explore')">Cancel</button><button class="btn btn-primary" onclick="navTo('explore')">Connect →</button></div>
+  </section>
+
+  <!-- NEW PROJECT WIZARD -->
+  <section class="view" data-view="new">
+    <h1>New project</h1><p class="lead">Guided setup · step 1 of 2</p>
+    <div id="n_setup">
+      <div class="card"><h2>What problem are you solving?</h2><textarea class="search" rows="2" style="resize:vertical">Reduce patient registration wait time before imaging</textarea></div>
+      <div class="card"><h2>Select tables <span class="muted sm">· from radiology</span></h2>
+        <label class="chkrow"><input type="checkbox" checked> <b>cases</b> <span class="muted sm">visits, arrival + wait</span></label><label class="chkrow"><input type="checkbox"> <b>exams</b> <span class="muted sm">modality + durations</span></label><label class="chkrow"><input type="checkbox" checked> <b>events</b> <span class="muted sm">workflow event log</span></label></div>
+      <div class="row spread"><button class="btn" onclick="navTo('overview')">Cancel</button><button class="btn btn-primary" onclick="genNew()">Generate understanding →</button></div>
+    </div>
+    <div id="n_gen" class="hide"><div class="card"><h2>Generating understanding</h2><div style="display:flex;flex-direction:column;gap:10px"><div><span style="color:var(--good)">✓</span> Loaded tables · profiled · found structure</div><div><span class="spin"></span> Typing columns · scoping to goal</div></div><div class="progress"><i id="genbar"></i></div></div></div>
+  </section>
+</main>
+
+<div class="menu hide" id="pmenu">
+  <div class="mi" onclick="pick('Registration Workflow')"><span>Registration Workflow</span><span class="ter sm">◐ 62%</span></div>
+  <div class="mi" onclick="pick('Device Utilization')"><span>Device Utilization</span><span class="ter sm">○</span></div>
+  <div class="sep"></div>
+  <div class="mi" onclick="closeMenu();navTo('new')"><span>+ New project</span></div>
+</div>
+
+<script>
+  let trust={pct:62,label:'FORMING'},qi=0,resolved=[false,false,false,false],step='understand';
+  let etabs=[{type:'query',id:'q1',title:'Query 1'}],activeTab='q1';
+  const COLS={cases:['case_id','arrival_time','patient_type','total_wait_time'],events:['case_id','activity','timestamp_start','modality'],exams:['modality','scan_time_duration']};
+  function tog(id){const e=document.getElementById(id);if(e)e.classList.toggle('hide');}
+  function selConn(el){document.querySelectorAll('.conn').forEach(c=>c.classList.remove('sel'));el.classList.add('sel');}
+  function col(){return trust.pct>=76?'#34c759':trust.pct>=40?'#0a84ff':'#ff9f0a';}
+  function ring(idPct,idRing,r){const C=2*Math.PI*r,c=document.getElementById(idRing);if(!c)return;c.style.strokeDasharray=C;c.style.strokeDashoffset=C*(1-trust.pct/100);c.setAttribute('stroke',col());if(document.getElementById(idPct))document.getElementById(idPct).textContent=trust.pct+'%';}
+  function applyTrust(){document.getElementById('tbadge').innerHTML=`<span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${col()}"></span> Trust · ${trust.label} ${trust.pct}%`;
+    ring('ovPct','ovRing',58);document.getElementById('ovLbl').textContent=trust.label;ring('rdPct','rdRing',44);}
+  function navTo(area){document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.dataset.view===area));
+    document.querySelectorAll('#nav a').forEach(a=>a.classList.toggle('on',a.dataset.area===area));
+    if(area==='explore')renderExplore();if(area==='workflow')setStep(step);applyTrust();window.scrollTo(0,0);}
+  /* project menu */
+  function toggleMenu(e){const m=document.getElementById('pmenu');m.classList.toggle('hide');const r=e.currentTarget.getBoundingClientRect();m.style.left=r.left+'px';m.style.top=(r.bottom+8)+'px';e.stopPropagation();}
+  function closeMenu(){document.getElementById('pmenu').classList.add('hide');}
+  function pick(name){document.getElementById('pselName').textContent=name;document.getElementById('ovTitle').textContent=name;
+    if(name==='Device Utilization'){document.getElementById('ovGoal').textContent='Maximize modality throughput · radiology';trust={pct:0,label:'NOT STARTED'};}
+    else{document.getElementById('ovGoal').textContent='Reduce patient registration wait time before imaging · radiology';trust={pct:62,label:'FORMING'};qi=0;resolved=[false,false,false,false];}
+    closeMenu();navTo('overview');}
+  document.addEventListener('click',()=>closeMenu());
+  /* explore */
+  function openConnect(){navTo('connect');}
+  function openTab(type,name,e){if(e)e.stopPropagation();const id=type+'-'+name;if(!etabs.find(t=>t.id===id))etabs.push({type,id,title:name});activeTab=id;renderExplore();}
+  function newQuery(){const n=etabs.filter(t=>t.type==='query').length+1;const id='q'+Date.now();etabs.push({type:'query',id,title:'Query '+n});activeTab=id;renderExplore();}
+  function closeTab(id,e){e.stopPropagation();etabs=etabs.filter(t=>t.id!==id);if(activeTab===id)activeTab=etabs[etabs.length-1]?.id;renderExplore();}
+  function renderExplore(){
+    document.getElementById('etabs').innerHTML=etabs.map(t=>`<div class="etab ${t.id===activeTab?'on':''}" onclick="activeTab='${t.id}';renderExplore()">${t.type==='query'?'⌗':'▦'} ${t.title} ${etabs.length>1?`<span class="x" onclick="closeTab('${t.id}',event)">✕</span>`:''}</div>`).join('')+`<div class="eplus" onclick="newQuery()">+</div>`;
+    const t=etabs.find(x=>x.id===activeTab);const b=document.getElementById('ebody');
+    if(!t){b.innerHTML='';return;}
+    if(t.type==='query'){b.innerHTML=`<div class="toolbar"><button class="runbtn" onclick="show('xqr')">▶ Run</button><span class="pill">Limit 100</span><span class="muted sm">click schema items on the left to insert</span></div>
+      <div class="editor"><textarea rows="5" id="xqe">SELECT c.patient_type, count(*) AS visits, avg(c.total_wait_time) AS avg_wait
+FROM cases c JOIN events e ON e.case_id = c.case_id
+WHERE e.activity = 'Recepcion'
+GROUP BY 1 ORDER BY 2 DESC;</textarea></div>
+      <div id="xqr" class="hide"><div class="restabs"><b class="sm">Result 1</b><div class="toggle"><div class="t on" onclick="resToggle(true,this)">▦</div><div class="t" onclick="resToggle(false,this)">▮</div></div></div>
+        <div id="xqtable"><table class="dt"><tr><th>patient_type</th><th>visits</th><th>avg_wait</th></tr><tr><td>A</td><td class="mono">2165</td><td class="mono">00:14</td></tr><tr><td>H</td><td class="mono">522</td><td class="mono">00:09</td></tr><tr><td>S</td><td class="mono">317</td><td class="mono">00:21</td></tr><tr><td>D</td><td class="mono">189</td><td class="mono">00:11</td></tr></table></div>
+        <div id="xqchart" class="hide"><div class="chart">${[2165,522,317,189].map(v=>`<div class="bar" style="height:${v/2165*100}%;max-width:90px"></div>`).join('')}</div><div class="xaxis"><span>A</span><span>H</span><span>S</span><span>D</span></div></div>
+      </div>`;}
+    else {const c=COLS[t.title]||[];b.innerHTML=`<div class="row spread"><h2 style="margin:0">${t.title}</h2><button class="btn btn-sm" onclick="newQuery()">Query this →</button></div>
+      <p class="muted sm">Editable metadata · edits become locks reused across projects</p>
+      <table class="dt"><tr><th>Column</th><th>Semantic type</th><th>Description</th><th>Lock</th></tr>${c.map(col=>`<tr><td class="mono">${col}</td><td><select class="cell"><option>auto-detected</option></select></td><td><input class="cell" value="${col.replace(/_/g,' ')}"></td><td><span class="lock" onclick="tl(this)">🔓</span></td></tr>`).join('')}</table>`;}
+  }
+  function tl(el){el.textContent=el.textContent==='🔒'?'🔓':'🔒';}
+  function resToggle(table,el){document.querySelectorAll('.toggle .t').forEach(x=>x.classList.remove('on'));el.classList.add('on');document.getElementById('xqtable').classList.toggle('hide',!table);document.getElementById('xqchart').classList.toggle('hide',table);}
+  /* workflow */
+  function setStep(s){step=s;['understand','resolve','readiness'].forEach(k=>document.getElementById('w_'+k).classList.toggle('hide',k!==s));
+    document.querySelectorAll('#wfsteps .stp').forEach(st=>{const k=st.dataset.s;const order=['understand','resolve','readiness'];const done=(k==='understand'&&order.indexOf(s)>0)||(k==='resolve'&&resolved.every(r=>r));st.classList.toggle('on',k===s);st.classList.toggle('done',done&&k!==s);});
+    if(s==='resolve')showQ();applyTrust();}
+  function showQ(){const rem=resolved.filter(r=>!r).length;document.getElementById('wfResCnt').textContent=rem;document.getElementById('wfResCnt').style.display=rem?'inline-block':'none';
+    document.querySelectorAll('#w_resolve .qcard').forEach(c=>c.classList.toggle('hide',+c.dataset.q!==qi));document.getElementById('qprog').textContent=Math.min(qi+1,4)+' of 4';
+    const L=['Where does “registration” end?','patient_type A/H/S/D','events.modality empty 88%','“UltraSound” vs “US”'],I=['high','med','med','low'];
+    document.getElementById('queue').innerHTML='<div class="ter sm" style="margin-bottom:4px">Queue</div>'+L.map((l,i)=>`<div class="qrow ${resolved[i]?'done':''}"><span>${i+1} · ${l}${i===qi&&!resolved[i]?' ◀':''}</span><span>${resolved[i]?'✓ resolved':I[i]}</span></div>`).join('');}
+  function resolveStep(){resolved[qi]=true;trust.pct=Math.min(78,62+resolved.filter(r=>r).length*4);trust.label=trust.pct>=76?'READY-ISH':'FORMING';const n=resolved.findIndex(r=>!r);if(n===-1){setStep('readiness');return;}qi=n;showQ();applyTrust();}
+  function runChart(){const d=[[6,11],[7,70],[8,291],[9,272],[10,322],[11,322],[12,320],[13,240],[14,226],[15,250],[16,222],[17,139],[18,116],[19,116],[20,83],[21,70],[22,18]];document.getElementById('chart').innerHTML=d.map(x=>`<div class="bar" style="height:0" data-h="${x[1]/322*100}"></div>`).join('');setTimeout(()=>document.querySelectorAll('#chart .bar').forEach(b=>b.style.height=b.dataset.h+'%'),50);document.getElementById('chartWrap').classList.remove('hide');}
+  function genNew(){document.getElementById('n_setup').classList.add('hide');document.getElementById('n_gen').classList.remove('hide');setTimeout(()=>document.getElementById('genbar').style.width='100%',60);setTimeout(()=>{trust={pct:62,label:'FORMING'};qi=0;resolved=[false,false,false,false];pick('Registration Workflow');},1900);}
+  applyTrust();renderExplore();
+</script>
+</body>
+</html>

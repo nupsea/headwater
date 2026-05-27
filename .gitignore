@@ -25,6 +25,9 @@ archives/
 metadata.db
 .headwater/
 
+# MovieLens data -- GroupLens terms forbid redistribution; do not commit
+data/media/
+
 # OS
 .DS_Store
 

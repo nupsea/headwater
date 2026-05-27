@@ -1,0 +1,163 @@
+
+DATASET DETAILS
+================
+
+This document provides a detailed description of the structure and contents of
+the synthetic radiology workflow dataset.
+
+It complements the high-level summary provided in the dataset description and
+explains each CSV file and folder in depth.
+
+------------------------------------------------------------
+1. FILE INVENTORY AND SIZE
+------------------------------------------------------------
+
+The dataset includes three main CSV files:
+
+  • cases.csv
+      - Rows: 3193
+      - Columns: case_id, arrival_time, end_time, patient_type, exam_types, exam_count, total_wait_time, total_scan_time, throughput_time, week_day_of_arrival, hour_day_of_arrival
+
+  • exams.csv
+      - Rows: 3503
+      - Columns: case_id, exam_id, modality, start_exam, end_exam, wait_before_exam, scan_time_duration, total_exam_duration
+
+  • events.csv
+      - Rows: 27343
+      - Columns: case_id, exam_id, activity, timestamp_start, timestamp_end, total_duration, modality, patient_type, scenario_id
+
+In addition, the dataset contains two folders:
+
+  • resource_usage/
+      Time-series CSV files providing resource utilisation snapshots
+      (one file per imaging device, every 5 minutes).
+
+  • metadata/
+      Contains three JSON files:
+        - scenario_patients.json
+        - scenario_resources.json
+        - scenario_distributions.json
+
+------------------------------------------------------------
+2. FILE DESCRIPTIONS
+------------------------------------------------------------
+
+2.1 cases.csv
+--------------
+One row per simulated patient case (i.e., per visit). Useful for modelling
+overall length of stay, total waiting time, modality mix, and arrival patterns.
+
+Columns:
+  - case_id: Unique identifier for the patient case.
+  - arrival_time (UTC): Timestamp when the patient enters the system.
+  - end_time (UTC): Timestamp when the patient completes their workflow.
+  - patient_type: A, S, H, D (outpatient, emergency, inpatient, day-hospital).
+  - exam_types: List of radiology modalities performed on this case.
+  - exam_count: Number of exams performed.
+  - total_wait_time: Sum of all waiting times before exams.
+  - total_scan_time: Sum of actual scan durations across exams.
+  - throughput_time: Total time spent in the system (arrival → exit).
+  - week_day_of_arrival: Weekday extracted from arrival timestamp.
+  - hour_day_of_arrival: Hour extracted from arrival timestamp.
+
+Typical uses:
+  - Regression (predict throughput_time / total_wait_time)
+  - Classification (high-load vs low-load cases)
+  - Epidemiological arrival pattern analysis
+  - Benchmarking scenario configurations
+
+
+2.2 exams.csv
+--------------
+One row per radiology exam performed for each case.
+
+Columns:
+  - case_id: Patient case identifier.
+  - exam_id: Unique ID per exam within a case.
+  - modality: Imaging modality (XRAY, CT, MRI, US, CBCT, MAMMO, OTHER).
+  - start_exam (UTC): Start timestamp of the exam.
+  - end_exam (UTC): End timestamp of the exam.
+  - wait_before_exam: Duration spent waiting before this exam.
+  - scan_time_duration: Duration of the scan itself.
+  - total_exam_duration: Total time related to this exam.
+
+Typical uses:
+  - Per-modality prediction (CT wait-time, MRI throughput, etc.)
+  - Benchmarking exam durations
+  - Time-series decomposition by modality
+
+
+2.3 events.csv
+---------------
+Full event-level logs, representing the complete trajectory of each case.
+
+Columns:
+  - case_id: Patient case identifier.
+  - exam_id: Exam identifier (may be empty for non-exam events).
+  - activity: Name of the activity (administrative, waiting, exam, scan event…).
+  - timestamp_start (UTC): When the event starts.
+  - timestamp_end (UTC): When the event ends.
+  - total_duration: Duration of the event.
+  - modality: Modality associated with the event (when applicable).
+  - patient_type: Patient category (A/S/H/D).
+  - scenario_id: Scenario instance identifier.
+
+Typical uses:
+  - Sequence modelling (RNN/GRU/Transformer)
+  - Process mining / next-activity prediction
+  - Remaining-time estimation
+  - Detection of anomalous workflow patterns
+
+
+------------------------------------------------------------
+3. FOLDERS
+------------------------------------------------------------
+
+3.1 resource_usage/
+--------------------
+Contains time-series CSVs describing system state every 5 minutes.
+
+Each file corresponds to an imaging device and typically includes:
+  - avgUsage
+  - avail (free units)
+  - limit (capacity)
+  - waitingProcesses
+  - maxWaitTime
+  - averageWaitTime
+  - currentSimulationLocalTime
+  - currentSimulationDay
+
+Typical uses:
+  - Queueing-system analysis
+  - Time-series forecasting
+  - Modality-specific load estimation
+  - RL state construction
+
+
+3.2 metadata/
+--------------
+Contains the scenario definition used to generate the dataset.
+
+Files:
+  - scenario_patients.json
+      Definitions of patient types and their roles.
+  - scenario_resources.json
+      Number of staff/resources, imaging equipment, and scheduling rules.
+  - scenario_distributions.json
+      Arrival rates, time-of-day patterns, and service-time distributions.
+
+These files allow researchers to:
+  - Reproduce the simulation setup
+  - Create extended or alternative scenarios
+  - Validate modelling assumptions
+  - Use the dataset to calibrate secondary simulators or RL environments
+
+
+------------------------------------------------------------
+4. NOTES ON SIMULATION CONTEXT
+------------------------------------------------------------
+
+The simulation was run for a 7-day period starting on January 1st, 2023.
+The absolute calendar date is not relevant, since patient arrivals depend on
+hour-of-day and weekday patterns rather than absolute dates. These configuration can be seen in more detail in the file 
+metadata/scenarios_distributions.json
