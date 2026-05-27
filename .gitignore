@@ -11,9 +11,10 @@ wheels/
 node_modules/
 .next/
 
-# Claude
+# Harness
 CLAUDE.md
 .claude/
+.antigravitycli/
 
 # Archives
 archives/

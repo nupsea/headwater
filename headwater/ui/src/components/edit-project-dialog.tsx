@@ -28,6 +28,7 @@ type ConnectionForm = {
   role: string;
   user: string;
   password: string;
+  authenticator: string;
   path: string;
   auto_sync: boolean;
   max_tables: number;
@@ -46,7 +47,8 @@ type ConnectionStringField =
   | "warehouse"
   | "role"
   | "user"
-  | "path";
+  | "path"
+  | "authenticator";
 
 const DEFAULT_FORM: ConnectionForm = {
   display_name: "",
@@ -58,6 +60,7 @@ const DEFAULT_FORM: ConnectionForm = {
   role: "",
   user: "",
   password: "",
+  authenticator: "",
   path: "",
   auto_sync: true,
   max_tables: 50,
@@ -345,12 +348,31 @@ export function EditProjectDialog({
                     value={form.user}
                     onChange={(value) => setForm((current) => ({ ...current, user: value }))}
                   />
-                  <Field
-                    label="Password"
-                    type="password"
-                    value={form.password}
-                    onChange={(value) => setForm((current) => ({ ...current, password: value }))}
-                  />
+                  {selectedConnector.id === "snowflake" && (
+                    <div>
+                      <label className="mb-1.5 block text-[12px] font-medium text-foreground">
+                        Authentication Method
+                      </label>
+                      <select
+                        value={form.authenticator}
+                        onChange={(event) =>
+                          setForm((current) => ({ ...current, authenticator: event.target.value }))
+                        }
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                      >
+                        <option value="">Standard (Password)</option>
+                        <option value="externalbrowser">Single Sign-On (SSO / Browser)</option>
+                      </select>
+                    </div>
+                  )}
+                  {!(selectedConnector.id === "snowflake" && form.authenticator === "externalbrowser") && (
+                    <Field
+                      label="Password"
+                      type="password"
+                      value={form.password}
+                      onChange={(value) => setForm((current) => ({ ...current, password: value }))}
+                    />
+                  )}
                 </div>
               ) : (
                 <Field
@@ -583,6 +605,7 @@ function readConnectionForm(source: SourceDetail): ConnectionForm {
     role: stringValue(connection.role) || stringValue(parsed.role),
     user: stringValue(parsed.user),
     password: parsedPassword == "***" ? "" : parsedPassword,
+    authenticator: stringValue(connection.authenticator) || stringValue(parsed.authenticator),
     path: source.path || stringValue(connection.path),
     auto_sync: source.auto_sync,
     max_tables: numberValue(config.max_tables, 50),
@@ -647,14 +670,16 @@ function buildConnectionValue(
   form: ConnectionForm
 ): { uri: string } | { path: string } {
   if (connectorId === "snowflake") {
+    const user = encodeURIComponent(form.user.trim());
+    const password = form.password.trim() ? encodeURIComponent(form.password.trim()) : "";
     const params = new URLSearchParams();
     if (form.warehouse.trim()) params.set("warehouse", form.warehouse.trim());
     if (form.role.trim()) params.set("role", form.role.trim());
+    if (form.authenticator.trim()) params.set("authenticator", form.authenticator.trim());
     const query = params.toString();
+    const authPart = password ? `${user}:${password}` : user;
     return {
-      uri: `snowflake://${encodeURIComponent(form.user.trim())}:${encodeURIComponent(
-        form.password.trim()
-      )}@${form.host.trim()}/${form.database.trim()}/${form.schema.trim()}${
+      uri: `snowflake://${authPart}@${form.host.trim()}/${form.database.trim()}/${form.schema.trim()}${
         query ? `?${query}` : ""
       }`,
     };
@@ -694,7 +719,7 @@ function _sameConnectionDetails(
     "database",
     "user",
   ];
-  const snowflakeFields: ConnectionStringField[] = ["schema", "warehouse", "role"];
+  const snowflakeFields: ConnectionStringField[] = ["schema", "warehouse", "role", "authenticator"];
   const fileFields: ConnectionStringField[] = ["path"];
 
   const compare = (field: ConnectionStringField) =>
@@ -723,6 +748,7 @@ function parseConnectionUri(type: string, value: string): Record<string, string>
       details.schema = parts[1] || "";
       details.warehouse = decodeURIComponent(url.searchParams.get("warehouse") || "");
       details.role = decodeURIComponent(url.searchParams.get("role") || "");
+      details.authenticator = decodeURIComponent(url.searchParams.get("authenticator") || "");
     } else {
       details.database = parts[0] || "";
     }

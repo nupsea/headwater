@@ -30,6 +30,7 @@ type ConnectionForm = {
   role: string;
   user: string;
   password: string;
+  authenticator: string;
   path: string;
   auto_sync: boolean;
   max_tables: number;
@@ -65,6 +66,7 @@ const DEFAULT_FORM: ConnectionForm = {
   role: "",
   user: "",
   password: "",
+  authenticator: "",
   path: "",
   auto_sync: true,
   max_tables: 50,
@@ -712,13 +714,30 @@ export function CreateProjectDialog({
                       onChange={(value) => setForm((current) => ({ ...current, user: value }))}
                       placeholder="headwater_ro"
                     />
-                    <Field
-                      label="Password"
-                      type="password"
-                      value={form.password}
-                      onChange={(value) => setForm((current) => ({ ...current, password: value }))}
-                      placeholder="••••••••"
-                    />
+                    <div>
+                      <label className="mb-1.5 block text-[12px] font-medium text-foreground">
+                        Authentication Method
+                      </label>
+                      <select
+                        value={form.authenticator}
+                        onChange={(event) =>
+                          setForm((current) => ({ ...current, authenticator: event.target.value }))
+                        }
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                      >
+                        <option value="">Standard (Password)</option>
+                        <option value="externalbrowser">Single Sign-On (SSO / Browser)</option>
+                      </select>
+                    </div>
+                    {form.authenticator !== "externalbrowser" && (
+                      <Field
+                        label="Password"
+                        type="password"
+                        value={form.password}
+                        onChange={(value) => setForm((current) => ({ ...current, password: value }))}
+                        placeholder="••••••••"
+                      />
+                    )}
                   </div>
                 )}
 
@@ -1133,16 +1152,18 @@ function buildConnectionValue(
 ): { uri: string } | { path: string } | { host: string } {
   if (connectorId === "snowflake") {
     const user = encodeURIComponent(form.user.trim());
-    const password = encodeURIComponent(form.password.trim());
+    const password = form.password.trim() ? encodeURIComponent(form.password.trim()) : "";
     const host = form.host.trim();
     const database = form.database.trim();
     const schema = form.schema.trim();
     const params = new URLSearchParams();
     if (form.warehouse.trim()) params.set("warehouse", form.warehouse.trim());
     if (form.role.trim()) params.set("role", form.role.trim());
+    if (form.authenticator.trim()) params.set("authenticator", form.authenticator.trim());
     const query = params.toString();
+    const authPart = password ? `${user}:${password}` : user;
     return {
-      uri: `snowflake://${user}:${password}@${host}/${database}/${schema}${query ? `?${query}` : ""}`,
+      uri: `snowflake://${authPart}@${host}/${database}/${schema}${query ? `?${query}` : ""}`,
     };
   }
   if (connectorId === "postgres") {

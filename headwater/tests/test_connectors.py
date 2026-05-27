@@ -406,6 +406,22 @@ class TestSnowflakeConnector:
             "authenticator": None,
         }
 
+        # SSO / Browser authenticator parsing
+        parts_sso = _parse_snowflake_uri(
+            "snowflake://sso_user@acme-xy123/analytics/public"
+            "?warehouse=compute_wh&role=reader&authenticator=externalbrowser"
+        )
+        assert parts_sso == {
+            "account": "acme-xy123",
+            "user": "sso_user",
+            "password": None,
+            "database": "ANALYTICS",
+            "schema": "PUBLIC",
+            "warehouse": "compute_wh",
+            "role": "reader",
+            "authenticator": "externalbrowser",
+        }
+
 
 # -- BaseConnector new methods (US-100) ------------------------------------
 
