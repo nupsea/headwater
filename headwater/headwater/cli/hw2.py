@@ -30,9 +30,15 @@ eda_app = typer.Typer(
     help="Generic EDA families against stored profiles.",
     no_args_is_help=True,
 )
+catalog_app = typer.Typer(
+    name="catalog",
+    help="Source catalog — view and edit column descriptions, semantic types, and locks.",
+    no_args_is_help=True,
+)
 app.add_typer(project_app, name="project")
 app.add_typer(resource_app, name="resource")
 app.add_typer(eda_app, name="eda")
+app.add_typer(catalog_app, name="catalog")
 
 console = Console()
 
@@ -398,6 +404,83 @@ def certify(
     if report.newly_certified:
         for qid in report.newly_certified:
             console.print(f"  [green]CERTIFIED[/green]  {qid}")
+
+
+@catalog_app.command("show")
+def catalog_show(
+    source: str = typer.Option(..., "--source", help="Source name."),
+    table: str | None = typer.Option(None, "--table", help="Filter to a single table."),  # noqa: B008
+    store_path: Annotated[
+        Path | None,
+        typer.Option("--store", help="Optional path to the H2 SQLite store."),
+    ] = None,
+) -> None:
+    """Display the source catalog with inferred semantic types and profile stats."""
+    from headwater.services.h2_catalog import get_source_catalog
+
+    store = _open_h2_store(store_path)
+    try:
+        tables = get_source_catalog(store, source, table_name=table)
+    finally:
+        store.close()
+
+    for tbl in tables:
+        console.print(
+            f"\n[bold]{tbl.table_name}[/bold]  "
+            f"{tbl.row_count:,} rows  "
+            f"{len(tbl.columns)} columns"
+        )
+        header = f"{'Column':<28} {'Type':>10} {'Semantic':>14} {'Null%':>6} {'Distinct':>9}"
+        console.print(header)
+        console.print("-" * 80)
+        for col in sorted(tbl.columns, key=lambda c: c.ordinal):
+            lock_mark = "[green]yes[/green]" if col.locked else ""
+            null_pct = f"{col.profile_summary.get('null_pct', 0)}%"
+            distinct = str(col.profile_summary.get("distinct", "?"))
+            console.print(
+                f"{col.column_name:<28} {col.dtype:>10} "
+                f"{col.semantic_type or '—':>14} {null_pct:>6} {distinct:>9}  {lock_mark}"
+            )
+
+
+@catalog_app.command("set")
+def catalog_set(
+    source: str = typer.Option(..., "--source", help="Source name."),
+    table: str = typer.Option(..., "--table", help="Table name."),  # noqa: B008
+    column: str = typer.Option(..., "--column", help="Column name."),  # noqa: B008
+    description: str | None = typer.Option(  # noqa: B008
+        None, "--description", help="Column description."
+    ),
+    semantic_type: str | None = typer.Option(  # noqa: B008
+        None, "--semantic-type", help="Override semantic type."
+    ),
+    lock: bool = typer.Option(False, "--lock", help="Lock column against re-inference."),  # noqa: B008
+    store_path: Annotated[
+        Path | None,
+        typer.Option("--store", help="Optional path to the H2 SQLite store."),
+    ] = None,
+) -> None:
+    """Edit a column's description, semantic type, and/or lock state."""
+    from headwater.services.h2_catalog import update_column
+
+    store = _open_h2_store(store_path)
+    try:
+        update_column(
+            store, source, table, column,
+            description=description,
+            semantic_type=semantic_type,
+            lock=lock or None,
+        )
+    finally:
+        store.close()
+
+    console.print(f"Updated {source}.{table}.{column}")
+    if description:
+        console.print(f"  description: {description[:80]}")
+    if semantic_type:
+        console.print(f"  semantic_type: {semantic_type}")
+    if lock:
+        console.print("  locked: yes")
 
 
 @eda_app.command("run")

@@ -8,21 +8,15 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
-from headwater.analyzer.metadata_retrieval import retrieve_metadata
-from headwater.analyzer.semantic_schema import infer_semantic_schema, roles_for_table
 from headwater.core.models import (
     ColumnInfo,
     ColumnProfile,
-    DatasetContext,
     DiscoveryResult,
-    ProjectContextItem,
-    ProjectContextResource,
     Relationship,
     SourceConfig,
     TableInfo,
 )
 from headwater.core.store import HeadwaterStore
-from headwater.services.context_bootstrap import bootstrap_project_context
 from headwater.services.h2_project_types import (
     _CATEGORY_NAME_HINTS,
     _CATEGORY_ROLES,
@@ -50,6 +44,7 @@ from headwater.services.h2_project_types import (
 from headwater.services.h2_project_types import (
     looks_code_like as _looks_code_like,
 )
+from headwater.services.h2_semantics import infer_source_semantics
 
 
 def propose_relevance(
@@ -68,39 +63,21 @@ def propose_relevance(
     source_view = build_discovery_from_store(store, source_name)
     source_snapshot_id = (store.get_latest_source_snapshot(source_name) or {}).get("id")
     project_goal = _goal_from_project(project)
-    context_bundle = bootstrap_project_context(source_view, project_id=project_id)
-    context_items: list[ProjectContextItem | dict[str, Any]] = [
-        item.model_dump() for item in context_bundle.items
-    ]
-    resources: list[ProjectContextResource | dict[str, Any]] = [
-        resource.model_dump() for resource in context_bundle.resources
-    ]
-    metadata = retrieve_metadata(
-        source_view,
-        context=_dataset_context_from_goal(source_name, project_goal),
-        context_items=context_items,
-        resources=resources,
-    )
-    schema = infer_semantic_schema(
-        source_view,
-        context=_dataset_context_from_goal(source_name, project_goal),
-        project_id=project_id,
-        metadata=metadata,
-    )
+
+    # H2 semantic typing — replaces the H1 analyzer / context-suite dependency
+    semantic_map = infer_source_semantics(store, source_name, project_id=project_id)
 
     selected_table_names = project_sources[0]["selected_tables"] or []
     goal_text = _goal_text(project_goal)
 
     # Load any resource-backed semantic claims and derive context from them.
-    # This is the hook that makes domain vocabulary (definitions, enum mappings)
-    # flow into the relevance engine without hardcoding domain terms.
     existing_claims = store.list_semantic_claims(project_id)
     resource_col_keys, resource_vocabulary = _resource_context_from_claims(existing_claims)
 
     goal_intents = _goal_intents(goal_text, resource_vocabulary=resource_vocabulary)
     relevance_scores = _score_relevance(
         source_view,
-        schema,
+        semantic_map,
         goal_intents,
         selected_table_names,
         resource_col_keys=resource_col_keys,
@@ -131,7 +108,7 @@ def propose_relevance(
         )
     top_questions = _build_question_proposals(
         source_view,
-        schema,
+        semantic_map,
         project_goal,
         relevant_columns,
         selected_tables=selected_table_names,
@@ -246,15 +223,6 @@ def _goal_text(goal: dict[str, Any]) -> str:
     return " ".join(part for part in parts if part).strip().lower()
 
 
-def _dataset_context_from_goal(source_name: str, goal: dict[str, Any]) -> DatasetContext:
-    return DatasetContext(
-        source_name=source_name,
-        row_represents=str(goal.get("statement") or "") or None,
-        time_grain=str(goal.get("time_horizon") or "") or None,
-        lifecycle=str(goal.get("decision") or "") or None,
-        decisions=str(goal.get("decision") or "") or None,
-    )
-
 
 def _goal_intents(
     goal_text: str,
@@ -294,7 +262,7 @@ def _goal_intents(
 
 def _score_relevance(
     discovery: DiscoveryResult,
-    schema,
+    semantic_map: dict[str, str],
     goal_intents: set[str],
     selected_tables: list[str],
     *,
@@ -304,23 +272,10 @@ def _score_relevance(
     known_cols = resource_col_keys or set()
     score_rows: list[H2RelevantColumn] = []
     for table in discovery.tables:
-        table_roles = roles_for_table(schema, table.name)
         for column in table.columns:
             profile = _profile_lookup(discovery, table.name, column.name)
-            role_info = table_roles.get(column.name)
-            role = (
-                role_info.canonical_role
-                if role_info is not None
-                else next(
-                    (
-                        r.canonical_role
-                        for r in schema.columns
-                        if r.table_name == table.name and r.column_name == column.name
-                    ),
-                    None,
-                )
-            )
             col_key = f"{table.name}.{column.name}".lower()
+            role = semantic_map.get(col_key)
             score, reason = _score_column(
                 table.name,
                 column.name,
@@ -430,7 +385,7 @@ def _score_column(
 
 def _build_question_proposals(
     discovery: DiscoveryResult,
-    schema,
+    semantic_map: dict[str, str],
     goal: dict[str, Any],
     relevant_columns: list[H2RelevantColumn],
     *,
