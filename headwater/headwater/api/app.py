@@ -349,6 +349,10 @@ def create_app(*, in_memory: bool = False) -> FastAPI:
     app.include_router(briefing.router, prefix="/api", tags=["briefing"])
     app.include_router(warehouse.router, prefix="/api", tags=["warehouse"])
 
+    # Headwater 2 routes
+    from headwater.api.routes.h2 import router as h2_router  # noqa: PLC0415
+    app.include_router(h2_router, prefix="/api")
+
     @app.get("/api/status")
     async def api_status(request: Request, project_id: str | None = None):
         pipeline = scoped_pipeline(request, project_id)

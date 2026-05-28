@@ -1,0 +1,297 @@
+// Headwater 2 API client
+
+const BASE = "/api/h2";
+
+async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${url}`, init);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`H2 API ${res.status}: ${body}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+async function post<T>(url: string, body?: unknown): Promise<T> {
+  return fetchJSON<T>(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body != null ? JSON.stringify(body) : undefined,
+  });
+}
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+export interface H2Source {
+  name: string;
+  type: string;
+  path: string | null;
+  uri: string | null;
+  latest_snapshot_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface H2CatalogColumn {
+  column_name: string;
+  dtype: string;
+  semantic_type: string;
+  description: string | null;
+  locked: boolean;
+  ordinal: number;
+  profile_summary: Record<string, unknown>;
+}
+
+export interface H2CatalogTable {
+  table_name: string;
+  row_count: number;
+  description: string | null;
+  columns: H2CatalogColumn[];
+}
+
+export interface H2Project {
+  id: string;
+  slug: string;
+  display_name: string;
+  description: string;
+  goal: {
+    statement: string;
+    decision?: string;
+    target_metric?: string;
+    entities?: string[];
+    time_horizon?: string;
+  };
+  created_at: string;
+  updated_at: string;
+  questions?: H2Question[];
+  sources?: Array<{ source_name: string; selected_tables: string[] }>;
+}
+
+export interface H2Question {
+  id: string;
+  project_id: string;
+  title: string;
+  answerability: "answerable" | "answerable_with_caveat" | "cannot_answer";
+  confidence: number;
+  status: string;
+  question: {
+    reason?: string;
+    needed_columns?: string[];
+    col_roles?: Record<string, string>;
+  };
+}
+
+export interface H2ResolveCard {
+  card_id: string;
+  issue_kind: string;
+  priority: "high" | "medium" | "low";
+  title: string;
+  body: string;
+  affected_questions: string[];
+  contract_impacts: string[];
+}
+
+export interface H2Contract {
+  contract_type: string;
+  passed: boolean;
+  note: string;
+}
+
+export interface H2QuestionReadiness {
+  question_id: string;
+  state: "certified" | "draft" | "cannot_answer" | "demoted";
+  readiness_pct: number;
+  summary: string;
+  contracts: H2Contract[];
+}
+
+export interface H2ReadinessReport {
+  project_id: string;
+  source_name: string;
+  source_snapshot_id: string | null;
+  certified_count: number;
+  draft_count: number;
+  cannot_answer_count: number;
+  questions: H2QuestionReadiness[];
+}
+
+export interface H2AnswerDraft {
+  question_id: string;
+  question_title: string;
+  state: "certified" | "draft" | "cannot_answer" | "demoted";
+  confidence: number;
+  sql_text: string | null;
+  chart_spec: Record<string, unknown>;
+  caveats: string[];
+}
+
+export interface H2EdaFinding {
+  col_ref: string;
+  family: string;
+  title: string;
+  confidence: number;
+  effect_size: number;
+  flags: string[];
+}
+
+export interface H2RelevantColumn {
+  table_name: string;
+  column_name: string;
+  semantic_role: string | null;
+  score: number;
+  reason: string;
+}
+
+export interface H2ProposedQuestion {
+  question_id: string;
+  title: string;
+  answerability: string;
+  reason: string;
+  needed_columns: string[];
+  confidence: number;
+}
+
+// ── Sources ────────────────────────────────────────────────────────────────
+
+export const h2 = {
+  sources: {
+    list: () => fetchJSON<H2Source[]>("/sources"),
+    get: (name: string) =>
+      fetchJSON<H2Source & { tables: unknown[]; latest_snapshot: unknown }>(`/sources/${name}`),
+    discover: (path: string, sourceType?: string, name?: string) =>
+      post<{ snapshot_id: string; table_count: number }>("/sources", {
+        path, source_type: sourceType, name,
+      }),
+    catalog: (name: string, table?: string, projectId?: string) => {
+      const params = new URLSearchParams();
+      if (table) params.set("table", table);
+      if (projectId) params.set("project_id", projectId);
+      const qs = params.toString();
+      return fetchJSON<H2CatalogTable[]>(`/sources/${name}/catalog${qs ? `?${qs}` : ""}`);
+    },
+    updateColumn: (
+      sourceName: string,
+      tableName: string,
+      columnName: string,
+      update: { description?: string; semantic_type?: string; locked?: boolean }
+    ) =>
+      fetchJSON<{ updated: string }>(
+        `/sources/${sourceName}/catalog/${tableName}/${columnName}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(update),
+        }
+      ),
+  },
+
+  projects: {
+    list: () => fetchJSON<H2Project[]>("/projects"),
+    get: (id: string) => fetchJSON<H2Project>(`/projects/${id}`),
+    frame: (req: {
+      project_id: string;
+      source_name: string;
+      display_name: string;
+      goal: string;
+      decision?: string;
+      target_metric?: string;
+      entities?: string[];
+      time_horizon?: string;
+      selected_tables?: string[];
+    }) =>
+      post<{
+        project_id: string;
+        relevant_columns: H2RelevantColumn[];
+        proposed_questions: H2ProposedQuestion[];
+        notes: string[];
+      }>("/projects", req),
+    rerunRelevance: (id: string) =>
+      post<{
+        relevant_columns: H2RelevantColumn[];
+        proposed_questions: H2ProposedQuestion[];
+      }>(`/projects/${id}/relevance`),
+
+    resolve: {
+      build: (id: string) => post<H2ResolveCard[]>(`/projects/${id}/resolve`),
+      list: (id: string) => fetchJSON<H2ResolveCard[]>(`/projects/${id}/resolve`),
+    },
+
+    readiness: {
+      evaluate: (id: string) => post<H2ReadinessReport>(`/projects/${id}/readiness`),
+    },
+
+    eda: {
+      run: (id: string) =>
+        post<{ findings_count: number; insight_confidence_score: number; top_findings: H2EdaFinding[] }>(
+          `/projects/${id}/eda`
+        ),
+    },
+
+    answer: {
+      draft: (id: string) =>
+        post<{ certified_count: number; draft_count: number; cannot_answer_count: number; answers: H2AnswerDraft[] }>(
+          `/projects/${id}/answer`
+        ),
+    },
+
+    certify: {
+      check: (id: string) =>
+        post<{ demotions: Array<{ question_id: string; question_title: string; drift_summary: string }>; newly_certified: string[]; has_drift: boolean }>(
+          `/projects/${id}/certify`
+        ),
+    },
+
+    report: {
+      get: (id: string) => fetch(`${BASE}/projects/${id}/report`).then(r => r.text()),
+    },
+
+    resources: {
+      list: (id: string) => fetchJSON<Array<{ path: string; format: string; ingested_at: string }>>(`/projects/${id}/resources`),
+      ingest: async (id: string, file: File, lock = false) => {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch(`${BASE}/projects/${id}/resources?lock=${lock}`, {
+          method: "POST",
+          body: form,
+        });
+        if (!res.ok) throw new Error(`H2 API ${res.status}: ${await res.text()}`);
+        return res.json();
+      },
+    },
+  },
+};
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+export function trustBadge(readiness?: H2ReadinessReport | null): {
+  label: string;
+  pct: number;
+  color: string;
+} {
+  if (!readiness) return { label: "Not started", pct: 0, color: "text-gray-400" };
+  const total = readiness.questions.length;
+  if (total === 0) return { label: "No questions", pct: 0, color: "text-gray-400" };
+  const certified = readiness.certified_count;
+  const pct = Math.round((certified / total) * 100);
+  if (pct === 100) return { label: "Certified", pct, color: "text-green-600" };
+  if (pct >= 60) return { label: "Forming", pct, color: "text-yellow-600" };
+  if (pct >= 20) return { label: "Low", pct, color: "text-orange-500" };
+  return { label: "Not started", pct, color: "text-gray-400" };
+}
+
+export function stateColor(state: string): string {
+  switch (state) {
+    case "certified": return "text-green-700 bg-green-50 border-green-200";
+    case "draft": return "text-yellow-700 bg-yellow-50 border-yellow-200";
+    case "cannot_answer": return "text-red-700 bg-red-50 border-red-200";
+    case "demoted": return "text-orange-700 bg-orange-50 border-orange-200";
+    default: return "text-gray-600 bg-gray-50 border-gray-200";
+  }
+}
+
+export function priorityColor(priority: string): string {
+  switch (priority) {
+    case "high": return "text-red-700 bg-red-50";
+    case "medium": return "text-yellow-700 bg-yellow-50";
+    default: return "text-gray-600 bg-gray-50";
+  }
+}
