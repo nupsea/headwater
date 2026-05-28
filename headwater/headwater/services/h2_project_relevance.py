@@ -512,6 +512,7 @@ def _build_question_proposals(
                 reason="Temporal columns and a measurable signal are available.",
                 needed_columns=[time_candidate, measure_candidate],
                 confidence=0.9,
+                col_roles={_cr(time_candidate): "event_ts", _cr(measure_candidate): "measure"},
             )
         )
 
@@ -537,6 +538,10 @@ def _build_question_proposals(
                 reason=caveat,
                 needed_columns=[category_candidate, measure_candidate],
                 confidence=0.84 if answerability == "answerable" else 0.74,
+                col_roles={
+                    _cr(category_candidate): "categorical",
+                    _cr(measure_candidate): "measure",
+                },
             )
         )
 
@@ -553,6 +558,10 @@ def _build_question_proposals(
                 reason="The source includes a stable entity key and a measurable outcome.",
                 needed_columns=[entity_candidate, measure_candidate],
                 confidence=0.81,
+                col_roles={
+                    _cr(entity_candidate): "identifier",
+                    _cr(measure_candidate): "measure",
+                },
             )
         )
 
@@ -573,6 +582,10 @@ def _build_question_proposals(
                         else [time_candidate]
                     ),
                     confidence=0.7,
+                    col_roles={
+                        _cr(time_candidate): "event_ts",
+                        **({_cr(measure_candidate): "measure"} if measure_candidate else {}),
+                    },
                 )
             )
         else:
@@ -592,6 +605,7 @@ def _build_question_proposals(
                     confidence=0.2,
                     snapshot_id=source_snapshot_id,
                     is_gap=True,
+                    col_roles={_cr(time_candidate): "event_ts"} if time_candidate else {},
                 )
             )
 
@@ -611,6 +625,10 @@ def _build_question_proposals(
                 ),
                 needed_columns=[resource_candidate, measure_candidate],
                 confidence=0.72,
+                col_roles={
+                    _cr(resource_candidate): "categorical",
+                    _cr(measure_candidate): "measure",
+                },
             )
         )
 
@@ -633,6 +651,10 @@ def _build_question_proposals(
                 ),
                 needed_columns=[workflow_candidate, measure_candidate],
                 confidence=0.64,
+                col_roles={
+                    _cr(workflow_candidate): "categorical",
+                    _cr(measure_candidate): "measure",
+                },
             )
         )
 
@@ -659,6 +681,15 @@ def _build_question_proposals(
     return proposals[:4]
 
 
+def _cr(col: H2RelevantColumn | str | None) -> str:
+    """Return a 'table.column' string from either a column object or a ref string."""
+    if col is None:
+        return ""
+    if isinstance(col, H2RelevantColumn):
+        return f"{col.table_name}.{col.column_name}"
+    return str(col)
+
+
 def _persist_question(
     store: HeadwaterStore,
     project_id: str,
@@ -672,6 +703,7 @@ def _persist_question(
     confidence: float,
     snapshot_id: str | None = None,
     is_gap: bool = False,
+    col_roles: dict[str, str] | None = None,
 ) -> H2QuestionProposal:
     full_id = f"{project_id}:{question_id}"
     needed = [
@@ -686,6 +718,7 @@ def _persist_question(
             "title": title,
             "reason": reason,
             "needed_columns": needed,
+            "col_roles": col_roles or {},
             "answerability": answerability,
             "source_snapshot_id": snapshot_id,
         },

@@ -294,6 +294,51 @@ def report(
         store.close()
 
 
+@app.command()
+def answer(
+    project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
+    store_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--store",
+            help="Optional path to the H2 SQLite store. Defaults to ~/.headwater/h2_metadata.db.",
+        ),
+    ] = None,
+) -> None:
+    """Draft SQL answers and chart specs for all project questions."""
+    from headwater.services.h2_answer import draft_project_answers
+
+    store = _open_h2_store(store_path)
+    try:
+        result = draft_project_answers(store, project_id)
+    finally:
+        store.close()
+
+    console.print(
+        f"\n[bold]Answers for {project_id}[/bold]  "
+        f"Certified: {result.certified_count}  "
+        f"Draft: {result.draft_count}  "
+        f"Cannot answer: {result.cannot_answer_count}\n"
+    )
+    for ans in result.answers:
+        state_color = (
+            "green" if ans.state == "certified"
+            else "red" if ans.state == "cannot_answer"
+            else "yellow"
+        )
+        stamp = f"[{state_color}]{ans.state.upper().replace('_', ' ')}[/{state_color}]"
+        console.print(f"{stamp} ({int(ans.confidence * 100)}%)  {ans.question_title}")
+        if ans.caveats:
+            for caveat in ans.caveats:
+                console.print(f"  [yellow]Caveat:[/yellow] {caveat}")
+        if ans.sql_text:
+            console.print(f"  Chart: {ans.chart_spec.get('type', '?')}")
+            console.print()
+            for line in ans.sql_text.splitlines():
+                console.print(f"    {line}")
+        console.print()
+
+
 @resource_app.command("add")
 def resource_add(
     project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
