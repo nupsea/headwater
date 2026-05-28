@@ -25,8 +25,14 @@ resource_app = typer.Typer(
     help="Resource intake and semantic claim fusion.",
     no_args_is_help=True,
 )
+eda_app = typer.Typer(
+    name="eda",
+    help="Generic EDA families against stored profiles.",
+    no_args_is_help=True,
+)
 app.add_typer(project_app, name="project")
 app.add_typer(resource_app, name="resource")
+app.add_typer(eda_app, name="eda")
 
 console = Console()
 
@@ -392,6 +398,52 @@ def certify(
     if report.newly_certified:
         for qid in report.newly_certified:
             console.print(f"  [green]CERTIFIED[/green]  {qid}")
+
+
+@eda_app.command("run")
+def eda_run(
+    project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
+    top: int = typer.Option(10, "--top", help="Number of top findings to display."),  # noqa: B008
+    store_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--store",
+            help="Optional path to the H2 SQLite store. Defaults to ~/.headwater/h2_metadata.db.",
+        ),
+    ] = None,
+) -> None:
+    """Run generic EDA families and update the insight_confidence contract."""
+    from headwater.services.h2_eda import run_eda
+
+    store = _open_h2_store(store_path)
+    try:
+        report = run_eda(store, project_id)
+    finally:
+        store.close()
+
+    console.print(
+        f"\n[bold]EDA for {project_id}[/bold]  "
+        f"{len(report.findings)} finding(s), "
+        f"insight confidence {report.insight_confidence_score:.0%}\n"
+    )
+    if report.critical_findings:
+        console.print(f"[red]{len(report.critical_findings)} critical finding(s)[/red]")
+        for f in report.critical_findings[:3]:
+            console.print(f"  [red]CRITICAL[/red]  {f.title}")
+            console.print(f"    {f.detail[:120]}")
+        console.print()
+
+    console.print(f"[bold]Top {min(top, len(report.findings))} findings[/bold]")
+    for finding in report.findings[:top]:
+        flag_str = f" [{', '.join(finding.flags[:2])}]" if finding.flags else ""
+        console.print(
+            f"  {finding.family:14} eff={finding.effect_size:.2f} "
+            f"conf={finding.confidence:.2f}  {finding.title}{flag_str}"
+        )
+    console.print(
+        f"\nRun [bold]hw2 readiness --project-id {project_id}[/bold] "
+        "to see updated contract state."
+    )
 
 
 @resource_app.command("add")

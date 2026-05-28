@@ -31,17 +31,19 @@ ContractType = Literal[
     "structural_integrity",
     "no_misleading",
     "definition_consistent",
+    "insight_confidence",
 ]
 
 QuestionState = Literal["certified", "draft", "cannot_answer", "demoted"]
 
 _HIGH_NULL_THRESHOLD = 0.50
 _CONTRACT_WEIGHT: dict[ContractType, int] = {
-    "columns_profiled": 25,
-    "no_blocking_gaps": 25,
+    "columns_profiled": 20,
+    "no_blocking_gaps": 20,
     "structural_integrity": 20,
     "no_misleading": 15,
     "definition_consistent": 15,
+    "insight_confidence": 10,
 }
 
 
@@ -116,6 +118,14 @@ def evaluate_project_readiness(
     }
     conflicting_cols: set[str] = _find_conflicting_claims(claims)
 
+    # Load stored EDA insight_confidence contracts (written by hw2 eda run)
+    eda_contracts: dict[str, dict[str, Any]] = {}
+    for q in questions:
+        stored = store.list_readiness_contracts(q["id"])
+        eda = next((c for c in stored if c["contract_type"] == "insight_confidence"), None)
+        if eda:
+            eda_contracts[q["id"]] = eda
+
     question_results: list[QuestionReadiness] = []
     for q in questions:
         result = evaluate_question(
@@ -124,6 +134,7 @@ def evaluate_project_readiness(
             high_priority_open=high_priority_open,
             conflicting_cols=conflicting_cols,
             snapshot_id=snapshot_id,
+            eda_contract=eda_contracts.get(q["id"]),
         )
         _persist_verdict(store, result)
         question_results.append(result)
@@ -143,6 +154,7 @@ def evaluate_question(
     high_priority_open: set[str],
     conflicting_cols: set[str],
     snapshot_id: str | None,
+    eda_contract: dict[str, Any] | None = None,
 ) -> QuestionReadiness:
     question_id = question["id"]
     answerability = question.get("answerability", "answerable")
@@ -164,6 +176,7 @@ def evaluate_question(
         profile_map=profile_map,
         high_priority_open=high_priority_open,
         conflicting_cols=conflicting_cols,
+        eda_contract=eda_contract,
     )
 
     readiness_pct = _compute_readiness_pct(contracts)
@@ -186,6 +199,7 @@ def _evaluate_contracts(
     profile_map: dict[str, dict[str, Any]],
     high_priority_open: set[str],
     conflicting_cols: set[str],
+    eda_contract: dict[str, Any] | None = None,
 ) -> list[ContractResult]:
     results: list[ContractResult] = []
 
@@ -263,6 +277,27 @@ def _evaluate_contracts(
             evidence={"conflicting_columns": conflicting},
         )
     )
+
+    # 6. insight_confidence — populated by the EDA runner when it has been executed.
+    # Defaults to passing with a note so questions are not blocked before EDA runs.
+    if eda_contract:
+        results.append(
+            ContractResult(
+                contract_type="insight_confidence",
+                passed=bool(eda_contract.get("passed")),
+                note=str(eda_contract.get("note") or "EDA confidence score available."),
+                evidence=dict(eda_contract.get("evidence") or {}),
+            )
+        )
+    else:
+        results.append(
+            ContractResult(
+                contract_type="insight_confidence",
+                passed=True,
+                note="EDA not yet run; defaulting to pass. Run `hw2 eda` to compute.",
+                evidence={},
+            )
+        )
 
     return results
 
