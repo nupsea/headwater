@@ -84,6 +84,7 @@ def frame_project(
         },
     )
     _write_project_spec(spec, settings=settings)
+    _bootstrap_profile_claims(store, project_id, source_name, snapshot_id)
     return spec
 
 
@@ -111,3 +112,79 @@ def _write_project_spec(
 
 def _asdict(spec: H2ProjectSpec) -> dict[str, Any]:
     return asdict(spec)
+
+
+# ── Profile-based claim bootstrapping ────────────────────────────────────────
+
+_CODE_MAX_DISTINCT = 30
+_CODE_MAX_AVG_LEN = 4.0
+_CODE_MAX_UNIQUENESS = 0.05
+
+
+def _bootstrap_profile_claims(
+    store: HeadwaterStore,
+    project_id: str,
+    source_name: str,
+    snapshot_id: str | None,
+) -> int:
+    """Auto-create proposed semantic claims from profile statistics at project creation.
+
+    Detects code-like columns (short varchar, few distinct values, low uniqueness)
+    and creates a proposed enum_mapping claim with the known code values but empty
+    meanings.  The user fills in meanings via resource intake (hw2 resource add)
+    or by editing the claim directly.
+
+    Returns the number of bootstrap claims created.
+    """
+    profiles = store.get_profiles(source_name)
+    existing_claim_ids = {c["id"] for c in store.list_semantic_claims(project_id)}
+    created = 0
+
+    for p in profiles:
+        profile = p.get("profile") or {}
+        dtype = profile.get("dtype", "").lower()
+        if dtype not in ("varchar", "text", "string", "category"):
+            continue
+        distinct = int(profile.get("distinct_count") or 0)
+        avg_len = float(profile.get("avg_length") or 0.0)
+        uniqueness = float(profile.get("uniqueness_ratio") or 0.0)
+        top_values = profile.get("top_values") or []
+
+        if not (
+            distinct >= 2
+            and distinct <= _CODE_MAX_DISTINCT
+            and avg_len <= _CODE_MAX_AVG_LEN
+            and uniqueness <= _CODE_MAX_UNIQUENESS
+            and top_values
+        ):
+            continue
+
+        table_name = p["table_name"]
+        col_name = p["column_name"]
+        claim_id = f"{project_id}:bootstrap:{table_name}.{col_name}:enum_mapping"
+        if claim_id in existing_claim_ids:
+            continue
+
+        # Codes are known from profile; meanings are empty — user fills them in.
+        known_codes = {str(v[0]): "" for v in top_values[:8] if v}
+        store.upsert_semantic_claim(
+            claim_id,
+            project_id=project_id,
+            source_name=source_name,
+            scope_type="column",
+            table_name=table_name,
+            column_name=col_name,
+            claim_type="enum_mapping",
+            claim={
+                "value": known_codes,
+                "note": "Codes detected from profile. Add meanings via resource intake.",
+                "snapshot_id": snapshot_id,
+            },
+            status="proposed",
+            confidence=0.30,
+            source="bootstrap:profile",
+            locked=False,
+        )
+        created += 1
+
+    return created

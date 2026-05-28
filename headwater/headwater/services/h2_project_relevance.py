@@ -90,8 +90,21 @@ def propose_relevance(
 
     selected_table_names = project_sources[0]["selected_tables"] or []
     goal_text = _goal_text(project_goal)
-    goal_intents = _goal_intents(goal_text)
-    relevance_scores = _score_relevance(source_view, schema, goal_intents, selected_table_names)
+
+    # Load any resource-backed semantic claims and derive context from them.
+    # This is the hook that makes domain vocabulary (definitions, enum mappings)
+    # flow into the relevance engine without hardcoding domain terms.
+    existing_claims = store.list_semantic_claims(project_id)
+    resource_col_keys, resource_vocabulary = _resource_context_from_claims(existing_claims)
+
+    goal_intents = _goal_intents(goal_text, resource_vocabulary=resource_vocabulary)
+    relevance_scores = _score_relevance(
+        source_view,
+        schema,
+        goal_intents,
+        selected_table_names,
+        resource_col_keys=resource_col_keys,
+    )
     relevant_columns = sorted(
         relevance_scores,
         key=lambda item: (-item.score, item.table_name, item.column_name),
@@ -243,22 +256,38 @@ def _dataset_context_from_goal(source_name: str, goal: dict[str, Any]) -> Datase
     )
 
 
-def _goal_intents(goal_text: str) -> set[str]:
-    tokens = set(re.findall(r"[a-z0-9]+", goal_text.lower()))
+def _goal_intents(
+    goal_text: str,
+    *,
+    resource_vocabulary: set[str] | None = None,
+) -> set[str]:
+    """Derive goal intents from the goal text plus any resource vocabulary.
+
+    Resource vocabulary comes from user-provided definitions (ingested via S6).
+    Those words flow through the same generic hint sets — no new domain logic
+    is added here.
+    """
+    goal_tokens = set(re.findall(r"[a-z0-9]+", goal_text.lower()))
+    # Resource vocabulary extends goal context without hardcoding domain terms.
+    # e.g. if a data dictionary defines "workflow step" or "duration", those
+    # words may trigger the same generic intent detection as if they were in
+    # the goal text itself.
+    all_tokens = goal_tokens | (resource_vocabulary or set())
+
     intents: set[str] = set()
-    if tokens & _GOAL_TIME_HINTS:
+    if all_tokens & _GOAL_TIME_HINTS:
         intents.add("time")
-    if tokens & _GOAL_SEGMENT_HINTS:
+    if all_tokens & _GOAL_SEGMENT_HINTS:
         intents.add("segment")
-    if tokens & _GOAL_WORKFLOW_HINTS:
+    if all_tokens & _GOAL_WORKFLOW_HINTS:
         intents.add("workflow")
-    if tokens & _GOAL_QUALITY_HINTS:
+    if all_tokens & _GOAL_QUALITY_HINTS:
         intents.add("quality")
-    if any(term in goal_text for term in ("utilization", "throughput", "capacity")):
+    if all_tokens & {"utilization", "throughput", "capacity"}:
         intents.add("utilization")
-    if any(term in goal_text for term in ("compare", "breakdown", "longest", "highest", "worst")):
+    if goal_tokens & {"compare", "breakdown", "longest", "highest", "worst"}:
         intents.add("compare")
-    if any(term in goal_text for term in ("entity", "customer", "subject", "device", "site")):
+    if all_tokens & {"entity", "customer", "subject", "device", "site"}:
         intents.add("entity")
     return intents
 
@@ -268,8 +297,11 @@ def _score_relevance(
     schema,
     goal_intents: set[str],
     selected_tables: list[str],
+    *,
+    resource_col_keys: set[str] | None = None,
 ) -> list[H2RelevantColumn]:
     selected = set(selected_tables)
+    known_cols = resource_col_keys or set()
     score_rows: list[H2RelevantColumn] = []
     for table in discovery.tables:
         table_roles = roles_for_table(schema, table.name)
@@ -288,6 +320,7 @@ def _score_relevance(
                     None,
                 )
             )
+            col_key = f"{table.name}.{column.name}".lower()
             score, reason = _score_column(
                 table.name,
                 column.name,
@@ -295,6 +328,7 @@ def _score_relevance(
                 profile,
                 goal_intents,
                 selected_tables=selected,
+                resource_defined=col_key in known_cols,
             )
             score_rows.append(
                 H2RelevantColumn(
@@ -317,6 +351,7 @@ def _score_column(
     goal_intents: set[str],
     *,
     selected_tables: set[str],
+    resource_defined: bool = False,
 ) -> tuple[float, str]:
     score = 0.0
     reasons: list[str] = []
@@ -326,6 +361,13 @@ def _score_column(
     if table_name in selected_tables:
         score += 2.0
         reasons.append("preselected")
+
+    # Boost columns that the user has defined in a resource file.
+    # This replaces hardcoded domain-specific column name hints —
+    # the score comes from what the user told us, not from the engine.
+    if resource_defined:
+        score += 0.6
+        reasons.append("resource-defined")
 
     if any(hint in name for hint in _GEOGRAPHIC_HINTS):
         score += 0.3
@@ -1083,3 +1125,55 @@ def _find_named_column(discovery: DiscoveryResult, hints: set[str]) -> str | Non
                     continue
                 return f"{table.name}.{column.name}"
     return None
+
+
+# ── Resource context helpers ──────────────────────────────────────────────────
+
+_DEFINITION_STOP_WORDS = frozenset({
+    "the", "and", "for", "are", "was", "were", "has", "have", "had",
+    "its", "with", "from", "this", "that", "which", "each", "all",
+    "can", "may", "will", "used", "been", "per", "not", "but", "also",
+    "into", "than", "more", "over", "when", "where", "how", "any",
+})
+
+
+def _resource_context_from_claims(
+    claims: list[dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    """Extract resource-backed column keys and domain vocabulary from project claims.
+
+    Returns:
+        resource_col_keys: set of "table.column" strings that have at least one
+            claim sourced from a user-provided resource file.
+        resource_vocabulary: set of meaningful words extracted from the text of
+            resource-backed definition claims.  These words flow through the same
+            generic intent hint sets as the goal text — no new domain logic is added.
+
+    This is the bridge that lets a user's data dictionary improve relevance and intent
+    detection without any domain-specific code in the engine.
+    """
+    resource_col_keys: set[str] = set()
+    vocab_words: set[str] = set()
+
+    for claim in claims:
+        if not str(claim.get("source", "")).startswith("resource:"):
+            continue
+
+        table = claim.get("table_name")
+        col = claim.get("column_name")
+        if table and col:
+            resource_col_keys.add(f"{table}.{col}".lower())
+
+        # Extract vocabulary from definition text so the goal intent engine
+        # can pick up domain-specific workflow/time/segment signals that the
+        # user documented but did not spell out in the goal statement.
+        if claim.get("claim_type") == "definition":
+            value = claim.get("claim", {}).get("value")
+            if isinstance(value, str):
+                words = {
+                    w for w in re.findall(r"[a-z][a-z0-9]+", value.lower())
+                    if w not in _DEFINITION_STOP_WORDS and len(w) >= 3
+                }
+                vocab_words |= words
+
+    return resource_col_keys, vocab_words

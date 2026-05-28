@@ -153,6 +153,7 @@ def project_frame(
     console.print(f"Spec: {settings.data_dir / 'projects' / f'{project_id}.yaml'}")
     console.print(f"Selected tables: {', '.join(spec.selected_tables) or 'none yet'}")
     _print_relevance_result(relevance)
+    _print_bootstrap_hints(store_path, project_id)
 
 
 @project_app.command("relevance")
@@ -382,6 +383,36 @@ def _open_h2_store(store_path: Path | None = None):
     store = HeadwaterStore(path)
     store.init()
     return store
+
+
+def _print_bootstrap_hints(store_path: Path | None, project_id: str) -> None:
+    """Print guidance when bootstrap claims were created from profile data."""
+    store = _open_h2_store(store_path)
+    try:
+        claims = store.list_semantic_claims(project_id)
+    finally:
+        store.close()
+
+    bootstrap_cols = [
+        f"{c['table_name']}.{c['column_name']}"
+        for c in claims
+        if c.get("source") == "bootstrap:profile"
+        and c.get("claim_type") == "enum_mapping"
+    ]
+    if not bootstrap_cols:
+        return
+    console.print(
+        f"\n[bold]Bootstrap hints[/bold]: {len(bootstrap_cols)} code-like column(s) "
+        "detected from profile data."
+    )
+    for col in bootstrap_cols[:5]:
+        console.print(f"  {col}")
+    if len(bootstrap_cols) > 5:
+        console.print(f"  ... and {len(bootstrap_cols) - 5} more")
+    console.print(
+        "\nProvide definitions and code meanings with:\n"
+        f"  hw2 resource add --project-id {project_id} --path <your-dictionary.md>"
+    )
 
 
 def _print_relevance_result(relevance) -> None:
