@@ -339,6 +339,61 @@ def answer(
         console.print()
 
 
+@app.command()
+def certify(
+    project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
+    store_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--store",
+            help="Optional path to the H2 SQLite store. Defaults to ~/.headwater/h2_metadata.db.",
+        ),
+    ] = None,
+) -> None:
+    """Re-evaluate readiness and auto-demote certified questions whose contracts now fail."""
+    from headwater.services.h2_certify import evaluate_and_certify
+
+    store = _open_h2_store(store_path)
+    try:
+        report = evaluate_and_certify(store, project_id)
+    finally:
+        store.close()
+
+    if report.snapshot_diff and report.snapshot_diff.has_changes:
+        console.print(
+            f"\n[yellow]Drift detected[/yellow] — "
+            f"{len(report.snapshot_diff.profile_drifts)} profile change(s):"
+        )
+        for d in report.snapshot_diff.profile_drifts[:5]:
+            console.print(f"  {d.description}")
+    else:
+        console.print("\nNo profile drift detected since the last snapshot.")
+
+    if report.demotions:
+        console.print(
+            f"\n[red]Demoted {len(report.demotions)} question(s)[/red] "
+            f"(previously certified):\n"
+        )
+        for rec in report.demotions:
+            console.print(f"  [red]DEMOTED[/red]  {rec.question_title}")
+            console.print(f"    Was certified under: {rec.prior_snapshot_id}")
+            console.print(f"    Reason: {rec.drift_summary[:120]}")
+            console.print()
+    elif report.newly_certified:
+        console.print(
+            f"\n[green]{len(report.newly_certified)} question(s) newly certified.[/green]"
+        )
+    else:
+        console.print(
+            f"\n[green]All certified questions remain valid.[/green] "
+            f"({len(report.unchanged)} unchanged)"
+        )
+
+    if report.newly_certified:
+        for qid in report.newly_certified:
+            console.print(f"  [green]CERTIFIED[/green]  {qid}")
+
+
 @resource_app.command("add")
 def resource_add(
     project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
