@@ -29,7 +29,6 @@ _RESOURCE_HINTS = {
     "site",
     "location",
     "zone",
-    "modality",
     "sensor",
     "channel",
     "team",
@@ -76,11 +75,12 @@ _GOAL_WORKFLOW_HINTS = {
     "process",
     "step",
     "flow",
-    "registration",
     "throughput",
     "bottleneck",
     "utilization",
     "coverage",
+    "pipeline",
+    "queue",
 }
 _GOAL_QUALITY_HINTS = {
     "quality",

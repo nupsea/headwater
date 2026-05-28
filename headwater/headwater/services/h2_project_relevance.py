@@ -258,7 +258,7 @@ def _goal_intents(goal_text: str) -> set[str]:
         intents.add("utilization")
     if any(term in goal_text for term in ("compare", "breakdown", "longest", "highest", "worst")):
         intents.add("compare")
-    if any(term in goal_text for term in ("entity", "customer", "patient", "device", "site")):
+    if any(term in goal_text for term in ("entity", "customer", "subject", "device", "site")):
         intents.add("entity")
     return intents
 
@@ -837,7 +837,7 @@ def _find_metric_column(
     search_terms = {
         token
         for token in re.findall(r"[a-z0-9]+", target_metric.lower())
-        if token not in {"inspection", "project", "source", "data", "table", "record", "row"}
+        if token not in {"project", "source", "data", "table", "record", "row", "value"}
     }
     if not search_terms:
         return None
@@ -922,13 +922,14 @@ def _find_entity_candidate(
         "zone",
         "location",
         "sensor",
-        "patient",
+        "subject",
         "customer",
         "device",
         "program",
         "project",
+        "entity",
     }
-    if any(token in goal_text for token in ("inspection", "site", "zone", "sensor", "patient")):
+    if any(token in goal_text for token in ("site", "zone", "sensor", "asset", "unit")):
         hints |= {"site", "zone", "sensor"}
     if focus_table is not None:
         candidate = _find_named_column_in_table(discovery, focus_table, hints)

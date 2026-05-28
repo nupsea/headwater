@@ -80,3 +80,43 @@ def test_production_package_does_not_contain_fixture_specific_dataset_terms():
                 leaks.append(f"{path.relative_to(ROOT)}:{term}")
 
     assert leaks == []
+
+
+def test_h2_service_modules_do_not_contain_domain_specific_terms():
+    """H2 service modules must never reference specific domain entities.
+
+    Domain context belongs in user-provided project resources (data/<domain>/) —
+    not hardcoded in generic engine logic.
+    """
+    h2_service_paths = list((PACKAGE_ROOT / "services").glob("h2_*.py"))
+    forbidden_terms = [
+        "patient",
+        "hospital",
+        "radiology",
+        "modality",
+        "inspection",
+        "movielens",
+        "movie",
+        "rating",
+        "pickup",
+        "dropoff",
+        "taxi",
+        "fare",
+    ]
+    leaks: list[str] = []
+    for path in h2_service_paths:
+        content = path.read_text().lower()
+        for term in forbidden_terms:
+            # Allow occurrences only inside comments or docstrings that serve as
+            # illustrative examples — flag actual string literals and logic
+            for lineno, line in enumerate(content.splitlines(), 1):
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    continue  # comment lines are fine
+                if re.search(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", line):
+                    leaks.append(f"{path.relative_to(ROOT)}:{lineno}:{term}")
+
+    assert leaks == [], (
+        "H2 service modules contain domain-specific terms. "
+        "Move domain context to project resource files under data/<domain>/."
+    )

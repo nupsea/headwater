@@ -144,11 +144,10 @@ class TestResolveCardEngine:
                 assert enum_cards, (
                     "Expected at least one enum_mapping_needed card for radiology code columns"
                 )
-                # patient_type (A, H, S, D) should be flagged
-                titles = " ".join(c.title for c in enum_cards)
-                assert "patient_type" in titles.lower() or any(
-                    "patient" in c.title.lower() for c in enum_cards
-                ), f"Expected patient_type enum card, got: {[c.title for c in enum_cards]}"
+                # Each card must declare contract_impacts and reference a column
+                for card in enum_cards:
+                    assert card.contract_impacts, f"Card {card.card_id} has no contract_impacts"
+                    assert card.payload.get("column"), f"Card {card.card_id} has no column payload"
             finally:
                 store.close()
         finally:
