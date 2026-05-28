@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_ROOT = ROOT / "headwater"
 
 
 def _read(relative_path: str) -> str:
@@ -54,5 +55,28 @@ def test_generic_runtime_modules_do_not_reintroduce_domain_lens_vocabulary():
         for term in forbidden_terms:
             if re.search(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", content):
                 leaks.append(f"{relative_path}:{term}")
+
+    assert leaks == []
+
+
+def test_production_package_does_not_contain_fixture_specific_dataset_terms():
+    forbidden_terms = [
+        "radiology",
+        "movielens",
+        "nytaxi",
+        "taxi",
+        "patient_type h",
+        "ny taxi",
+        "tlc",
+    ]
+
+    leaks: list[str] = []
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        content = path.read_text().lower()
+        for term in forbidden_terms:
+            if re.search(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", content):
+                leaks.append(f"{path.relative_to(ROOT)}:{term}")
 
     assert leaks == []

@@ -27,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 headwater = "headwater.cli.main:app"
+hw2 = "headwater.cli.hw2:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -44,6 +45,7 @@ testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.409",
     "pytest>=8.0",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.5",

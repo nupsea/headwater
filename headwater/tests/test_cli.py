@@ -6,7 +6,9 @@ import json
 
 from typer.testing import CliRunner
 
+from headwater.cli.hw2 import app as hw2_app
 from headwater.cli.main import app
+from headwater.core.store import HeadwaterStore
 
 runner = CliRunner()
 
@@ -30,6 +32,52 @@ class TestCLIBasic:
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0
         assert "LLM provider" in result.output
+
+
+class TestHW2CLI:
+    def test_help(self):
+        result = runner.invoke(hw2_app, ["--help"])
+        assert result.exit_code == 0
+        assert "Headwater 2" in result.output
+
+    def test_version(self):
+        result = runner.invoke(hw2_app, ["version"])
+        assert result.exit_code == 0
+        assert result.output.startswith("hw2 ")
+
+    def test_status(self):
+        result = runner.invoke(hw2_app, ["status"])
+        assert result.exit_code == 0
+        assert "scaffold is active" in result.output
+
+    def test_discover_persists_source_metadata(self, tmp_path):
+        store_path = tmp_path / "h2_metadata.db"
+        result = runner.invoke(
+            hw2_app,
+            [
+                "discover",
+                "--source",
+                SAMPLE_DATA,
+                "--type",
+                "json",
+                "--store",
+                str(store_path),
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Persisted" in result.output
+
+        store = HeadwaterStore(store_path)
+        try:
+            store.init()
+            source = store.get_source("sample")
+            assert source is not None
+            assert source["type"] == "json"
+            assert store.get_latest_source_snapshot("sample") is not None
+            assert len(store.get_tables("sample")) > 0
+            assert len(store.get_profiles("sample")) > 0
+        finally:
+            store.close()
 
 
 class TestCLIDemo:

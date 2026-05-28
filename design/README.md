@@ -11,6 +11,7 @@ these are vetted (see memory: design-first-workflow).
 | [HEADWATER2_PERSONAS.md](HEADWATER2_PERSONAS.md) | Persona problems mapped to lifecycle + modules, externally validated |
 | [HEADWATER2_AUDIT.md](HEADWATER2_AUDIT.md) | H1 code audit — keep / mine / cut against the H2 model |
 | [HEADWATER2_BUILD.md](HEADWATER2_BUILD.md) | Package layout, test bed, staged build plan (gated), information architecture |
+| [HEADWATER2_IMPLEMENTATION_PLAN.md](HEADWATER2_IMPLEMENTATION_PLAN.md) | Execution plan — architecture rules, data model, stages, verification gates, dataset-agnostic safeguards |
 | [HEADWATER2_UX.md](HEADWATER2_UX.md) | Guided workflow + UX flows, wireframes, IA, anti-overload rules |
 | [h1-capabilities-to-reuse.md](h1-capabilities-to-reuse.md) | Which H1 inspection capabilities to bring forward, and status |
 | [prototype/Headwater2_refined.html](prototype/Headwater2_refined.html) | Current clickable prototype — refined readiness workspace (open directly, no build step) |
