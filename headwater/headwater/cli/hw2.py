@@ -20,7 +20,13 @@ project_app = typer.Typer(
     help="Project framing and relevance.",
     no_args_is_help=True,
 )
+resource_app = typer.Typer(
+    name="resource",
+    help="Resource intake and semantic claim fusion.",
+    no_args_is_help=True,
+)
 app.add_typer(project_app, name="project")
+app.add_typer(resource_app, name="resource")
 
 console = Console()
 
@@ -285,6 +291,80 @@ def report(
             console.print(f"Report written to: {written}")
     finally:
         store.close()
+
+
+@resource_app.command("add")
+def resource_add(
+    project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
+    path: Path = typer.Option(..., "--path", help="Path to the resource file."),  # noqa: B008
+    lock: bool = typer.Option(  # noqa: B008
+        False,
+        "--lock",
+        help="Lock extracted definitions so they survive re-runs.",
+    ),
+    store_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--store",
+            help="Optional path to the H2 SQLite store. Defaults to ~/.headwater/h2_metadata.db.",
+        ),
+    ] = None,
+) -> None:
+    """Ingest a resource file (Markdown, text, CSV) into the project's semantic layer."""
+    from headwater.services.h2_resource import ingest_resource
+
+    store = _open_h2_store(store_path)
+    try:
+        result = ingest_resource(store, project_id, path, lock_on_ingest=lock)
+    finally:
+        store.close()
+
+    sens_label = (
+        "[red]sensitive[/red]" if result.sensitivity == "sensitive" else "[green]safe[/green]"
+    )
+    console.print(f"Resource: {result.resource_path} ({result.resource_format}, {sens_label})")
+    if result.sensitivity_notes:
+        for note in result.sensitivity_notes:
+            console.print(f"  [yellow]Warning:[/yellow] {note}")
+    console.print(
+        f"  Claims created: {result.claims_created}  "
+        f"Updated: {result.claims_updated}  "
+        f"Locked (skipped): {result.claims_skipped_locked}  "
+        f"Conflicts: {result.conflicts_detected}"
+    )
+    if result.notes:
+        for note in result.notes:
+            console.print(f"  Note: {note}")
+
+
+@resource_app.command("list")
+def resource_list(
+    project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
+    store_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--store",
+            help="Optional path to the H2 SQLite store. Defaults to ~/.headwater/h2_metadata.db.",
+        ),
+    ] = None,
+) -> None:
+    """List resources registered for a project."""
+    store = _open_h2_store(store_path)
+    try:
+        claim = store.get_semantic_claim(f"{project_id}:resource_registry")
+    finally:
+        store.close()
+
+    if claim is None:
+        console.print("No resources registered for this project.")
+        return
+    registry = claim.get("claim", {}).get("value") or []
+    if not registry:
+        console.print("No resources registered for this project.")
+        return
+    console.print(f"\n[bold]Resources for {project_id}[/bold] ({len(registry)} total)\n")
+    for entry in registry:
+        console.print(f"  {entry['format']:10} {entry['ingested_at']}  {entry['path']}")
 
 
 def _default_store_path() -> Path:

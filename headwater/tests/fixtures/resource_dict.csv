@@ -1,0 +1,6 @@
+column_name,description,example_values
+inspection_score,Numeric score assigned by the inspector from 0 to 100,
+violation_count,Total number of code violations found during the inspection,
+inspection_type,Category of inspection conducted,"R=Routine, C=Complaint, F=Follow-up"
+facility_id,Unique identifier for the inspected facility,
+risk_level,Overall risk classification,"H=High, M=Medium, L=Low"
