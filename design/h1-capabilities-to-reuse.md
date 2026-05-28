@@ -21,7 +21,7 @@ the guided project flow — so they help without re-creating H1's overload.
 | Relationship / lineage graph view | Understand screen shows a simple flow for now; mine schema_graph later |
 | Column profile charts (distributions, cardinality) | null% shown; deeper charts add density — defer |
 | Decisions / provenance audit log | Valuable for trust provenance; mine H1 decisions / llm_audit later |
-| Drift / monitoring over time (living verdict) | The vision's monitoring; mine snapshot-diff later, keep simple |
+| Drift / monitoring over time (continuous certification) | Powers the vision's living credential (snapshot-diff -> re-check evidence contracts -> auto-revoke a badge with a reason). Central to the moat, but post-wedge; mine only the snapshot-diff, keep it simple |
 
 ## Principle
 

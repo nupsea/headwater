@@ -47,6 +47,7 @@ Status: Draft. Companion to `HEADWATER2_VISION.md`. Externally validated 2026-05
 | Inconsistent metric definitions across reports/systems | AE, analyst | Semantic / definition layer + locks |
 | Metrics untraceable to source -> stakeholders stop trusting | Analyst | Lineage / traceability in the verdict |
 | Need a fast maturity assessment at engagement start | Consultant | Readiness verdict as deliverable |
+| A number right last month is wrong now (source drifted) and nothing flagged it | All, consultant | Continuous re-certification — affected answers re-check; the badge auto-revokes with a reason |
 
 ### Answer & Share (gated) — "produce and defend the answer"
 
@@ -61,13 +62,17 @@ Status: Draft. Companion to `HEADWATER2_VISION.md`. Externally validated 2026-05
 - Org governance/ownership process, real-time streaming, security/access control.
 - Full self-serve BI (the long tail already ruled out in the vision).
 
-## Two findings folded into the vision
+## Three findings folded into the vision
 
 1. Definition consistency is co-equal with data quality in Evaluate — not a sub-bullet.
    The trust crisis is as much "what does this column mean and can I trace it" as "is it
    clean." Semantic/definition layer + traceability is core to the verdict.
 2. The many-to-many shared-data model is validated by the consultant persona, whose
    multi-client, multi-format, repeated-assessment workflow IS the architecture.
+3. Trust is not a one-shot report. The consultant's "repeated assessment" is really a
+   demand for a *living* credential: as shared sources grow and drift, the verdict
+   re-checks and a certified answer revokes its own badge with a reason — continuous
+   certification, not a point-in-time score.
 
 ## Sources
 

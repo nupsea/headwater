@@ -35,7 +35,7 @@ Evaluate *deep*. Without them, months of stats work get rebuilt.
 | `explorer/nl_to_sql.py`, `query_planner.py`, `decomposition.py` | ~8.9K LOC | NL-to-SQL — out of scope per vision |
 | `explorer/suggestions.py` | 94KB | H1 question/insight surface; superseded by goal-anchored relevance |
 | `services/context_*` suite | ~3.8K LOC | v2/v3 context machinery; replaced by shared-source + project-scope model |
-| `drift/`, `sync_*`, `schema_snapshots`, `drift_reports` | — | Over-built; "living verdict" monitoring is simpler — mine only the snapshot-diff idea |
+| `drift/`, `sync_*`, `schema_snapshots`, `drift_reports` | — | H1 suite over-built; CUT it. But **mine the snapshot-diff idea** — it is the trigger for continuous re-certification (diff a source snapshot -> re-check the affected answers' evidence contracts -> auto-revoke a badge with a reason). Keep it simple: a diff feeding the existing Readiness/Resolve, not a monitoring product. |
 | `core/metadata.py` | 149KB | God file with duplicate `CREATE TABLE` statements — rebuild (below) |
 
 ## Metadata schema: 47 tables (with duplicates) -> ~14
