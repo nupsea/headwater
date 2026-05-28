@@ -18,10 +18,10 @@ headwater/headwater/
   profiler/          KEEP  structure, stats, PK/FK/grain
   eda/               NEW   MINED from explorer/statistical.py -- anomaly/seasonality/change-point/correlation kernel (no domain families)
   semantics/         NEW   MINED from analyzer/semantic_types.py + heuristics.py -- typing + definitions + locks
-  llm/               NEW   MINED from analyzer/semantic.py -- orchestration + I-3 redaction
-  project/           NEW   Project entity, project_sources (M:N + per-goal scoping), goal
-  relevance/         NEW   goal -> relevant tables/columns (the relevance function)
-  readiness/         NEW   the trust verdict: quality + definitions + lineage + gaps (graded)
+  llm/               NEW   MINED from analyzer/semantic.py -- orchestration + I-3 redaction (v3: pluggable Ollama/3P harness lands here; optional, never sets certification)
+  project/           NEW   Project entity, project_sources (M:N + per-goal scoping), goal, proposed/curated questions
+  relevance/         NEW   goal -> relevant tables/columns + proposed questions (answerable / can't-answer + why)
+  readiness/         NEW   the verdict: per-answer, evidence-derived (quality + definitions + lineage + gaps); certification recomputed from contracts + insight confidence; re-checks on source change
   generator/         KEEP  SQL templates (extend)
   export/            NEW   audit report (md/pdf) FIRST, then dbt emit; reuses generator
   executor/          KEEP  DuckDB run
@@ -59,7 +59,8 @@ trust badge. This is simultaneously the consultant's engagement deliverable and 
 Stage-4 trust credential.
 
 Out of the slice (deliberately deferred): query editing, charts, dashboards (Stage 4
-interactive), dbt export, the live-monitoring loop, the UI. Slice can be CLI-first.
+interactive), dbt export, the continuous re-certification loop (snapshot-diff -> re-check
+contracts -> auto-revoke), the v3 LLM query harness, the UI. Slice can be CLI-first.
 
 ## Definition of done
 
@@ -133,8 +134,15 @@ first-class inputs:
   notes / definitions. These feed semantic typing, relevance, become semantic locks
   (I-6), and serve as ground truth the readiness verdict checks gaps against.
 
+**Questions are proposed, not required input.** The user is not made to author questions
+up front. After Generate, relevance proposes the questions this data can credibly answer
+(and flags the ones it can't, with the reason); the user curates them, and the curated
+set is persisted back into the spec. Each question is the unit the readiness verdict and
+certification are scoped to.
+
 Ordering consequence: cheap semantic typing runs on all columns BEFORE relevance (so
-relevance matches meaning, not just names); goal interpretation drives relevance.
+relevance matches meaning, not just names); goal interpretation drives relevance, which
+in turn drives question proposal.
 
 ### Stages
 
@@ -150,10 +158,12 @@ relevance matches meaning, not just names); goal interpretation drives relevance
 | S7 | Goal interpretation + relevance | structure goal -> match to typed columns + resources -> scope; non-blocking confirm | for "registration workflow": selects `events.activity/timestamps`, `cases.wait/throughput/patient_type`; deprioritizes `exams.scan_time_duration`; rationale cites goal terms | relevance + rationale |
 | S8 | EDA depth (mined) | mine kernel from `explorer/statistical.py` (anomaly/period/change-point), drop domain "families"; run on the relevant slice | detects arrival-by-hour peak and wait-time anomalies | insights list |
 | S9 | Deep semantics + definition gaps | enrich relevant slice; reconcile against resource definitions; surface gaps | flags inconsistent duration formats (`00:00` vs `0 days 00:22:00`), undefined codes not covered by resources, mixed-language activities | semantic findings |
-| S10 | Readiness verdict | combine quality + definitions + relationships + gaps -> graded verdict, scoped to goal | verdict: have / trustworthy / broken / missing / misleading + gaps vs the goal's stated metrics | verdict object |
+| S10 | Readiness verdict | combine quality + definitions + relationships + gaps -> evidence-derived verdict, scoped per question/goal; certification recomputed from the contract set (not a score) | verdict: have / trustworthy / broken / missing / misleading + gaps vs the goal's stated metrics; a per-question certify/Draft flag derived from passing contracts | verdict object |
 | S11 | Export: Markdown audit report | render verdict to report with graded trust badge + provenance | `hw2 report` emits Markdown; golden test asserts key findings + badge + goal restated | the rendered report (the deliverable) |
 | S12 | Many-to-many proof | add project (2) device utilization (new spec/goal) on the SAME profiled source | second report; relevance now selects `exams.modality/scan_time`; assert profile + typing reused (no re-ingest/re-profile), output differs by goal | two reports side by side |
 
 After S12: cross-domain check on MovieLens (new spec, no engine changes) confirms the
 engine is domain-agnostic. Then decide on Stage-4 interactive (query/charts/dashboard),
-dbt export, and UI -- only if the audit report passes the "saved me a week" test.
+the continuous re-certification loop (snapshot-diff -> re-check contracts -> auto-revoke
+with reason), dbt export, the v3 LLM query harness, and UI -- only if the audit report
+passes the "saved me a week" test.

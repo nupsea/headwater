@@ -12,10 +12,9 @@ these are vetted (see memory: design-first-workflow).
 | [HEADWATER2_AUDIT.md](HEADWATER2_AUDIT.md) | H1 code audit — keep / mine / cut against the H2 model |
 | [HEADWATER2_BUILD.md](HEADWATER2_BUILD.md) | Package layout, test bed, staged build plan (gated), information architecture |
 | [HEADWATER2_UX.md](HEADWATER2_UX.md) | Guided workflow + UX flows, wireframes, IA, anti-overload rules |
-| [HEADWATER2_PROTOTYPE2_NOTES.md](HEADWATER2_PROTOTYPE2_NOTES.md) | Prototype 2 rationale, H1 gaps addressed, research cues |
 | [h1-capabilities-to-reuse.md](h1-capabilities-to-reuse.md) | Which H1 inspection capabilities to bring forward, and status |
-| [prototype/headwater2-ux.html](prototype/headwater2-ux.html) | Clickable browser prototype v1 (open directly, no build step) |
-| [prototype/headwater2-prototype2.html](prototype/headwater2-prototype2.html) | Prototype 2 UX: readiness workspace / answer-pack flow |
+| [prototype/Headwater2_refined.html](prototype/Headwater2_refined.html) | Current clickable prototype — refined readiness workspace (open directly, no build step) |
+| [prototype/Headwater-handoff.zip](prototype/Headwater-handoff.zip) | Design handoff bundle. Build from the `hw2-*` source inside it; ignore the `hw-*` / PR / INTEGRATION files (a superseded design generation, copied to `archives/h2_design_2026-05-28/`) |
 
 ## Test bed
 
@@ -25,5 +24,8 @@ these are vetted (see memory: design-first-workflow).
 
 ## Status
 
-Vision, personas, audit, build plan, UX flows, and prototype drafted. Iterating the
-prototype before locking architecture and starting implementation (S0).
+Vision (updated 2026-05-28: continuous certification, evidence-derived per-answer
+certification, proposed questions), personas, audit, build plan, UX flows, and the
+refined prototype drafted. Iterating the prototype before locking architecture and
+starting implementation (S0). Superseded design generations live in
+`../archives/h2_design_2026-05-28/`.
