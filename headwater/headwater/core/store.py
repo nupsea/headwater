@@ -920,6 +920,21 @@ class HeadwaterStore:
         assert cur.lastrowid is not None
         return int(cur.lastrowid)
 
+    def list_readiness_contracts(self, question_id: str) -> list[dict[str, Any]]:
+        rows = self.con.execute(
+            """
+            SELECT *
+              FROM readiness_contracts
+             WHERE question_id = ?
+             ORDER BY contract_type
+            """,
+            (question_id,),
+        ).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+        return items
+
     def list_decisions(self, artifact_type: str, artifact_id: str) -> list[dict[str, Any]]:
         rows = self.con.execute(
             """

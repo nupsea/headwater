@@ -109,8 +109,8 @@ def project_frame(
         "--time-horizon",
         help="Optional time window or coverage expectation.",
     ),
-    entity: list[str] = typer.Option([], "--entity", help="Entity or subject of analysis."),
-    table: list[str] = typer.Option([], "--table", help="Preselected source table."),
+    entity: list[str] = typer.Option([], "--entity", help="Entity or subject of analysis."),  # noqa: B008
+    table: list[str] = typer.Option([], "--table", help="Preselected source table."),  # noqa: B008
     store_path: Annotated[
         Path | None,
         typer.Option(
@@ -170,6 +170,121 @@ def project_relevance(
         store.close()
 
     _print_relevance_result(relevance)
+
+
+@app.command()
+def resolve(
+    project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
+    store_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--store",
+            help="Optional path to the H2 SQLite store. Defaults to ~/.headwater/h2_metadata.db.",
+        ),
+    ] = None,
+) -> None:
+    """Build and display resolve cards for a project."""
+    from headwater.services.h2_resolve import build_resolve_cards
+
+    store = _open_h2_store(store_path)
+    try:
+        cards = build_resolve_cards(store, project_id)
+    finally:
+        store.close()
+
+    if not cards:
+        console.print("No resolve items — nothing outstanding.")
+        return
+
+    console.print(f"\n[bold]Resolve items for {project_id}[/bold] ({len(cards)} total)\n")
+    for card in cards:
+        color = "red" if card.priority == "high" else "yellow" if card.priority == "medium" else "dim"  # noqa: E501
+        console.print(f"[{color}][{card.priority.upper()}][/{color}] {card.title}")
+        console.print(f"  {card.body[:120]}...")
+        if card.affected_questions:
+            console.print(f"  Affects: {len(card.affected_questions)} question(s)")
+        console.print()
+
+
+@app.command()
+def readiness(
+    project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
+    store_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--store",
+            help="Optional path to the H2 SQLite store. Defaults to ~/.headwater/h2_metadata.db.",
+        ),
+    ] = None,
+) -> None:
+    """Evaluate and display per-question readiness for a project."""
+    from headwater.services.h2_readiness import evaluate_project_readiness
+
+    store = _open_h2_store(store_path)
+    try:
+        report = evaluate_project_readiness(store, project_id)
+    finally:
+        store.close()
+
+    console.print(f"\n[bold]Readiness for {project_id}[/bold]\n")
+    console.print(
+        f"  Certified: {report.certified_count}  |  "
+        f"Draft: {report.draft_count}  |  "
+        f"Cannot answer: {report.cannot_answer_count}"
+    )
+    console.print()
+    for q in report.questions:
+        state_color = (
+            "green" if q.state == "certified"
+            else "red" if q.state == "cannot_answer"
+            else "yellow"
+        )
+        console.print(
+            f"[{state_color}]{q.state.upper().replace('_', ' ')}[/{state_color}] "
+            f"({q.readiness_pct}%)  {q.question_id}"
+        )
+        if q.summary:
+            console.print(f"  {q.summary[:120]}")
+        console.print()
+
+
+@app.command()
+def report(
+    project_id: str = typer.Option(..., "--project-id", help="Project identifier."),
+    output: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            help="Output file path. Defaults to <data_dir>/reports/<project_id>.md.",
+        ),
+    ] = None,
+    store_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--store",
+            help="Optional path to the H2 SQLite store. Defaults to ~/.headwater/h2_metadata.db.",
+        ),
+    ] = None,
+    print_report: bool = typer.Option(False, "--print", help="Print the report to stdout."),  # noqa: B008
+) -> None:
+    """Generate the Markdown audit report for a project."""
+    from headwater.core.config import get_settings
+    from headwater.services.h2_report import build_report, write_report
+
+    settings = get_settings()
+    store = _open_h2_store(store_path)
+    try:
+        if print_report:
+            text = build_report(store, project_id)
+            console.print(text)
+        else:
+            out_path = output or (
+                settings.data_dir / "reports" / f"{project_id}.md"
+            )
+            written = write_report(store, project_id, out_path)
+            console.print(f"Report written to: {written}")
+    finally:
+        store.close()
 
 
 def _default_store_path() -> Path:
