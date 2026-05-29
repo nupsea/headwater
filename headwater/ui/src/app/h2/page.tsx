@@ -1,10 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
-import { h2, type H2Project, type H2Source, trustBadge } from "@/lib/h2api";
+import { useRouter } from "next/navigation";
+import { h2, type H2Project, type H2Source } from "@/lib/h2api";
+import { ReadinessRing, HW2_COLOR } from "@/components/h2/readiness-ring";
+
+function computeReadout(project: H2Project) {
+  const questions = project.questions ?? [];
+  const total = questions.length;
+  if (total === 0) return { pct: 0, certifiedCount: 0, total: 0 };
+  const certifiedCount = questions.filter((q) => q.status === "certified").length;
+  return { pct: Math.round((certifiedCount / total) * 100), certifiedCount, total };
+}
 
 export default function H2HomePage() {
+  const router = useRouter();
   const [projects, setProjects] = useState<H2Project[]>([]);
   const [sources, setSources] = useState<H2Source[]>([]);
   const [loading, setLoading] = useState(true);
@@ -12,84 +22,292 @@ export default function H2HomePage() {
 
   useEffect(() => {
     Promise.all([h2.projects.list(), h2.sources.list()])
-      .then(([p, s]) => { setProjects(p); setSources(s); })
-      .catch(e => setError(e.message))
+      .then(([p, s]) => {
+        setProjects(p);
+        setSources(s);
+      })
+      .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <div className="p-8 text-gray-500">Loading…</div>;
-  if (error) return <div className="p-8 text-red-600">{error}</div>;
+  if (loading) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          height: "60vh",
+          font: "400 14px 'DM Sans', sans-serif",
+          color: HW2_COLOR.muted,
+        }}
+      >
+        Loading…
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={{ maxWidth: 640, margin: "48px auto", padding: "0 32px" }}>
+        <div
+          style={{
+            padding: "14px 18px",
+            background: HW2_COLOR.badSoft,
+            border: `1px solid ${HW2_COLOR.bad}44`,
+            borderRadius: 10,
+            font: "500 13px 'DM Sans', sans-serif",
+            color: HW2_COLOR.bad,
+          }}
+        >
+          {error}
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="max-w-4xl mx-auto p-8">
-      <div className="flex items-center justify-between mb-6">
+    <div
+      style={{
+        maxWidth: 900,
+        margin: "0 auto",
+        padding: "36px 32px 80px",
+        fontFamily: "'DM Sans', sans-serif",
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          marginBottom: 32,
+        }}
+      >
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Headwater 2</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Goal-anchored data readiness workspace
+          <span
+            style={{
+              font: "600 11px 'DM Sans', sans-serif",
+              color: HW2_COLOR.blue,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+            }}
+          >
+            Workspace
+          </span>
+          <h1
+            style={{
+              font: "600 26px 'DM Sans', sans-serif",
+              letterSpacing: "-0.02em",
+              color: HW2_COLOR.ink,
+              lineHeight: 1.25,
+              marginTop: 6,
+              marginBottom: 6,
+            }}
+          >
+            {projects.length > 0
+              ? `${projects.length} active project${projects.length !== 1 ? "s" : ""}`
+              : "Start a project"}
+          </h1>
+          <p
+            style={{
+              font: "400 14px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              lineHeight: 1.55,
+              maxWidth: 520,
+            }}
+          >
+            A project is a business goal. Headwater proposes the questions this
+            data can credibly answer, then helps you certify each one.
           </p>
         </div>
-        <Link
-          href="/h2/projects/new"
-          className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700"
+
+        <button
+          onClick={() => router.push("/h2/projects/new")}
+          style={{
+            appearance: "none",
+            cursor: "pointer",
+            background: HW2_COLOR.ink,
+            color: "#fff",
+            border: "1px solid transparent",
+            borderRadius: 10,
+            padding: "11px 20px",
+            font: "600 14px 'DM Sans', sans-serif",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+          }}
         >
           + New project
-        </Link>
+        </button>
       </div>
 
-      {/* Projects */}
-      <section className="mb-8">
-        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide mb-3">
-          Projects
-        </h2>
-        {projects.length === 0 ? (
-          <div className="border border-dashed border-gray-300 rounded-lg p-8 text-center text-gray-500">
-            <p>No projects yet.</p>
-            <p className="text-sm mt-1">
-              <Link href="/h2/projects/new" className="text-blue-600 underline">
-                Create your first project
-              </Link>{" "}
-              to get started.
-            </p>
+      {/* Projects grid */}
+      {projects.length === 0 ? (
+        <div
+          style={{
+            border: `1.5px dashed ${HW2_COLOR.rule2}`,
+            borderRadius: 14,
+            padding: "56px 40px",
+            textAlign: "center",
+            marginBottom: 32,
+          }}
+        >
+          <div
+            style={{
+              font: "500 15px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              marginBottom: 12,
+            }}
+          >
+            No projects yet
           </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {projects.map(p => (
-              <ProjectCard key={p.id} project={p} />
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* Sources */}
-      <section>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide">
-            Shared sources
-          </h2>
-          <Link href="/h2/sources/new" className="text-sm text-blue-600 hover:underline">
-            + Connect source
-          </Link>
+          <p
+            style={{
+              font: "400 13px 'DM Sans', sans-serif",
+              color: HW2_COLOR.faint,
+              lineHeight: 1.55,
+              marginBottom: 20,
+              maxWidth: 380,
+              margin: "0 auto 20px",
+            }}
+          >
+            Connect a source, then create a project to have Headwater propose
+            questions and evaluate data readiness.
+          </p>
+          <button
+            onClick={() =>
+              sources.length === 0
+                ? router.push("/h2/sources/new")
+                : router.push("/h2/projects/new")
+            }
+            style={{
+              appearance: "none",
+              cursor: "pointer",
+              background: HW2_COLOR.blue,
+              color: "#fff",
+              border: "1px solid transparent",
+              borderRadius: 10,
+              padding: "10px 20px",
+              font: "600 14px 'DM Sans', sans-serif",
+            }}
+          >
+            {sources.length === 0 ? "Connect a source first" : "Create first project"}
+          </button>
         </div>
+      ) : (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))",
+            gap: 14,
+            marginBottom: 36,
+          }}
+        >
+          {projects.map((p) => (
+            <ProjectCard
+              key={p.id}
+              project={p}
+              onClick={() => router.push(`/h2/projects/${p.id}/understand`)}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Sources section */}
+      <section>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 12,
+          }}
+        >
+          <span
+            style={{
+              font: "600 11px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              letterSpacing: "0.07em",
+              textTransform: "uppercase",
+            }}
+          >
+            Connected sources
+          </span>
+          <button
+            onClick={() => router.push("/h2/sources/new")}
+            style={{
+              appearance: "none",
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              padding: 0,
+              font: "500 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.blue,
+            }}
+          >
+            + Connect source
+          </button>
+        </div>
+
         {sources.length === 0 ? (
-          <p className="text-sm text-gray-400">
-            No sources connected yet.{" "}
-            <Link href="/h2/sources/new" className="text-blue-600 underline">
-              Connect a source
-            </Link>{" "}
-            before creating a project.
+          <p
+            style={{
+              font: "400 13px 'DM Sans', sans-serif",
+              color: HW2_COLOR.faint,
+            }}
+          >
+            No sources connected yet.
           </p>
         ) : (
-          <div className="flex flex-wrap gap-3">
-            {sources.map(s => (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {sources.map((s) => (
               <div
                 key={s.name}
-                className="border border-gray-200 rounded-lg px-4 py-3 text-sm"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 12px",
+                  background: HW2_COLOR.surface,
+                  border: `1px solid ${HW2_COLOR.rule}`,
+                  borderRadius: 8,
+                }}
               >
-                <span className="font-medium text-gray-800">{s.name}</span>
-                <span className="ml-2 text-gray-400 text-xs">{s.type}</span>
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: s.latest_snapshot_id
+                      ? HW2_COLOR.good
+                      : HW2_COLOR.faint,
+                  }}
+                />
+                <span
+                  style={{
+                    font: "600 13px 'DM Sans', sans-serif",
+                    color: HW2_COLOR.ink,
+                  }}
+                >
+                  {s.name}
+                </span>
+                <span
+                  style={{
+                    font: "500 10px 'DM Mono', monospace",
+                    color: HW2_COLOR.muted,
+                  }}
+                >
+                  {s.type}
+                </span>
                 {s.latest_snapshot_id && (
-                  <span className="ml-2 text-green-600 text-xs">profiled</span>
+                  <span
+                    style={{
+                      font: "500 10px 'DM Sans', sans-serif",
+                      color: HW2_COLOR.good,
+                    }}
+                  >
+                    profiled
+                  </span>
                 )}
               </div>
             ))}
@@ -100,27 +318,105 @@ export default function H2HomePage() {
   );
 }
 
-function ProjectCard({ project }: { project: H2Project }) {
-  const badge = trustBadge(null);
+function ProjectCard({
+  project,
+  onClick,
+}: {
+  project: H2Project;
+  onClick: () => void;
+}) {
+  const ro = computeReadout(project);
   const goal = project.goal?.statement || project.description || "—";
 
   return (
-    <Link
-      href={`/h2/projects/${project.id}`}
-      className="block border border-gray-200 rounded-lg p-5 hover:border-blue-300 hover:shadow-sm transition-all"
+    <button
+      onClick={onClick}
+      style={{
+        appearance: "none",
+        cursor: "pointer",
+        textAlign: "left",
+        background: HW2_COLOR.surface,
+        border: `1px solid ${HW2_COLOR.rule}`,
+        borderRadius: 14,
+        padding: "18px 20px",
+        transition: "border-color 120ms, box-shadow 120ms",
+        fontFamily: "'DM Sans', sans-serif",
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.borderColor = HW2_COLOR.blue;
+        (e.currentTarget as HTMLButtonElement).style.boxShadow =
+          "0 2px 8px rgba(43,95,217,0.08)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.borderColor = HW2_COLOR.rule;
+        (e.currentTarget as HTMLButtonElement).style.boxShadow = "none";
+      }}
     >
-      <div className="flex items-start justify-between">
-        <div className="flex-1 min-w-0">
-          <h3 className="font-medium text-gray-900 truncate">{project.display_name}</h3>
-          <p className="text-sm text-gray-500 mt-1 line-clamp-2">{goal}</p>
+      <div
+        style={{ display: "flex", alignItems: "flex-start", gap: 14, marginBottom: 12 }}
+      >
+        <ReadinessRing
+          value={ro.pct}
+          certified={ro.certifiedCount === ro.total && ro.total > 0}
+          demoted={false}
+          size={36}
+          stroke={3.5}
+          showLabel={false}
+          animate={false}
+        />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              font: "600 15px 'DM Sans', sans-serif",
+              color: HW2_COLOR.ink,
+              letterSpacing: "-0.01em",
+              marginBottom: 4,
+            }}
+          >
+            {project.display_name}
+          </div>
+          <p
+            style={{
+              font: "400 13px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              lineHeight: 1.5,
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {goal}
+          </p>
         </div>
-        <span className={`ml-3 text-xs font-medium shrink-0 ${badge.color}`}>
-          {badge.label}
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          paddingTop: 12,
+          borderTop: `1px solid ${HW2_COLOR.rule}`,
+        }}
+      >
+        <span
+          style={{
+            font: "500 11px 'DM Mono', monospace",
+            color: HW2_COLOR.muted,
+          }}
+        >
+          {ro.certifiedCount}/{ro.total} certified
+        </span>
+        <span
+          style={{
+            font: "400 11px 'DM Sans', sans-serif",
+            color: HW2_COLOR.faint,
+          }}
+        >
+          {new Date(project.updated_at).toLocaleDateString()}
         </span>
       </div>
-      <div className="mt-3 text-xs text-gray-400">
-        Updated {new Date(project.updated_at).toLocaleDateString()}
-      </div>
-    </Link>
+    </button>
   );
 }

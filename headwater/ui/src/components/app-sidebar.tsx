@@ -97,6 +97,20 @@ export function AppSidebar() {
 
   return (
     <aside className="w-56 shrink-0 border-r border-border bg-card flex flex-col overflow-hidden">
+      {/* Headwater 2 entry point */}
+      <Link
+        href="/h2"
+        className="mx-3 mt-3 mb-1 flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold bg-[#2b5fd9] text-white hover:bg-[#2450c4] transition-colors"
+        style={{ textDecoration: "none" }}
+      >
+        <span
+          className="inline-block w-4 h-4 rounded shrink-0"
+          style={{ background: "rgba(255,255,255,0.3)" }}
+        />
+        <span>Headwater 2</span>
+        <span className="ml-auto text-[10px] font-mono text-blue-200">→</span>
+      </Link>
+
       <div className="px-3 py-3 border-b border-border">
         <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-2">
           Review Queue

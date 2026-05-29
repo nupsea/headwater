@@ -1,19 +1,20 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import { AppSidebar } from "@/components/app-sidebar";
-import { AppTopbar } from "@/components/app-topbar";
-import { RerunBanner } from "@/components/rerun-banner";
-import { ClientLayout } from "@/components/client-layout";
+import { DM_Sans, DM_Mono } from "next/font/google";
+import { H1Shell } from "@/components/h1-shell";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const dmSans = DM_Sans({
+  variable: "--font-dm-sans",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const dmMono = DM_Mono({
+  variable: "--font-dm-mono",
   subsets: ["latin"],
+  weight: ["400", "500"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -29,21 +30,10 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${dmSans.variable} ${dmMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-background text-foreground">
-        <ClientLayout>
-          <AppTopbar />
-          <div className="flex flex-1 overflow-hidden">
-            <AppSidebar />
-            <main className="flex-1 overflow-y-auto">
-              <div className="mx-auto w-full max-w-[min(1800px,100vw)] px-6 py-6">
-                <RerunBanner />
-                {children}
-              </div>
-            </main>
-          </div>
-        </ClientLayout>
+        <H1Shell>{children}</H1Shell>
       </body>
     </html>
   );

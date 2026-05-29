@@ -3,192 +3,568 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { h2, type H2Source } from "@/lib/h2api";
+import { HW2_COLOR } from "@/components/h2/readiness-ring";
+
+function Field({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <div>
+      <label
+        style={{
+          font: "600 12px 'DM Sans', sans-serif",
+          color: HW2_COLOR.muted,
+          display: "block",
+          marginBottom: 6,
+        }}
+      >
+        {label}
+      </label>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          width: "100%",
+          padding: "10px 14px",
+          background: "#fff",
+          border: `1px solid ${HW2_COLOR.rule2}`,
+          borderRadius: 8,
+          font: "400 14px 'DM Sans', sans-serif",
+          color: HW2_COLOR.ink,
+          fontFamily: "'DM Sans', sans-serif",
+          outline: "none",
+          boxSizing: "border-box",
+        }}
+        onFocus={(e) => (e.currentTarget.style.borderColor = HW2_COLOR.blue)}
+        onBlur={(e) => (e.currentTarget.style.borderColor = HW2_COLOR.rule2)}
+      />
+    </div>
+  );
+}
 
 export default function NewProjectPage() {
   const router = useRouter();
   const [sources, setSources] = useState<H2Source[]>([]);
+  const [tables, setTables] = useState<Array<{ table_name: string; row_count: number; description: string | null }>>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [form, setForm] = useState({
-    project_id: "",
-    source_name: "",
-    display_name: "",
-    goal: "",
-    decision: "",
-    target_metric: "",
-    time_horizon: "",
-  });
+  const [goal, setGoal] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [sourceName, setSourceName] = useState("");
+  const [decision, setDecision] = useState("");
+  const [targetMetric, setTargetMetric] = useState("");
+  const [timeHorizon, setTimeHorizon] = useState("");
+  const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showTablePicker, setShowTablePicker] = useState(false);
 
   useEffect(() => {
     h2.sources.list().then(setSources).catch(() => {});
   }, []);
 
-  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
-    setForm(f => ({ ...f, [k]: e.target.value }));
+  // Load tables when source is selected
+  useEffect(() => {
+    if (!sourceName) {
+      setTables([]);
+      setSelectedTables(new Set());
+      return;
+    }
+    h2.sources
+      .catalog(sourceName)
+      .then((catalog) => {
+        setTables(catalog);
+        // Pre-select all tables
+        setSelectedTables(new Set(catalog.map((t) => t.table_name)));
+      })
+      .catch(() => setTables([]));
+  }, [sourceName]);
+
+  const toggleTable = (name: string) => {
+    setSelectedTables((prev) => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+  };
+
+  const ready =
+    goal.trim().length >= 6 &&
+    projectId.trim().length > 0 &&
+    sourceName.length > 0;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.project_id || !form.source_name || !form.goal) return;
+    if (!ready) return;
     setLoading(true);
     setError(null);
     try {
       await h2.projects.frame({
-        project_id: form.project_id,
-        source_name: form.source_name,
-        display_name: form.display_name || form.project_id,
-        goal: form.goal,
-        decision: form.decision || undefined,
-        target_metric: form.target_metric || undefined,
-        time_horizon: form.time_horizon || undefined,
+        project_id: projectId.trim(),
+        source_name: sourceName,
+        display_name: displayName || projectId.trim(),
+        goal: goal.trim(),
+        decision: decision || undefined,
+        target_metric: targetMetric || undefined,
+        time_horizon: timeHorizon || undefined,
+        selected_tables: selectedTables.size > 0 ? [...selectedTables] : undefined,
       });
-      router.push(`/h2/projects/${form.project_id}`);
+      router.push(`/h2/projects/${projectId.trim()}/understand`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to create project");
-    } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="max-w-2xl mx-auto p-8">
-      <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-900">New project</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          A project is a business problem. Start with the goal.
-        </p>
-      </div>
+    <div
+      style={{
+        maxWidth: 800,
+        margin: "0 auto",
+        padding: "32px 32px 80px",
+        fontFamily: "'DM Sans', sans-serif",
+      }}
+    >
+      <span
+        style={{
+          font: "600 11px 'DM Sans', sans-serif",
+          color: HW2_COLOR.blue,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+        }}
+      >
+        Step 1 of 5 · Frame
+      </span>
+      <h2
+        style={{
+          font: "600 26px 'DM Sans', sans-serif",
+          letterSpacing: "-0.02em",
+          color: HW2_COLOR.ink,
+          lineHeight: 1.25,
+          marginTop: 8,
+          marginBottom: 6,
+        }}
+      >
+        What goal are we serving?
+      </h2>
+      <p
+        style={{
+          font: "400 14px 'DM Sans', sans-serif",
+          color: HW2_COLOR.muted,
+          marginBottom: 28,
+          lineHeight: 1.55,
+        }}
+      >
+        State a goal and a scope. You don&rsquo;t need to know the questions
+        yet —{" "}
+        <strong style={{ color: HW2_COLOR.ink2 }}>
+          Headwater will propose the questions this data can credibly answer
+        </strong>{" "}
+        on the next step, and flag the ones it can&rsquo;t.
+      </p>
 
-      <form onSubmit={submit} className="space-y-5">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            What problem are you solving? *
+      <form onSubmit={submit}>
+        {/* Goal */}
+        <div style={{ marginBottom: 6 }}>
+          <label
+            style={{
+              font: "600 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              display: "block",
+              marginBottom: 8,
+            }}
+          >
+            The goal *
           </label>
           <textarea
-            value={form.goal}
-            onChange={set("goal")}
-            required
+            value={goal}
+            onChange={(e) => setGoal(e.target.value)}
+            placeholder="e.g. Understand where delays occur in the end-to-end process"
             rows={3}
-            placeholder="e.g. Understand where delays occur in the registration process"
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            style={{
+              width: "100%",
+              resize: "vertical",
+              display: "block",
+              padding: "12px 16px",
+              background: "#fff",
+              border: `1px solid ${HW2_COLOR.rule2}`,
+              borderRadius: 10,
+              font: "500 16px 'DM Sans', sans-serif",
+              color: HW2_COLOR.ink,
+              lineHeight: 1.4,
+              fontFamily: "'DM Sans', sans-serif",
+              outline: "none",
+              boxSizing: "border-box",
+            }}
+            onFocus={(e) =>
+              (e.currentTarget.style.borderColor = HW2_COLOR.blue)
+            }
+            onBlur={(e) =>
+              (e.currentTarget.style.borderColor = HW2_COLOR.rule2)
+            }
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Project ID *
-            </label>
-            <input
-              value={form.project_id}
-              onChange={set("project_id")}
-              required
-              placeholder="reg_workflow_01"
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Display name
-            </label>
-            <input
-              value={form.display_name}
-              onChange={set("display_name")}
-              placeholder="Registration Workflow"
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
+        {/* Project ID + Display Name */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 16 }}>
+          <Field
+            label="Project ID *"
+            value={projectId}
+            onChange={setProjectId}
+            placeholder="my_project_01"
+          />
+          <Field
+            label="Display name"
+            value={displayName}
+            onChange={setDisplayName}
+            placeholder="My Project"
+          />
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+        {/* Source selector */}
+        <div style={{ marginTop: 20 }}>
+          <label
+            style={{
+              font: "600 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              display: "block",
+              marginBottom: 8,
+            }}
+          >
             Data source *
           </label>
           {sources.length === 0 ? (
-            <p className="text-sm text-red-600">
-              No sources available.{" "}
-              <a href="/h2/sources/new" className="underline">Connect one first.</a>
-            </p>
-          ) : (
-            <select
-              value={form.source_name}
-              onChange={set("source_name")}
-              required
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            <div
+              style={{
+                padding: "12px 16px",
+                background: HW2_COLOR.badSoft,
+                border: `1px solid ${HW2_COLOR.bad}44`,
+                borderRadius: 8,
+                font: "500 13px 'DM Sans', sans-serif",
+                color: HW2_COLOR.bad,
+              }}
             >
-              <option value="">Select a source…</option>
-              {sources.map(s => (
-                <option key={s.name} value={s.name}>
-                  {s.name} ({s.type})
-                </option>
-              ))}
-            </select>
+              No sources available.{" "}
+              <a
+                href="/h2/sources/new"
+                style={{ color: HW2_COLOR.bad, fontWeight: 600 }}
+              >
+                Connect one first.
+              </a>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {sources.map((s) => {
+                const active = sourceName === s.name;
+                return (
+                  <button
+                    key={s.name}
+                    type="button"
+                    onClick={() => setSourceName(s.name)}
+                    style={{
+                      appearance: "none",
+                      cursor: "pointer",
+                      padding: "8px 14px",
+                      background: active ? HW2_COLOR.blueSoft : "#fff",
+                      border: `1.5px solid ${
+                        active ? HW2_COLOR.blue : HW2_COLOR.rule2
+                      }`,
+                      borderRadius: 8,
+                      font: "500 13px 'DM Sans', sans-serif",
+                      color: active ? HW2_COLOR.blue : HW2_COLOR.ink2,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        background: s.latest_snapshot_id
+                          ? HW2_COLOR.good
+                          : HW2_COLOR.faint,
+                      }}
+                    />
+                    {s.name}
+                    <span
+                      style={{
+                        font: "400 10px 'DM Mono', monospace",
+                        color: active ? HW2_COLOR.blue : HW2_COLOR.muted,
+                      }}
+                    >
+                      {s.type}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           )}
         </div>
 
-        <details className="border border-gray-200 rounded-md p-3">
-          <summary className="text-sm text-gray-500 cursor-pointer">
-            Add detail (optional)
-          </summary>
-          <div className="mt-3 space-y-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Decision this project informs
-              </label>
-              <input
-                value={form.decision}
-                onChange={set("decision")}
-                placeholder="e.g. Identify bottleneck steps for process improvement"
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+        {/* Advanced toggle */}
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          style={{
+            appearance: "none",
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            marginTop: 20,
+            padding: 0,
+            color: HW2_COLOR.muted,
+            font: "500 13px 'DM Sans', sans-serif",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            fontFamily: "'DM Sans', sans-serif",
+          }}
+        >
+          <span
+            style={{
+              font: "500 11px 'DM Mono', monospace",
+              color: HW2_COLOR.faint,
+            }}
+          >
+            {showAdvanced ? "▼" : "▶"}
+          </span>
+          Add detail (optional): decision · target metric · time horizon
+        </button>
+
+        {showAdvanced && (
+          <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+            <Field
+              label="Decision you're making"
+              value={decision}
+              onChange={setDecision}
+              placeholder="e.g. Where to add staff or change process"
+            />
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 12,
+              }}
+            >
+              <Field
+                label="Target metric"
+                value={targetMetric}
+                onChange={setTargetMetric}
+                placeholder="e.g. Mean wait time"
+              />
+              <Field
+                label="Time horizon"
+                value={timeHorizon}
+                onChange={setTimeHorizon}
+                placeholder="e.g. Next quarter"
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Target metric
-                </label>
-                <input
-                  value={form.target_metric}
-                  onChange={set("target_metric")}
-                  placeholder="wait_time"
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Time horizon
-                </label>
-                <input
-                  value={form.time_horizon}
-                  onChange={set("time_horizon")}
-                  placeholder="weekly"
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
-                />
-              </div>
-            </div>
           </div>
-        </details>
+        )}
 
+        {/* Table scope */}
+        {sourceName && tables.length > 0 && (
+          <div style={{ marginTop: 28 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "baseline",
+                justifyContent: "space-between",
+                marginBottom: 10,
+              }}
+            >
+              <label
+                style={{
+                  font: "600 12px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.muted,
+                }}
+              >
+                Data scope · {selectedTables.size} table
+                {selectedTables.size !== 1 ? "s" : ""} selected
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowTablePicker((v) => !v)}
+                style={{
+                  appearance: "none",
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                  color: HW2_COLOR.blue,
+                  font: "500 12px 'DM Sans', sans-serif",
+                  fontFamily: "'DM Sans', sans-serif",
+                }}
+              >
+                {showTablePicker ? "Hide" : "Edit table picks"}
+              </button>
+            </div>
+
+            {!showTablePicker ? (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {[...selectedTables].map((tname) => (
+                  <span
+                    key={tname}
+                    style={{
+                      font: "500 12px 'DM Mono', monospace",
+                      color: HW2_COLOR.blue,
+                      padding: "3px 8px",
+                      background: HW2_COLOR.blueSoft,
+                      borderRadius: 4,
+                    }}
+                  >
+                    {tname}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div
+                style={{
+                  background: HW2_COLOR.surface,
+                  border: `1px solid ${HW2_COLOR.rule}`,
+                  borderRadius: 12,
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    padding: "8px 14px",
+                    background: HW2_COLOR.paper,
+                    borderBottom: `1px solid ${HW2_COLOR.rule}`,
+                    font: "400 11px 'DM Sans', sans-serif",
+                    color: HW2_COLOR.muted,
+                  }}
+                >
+                  Pick the tables in scope. Profiles are reused — picking
+                  doesn&rsquo;t re-scan.
+                </div>
+                <div
+                  style={{ maxHeight: 320, overflowY: "auto", padding: "8px 6px" }}
+                >
+                  {tables.map((t) => {
+                    const sel = selectedTables.has(t.table_name);
+                    return (
+                      <label
+                        key={t.table_name}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                          padding: "6px 12px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={sel}
+                          onChange={() => toggleTable(t.table_name)}
+                          style={{ accentColor: HW2_COLOR.blue }}
+                        />
+                        <span
+                          style={{
+                            font: "500 12px 'DM Mono', monospace",
+                            color: HW2_COLOR.ink2,
+                            minWidth: 160,
+                          }}
+                        >
+                          {t.table_name}
+                        </span>
+                        <span
+                          style={{
+                            flex: 1,
+                            font: "400 12px 'DM Sans', sans-serif",
+                            color: HW2_COLOR.muted,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {t.description ?? ""}
+                        </span>
+                        <span
+                          style={{
+                            font: "400 11px 'DM Mono', monospace",
+                            color: HW2_COLOR.faint,
+                          }}
+                        >
+                          {t.row_count >= 1000
+                            ? `${(t.row_count / 1000).toFixed(1)}k`
+                            : t.row_count}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Error */}
         {error && (
-          <div className="text-sm text-red-600 border border-red-200 bg-red-50 rounded px-3 py-2">
+          <div
+            style={{
+              marginTop: 20,
+              padding: "12px 16px",
+              background: HW2_COLOR.badSoft,
+              border: `1px solid ${HW2_COLOR.bad}44`,
+              borderRadius: 8,
+              font: "500 13px 'DM Sans', sans-serif",
+              color: HW2_COLOR.bad,
+            }}
+          >
             {error}
           </div>
         )}
 
-        <div className="flex gap-3 pt-2">
-          <button
-            type="button"
-            onClick={() => router.back()}
-            className="px-4 py-2 border border-gray-300 text-sm rounded-md hover:bg-gray-50"
+        {/* CTA */}
+        <div
+          style={{
+            marginTop: 36,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <span
+            style={{
+              font: "400 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.faint,
+            }}
           >
-            Cancel
-          </button>
+            {!ready
+              ? "Add a goal, project ID, and select a source."
+              : "Headwater will read the scope and propose questions next."}
+          </span>
           <button
             type="submit"
-            disabled={loading || !form.goal || !form.project_id || !form.source_name}
-            className="px-5 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 disabled:opacity-50"
+            disabled={!ready || loading}
+            style={{
+              appearance: "none",
+              cursor: ready && !loading ? "pointer" : "default",
+              background: HW2_COLOR.blue,
+              color: "#fff",
+              border: "1px solid transparent",
+              borderRadius: 10,
+              padding: "11px 20px",
+              font: "600 14px 'DM Sans', sans-serif",
+              opacity: !ready || loading ? 0.5 : 1,
+              transition: "opacity 120ms",
+            }}
           >
-            {loading ? "Generating…" : "Generate →"}
+            {loading ? "Generating…" : "Generate understanding →"}
           </button>
         </div>
       </form>

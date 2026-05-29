@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import { h2 } from "@/lib/h2api";
+import { HW2_COLOR } from "@/components/h2/readiness-ring";
 
 export default function ConnectSourcePage() {
   const router = useRouter();
@@ -22,47 +22,117 @@ export default function ConnectSourcePage() {
       await h2.sources.discover(path, sourceType || undefined, name || undefined);
       router.push("/h2");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to connect source");
-    } finally {
+      setError(
+        err instanceof Error ? err.message : "Failed to connect source"
+      );
       setLoading(false);
     }
   };
 
-  return (
-    <div className="max-w-xl mx-auto p-8">
-      <div className="mb-6">
-        <Link href="/h2" className="text-xs text-gray-400 hover:text-gray-600">
-          ← Home
-        </Link>
-        <h1 className="text-xl font-semibold text-gray-900 mt-1">Connect a source</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Sources are profiled once and shared across projects.
-        </p>
-      </div>
+  const inputStyle = {
+    width: "100%",
+    padding: "10px 14px",
+    background: "#fff",
+    border: `1px solid ${HW2_COLOR.rule2}`,
+    borderRadius: 8,
+    font: "400 14px 'DM Sans', sans-serif",
+    color: HW2_COLOR.ink,
+    fontFamily: "'DM Sans', sans-serif",
+    outline: "none",
+    boxSizing: "border-box" as const,
+  };
 
-      <form onSubmit={submit} className="space-y-4">
+  return (
+    <div
+      style={{
+        maxWidth: 600,
+        margin: "0 auto",
+        padding: "36px 32px 80px",
+        fontFamily: "'DM Sans', sans-serif",
+      }}
+    >
+      <span
+        style={{
+          font: "600 11px 'DM Sans', sans-serif",
+          color: HW2_COLOR.blue,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+        }}
+      >
+        Connect
+      </span>
+      <h1
+        style={{
+          font: "600 26px 'DM Sans', sans-serif",
+          letterSpacing: "-0.02em",
+          color: HW2_COLOR.ink,
+          lineHeight: 1.25,
+          marginTop: 8,
+          marginBottom: 6,
+        }}
+      >
+        Connect a source
+      </h1>
+      <p
+        style={{
+          font: "400 14px 'DM Sans', sans-serif",
+          color: HW2_COLOR.muted,
+          marginBottom: 28,
+          lineHeight: 1.55,
+        }}
+      >
+        Sources are profiled once and shared across all projects.
+        Point to a file path or connection string.
+      </p>
+
+      <form onSubmit={submit} style={{ display: "grid", gap: 18 }}>
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <label
+            style={{
+              font: "600 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              display: "block",
+              marginBottom: 8,
+            }}
+          >
             File path or connection string *
           </label>
           <input
             value={path}
-            onChange={e => setPath(e.target.value)}
+            onChange={(e) => setPath(e.target.value)}
             required
             placeholder="/data/my_source  or  postgres://user:pass@host/db"
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            style={inputStyle}
+            onFocus={(e) =>
+              (e.currentTarget.style.borderColor = HW2_COLOR.blue)
+            }
+            onBlur={(e) =>
+              (e.currentTarget.style.borderColor = HW2_COLOR.rule2)
+            }
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div
+          style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}
+        >
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label
+              style={{
+                font: "600 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.muted,
+                display: "block",
+                marginBottom: 8,
+              }}
+            >
               Type (optional)
             </label>
             <select
               value={sourceType}
-              onChange={e => setSourceType(e.target.value)}
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+              onChange={(e) => setSourceType(e.target.value)}
+              style={{
+                ...inputStyle,
+                cursor: "pointer",
+              }}
             >
               <option value="">Auto-detect</option>
               <option value="csv">CSV</option>
@@ -74,38 +144,99 @@ export default function ConnectSourcePage() {
             </select>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label
+              style={{
+                font: "600 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.muted,
+                display: "block",
+                marginBottom: 8,
+              }}
+            >
               Name (optional)
             </label>
             <input
               value={name}
-              onChange={e => setName(e.target.value)}
+              onChange={(e) => setName(e.target.value)}
               placeholder="my_source"
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+              style={inputStyle}
+              onFocus={(e) =>
+                (e.currentTarget.style.borderColor = HW2_COLOR.blue)
+              }
+              onBlur={(e) =>
+                (e.currentTarget.style.borderColor = HW2_COLOR.rule2)
+              }
             />
           </div>
         </div>
 
         {error && (
-          <div className="text-sm text-red-600 border border-red-200 bg-red-50 rounded px-3 py-2">
+          <div
+            style={{
+              padding: "12px 16px",
+              background: HW2_COLOR.badSoft,
+              border: `1px solid ${HW2_COLOR.bad}44`,
+              borderRadius: 8,
+              font: "500 13px 'DM Sans', sans-serif",
+              color: HW2_COLOR.bad,
+            }}
+          >
             {error}
           </div>
         )}
 
-        <div className="flex gap-3 pt-2">
+        {/* Hint */}
+        <div
+          style={{
+            padding: "12px 16px",
+            background: HW2_COLOR.chip,
+            borderRadius: 8,
+            font: "400 12px 'DM Sans', sans-serif",
+            color: HW2_COLOR.muted,
+            lineHeight: 1.5,
+          }}
+        >
+          Profiling reads column names, types, row counts and statistics. No
+          row data is sent to any LLM.
+        </div>
+
+        <div
+          style={{ display: "flex", gap: 10, paddingTop: 4 }}
+        >
           <button
             type="button"
             onClick={() => router.back()}
-            className="px-4 py-2 border border-gray-300 text-sm rounded-md hover:bg-gray-50"
+            style={{
+              appearance: "none",
+              cursor: "pointer",
+              background: "#fff",
+              border: `1px solid ${HW2_COLOR.rule2}`,
+              borderRadius: 8,
+              padding: "10px 18px",
+              font: "500 13px 'DM Sans', sans-serif",
+              color: HW2_COLOR.ink2,
+              fontFamily: "'DM Sans', sans-serif",
+            }}
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={loading || !path}
-            className="px-5 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 disabled:opacity-50"
+            style={{
+              appearance: "none",
+              cursor: loading || !path ? "default" : "pointer",
+              background: HW2_COLOR.blue,
+              color: "#fff",
+              border: "1px solid transparent",
+              borderRadius: 8,
+              padding: "10px 20px",
+              font: "600 14px 'DM Sans', sans-serif",
+              fontFamily: "'DM Sans', sans-serif",
+              opacity: loading || !path ? 0.5 : 1,
+              transition: "opacity 120ms",
+            }}
           >
-            {loading ? "Profiling…" : "Connect & profile"}
+            {loading ? "Profiling…" : "Connect & profile →"}
           </button>
         </div>
       </form>

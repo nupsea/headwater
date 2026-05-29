@@ -1,39 +1,367 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
-import Link from "next/link";
-import { h2, type H2Question, type H2ProposedQuestion, type H2RelevantColumn, type H2EdaFinding } from "@/lib/h2api";
+import { useParams, useRouter } from "next/navigation";
+import {
+  h2,
+  type H2Question,
+  type H2RelevantColumn,
+  type H2EdaFinding,
+} from "@/lib/h2api";
+import { HW2_COLOR } from "@/components/h2/readiness-ring";
 
-const ANSWERABILITY_LABEL: Record<string, string> = {
-  answerable: "Can answer",
-  answerable_with_caveat: "With caveats",
-  cannot_answer: "Cannot answer",
-};
+// ─── Primitives ──────────────────────────────────────────────────────────────
 
-const ANSWERABILITY_COLOR: Record<string, string> = {
-  answerable: "text-green-700 bg-green-50",
-  answerable_with_caveat: "text-yellow-700 bg-yellow-50",
-  cannot_answer: "text-red-700 bg-red-50",
-};
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        font: "600 11px 'DM Sans', sans-serif",
+        color: HW2_COLOR.muted,
+        textTransform: "uppercase",
+        letterSpacing: "0.06em",
+        marginBottom: 14,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+// ─── Proposed question row ────────────────────────────────────────────────────
+
+function ProposedQ({
+  question,
+  kept,
+  onToggle,
+}: {
+  question: H2Question;
+  kept: boolean;
+  onToggle: () => void;
+}) {
+  const ans = question.answerability;
+  const tone =
+    ans === "answerable"
+      ? {
+          bg: HW2_COLOR.goodSoft,
+          c: HW2_COLOR.good,
+          icon: "✓",
+          verdict: "Answerable",
+        }
+      : ans === "cannot_answer"
+      ? {
+          bg: HW2_COLOR.warnSoft,
+          c: HW2_COLOR.warn,
+          icon: "✗",
+          verdict: "Can't answer",
+        }
+      : {
+          bg: HW2_COLOR.blueSoft,
+          c: HW2_COLOR.blue,
+          icon: "⚠",
+          verdict: "Answerable, with caveat",
+        };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 12,
+        padding: "12px 14px",
+        borderRadius: 10,
+        background: kept ? HW2_COLOR.surface : HW2_COLOR.paper,
+        border: `1px solid ${kept ? HW2_COLOR.rule2 : HW2_COLOR.rule}`,
+        opacity: kept ? 1 : 0.65,
+        transition: "opacity 120ms",
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={kept}
+        onChange={onToggle}
+        style={{ accentColor: HW2_COLOR.blue, marginTop: 4, cursor: "pointer" }}
+      />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 6,
+            flexWrap: "wrap",
+          }}
+        >
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "2px 8px",
+              borderRadius: 4,
+              background: tone.bg,
+              color: tone.c,
+              font: "700 10px 'DM Sans', sans-serif",
+              letterSpacing: "0.07em",
+              textTransform: "uppercase",
+            }}
+          >
+            <span>{tone.icon}</span>
+            {tone.verdict}
+          </span>
+          <span
+            style={{
+              font: "500 11px 'DM Mono', monospace",
+              color: HW2_COLOR.faint,
+            }}
+          >
+            {(question.confidence * 100).toFixed(0)}% confidence
+          </span>
+        </div>
+        <div
+          style={{
+            font: "500 14px 'DM Sans', sans-serif",
+            color: HW2_COLOR.ink,
+            lineHeight: 1.4,
+          }}
+        >
+          {question.title}
+        </div>
+        {question.question.reason && (
+          <div
+            style={{
+              font: "400 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              marginTop: 5,
+              lineHeight: 1.5,
+            }}
+          >
+            <strong style={{ color: tone.c }}>
+              {ans === "cannot_answer" ? "Why not: " : "Why: "}
+            </strong>
+            {question.question.reason}
+          </div>
+        )}
+        {question.question.needed_columns &&
+          question.question.needed_columns.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 4,
+                marginTop: 6,
+              }}
+            >
+              {question.question.needed_columns.map((c) => (
+                <span
+                  key={c}
+                  style={{
+                    font: "500 11px 'DM Mono', monospace",
+                    color: HW2_COLOR.faint,
+                    padding: "1px 6px",
+                    background: HW2_COLOR.chip,
+                    borderRadius: 4,
+                  }}
+                >
+                  {c}
+                </span>
+              ))}
+            </div>
+          )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Relevant columns ─────────────────────────────────────────────────────────
+
+function RelevantCols({ cols }: { cols: H2RelevantColumn[] }) {
+  const [showMore, setShowMore] = useState(false);
+  const visible = showMore ? cols : cols.slice(0, 16);
+
+  return (
+    <div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          marginBottom: 12,
+        }}
+      >
+        <SectionLabel>Relevant to goal</SectionLabel>
+        <span
+          style={{
+            font: "400 11px 'DM Sans', sans-serif",
+            color: HW2_COLOR.faint,
+          }}
+        >
+          {cols.length} columns
+        </span>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {visible.map((c) => (
+          <span
+            key={`${c.table_name}.${c.column_name}`}
+            title={c.reason}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "5px 9px",
+              borderRadius: 6,
+              background: HW2_COLOR.blueSoft,
+              color: HW2_COLOR.blue,
+              font: "500 12px 'DM Mono', monospace",
+            }}
+          >
+            <span style={{ color: HW2_COLOR.muted }}>{c.table_name}.</span>
+            {c.column_name}
+          </span>
+        ))}
+      </div>
+      {cols.length > 16 && (
+        <button
+          onClick={() => setShowMore((v) => !v)}
+          style={{
+            appearance: "none",
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            padding: 0,
+            marginTop: 10,
+            color: HW2_COLOR.muted,
+            font: "500 12px 'DM Sans', sans-serif",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            fontFamily: "'DM Sans', sans-serif",
+          }}
+        >
+          <span
+            style={{
+              font: "500 11px 'DM Mono', monospace",
+              color: HW2_COLOR.faint,
+            }}
+          >
+            {showMore ? "▼" : "▶"}
+          </span>
+          {showMore ? "Show fewer" : `Show ${cols.length - 16} more`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─── EDA Finding row ──────────────────────────────────────────────────────────
+
+function EdaFindingRow({ finding }: { finding: H2EdaFinding }) {
+  const isCritical = finding.flags.includes("critical");
+  return (
+    <div
+      style={{
+        padding: "12px 16px",
+        background: isCritical ? HW2_COLOR.badSoft : HW2_COLOR.surface,
+        border: `1px solid ${isCritical ? HW2_COLOR.bad + "44" : HW2_COLOR.rule}`,
+        borderRadius: 10,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <span
+          style={{
+            font: "600 10px 'DM Sans', sans-serif",
+            color: isCritical ? HW2_COLOR.bad : HW2_COLOR.muted,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+            flexShrink: 0,
+            marginTop: 2,
+          }}
+        >
+          {finding.family}
+        </span>
+        <div style={{ flex: 1 }}>
+          <p
+            style={{
+              font: "500 13px 'DM Sans', sans-serif",
+              color: isCritical ? HW2_COLOR.bad : HW2_COLOR.ink,
+            }}
+          >
+            {finding.title}
+          </p>
+          <div
+            style={{
+              display: "flex",
+              gap: 12,
+              marginTop: 4,
+              font: "400 11px 'DM Mono', monospace",
+              color: HW2_COLOR.faint,
+            }}
+          >
+            <span>
+              effect {(finding.effect_size * 100).toFixed(0)}%
+            </span>
+            <span>
+              conf {(finding.confidence * 100).toFixed(0)}%
+            </span>
+            <span
+              style={{
+                font: "500 10.5px 'DM Mono', monospace",
+                color: HW2_COLOR.muted,
+              }}
+            >
+              {finding.col_ref}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function UnderstandPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
+
   const [questions, setQuestions] = useState<H2Question[]>([]);
   const [relevance, setRelevance] = useState<H2RelevantColumn[]>([]);
   const [eda, setEda] = useState<H2EdaFinding[]>([]);
   const [edaScore, setEdaScore] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [kept, setKept] = useState<Set<string>>(new Set());
 
   const load = async () => {
     try {
       const project = await h2.projects.get(id);
-      setQuestions(project.questions ?? []);
-      const rel = await h2.projects.rerunRelevance(id);
-      setRelevance(rel.relevant_columns);
+      const qs = project.questions ?? [];
+      setQuestions(qs);
+      // Initially keep all answerable questions
+      setKept(
+        new Set(
+          qs
+            .filter((q) => q.answerability !== "cannot_answer")
+            .map((q) => q.id)
+        )
+      );
+    } catch {
+      // ignore
     } finally {
       setLoading(false);
+    }
+  };
+
+  const rerunRelevance = async () => {
+    setRefreshing(true);
+    try {
+      const rel = await h2.projects.rerunRelevance(id);
+      setRelevance(rel.relevant_columns);
+    } catch {
+      // ignore
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -43,167 +371,334 @@ export default function UnderstandPage() {
       const result = await h2.projects.eda.run(id);
       setEda(result.top_findings);
       setEdaScore(result.insight_confidence_score);
+    } catch {
+      // ignore
     } finally {
       setRunning(false);
     }
   };
 
-  useEffect(() => { load(); }, [id]);
+  const toggleKept = (qid: string) => {
+    setKept((prev) => {
+      const next = new Set(prev);
+      next.has(qid) ? next.delete(qid) : next.add(qid);
+      return next;
+    });
+  };
 
-  if (loading) return <div className="p-8 text-gray-500">Loading…</div>;
+  const acceptAll = () => {
+    setKept(
+      new Set(
+        questions
+          .filter((q) => q.answerability !== "cannot_answer")
+          .map((q) => q.id)
+      )
+    );
+  };
+
+  useEffect(() => {
+    load();
+    rerunRelevance();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  const keptCount = [...kept].length;
+
+  if (loading) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          height: "40vh",
+          font: "400 14px 'DM Sans', sans-serif",
+          color: HW2_COLOR.muted,
+        }}
+      >
+        Loading…
+      </div>
+    );
+  }
 
   return (
-    <div className="max-w-3xl mx-auto p-8">
-      <div className="flex items-center gap-3 mb-6">
-        <Link href={`/h2/projects/${id}`} className="text-xs text-gray-400 hover:text-gray-600">
-          ← Project
-        </Link>
-        <h1 className="text-xl font-semibold text-gray-900">Understand</h1>
-      </div>
+    <div
+      style={{
+        maxWidth: 980,
+        margin: "0 auto",
+        padding: "32px 32px 80px",
+        fontFamily: "'DM Sans', sans-serif",
+      }}
+    >
+      <span
+        style={{
+          font: "600 11px 'DM Sans', sans-serif",
+          color: HW2_COLOR.blue,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+        }}
+      >
+        Step 2 of 5 · Understand
+      </span>
+      <h2
+        style={{
+          font: "600 26px 'DM Sans', sans-serif",
+          letterSpacing: "-0.02em",
+          color: HW2_COLOR.ink,
+          lineHeight: 1.25,
+          marginTop: 8,
+          marginBottom: 4,
+        }}
+      >
+        Here&rsquo;s what this data is.
+      </h2>
+      <p
+        style={{
+          font: "400 14px 'DM Sans', sans-serif",
+          color: HW2_COLOR.muted,
+          marginBottom: 28,
+        }}
+      >
+        Review the relevant columns and curate the proposed questions below.
+      </p>
 
-      {/* Proposed questions */}
-      <section className="mb-8">
-        <h2 className="text-sm font-medium text-gray-700 mb-3">
-          Proposed questions ({questions.length})
-        </h2>
-        {questions.length === 0 ? (
-          <p className="text-sm text-gray-400">No questions yet. Re-frame the project to generate them.</p>
-        ) : (
-          <div className="space-y-3">
-            {questions.map(q => (
-              <QuestionRow key={q.id} question={q} />
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* Relevant columns */}
+      {/* Relevant columns card */}
       {relevance.length > 0 && (
-        <section className="mb-8">
-          <h2 className="text-sm font-medium text-gray-700 mb-3">
-            Relevant columns (top {relevance.length})
-          </h2>
-          <div className="border border-gray-200 rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
-                <tr>
-                  <th className="px-4 py-2 text-left">Column</th>
-                  <th className="px-4 py-2 text-left">Role</th>
-                  <th className="px-4 py-2 text-right">Score</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {relevance.map(c => (
-                  <tr key={`${c.table_name}.${c.column_name}`} className="hover:bg-gray-50">
-                    <td className="px-4 py-2 font-mono text-xs">
-                      <span className="text-gray-400">{c.table_name}.</span>
-                      {c.column_name}
-                    </td>
-                    <td className="px-4 py-2 text-gray-500 text-xs">{c.semantic_role ?? "—"}</td>
-                    <td className="px-4 py-2 text-right">
-                      <span className="text-xs font-medium text-gray-700">{c.score.toFixed(1)}</span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <div
+          style={{
+            background: HW2_COLOR.surface,
+            border: `1px solid ${HW2_COLOR.rule}`,
+            borderRadius: 12,
+            padding: "20px 24px",
+            marginBottom: 16,
+          }}
+        >
+          <RelevantCols cols={relevance} />
+          <button
+            onClick={rerunRelevance}
+            disabled={refreshing}
+            style={{
+              appearance: "none",
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              marginTop: 12,
+              padding: 0,
+              color: HW2_COLOR.muted,
+              font: "500 12px 'DM Sans', sans-serif",
+              opacity: refreshing ? 0.5 : 1,
+              fontFamily: "'DM Sans', sans-serif",
+            }}
+          >
+            {refreshing ? "Re-running…" : "↺ Re-run relevance"}
+          </button>
+        </div>
       )}
 
-      {/* EDA */}
-      <section>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-gray-700">
+      {/* EDA card */}
+      <div
+        style={{
+          background: HW2_COLOR.surface,
+          border: `1px solid ${HW2_COLOR.rule}`,
+          borderRadius: 12,
+          padding: "20px 24px",
+          marginBottom: 20,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: eda.length > 0 ? 16 : 0,
+          }}
+        >
+          <SectionLabel>
             Data quality findings
             {edaScore !== null && (
-              <span className="ml-2 text-xs text-gray-400">
+              <span
+                style={{
+                  marginLeft: 10,
+                  font: "500 10px 'DM Mono', monospace",
+                  color: HW2_COLOR.faint,
+                  textTransform: "none",
+                  letterSpacing: 0,
+                }}
+              >
                 insight confidence {(edaScore * 100).toFixed(0)}%
               </span>
             )}
-          </h2>
+          </SectionLabel>
           <button
             onClick={runEda}
             disabled={running}
-            className="text-xs px-3 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+            style={{
+              appearance: "none",
+              cursor: running ? "default" : "pointer",
+              background: HW2_COLOR.chip,
+              border: `1px solid ${HW2_COLOR.rule2}`,
+              borderRadius: 8,
+              padding: "6px 12px",
+              font: "500 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.ink2,
+              fontFamily: "'DM Sans', sans-serif",
+              opacity: running ? 0.6 : 1,
+            }}
           >
             {running ? "Running…" : "Run EDA"}
           </button>
         </div>
         {eda.length > 0 ? (
-          <div className="space-y-2">
+          <div style={{ display: "grid", gap: 8 }}>
             {eda.map((f, i) => (
               <EdaFindingRow key={i} finding={f} />
             ))}
           </div>
         ) : (
-          <p className="text-sm text-gray-400">
-            Click "Run EDA" to analyse data quality patterns.
+          <p
+            style={{
+              font: "400 13px 'DM Sans', sans-serif",
+              color: HW2_COLOR.faint,
+            }}
+          >
+            Click &ldquo;Run EDA&rdquo; to analyse data quality patterns.
           </p>
         )}
-      </section>
-
-      <div className="mt-8 flex justify-end">
-        <Link
-          href={`/h2/projects/${id}/resolve`}
-          className="px-5 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700"
-        >
-          Resolve →
-        </Link>
       </div>
-    </div>
-  );
-}
 
-function QuestionRow({ question }: { question: H2Question }) {
-  const answerability = question.answerability;
-  return (
-    <div className="border border-gray-200 rounded-lg p-4">
-      <div className="flex items-start gap-3">
-        <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 mt-0.5 ${ANSWERABILITY_COLOR[answerability] ?? "text-gray-600 bg-gray-50"}`}>
-          {ANSWERABILITY_LABEL[answerability] ?? answerability}
-        </span>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-gray-800">{question.title}</p>
-          {question.question.reason && (
-            <p className="text-xs text-gray-500 mt-0.5">{question.question.reason}</p>
-          )}
-          {question.question.needed_columns && question.question.needed_columns.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {question.question.needed_columns.map(c => (
-                <span key={c} className="text-xs font-mono bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
-                  {c}
-                </span>
-              ))}
+      {/* Proposed questions card */}
+      <div
+        style={{
+          background: HW2_COLOR.surface,
+          border: `1px solid ${HW2_COLOR.rule}`,
+          borderRadius: 12,
+          overflow: "hidden",
+          marginBottom: 24,
+        }}
+      >
+        <div
+          style={{
+            padding: "16px 22px",
+            borderBottom: `1px solid ${HW2_COLOR.rule}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <div>
+            <div
+              style={{
+                font: "600 11px 'DM Sans', sans-serif",
+                color: HW2_COLOR.blue,
+                letterSpacing: "0.07em",
+                textTransform: "uppercase",
+              }}
+            >
+              Proposed questions
             </div>
+            <div
+              style={{
+                font: "500 16px 'DM Sans', sans-serif",
+                color: HW2_COLOR.ink,
+                marginTop: 4,
+              }}
+            >
+              {keptCount} of {questions.length} kept — curate or add your
+              own.
+            </div>
+          </div>
+          <button
+            onClick={acceptAll}
+            style={{
+              appearance: "none",
+              cursor: "pointer",
+              background: "#fff",
+              border: `1px solid ${HW2_COLOR.rule2}`,
+              borderRadius: 8,
+              padding: "6px 12px",
+              font: "500 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.ink2,
+              fontFamily: "'DM Sans', sans-serif",
+            }}
+          >
+            Accept all answerable
+          </button>
+        </div>
+
+        <div style={{ padding: "12px 22px 18px", display: "grid", gap: 8 }}>
+          {questions.length === 0 ? (
+            <p
+              style={{
+                font: "400 13px 'DM Sans', sans-serif",
+                color: HW2_COLOR.faint,
+                padding: "8px 0",
+              }}
+            >
+              No questions proposed yet. The Frame stage generates these
+              automatically.
+            </p>
+          ) : (
+            questions.map((q) => (
+              <ProposedQ
+                key={q.id}
+                question={q}
+                kept={kept.has(q.id)}
+                onToggle={() => toggleKept(q.id)}
+              />
+            ))
           )}
         </div>
-        <span className="text-xs text-gray-400 shrink-0">
-          {(question.confidence * 100).toFixed(0)}%
-        </span>
       </div>
-    </div>
-  );
-}
 
-function EdaFindingRow({ finding }: { finding: H2EdaFinding }) {
-  const isCritical = finding.flags.includes("critical");
-  return (
-    <div className={`border rounded-lg px-4 py-3 text-sm ${isCritical ? "border-red-200 bg-red-50" : "border-gray-200"}`}>
-      <div className="flex items-start gap-2">
-        <span className="text-xs text-gray-400 shrink-0 mt-0.5 font-medium uppercase">{finding.family}</span>
-        <div className="flex-1">
-          <p className={`text-sm font-medium ${isCritical ? "text-red-800" : "text-gray-800"}`}>
-            {finding.title}
-          </p>
-          <div className="flex gap-3 mt-1 text-xs text-gray-400">
-            <span>effect {(finding.effect_size * 100).toFixed(0)}%</span>
-            <span>conf {(finding.confidence * 100).toFixed(0)}%</span>
-            {finding.flags.filter(f => f !== "critical").map(f => (
-              <span key={f} className="bg-gray-100 px-1.5 rounded">{f}</span>
-            ))}
+      {/* Continue */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "16px 20px",
+          background: HW2_COLOR.surface,
+          border: `1px solid ${HW2_COLOR.rule2}`,
+          borderRadius: 12,
+          gap: 14,
+        }}
+      >
+        <div>
+          <div
+            style={{
+              font: "600 14px 'DM Sans', sans-serif",
+              color: HW2_COLOR.ink,
+            }}
+          >
+            Looks right?
+          </div>
+          <div
+            style={{
+              font: "400 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              marginTop: 2,
+            }}
+          >
+            Specifics are resolved one at a time in the next step.
           </div>
         </div>
+        <button
+          onClick={() => router.push(`/h2/projects/${id}/resolve`)}
+          style={{
+            appearance: "none",
+            cursor: "pointer",
+            background: HW2_COLOR.blue,
+            color: "#fff",
+            border: "1px solid transparent",
+            borderRadius: 8,
+            padding: "10px 18px",
+            font: "600 14px 'DM Sans', sans-serif",
+            fontFamily: "'DM Sans', sans-serif",
+          }}
+        >
+          Yes, continue →
+        </button>
       </div>
     </div>
   );
