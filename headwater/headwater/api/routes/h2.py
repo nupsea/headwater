@@ -524,6 +524,8 @@ def evaluate_readiness(project_id: str) -> dict[str, Any]:
                 "state": q.state,
                 "readiness_pct": q.readiness_pct,
                 "summary": q.summary,
+                "title": q.title,
+                "needed_columns": q.needed_columns,
                 "contracts": [
                     {"contract_type": c.contract_type, "passed": c.passed, "note": c.note}
                     for c in q.contracts

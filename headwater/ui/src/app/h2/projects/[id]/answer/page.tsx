@@ -13,7 +13,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { h2, type H2AnswerDraft } from "@/lib/h2api";
+import { h2, onHw2Event, HW2_RECOMPUTED, type H2AnswerDraft } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
 
 // ─── State pill ───────────────────────────────────────────────────────────────
@@ -790,6 +790,13 @@ export default function AnswerPage() {
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // A recompute re-drafts and re-executes; pull the fresh answers/data in.
+  useEffect(
+    () => onHw2Event(HW2_RECOMPUTED, () => void loadDraft().catch(() => {})),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [id]
+  );
 
   if (loading) {
     return (

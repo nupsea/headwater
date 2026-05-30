@@ -112,6 +112,8 @@ export interface H2QuestionReadiness {
   state: "certified" | "draft" | "cannot_answer" | "demoted";
   readiness_pct: number;
   summary: string;
+  title: string;
+  needed_columns: string[];
   contracts: H2Contract[];
 }
 
@@ -363,6 +365,23 @@ export function notifyInputChanged(): void {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event(HW2_INPUT_CHANGED));
   }
+}
+
+/** Signal that a recompute finished so every open view re-fetches its derived
+ *  state — the seamless alternative to a full page reload. */
+export const HW2_RECOMPUTED = "hw2:recomputed";
+export function notifyRecomputed(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(HW2_RECOMPUTED));
+  }
+}
+
+/** Subscribe a callback to one of the HW2 events; returns an unsubscribe fn.
+ *  Convenience for page effects that reload on recompute. */
+export function onHw2Event(event: string, handler: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(event, handler);
+  return () => window.removeEventListener(event, handler);
 }
 
 export function trustBadge(readiness?: H2ReadinessReport | null): {

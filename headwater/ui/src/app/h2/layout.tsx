@@ -9,7 +9,14 @@ import {
 } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
-import { h2, HW2_INPUT_CHANGED, type H2Project, type H2Source } from "@/lib/h2api";
+import {
+  h2,
+  HW2_INPUT_CHANGED,
+  HW2_RECOMPUTED,
+  notifyRecomputed,
+  type H2Project,
+  type H2Source,
+} from "@/lib/h2api";
 import { ReadinessRing, HW2_COLOR } from "@/components/h2/readiness-ring";
 import { Stepper, type StageKey } from "@/components/h2/stepper";
 
@@ -671,9 +678,11 @@ function RecomputeBanner({ projectId }: { projectId: string }) {
     setBusy(true);
     try {
       await h2.projects.recompute(projectId);
-      // Refresh so every view reflects the new state.
-      window.location.reload();
-    } catch {
+      // Re-check our own staleness (the banner hides once fresh) and tell every
+      // open view to re-fetch — a seamless refresh instead of a full reload.
+      load();
+      notifyRecomputed();
+    } finally {
       setBusy(false);
     }
   };
@@ -747,7 +756,7 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
 
   // Fetch active project when route changes to a project page
   const projectId = projectIdFromPath(pathname);
-  useEffect(() => {
+  const reloadActiveProject = useCallback(() => {
     if (!projectId) {
       setActiveProject(null);
       return;
@@ -757,6 +766,21 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
       .then(setActiveProject)
       .catch(() => setActiveProject(null));
   }, [projectId]);
+
+  useEffect(() => {
+    reloadActiveProject();
+  }, [reloadActiveProject]);
+
+  // After a recompute, refresh the banner (ring/goal/counts) and the rail
+  // readouts so they reflect the new derived state — no full page reload.
+  useEffect(() => {
+    const onRecomputed = () => {
+      reloadActiveProject();
+      reload();
+    };
+    window.addEventListener(HW2_RECOMPUTED, onRecomputed);
+    return () => window.removeEventListener(HW2_RECOMPUTED, onRecomputed);
+  }, [reloadActiveProject, reload]);
 
   const stage = stageFromPath(pathname) ?? "understand";
 

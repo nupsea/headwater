@@ -5,6 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import {
   h2,
   notifyInputChanged,
+  onHw2Event,
+  HW2_RECOMPUTED,
   type H2Question,
   type H2RelevantColumn,
   type H2EdaFinding,
@@ -256,6 +258,137 @@ function RelevantCols({ cols }: { cols: H2RelevantColumn[] }) {
 }
 
 // ─── EDA Finding row ──────────────────────────────────────────────────────────
+
+function EdaPanel({ findings }: { findings: H2EdaFinding[] }) {
+  const [visible, setVisible] = useState(10);
+  useEffect(() => {
+    setVisible(10);
+  }, [findings]);
+
+  const weight = (f: H2EdaFinding) =>
+    (f.flags.includes("critical") ? 1000 : 0) + f.effect_size * f.confidence;
+  const sorted = [...findings].sort((a, b) => weight(b) - weight(a));
+
+  // Family overview across all findings.
+  const fam = new Map<string, { count: number; critical: number }>();
+  for (const f of findings) {
+    const e = fam.get(f.family) ?? { count: 0, critical: 0 };
+    e.count += 1;
+    if (f.flags.includes("critical")) e.critical += 1;
+    fam.set(f.family, e);
+  }
+  const families = [...fam.entries()].sort((a, b) => b[1].count - a[1].count);
+  const criticalTotal = findings.filter((f) => f.flags.includes("critical")).length;
+
+  // Visible slice, grouped by family in importance order.
+  const shown = sorted.slice(0, visible);
+  const groups: { family: string; items: H2EdaFinding[] }[] = [];
+  const at = new Map<string, number>();
+  for (const f of shown) {
+    if (!at.has(f.family)) {
+      at.set(f.family, groups.length);
+      groups.push({ family: f.family, items: [] });
+    }
+    groups[at.get(f.family) as number].items.push(f);
+  }
+  const remaining = sorted.length - shown.length;
+
+  const chip = (label: string, tone: "blue" | "bad" | "neutral") => (
+    <span
+      style={{
+        font: "500 11px 'DM Mono', monospace",
+        padding: "3px 9px",
+        borderRadius: 5,
+        background:
+          tone === "bad" ? HW2_COLOR.badSoft : tone === "blue" ? HW2_COLOR.blueSoft : HW2_COLOR.chip,
+        color: tone === "bad" ? HW2_COLOR.bad : tone === "blue" ? HW2_COLOR.blue : HW2_COLOR.ink2,
+      }}
+    >
+      {label}
+    </span>
+  );
+
+  return (
+    <div>
+      {/* Digestible overview — one chip per family */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+        {chip(`${findings.length} finding${findings.length === 1 ? "" : "s"}`, "blue")}
+        {criticalTotal > 0 && chip(`${criticalTotal} critical`, "bad")}
+        {families.map(([name, e]) => (
+          <span key={name}>{chip(`${name} · ${e.count}`, e.critical ? "bad" : "neutral")}</span>
+        ))}
+      </div>
+
+      {/* Grouped, capped list */}
+      <div style={{ display: "grid", gap: 16 }}>
+        {groups.map((g) => (
+          <div key={g.family}>
+            <div
+              style={{
+                font: "600 10px 'DM Sans', sans-serif",
+                color: HW2_COLOR.muted,
+                textTransform: "uppercase",
+                letterSpacing: "0.07em",
+                marginBottom: 7,
+              }}
+            >
+              {g.family}
+              <span style={{ color: HW2_COLOR.faint, marginLeft: 6, fontWeight: 500 }}>
+                {g.items.length}
+              </span>
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {g.items.map((f, i) => (
+                <EdaFindingRow key={`${g.family}-${i}`} finding={f} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Show more / fewer */}
+      {(remaining > 0 || visible > 10) && (
+        <div style={{ display: "flex", gap: 16, marginTop: 14 }}>
+          {remaining > 0 && (
+            <button
+              onClick={() => setVisible((v) => v + 10)}
+              style={{
+                appearance: "none",
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                padding: 0,
+                color: HW2_COLOR.blue,
+                font: "600 12.5px 'DM Sans', sans-serif",
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              Show {Math.min(10, remaining)} more
+              <span style={{ color: HW2_COLOR.faint, fontWeight: 500 }}> · {remaining} hidden</span>
+            </button>
+          )}
+          {visible > 10 && (
+            <button
+              onClick={() => setVisible(10)}
+              style={{
+                appearance: "none",
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                padding: 0,
+                color: HW2_COLOR.muted,
+                font: "500 12.5px 'DM Sans', sans-serif",
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              Show fewer
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function EdaFindingRow({ finding }: { finding: H2EdaFinding }) {
   const isCritical = finding.flags.includes("critical");
@@ -557,6 +690,17 @@ export default function UnderstandPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  // A recompute re-proposes relevance + questions; reflect both here.
+  useEffect(
+    () =>
+      onHw2Event(HW2_RECOMPUTED, () => {
+        load();
+        rerunRelevance();
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [id]
+  );
+
   const keptCount = [...kept].length;
 
   if (loading) {
@@ -644,30 +788,68 @@ export default function UnderstandPage() {
               cursor: "pointer",
               width: "100%",
               textAlign: "left",
-              background: HW2_COLOR.surface,
-              border: `1px solid ${HW2_COLOR.rule}`,
+              background: showSchema ? HW2_COLOR.surface : HW2_COLOR.blueSoft,
+              border: `1.5px solid ${showSchema ? HW2_COLOR.rule2 : HW2_COLOR.blue}`,
               borderRadius: 12,
-              padding: "14px 20px",
-              font: "600 13px 'DM Sans', sans-serif",
-              color: HW2_COLOR.ink,
-              fontFamily: "'DM Sans', sans-serif",
+              padding: "16px 20px",
               display: "flex",
               alignItems: "center",
-              gap: 10,
+              gap: 13,
+              fontFamily: "'DM Sans', sans-serif",
+              transition: "background 120ms, border-color 120ms",
             }}
           >
-            <span style={{ color: HW2_COLOR.faint, font: "500 11px 'DM Mono', monospace" }}>
-              {showSchema ? "▾" : "▸"}
-            </span>
-            Schema &amp; meaning
             <span
               style={{
-                font: "400 12px 'DM Sans', sans-serif",
-                color: HW2_COLOR.muted,
-                fontWeight: 400,
+                width: 28,
+                height: 28,
+                flexShrink: 0,
+                borderRadius: 8,
+                display: "grid",
+                placeItems: "center",
+                background: HW2_COLOR.blue,
+                color: "#fff",
+                font: "700 16px 'DM Mono', monospace",
+                lineHeight: 1,
               }}
             >
-              — tables, editable column meanings, inferred relationships
+              {showSchema ? "–" : "+"}
+            </span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span
+                style={{
+                  display: "block",
+                  font: "700 15px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.ink,
+                  letterSpacing: "-0.01em",
+                }}
+              >
+                Schema &amp; meaning
+              </span>
+              <span
+                style={{
+                  display: "block",
+                  font: "400 12.5px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.muted,
+                  marginTop: 2,
+                }}
+              >
+                Tables, editable column meanings, inferred relationships — correct what
+                columns mean here.
+              </span>
+            </span>
+            <span
+              style={{
+                flexShrink: 0,
+                font: "600 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.blue,
+                background: showSchema ? HW2_COLOR.blueSoft : "#fff",
+                border: `1px solid ${HW2_COLOR.blue}55`,
+                borderRadius: 7,
+                padding: "6px 12px",
+              }}
+            >
+              {showSchema ? "Hide" : "Review & edit"}
             </span>
           </button>
           {showSchema && (
@@ -765,11 +947,7 @@ export default function UnderstandPage() {
           </button>
         </div>
         {eda.length > 0 ? (
-          <div style={{ display: "grid", gap: 8 }}>
-            {eda.map((f, i) => (
-              <EdaFindingRow key={i} finding={f} />
-            ))}
-          </div>
+          <EdaPanel findings={eda} />
         ) : (
           <p
             style={{

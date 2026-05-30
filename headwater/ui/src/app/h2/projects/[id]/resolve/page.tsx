@@ -2,7 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { h2, notifyInputChanged, type H2ResolveCard } from "@/lib/h2api";
+import {
+  h2,
+  notifyInputChanged,
+  onHw2Event,
+  HW2_RECOMPUTED,
+  type H2ResolveCard,
+} from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
 
 const secondaryBtn: React.CSSProperties = {
@@ -85,6 +91,7 @@ function ResolveCardRow({
     setBusy(true);
     try {
       await h2.projects.resolve.setDisposition(projectId, card.card_id, "open");
+      notifyInputChanged();
       onChanged();
     } finally {
       setBusy(false);
@@ -324,6 +331,9 @@ export default function ResolvePage() {
     load();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // A recompute can open/close gap cards; reflect the new set here.
+  useEffect(() => onHw2Event(HW2_RECOMPUTED, load), [id]);
 
   const high = cards.filter((c) => c.priority === "high");
   const medium = cards.filter((c) => c.priority === "medium");

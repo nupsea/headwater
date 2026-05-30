@@ -97,7 +97,17 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked.
 answers all visibly update; inputs visible and extensible; nothing is a dead end.
 
 ### Phase 2 — Make the pieces real
-- [ ] **S4. Specific readiness reasons + guidance** (`readiness/page.tsx` + backend summary).
+- [x] **S4. Specific readiness reasons + guidance** DONE 2026-05-31. Fixed the duplicated
+      "Why not" (the report had no separate title, so `summary` was printed twice). Backend now
+      surfaces `title` + `needed_columns` on each readiness question; the page shows the title
+      as heading, the summary once as the reason, the actual failing-contract notes, a concrete
+      resolution path per failing contract type (`resolutionPaths()`), and the needed-column
+      chips. Draft questions get an inline "To certify: …" hint. Files: `services/h2_readiness.py`,
+      `api/routes/h2.py`, `ui/src/lib/h2api.ts`, `readiness/page.tsx`. Gate: ruff + tsc clean,
+      49 backend tests pass.
+      Plus (test-driven, same session): Understand page — Schema & meaning toggle made prominent
+      (blue card, + badge, bold heading, "Review & edit"); EDA reworked into a family-overview
+      chip strip + grouped, importance-sorted list capped at 10 with show-more.
 - [ ] **S5. Persist question curation** (`services/h2_project.py`, `api/routes/h2.py`,
       `understand/page.tsx`, `h2api.ts`).
 - [ ] **S6. Real SQL Run in Answer** via `POST /h2/query` (`answer/page.tsx`).
@@ -137,8 +147,12 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
   persistent Inputs surface (new reusable `InputsPanel` — view + add data dictionary / .md /
   .txt any time, each add fires the refresh), scope + proposal snapshot. Stepper "Frame" and
   rail now open the home, not the new-project form. Resource registry enriched to show what
-  each input touched. ruff + tsc clean; 294 tests pass. Next: S3 (wire every input → the
-  complete refresh; replace the banner's full-page reload).
+  each input touched. ruff + tsc clean; 294 tests pass.
+- 2026-05-30 — **S3 done.** Every input write-path signals a change; the recompute banner now
+  refreshes in place (new HW2_RECOMPUTED event; no full page reload) and all five stage views
+  + the layout re-fetch on recompute. Phase 1 (the loop listens) is complete: feed an input
+  anywhere → the whole workflow updates with no reload. tsc clean; UI integrity verified.
+  Next: Phase 2 — S4 (specific readiness reasons + guidance).
 
 ---
 

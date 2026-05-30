@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   h2,
+  onHw2Event,
+  HW2_RECOMPUTED,
   type H2ReadinessReport,
   type H2QuestionReadiness,
   type H2Contract,
@@ -114,6 +116,29 @@ function ContractRow({ contract }: { contract: H2Contract }) {
 
 // ─── Per-question verdict ─────────────────────────────────────────────────────
 
+// Maps a failing evidence contract to a concrete, plain-English resolution path.
+const RESOLUTION: Record<string, string> = {
+  columns_present: "Add the missing column(s) to the source data.",
+  meanings_locked: "Confirm and lock what the needed columns mean (open Schema & meaning).",
+  nulls_acceptable: "Supply cleaner data — the needed columns have too many nulls.",
+  coverage_sufficient: "Add more data — more rows or a longer time span.",
+  consistent_grain: "Fix the duplicate-grain / join fan-out on the path.",
+};
+
+function resolutionPaths(contracts: H2Contract[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const c of contracts) {
+    if (c.passed) continue;
+    const g = RESOLUTION[c.contract_type] ?? c.note;
+    if (g && !seen.has(g)) {
+      seen.add(g);
+      out.push(g);
+    }
+  }
+  return out;
+}
+
 function QuestionVerdictRow({ question }: { question: H2QuestionReadiness }) {
   const [open, setOpen] = useState(false);
   const passing = question.contracts.filter((c) => c.passed).length;
@@ -181,8 +206,22 @@ function QuestionVerdictRow({ question }: { question: H2QuestionReadiness }) {
               letterSpacing: "-0.005em",
             }}
           >
-            {question.summary || question.question_id.split(":").pop()}
+            {question.title || question.summary || question.question_id.split(":").pop()}
           </div>
+          {question.state === "draft" &&
+            resolutionPaths(question.contracts).length > 0 && (
+              <div
+                style={{
+                  font: "400 12px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.muted,
+                  marginTop: 4,
+                  lineHeight: 1.5,
+                }}
+              >
+                <strong style={{ color: HW2_COLOR.ink2 }}>To certify: </strong>
+                {resolutionPaths(question.contracts)[0]}
+              </div>
+            )}
           {question.state === "demoted" && (
             <div
               style={{
@@ -275,36 +314,89 @@ function CannotAnswerBlock({
           {questions.length} question{questions.length !== 1 ? "s" : ""}
         </span>
       </div>
-      {questions.map((q) => (
-        <div
-          key={q.question_id}
-          style={{
-            padding: "14px 0",
-            borderTop: `1px solid ${HW2_COLOR.rule}`,
-          }}
-        >
+      {questions.map((q) => {
+        const reasons = q.contracts
+          .filter((c) => !c.passed)
+          .map((c) => c.note)
+          .filter(Boolean);
+        const paths = resolutionPaths(q.contracts);
+        return (
           <div
+            key={q.question_id}
             style={{
-              font: "600 15px 'DM Sans', sans-serif",
-              color: HW2_COLOR.ink,
-              marginBottom: 6,
-              letterSpacing: "-0.01em",
+              padding: "14px 0",
+              borderTop: `1px solid ${HW2_COLOR.rule}`,
             }}
           >
-            {q.summary || q.question_id.split(":").pop()}
+            <div
+              style={{
+                font: "600 15px 'DM Sans', sans-serif",
+                color: HW2_COLOR.ink,
+                marginBottom: 6,
+                letterSpacing: "-0.01em",
+              }}
+            >
+              {q.title || q.question_id.split(":").pop()}
+            </div>
+            <div
+              style={{
+                font: "400 13px 'DM Sans', sans-serif",
+                color: HW2_COLOR.ink2,
+                lineHeight: 1.55,
+              }}
+            >
+              <strong style={{ color: HW2_COLOR.warn }}>Why not: </strong>
+              {q.summary}
+            </div>
+            {reasons.length > 0 && (
+              <ul
+                style={{
+                  margin: "8px 0 0",
+                  paddingLeft: 18,
+                  font: "400 12.5px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.ink2,
+                  lineHeight: 1.55,
+                }}
+              >
+                {reasons.slice(0, 4).map((r, i) => (
+                  <li key={i}>{r}</li>
+                ))}
+              </ul>
+            )}
+            {paths.length > 0 && (
+              <div
+                style={{
+                  marginTop: 8,
+                  font: "400 12.5px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.ink2,
+                  lineHeight: 1.55,
+                }}
+              >
+                <strong style={{ color: HW2_COLOR.good }}>To unblock: </strong>
+                {paths.join(" · ")}
+              </div>
+            )}
+            {q.needed_columns.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 8 }}>
+                {q.needed_columns.map((c) => (
+                  <span
+                    key={c}
+                    style={{
+                      font: "500 11px 'DM Mono', monospace",
+                      color: HW2_COLOR.muted,
+                      padding: "1px 6px",
+                      background: HW2_COLOR.chip,
+                      borderRadius: 4,
+                    }}
+                  >
+                    {c}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
-          <div
-            style={{
-              font: "400 13px 'DM Sans', sans-serif",
-              color: HW2_COLOR.ink2,
-              lineHeight: 1.55,
-            }}
-          >
-            <strong style={{ color: HW2_COLOR.warn }}>Why not: </strong>
-            {q.summary}
-          </div>
-        </div>
-      ))}
+        );
+      })}
       <div
         style={{
           marginTop: 14,
@@ -370,6 +462,9 @@ export default function ReadinessPage() {
       .then(setReport)
       .finally(() => setLoading(false));
   }, [id]);
+
+  // Re-evaluate the verdict when a recompute lands.
+  useEffect(() => onHw2Event(HW2_RECOMPUTED, evaluate), [id]);
 
   if (loading) {
     return (

@@ -2,7 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { h2, notifyInputChanged, type H2Project } from "@/lib/h2api";
+import {
+  h2,
+  notifyInputChanged,
+  onHw2Event,
+  HW2_RECOMPUTED,
+  type H2Project,
+} from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
 import { InputsPanel } from "@/components/h2/inputs-panel";
 
@@ -49,6 +55,9 @@ export default function ProjectHomePage() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Re-fetch when a recompute lands so goal/inputs/proposal snapshot stay current.
+  useEffect(() => onHw2Event(HW2_RECOMPUTED, load), [id]);
 
   const saveGoal = async () => {
     if (goalDraft.trim().length < 6) return;

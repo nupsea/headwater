@@ -62,6 +62,8 @@ class QuestionReadiness:
     readiness_pct: int
     contracts: list[ContractResult] = field(default_factory=list)
     summary: str = ""
+    title: str = ""
+    needed_columns: list[str] = field(default_factory=list)
     source_snapshot_id: str | None = None
 
 
@@ -158,18 +160,21 @@ def evaluate_question(
 ) -> QuestionReadiness:
     question_id = question["id"]
     answerability = question.get("answerability", "answerable")
+    title = question.get("title", "")
+    needed = list(question.get("question", {}).get("needed_columns") or [])
 
     if answerability == "cannot_answer":
+        reason = (question.get("question", {}).get("reason") or "").strip()
         return QuestionReadiness(
             question_id=question_id,
             state="cannot_answer",
             readiness_pct=0,
             contracts=[],
-            summary=question.get("title", ""),
+            summary=reason or "This question cannot be answered with the current data.",
+            title=title,
+            needed_columns=needed,
             source_snapshot_id=snapshot_id,
         )
-
-    needed = list(question.get("question", {}).get("needed_columns") or [])
     contracts = _evaluate_contracts(
         question_id=question_id,
         needed_columns=needed,
@@ -189,6 +194,8 @@ def evaluate_question(
         readiness_pct=readiness_pct,
         contracts=contracts,
         summary=summary,
+        title=title,
+        needed_columns=needed,
         source_snapshot_id=snapshot_id,
     )
 
