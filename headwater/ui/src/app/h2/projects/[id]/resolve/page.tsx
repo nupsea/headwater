@@ -2,8 +2,32 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { h2, type H2ResolveCard } from "@/lib/h2api";
+import { h2, notifyInputChanged, type H2ResolveCard } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+
+const secondaryBtn: React.CSSProperties = {
+  appearance: "none",
+  cursor: "pointer",
+  background: "#fff",
+  border: `1px solid ${HW2_COLOR.rule2}`,
+  borderRadius: 8,
+  padding: "7px 13px",
+  font: "500 12px 'DM Sans', sans-serif",
+  color: HW2_COLOR.ink2,
+  fontFamily: "'DM Sans', sans-serif",
+};
+
+const primaryBtn: React.CSSProperties = {
+  appearance: "none",
+  cursor: "pointer",
+  background: HW2_COLOR.blueSoft,
+  border: `1px solid ${HW2_COLOR.blue}44`,
+  borderRadius: 8,
+  padding: "7px 13px",
+  font: "600 12px 'DM Sans', sans-serif",
+  color: HW2_COLOR.blue,
+  fontFamily: "'DM Sans', sans-serif",
+};
 
 function ImpactPill({ priority }: { priority: "high" | "medium" | "low" }) {
   const tones: Record<string, { bg: string; color: string }> = {
@@ -31,8 +55,56 @@ function ImpactPill({ priority }: { priority: "high" | "medium" | "low" }) {
   );
 }
 
-function ResolveCardRow({ card }: { card: H2ResolveCard }) {
-  const [open, setOpen] = useState(false);
+function ResolveCardRow({
+  card,
+  projectId,
+  onChanged,
+}: {
+  card: H2ResolveCard;
+  projectId: string;
+  onChanged: () => void;
+}) {
+  const [open, setOpen] = useState(card.status !== "deferred");
+  const [adding, setAdding] = useState(false);
+  const [ctx, setCtx] = useState("");
+  const [busy, setBusy] = useState(false);
+  const deferred = card.status === "deferred";
+
+  const defer = async () => {
+    setBusy(true);
+    try {
+      await h2.projects.resolve.setDisposition(projectId, card.card_id, "deferred");
+      notifyInputChanged();
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reopen = async () => {
+    setBusy(true);
+    try {
+      await h2.projects.resolve.setDisposition(projectId, card.card_id, "open");
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addContext = async () => {
+    if (!ctx.trim()) return;
+    setBusy(true);
+    try {
+      const file = new File([ctx], "resolve-context.md", { type: "text/markdown" });
+      await h2.projects.resources.ingest(projectId, file);
+      setCtx("");
+      setAdding(false);
+      notifyInputChanged();
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div
@@ -41,6 +113,7 @@ function ResolveCardRow({ card }: { card: H2ResolveCard }) {
         border: `1px solid ${card.priority === "high" ? HW2_COLOR.bad + "44" : HW2_COLOR.rule}`,
         borderRadius: 12,
         overflow: "hidden",
+        opacity: deferred ? 0.6 : 1,
       }}
     >
       <button
@@ -84,6 +157,9 @@ function ResolveCardRow({ card }: { card: H2ResolveCard }) {
                 · affects {card.affected_questions.length} question
                 {card.affected_questions.length !== 1 ? "s" : ""}
               </span>
+            )}
+            {deferred && (
+              <span style={{ color: HW2_COLOR.faint }}> · deferred to next cycle</span>
             )}
           </p>
         </div>
@@ -146,6 +222,73 @@ function ResolveCardRow({ card }: { card: H2ResolveCard }) {
                   </span>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Dispositions — feed the recompute loop */}
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              marginTop: 16,
+              paddingTop: 14,
+              borderTop: `1px solid ${HW2_COLOR.rule}`,
+            }}
+          >
+            {deferred ? (
+              <button onClick={reopen} disabled={busy} style={secondaryBtn}>
+                Reopen
+              </button>
+            ) : (
+              <button onClick={defer} disabled={busy} style={secondaryBtn}>
+                Defer to next cycle
+              </button>
+            )}
+            <button
+              onClick={() => setAdding((v) => !v)}
+              disabled={busy}
+              style={primaryBtn}
+            >
+              {adding ? "Cancel" : "Add context / define a term"}
+            </button>
+          </div>
+
+          {adding && (
+            <div style={{ marginTop: 12 }}>
+              <textarea
+                value={ctx}
+                onChange={(e) => setCtx(e.target.value)}
+                placeholder={
+                  "Paste a definition or note. Markdown tables map to columns, e.g.\n\n| column | meaning |\n| --- | --- |\n| total_wait_time | service_ts minus arrival_time |"
+                }
+                spellCheck={false}
+                style={{
+                  width: "100%",
+                  minHeight: 110,
+                  padding: "10px 14px",
+                  background: "#fff",
+                  border: `1px solid ${HW2_COLOR.rule2}`,
+                  borderRadius: 8,
+                  font: "500 12.5px 'DM Mono', monospace",
+                  color: HW2_COLOR.ink,
+                  lineHeight: 1.5,
+                  resize: "vertical",
+                  outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+              <button
+                onClick={addContext}
+                disabled={busy || !ctx.trim()}
+                style={{
+                  ...primaryBtn,
+                  marginTop: 8,
+                  opacity: busy || !ctx.trim() ? 0.5 : 1,
+                }}
+              >
+                {busy ? "Saving…" : "Save context — triggers a refresh"}
+              </button>
             </div>
           )}
         </div>
@@ -372,7 +515,7 @@ export default function ResolvePage() {
                 </div>
                 <div style={{ display: "grid", gap: 8 }}>
                   {high.map((c) => (
-                    <ResolveCardRow key={c.card_id} card={c} />
+                    <ResolveCardRow key={c.card_id} card={c} projectId={id} onChanged={load} />
                   ))}
                 </div>
               </div>
@@ -404,7 +547,7 @@ export default function ResolvePage() {
                 </div>
                 <div style={{ display: "grid", gap: 8 }}>
                   {medium.map((c) => (
-                    <ResolveCardRow key={c.card_id} card={c} />
+                    <ResolveCardRow key={c.card_id} card={c} projectId={id} onChanged={load} />
                   ))}
                 </div>
               </div>
@@ -436,7 +579,7 @@ export default function ResolvePage() {
                 </div>
                 <div style={{ display: "grid", gap: 8 }}>
                   {low.map((c) => (
-                    <ResolveCardRow key={c.card_id} card={c} />
+                    <ResolveCardRow key={c.card_id} card={c} projectId={id} onChanged={load} />
                   ))}
                 </div>
               </div>

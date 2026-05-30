@@ -69,6 +69,7 @@ class FrameProjectRequest(BaseModel):
 class UpdateColumnRequest(BaseModel):
     description: str | None = None
     semantic_type: str | None = None
+    dtype: str | None = None
     locked: bool | None = None
 
 
@@ -76,6 +77,15 @@ class IngestResourceRequest(BaseModel):
     content: str
     filename: str
     lock: bool = False
+
+
+class ResolveDispositionRequest(BaseModel):
+    status: str  # open | deferred | resolved
+
+
+class QueryRequest(BaseModel):
+    source_name: str
+    sql: str
 
 
 # ── Sources ───────────────────────────────────────────────────────────────────
@@ -174,6 +184,56 @@ def get_catalog(
     return result
 
 
+@router.post("/sources/{source_name}/suggest-goal")
+def suggest_goal(source_name: str) -> dict[str, Any]:
+    """LLM-propose an analysis goal inferred from the source schema (metadata only)."""
+    from headwater.services.h2_enrich import suggest_goal as _suggest
+
+    store = _get_store()
+    try:
+        return _suggest(store, source_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
+@router.post("/sources/{source_name}/generate-descriptions")
+def generate_descriptions(source_name: str, overwrite: bool = False) -> dict[str, Any]:
+    """LLM-generate column descriptions from names/types (one call per table)."""
+    from headwater.services.h2_enrich import generate_descriptions as _gen
+
+    store = _get_store()
+    try:
+        return _gen(store, source_name, overwrite=overwrite)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
+@router.get("/sources/{source_name}/relationships")
+def get_relationships(source_name: str) -> list[dict[str, Any]]:
+    """Inferred relationships for a source — feeds the data-model diagram."""
+    store = _get_store()
+    try:
+        rels = store.get_relationships(source_name)
+    finally:
+        store.close()
+    return [
+        {
+            "from_table": r["from_table"],
+            "from_column": r["from_column"],
+            "to_table": r["to_table"],
+            "to_column": r["to_column"],
+            "rel_type": r["rel_type"],
+            "confidence": r["confidence"],
+            "referential_integrity": r["referential_integrity"],
+        }
+        for r in rels
+    ]
+
+
 @router.patch("/sources/{source_name}/catalog/{table_name}/{column_name}")
 def update_catalog_column(
     source_name: str,
@@ -189,6 +249,7 @@ def update_catalog_column(
             store, source_name, table_name, column_name,
             description=req.description,
             semantic_type=req.semantic_type,
+            dtype=req.dtype,
             lock=req.locked,
         )
     except ValueError as exc:
@@ -291,6 +352,27 @@ def get_project(project_id: str) -> dict[str, Any]:
         store.close()
 
 
+class SetGoalRequest(BaseModel):
+    goal: str
+
+
+@router.post("/projects/{project_id}/goal")
+def set_goal(project_id: str, req: SetGoalRequest) -> dict[str, Any]:
+    """Set/refine a project's goal and re-propose relevant questions."""
+    from headwater.services.h2_project import set_project_goal
+
+    if len(req.goal.strip()) < 6:
+        raise HTTPException(status_code=422, detail="Goal must be at least 6 characters.")
+    store = _get_store()
+    try:
+        set_project_goal(store, project_id, req.goal.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+    return {"project_id": project_id, "goal": req.goal.strip()}
+
+
 @router.post("/projects/{project_id}/relevance")
 def rerun_relevance(project_id: str) -> dict[str, Any]:
     from headwater.services.h2_project import propose_relevance
@@ -350,11 +432,69 @@ def build_resolve(project_id: str) -> list[dict[str, Any]]:
 
 @router.get("/projects/{project_id}/resolve")
 def get_resolve(project_id: str) -> list[dict[str, Any]]:
+    """List persisted resolve cards in the same shape as the build response."""
     store = _get_store()
     try:
-        return store.list_resolve_items(project_id)
+        items = store.list_resolve_items(project_id)
     finally:
         store.close()
+
+    return [
+        {
+            "card_id": it["id"],
+            "issue_kind": it["issue_kind"],
+            "priority": it["priority"],
+            "title": it["title"],
+            "body": it["body"],
+            "status": it.get("status", "open"),
+            "affected_questions": (it.get("payload") or {}).get("affected_questions", []),
+            "contract_impacts": (it.get("payload") or {}).get("contract_impacts", []),
+        }
+        for it in items
+    ]
+
+
+@router.post("/projects/{project_id}/resolve/{card_id}/disposition")
+def set_resolve_disposition(
+    project_id: str, card_id: str, req: ResolveDispositionRequest
+) -> dict[str, Any]:
+    """Record a disposition on a resolve card (e.g. defer to next cycle)."""
+    if req.status not in {"open", "deferred", "resolved"}:
+        raise HTTPException(status_code=422, detail="status must be open|deferred|resolved")
+    store = _get_store()
+    try:
+        store.set_resolve_item_status(card_id, req.status)
+    finally:
+        store.close()
+    return {"card_id": card_id, "status": req.status}
+
+
+# ── Ad-hoc query (power tool) ─────────────────────────────────────────────────
+
+@router.post("/query")
+def run_query(req: QueryRequest) -> dict[str, Any]:
+    """Run read-only SQL against a freshly materialized source (sandboxed)."""
+    from headwater.services.h2_execute import execute_one, materialize_source
+
+    store = _get_store()
+    con = None
+    try:
+        con, _ = materialize_source(store, req.source_name)
+        result = execute_one(con, "adhoc", req.sql)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        if con is not None:
+            con.close()
+        store.close()
+
+    return {
+        "columns": result.columns,
+        "rows": result.rows,
+        "row_count": result.row_count,
+        "truncated": result.truncated,
+        "error": result.error,
+    }
 
 
 # ── Readiness ─────────────────────────────────────────────────────────────────
@@ -430,36 +570,107 @@ def run_eda(project_id: str) -> dict[str, Any]:
 
 # ── Answer ────────────────────────────────────────────────────────────────────
 
-@router.post("/projects/{project_id}/answer")
-def draft_answers(project_id: str) -> dict[str, Any]:
-    from headwater.services.h2_answer import draft_project_answers
-
-    store = _get_store()
-    try:
-        result = draft_project_answers(store, project_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    finally:
-        store.close()
-
+def _answers_payload(result: Any) -> dict[str, Any]:
     return {
         "project_id": result.project_id,
         "certified_count": result.certified_count,
-        "draft_count": result.draft_count,
+        "doubtful_count": result.doubtful_count,
+        "pending_count": result.pending_count,
         "cannot_answer_count": result.cannot_answer_count,
         "answers": [
             {
                 "question_id": a.question_id,
                 "question_title": a.question_title,
                 "state": a.state,
-                "confidence": a.confidence,
+                "confidence": a.judge_confidence,
                 "sql_text": a.sql_text,
                 "chart_spec": a.chart_spec,
+                "columns": a.columns,
+                "rows": a.rows,
+                "row_count": a.row_count,
+                "truncated": a.truncated,
+                "result_stats": a.result_stats,
+                "readiness_pct": a.readiness_pct,
+                "statistical_pass": a.statistical_pass,
+                "judge_verdict": a.judge_verdict,
+                "judge_confidence": a.judge_confidence,
+                "judge_reasons": a.judge_reasons,
                 "caveats": a.caveats,
+                "execution_error": a.execution_error,
             }
             for a in result.answers
         ],
     }
+
+
+@router.post("/projects/{project_id}/answer")
+def draft_answers(project_id: str) -> dict[str, Any]:
+    """Fast path: draft SQL, execute it, and return real data (no LLM judge).
+
+    Stat-ready answers come back as ``pending`` certification.  The UI renders
+    data + charts immediately and lets the user trigger certification separately
+    via /answer/certify (the judge can be slow on a local model).
+    """
+    from headwater.services.h2_pipeline import finalize_project_answers
+
+    store = _get_store()
+    try:
+        result = finalize_project_answers(store, project_id, run_judge=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+    return _answers_payload(result)
+
+
+@router.post("/projects/{project_id}/answer/certify")
+def certify_answers(project_id: str) -> dict[str, Any]:
+    """Two-factor certification: run the LLM judge over the executed answers.
+
+    User-triggered because the local model can take seconds per question.
+    """
+    from headwater.services.h2_pipeline import finalize_project_answers
+
+    store = _get_store()
+    try:
+        result = finalize_project_answers(store, project_id, run_judge=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+    return _answers_payload(result)
+
+
+# ── Recompute spine (staged) ──────────────────────────────────────────────────
+
+@router.get("/projects/{project_id}/state")
+def get_state(project_id: str) -> dict[str, Any]:
+    """Is derived state stale relative to current inputs? Drives the UI banner."""
+    from headwater.services.h2_pipeline import get_project_state
+
+    store = _get_store()
+    try:
+        return get_project_state(store, project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
+@router.post("/projects/{project_id}/recompute")
+def recompute(project_id: str) -> dict[str, Any]:
+    """Re-run derived stages from current inputs (fast; certification separate)."""
+    from headwater.services.h2_pipeline import recompute_project
+
+    store = _get_store()
+    try:
+        return recompute_project(store, project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
 
 
 # ── Certify ───────────────────────────────────────────────────────────────────

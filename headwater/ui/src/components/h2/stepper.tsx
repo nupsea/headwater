@@ -3,7 +3,7 @@
 import { HW2_COLOR } from "./readiness-ring";
 
 export const HW2_STAGES = [
-  { key: "frame",      label: "Frame",      path: (_id: string) => `/h2/projects/new` },
+  { key: "frame",      label: "Frame",      path: (id: string) => `/h2/projects/${id}` },
   { key: "understand", label: "Understand", path: (id: string) => `/h2/projects/${id}/understand` },
   { key: "resolve",    label: "Resolve",    path: (id: string) => `/h2/projects/${id}/resolve` },
   { key: "readiness",  label: "Readiness",  path: (id: string) => `/h2/projects/${id}/readiness` },

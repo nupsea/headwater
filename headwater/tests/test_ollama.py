@@ -21,7 +21,7 @@ def test_ollama_provider_init() -> None:
     """OllamaProvider should initialize with settings."""
     settings = HeadwaterSettings(llm_provider="ollama")
     provider = OllamaProvider(settings)
-    assert provider._model == "llama3.1:8b"
+    assert provider._model == "qwen2.5:14b-instruct"
     assert provider._base_url == "http://localhost:11434"
     assert provider._timeout == 120
 
@@ -37,7 +37,7 @@ def test_ollama_provider_claude_model_fallback() -> None:
     """Claude model names should fall back to ollama default."""
     settings = HeadwaterSettings(llm_provider="ollama", llm_model="claude-sonnet-4-20250514")
     provider = OllamaProvider(settings)
-    assert provider._model == "llama3.1:8b"
+    assert provider._model == "qwen2.5:14b-instruct"
 
 
 def test_get_provider_ollama() -> None:
@@ -130,7 +130,7 @@ async def test_ollama_audit_log() -> None:
     logs = store.get_llm_audit_log()
     assert len(logs) == 1
     assert logs[0]["provider"] == "ollama"
-    assert logs[0]["model"] == "llama3.1:8b"
+    assert logs[0]["model"] == "qwen2.5:14b-instruct"
     assert "Audit test prompt" in logs[0]["prompt_text"]
     assert logs[0]["prompt_hash"] == make_llm_request_hash(
         prompt_template_version=LLM_REQUEST_TEMPLATE_VERSION,
@@ -143,7 +143,7 @@ async def test_ollama_audit_log() -> None:
             "prompt": "Audit test prompt",
         },
         provider="ollama",
-        model="llama3.1:8b",
+        model="qwen2.5:14b-instruct",
         configuration={"format": "json", "stream": False, "timeout": 120},
     )
 
@@ -197,12 +197,12 @@ async def test_ollama_uses_cached_audit_response_without_live_call() -> None:
             "prompt": prompt,
         },
         provider="ollama",
-        model="llama3.1:8b",
+        model="qwen2.5:14b-instruct",
         configuration={"format": "json", "stream": False, "timeout": 120},
     )
     store.insert_llm_audit(
         "ollama",
-        "llama3.1:8b",
+        "qwen2.5:14b-instruct",
         prompt_text=prompt,
         response_text='{"description": "Cached"}',
         prompt_hash=prompt_hash,
@@ -277,7 +277,7 @@ async def test_ollama_source_token_budget_exhaustion_skips_live_call() -> None:
     store.init()
     store.insert_llm_audit(
         "ollama",
-        "llama3.1:8b",
+        "qwen2.5:14b-instruct",
         prompt_text="prior",
         response_text="{}",
         source_name="orders",

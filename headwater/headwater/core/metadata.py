@@ -5,10 +5,12 @@ Metadata is always SQLite (POC) or Postgres (Phase 1+). Never DuckDB.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -504,20 +506,37 @@ class MetadataStore:
 
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self._db_path = str(db_path)
-        self._con: sqlite3.Connection | None = None
+        self._is_memory = self._db_path == ":memory:"
+        # File-backed metadata uses one SQLite connection per thread so FastAPI's
+        # request threadpool can't race on a single shared connection (SQLite
+        # raises "bad parameter or other API misuse" on concurrent use).  An
+        # in-memory store (tests/ephemeral) keeps a single shared connection —
+        # per-thread :memory: connections would each be a separate empty DB.
+        self._local = threading.local()
+        self._shared_con: sqlite3.Connection | None = None
+        self._all_cons: list[sqlite3.Connection] = []
+        self._cons_lock = threading.Lock()
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self._db_path, check_same_thread=False)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA foreign_keys=ON")
+        with self._cons_lock:
+            self._all_cons.append(con)
         return con
 
     @property
     def con(self) -> sqlite3.Connection:
-        if self._con is None:
-            self._con = self._connect()
-        return self._con
+        if self._is_memory:
+            if self._shared_con is None:
+                self._shared_con = self._connect()
+            return self._shared_con
+        con: sqlite3.Connection | None = getattr(self._local, "con", None)
+        if con is None:
+            con = self._connect()
+            self._local.con = con
+        return con
 
     def init(self) -> None:
         """Create all tables if they don't exist, then apply any pending migrations."""
@@ -797,9 +816,14 @@ CREATE INDEX IF NOT EXISTS idx_model_impacts_model
                 pass
 
     def close(self) -> None:
-        if self._con is not None:
-            self._con.close()
-            self._con = None
+        with self._cons_lock:
+            cons = list(self._all_cons)
+            self._all_cons.clear()
+        for con in cons:
+            with contextlib.suppress(Exception):
+                con.close()
+        self._shared_con = None
+        self._local = threading.local()
 
     # -- Sources -----------------------------------------------------------
 

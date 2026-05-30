@@ -88,6 +88,31 @@ def frame_project(
     return spec
 
 
+def set_project_goal(
+    store: HeadwaterStore,
+    project_id: str,
+    goal_statement: str,
+):
+    """Set/replace an existing project's goal, then re-propose relevance.
+
+    Used when a project reaches Understand without a goal, or the user refines
+    it.  Re-running relevance regenerates the questions for the new goal.
+    """
+    project = store.get_project(project_id)
+    if project is None:
+        raise ValueError(f"Project '{project_id}' is not registered.")
+    goal = dict(project.get("goal") or {})
+    goal["statement"] = goal_statement
+    store.upsert_project(
+        project_id,
+        slug=project.get("slug") or _slugify(project_id),
+        display_name=project.get("display_name") or project_id,
+        description=project.get("description") or "",
+        goal=goal,
+    )
+    return propose_relevance(store=store, project_id=project_id)
+
+
 def propose_relevance(
     *,
     store: HeadwaterStore,

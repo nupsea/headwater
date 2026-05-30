@@ -207,6 +207,14 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_artifact
     ON decisions(artifact_type, artifact_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS pipeline_state (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id),
+    last_input_hash TEXT,
+    last_recomputed_at TEXT,
+    impacted_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -736,6 +744,13 @@ class HeadwaterStore:
         )
         self.con.commit()
 
+    def set_resolve_item_status(self, item_id: str, status: str) -> None:
+        self.con.execute(
+            "UPDATE resolve_items SET status = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, item_id),
+        )
+        self.con.commit()
+
     def list_resolve_items(self, project_id: str) -> list[dict[str, Any]]:
         rows = self.con.execute(
             "SELECT * FROM resolve_items WHERE project_id = ? ORDER BY priority, updated_at DESC",
@@ -934,6 +949,36 @@ class HeadwaterStore:
         for item in items:
             item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
         return items
+
+    def get_pipeline_state(self, project_id: str) -> dict[str, Any] | None:
+        row = self.con.execute(
+            "SELECT * FROM pipeline_state WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def set_pipeline_state(
+        self,
+        project_id: str,
+        *,
+        last_input_hash: str,
+        impacted_count: int,
+    ) -> None:
+        self.con.execute(
+            """
+            INSERT INTO pipeline_state (
+                project_id, last_input_hash, last_recomputed_at, impacted_count
+            )
+            VALUES (?, ?, datetime('now'), ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                last_input_hash = excluded.last_input_hash,
+                last_recomputed_at = excluded.last_recomputed_at,
+                impacted_count = excluded.impacted_count,
+                updated_at = datetime('now')
+            """,
+            (project_id, last_input_hash, impacted_count),
+        )
+        self.con.commit()
 
     def list_decisions(self, artifact_type: str, artifact_id: str) -> list[dict[str, Any]]:
         rows = self.con.execute(

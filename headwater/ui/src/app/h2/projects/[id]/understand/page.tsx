@@ -4,11 +4,13 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   h2,
+  notifyInputChanged,
   type H2Question,
   type H2RelevantColumn,
   type H2EdaFinding,
 } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+import { SchemaEditor } from "@/components/h2/schema-editor";
 
 // ─── Primitives ──────────────────────────────────────────────────────────────
 
@@ -318,6 +320,152 @@ function EdaFindingRow({ finding }: { finding: H2EdaFinding }) {
   );
 }
 
+// ─── Goal gate (Step 1 must be filled before Step 2) ──────────────────────────
+
+function GoalGate({
+  projectId,
+  sourceName,
+  onSaved,
+}: {
+  projectId: string;
+  sourceName: string;
+  onSaved: () => void;
+}) {
+  const [goal, setGoal] = useState("");
+  const [rationale, setRationale] = useState("");
+  const [suggesting, setSuggesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const suggest = async () => {
+    if (!sourceName) return;
+    setSuggesting(true);
+    try {
+      const r = await h2.sources.suggestGoal(sourceName);
+      setGoal(r.goal);
+      setRationale(
+        r.available
+          ? r.rationale
+          : "Suggested without a model — start Ollama for a data-aware goal."
+      );
+    } catch {
+      setRationale("Could not reach the suggestion service.");
+    } finally {
+      setSuggesting(false);
+    }
+  };
+
+  const save = async () => {
+    if (goal.trim().length < 6) return;
+    setSaving(true);
+    try {
+      await h2.projects.setGoal(projectId, goal.trim());
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 760, margin: "0 auto", padding: "32px 32px 80px", fontFamily: "'DM Sans', sans-serif" }}>
+      <span
+        style={{
+          font: "600 11px 'DM Sans', sans-serif",
+          color: HW2_COLOR.blue,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+        }}
+      >
+        Step 1 of 5 · Frame
+      </span>
+      <h2
+        style={{
+          font: "600 26px 'DM Sans', sans-serif",
+          letterSpacing: "-0.02em",
+          color: HW2_COLOR.ink,
+          lineHeight: 1.25,
+          marginTop: 8,
+          marginBottom: 6,
+        }}
+      >
+        What goal are we serving?
+      </h2>
+      <p style={{ font: "400 14px 'DM Sans', sans-serif", color: HW2_COLOR.muted, marginBottom: 20, lineHeight: 1.55 }}>
+        This project has no goal yet. Define what you want to learn — or let
+        Headwater infer one from the data — before we go further.
+      </p>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <label style={{ font: "600 12px 'DM Sans', sans-serif", color: HW2_COLOR.muted }}>The goal *</label>
+        <button
+          type="button"
+          onClick={suggest}
+          disabled={!sourceName || suggesting}
+          style={{
+            appearance: "none",
+            cursor: !sourceName || suggesting ? "default" : "pointer",
+            background: HW2_COLOR.blueSoft,
+            border: `1px solid ${HW2_COLOR.blue}44`,
+            borderRadius: 7,
+            padding: "5px 11px",
+            font: "600 11.5px 'DM Sans', sans-serif",
+            color: HW2_COLOR.blue,
+            fontFamily: "'DM Sans', sans-serif",
+            opacity: !sourceName || suggesting ? 0.5 : 1,
+          }}
+        >
+          {suggesting ? "Thinking…" : "✦ Suggest from data"}
+        </button>
+      </div>
+      <textarea
+        value={goal}
+        onChange={(e) => setGoal(e.target.value)}
+        placeholder="e.g. Understand where delays occur in the end-to-end process"
+        rows={3}
+        style={{
+          width: "100%",
+          resize: "vertical",
+          padding: "12px 16px",
+          background: "#fff",
+          border: `1px solid ${HW2_COLOR.rule2}`,
+          borderRadius: 10,
+          font: "500 16px 'DM Sans', sans-serif",
+          color: HW2_COLOR.ink,
+          lineHeight: 1.4,
+          fontFamily: "'DM Sans', sans-serif",
+          outline: "none",
+          boxSizing: "border-box",
+        }}
+      />
+      {rationale && (
+        <p style={{ font: "400 12px 'DM Sans', sans-serif", color: HW2_COLOR.muted, marginTop: 8, lineHeight: 1.5 }}>
+          <span style={{ color: HW2_COLOR.blue, fontWeight: 600 }}>Why: </span>
+          {rationale}
+        </p>
+      )}
+      <div style={{ marginTop: 20, display: "flex", justifyContent: "flex-end" }}>
+        <button
+          onClick={save}
+          disabled={goal.trim().length < 6 || saving}
+          style={{
+            appearance: "none",
+            cursor: goal.trim().length < 6 || saving ? "default" : "pointer",
+            background: HW2_COLOR.blue,
+            color: "#fff",
+            border: "1px solid transparent",
+            borderRadius: 10,
+            padding: "11px 20px",
+            font: "600 14px 'DM Sans', sans-serif",
+            fontFamily: "'DM Sans', sans-serif",
+            opacity: goal.trim().length < 6 || saving ? 0.5 : 1,
+          }}
+        >
+          {saving ? "Saving…" : "Save goal & continue →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function UnderstandPage() {
@@ -332,10 +480,17 @@ export default function UnderstandPage() {
   const [running, setRunning] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [kept, setKept] = useState<Set<string>>(new Set());
+  const [sourceName, setSourceName] = useState<string>("");
+  const [showSchema, setShowSchema] = useState(false);
+  const [goalStatement, setGoalStatement] = useState<string>("");
+  const [goalLoaded, setGoalLoaded] = useState(false);
 
   const load = async () => {
     try {
       const project = await h2.projects.get(id);
+      setSourceName(project.sources?.[0]?.source_name ?? "");
+      setGoalStatement(project.goal?.statement ?? "");
+      setGoalLoaded(true);
       const qs = project.questions ?? [];
       setQuestions(qs);
       // Initially keep all answerable questions
@@ -421,6 +576,21 @@ export default function UnderstandPage() {
     );
   }
 
+  // Gate: Step 2 is only reachable once Step 1's goal is defined.
+  if (goalLoaded && !goalStatement.trim()) {
+    return (
+      <GoalGate
+        projectId={id}
+        sourceName={sourceName}
+        onSaved={() => {
+          notifyInputChanged();
+          setLoading(true);
+          load().finally(() => setLoading(false));
+        }}
+      />
+    );
+  }
+
   return (
     <div
       style={{
@@ -460,7 +630,53 @@ export default function UnderstandPage() {
         }}
       >
         Review the relevant columns and curate the proposed questions below.
+        Open <strong style={{ color: HW2_COLOR.ink2 }}>Schema &amp; meaning</strong>{" "}
+        to correct what columns mean — every edit feeds a refresh.
       </p>
+
+      {/* Schema & meaning */}
+      {sourceName && (
+        <div style={{ marginBottom: 16 }}>
+          <button
+            onClick={() => setShowSchema((v) => !v)}
+            style={{
+              appearance: "none",
+              cursor: "pointer",
+              width: "100%",
+              textAlign: "left",
+              background: HW2_COLOR.surface,
+              border: `1px solid ${HW2_COLOR.rule}`,
+              borderRadius: 12,
+              padding: "14px 20px",
+              font: "600 13px 'DM Sans', sans-serif",
+              color: HW2_COLOR.ink,
+              fontFamily: "'DM Sans', sans-serif",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+            }}
+          >
+            <span style={{ color: HW2_COLOR.faint, font: "500 11px 'DM Mono', monospace" }}>
+              {showSchema ? "▾" : "▸"}
+            </span>
+            Schema &amp; meaning
+            <span
+              style={{
+                font: "400 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.muted,
+                fontWeight: 400,
+              }}
+            >
+              — tables, editable column meanings, inferred relationships
+            </span>
+          </button>
+          {showSchema && (
+            <div style={{ marginTop: 12 }}>
+              <SchemaEditor sourceName={sourceName} projectId={id} />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Relevant columns card */}
       {relevance.length > 0 && (

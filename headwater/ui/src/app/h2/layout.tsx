@@ -9,7 +9,7 @@ import {
 } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
-import { h2, type H2Project, type H2Source } from "@/lib/h2api";
+import { h2, HW2_INPUT_CHANGED, type H2Project, type H2Source } from "@/lib/h2api";
 import { ReadinessRing, HW2_COLOR } from "@/components/h2/readiness-ring";
 import { Stepper, type StageKey } from "@/components/h2/stepper";
 
@@ -49,9 +49,9 @@ function stageFromPath(pathname: string): StageKey | null {
   if (pathname.endsWith("/resolve")) return "resolve";
   if (pathname.endsWith("/readiness")) return "readiness";
   if (pathname.endsWith("/answer")) return "answer";
-  // project root or /new
+  // project root (the Frame home) or /new
   if (pathname.match(/\/h2\/projects\/[^/]+$/) && !pathname.endsWith("/new"))
-    return "understand";
+    return "frame";
   return null;
 }
 
@@ -392,11 +392,17 @@ function H2Rail({
       {/* Workspace tools */}
       <RailSection label="Workspace">
         <RailItem
-          active={pathname === "/h2/catalog" || pathname.startsWith("/h2/catalog/")}
-          onClick={() => onNavigate("/h2/catalog")}
+          active={pathname.startsWith("/h2/sources/")}
+          onClick={() =>
+            onNavigate(
+              primarySource
+                ? `/h2/sources/${encodeURIComponent(primarySource.name)}`
+                : "/h2/sources/new"
+            )
+          }
           icon={<TableIcon />}
           label="Catalog"
-          hint={primarySource ? `${primarySource.name}` : undefined}
+          hint={primarySource ? `${primarySource.name}` : "connect a source"}
         />
         <RailItem
           active={pathname === "/h2/query" || pathname.startsWith("/h2/query/")}
@@ -452,9 +458,7 @@ function H2Rail({
               <RailItem
                 key={p.id}
                 active={isActive}
-                onClick={() =>
-                  onNavigate(`/h2/projects/${p.id}/understand`)
-                }
+                onClick={() => onNavigate(`/h2/projects/${p.id}`)}
                 icon={
                   <ReadinessRing
                     value={ro.pct}
@@ -637,6 +641,87 @@ function ProjectBanner({
   );
 }
 
+// ─── Recompute banner (staged) ───────────────────────────────────────────────
+
+function RecomputeBanner({ projectId }: { projectId: string }) {
+  const [state, setState] = useState<{
+    stale: boolean;
+    never_computed: boolean;
+    impacted_count: number;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    h2.projects
+      .state(projectId)
+      .then(setState)
+      .catch(() => setState(null));
+  }, [projectId]);
+
+  useEffect(() => {
+    load();
+    // Re-check when an input changes anywhere in the app (edits, context, defer).
+    window.addEventListener(HW2_INPUT_CHANGED, load);
+    return () => window.removeEventListener(HW2_INPUT_CHANGED, load);
+  }, [load]);
+
+  if (!state || !state.stale) return null;
+
+  const recompute = async () => {
+    setBusy(true);
+    try {
+      await h2.projects.recompute(projectId);
+      // Refresh so every view reflects the new state.
+      window.location.reload();
+    } catch {
+      setBusy(false);
+    }
+  };
+
+  const n = state.impacted_count;
+  const msg = state.never_computed
+    ? `Not computed yet — ${n} question${n === 1 ? "" : "s"} ready to evaluate.`
+    : `Inputs changed — ${n} answer${n === 1 ? "" : "s"} will be re-verified.`;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 16,
+        padding: "10px 32px",
+        background: HW2_COLOR.warnSoft,
+        borderBottom: `1px solid ${HW2_COLOR.warn}44`,
+      }}
+    >
+      <span style={{ font: "500 13px 'DM Sans', sans-serif", color: HW2_COLOR.ink2 }}>
+        <strong style={{ color: HW2_COLOR.warn }}>Refresh needed.</strong> {msg}{" "}
+        Certification re-runs separately after.
+      </span>
+      <button
+        onClick={recompute}
+        disabled={busy}
+        style={{
+          appearance: "none",
+          cursor: busy ? "default" : "pointer",
+          background: HW2_COLOR.blue,
+          color: "#fff",
+          border: "1px solid transparent",
+          borderRadius: 8,
+          padding: "7px 14px",
+          font: "600 12px 'DM Sans', sans-serif",
+          fontFamily: "'DM Sans', sans-serif",
+          opacity: busy ? 0.6 : 1,
+          flexShrink: 0,
+        }}
+      >
+        {busy ? "Recomputing…" : "Recompute now"}
+      </button>
+    </div>
+  );
+}
+
 // ─── Layout ──────────────────────────────────────────────────────────────────
 
 export default function H2Layout({ children }: { children: React.ReactNode }) {
@@ -682,7 +767,7 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
   const handleJumpStage = (key: StageKey) => {
     if (!activeProject) return;
     const stageMap: Record<StageKey, string> = {
-      frame:      `/h2/projects/new`,
+      frame:      `/h2/projects/${activeProject.id}`,
       understand: `/h2/projects/${activeProject.id}/understand`,
       resolve:    `/h2/projects/${activeProject.id}/resolve`,
       readiness:  `/h2/projects/${activeProject.id}/readiness`,
@@ -838,6 +923,7 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
                   stage={stage}
                   onJumpStage={handleJumpStage}
                 />
+                <RecomputeBanner projectId={activeProject.id} />
                 <div>{children}</div>
               </>
             ) : (

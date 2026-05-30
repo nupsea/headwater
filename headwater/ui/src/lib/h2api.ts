@@ -48,6 +48,16 @@ export interface H2CatalogTable {
   columns: H2CatalogColumn[];
 }
 
+export interface H2Relationship {
+  from_table: string;
+  from_column: string;
+  to_table: string;
+  to_column: string;
+  rel_type: string;
+  confidence: number;
+  referential_integrity: number;
+}
+
 export interface H2Project {
   id: string;
   slug: string;
@@ -86,6 +96,7 @@ export interface H2ResolveCard {
   priority: "high" | "medium" | "low";
   title: string;
   body: string;
+  status?: "open" | "deferred" | "resolved";
   affected_questions: string[];
   contract_impacts: string[];
 }
@@ -114,14 +125,35 @@ export interface H2ReadinessReport {
   questions: H2QuestionReadiness[];
 }
 
+export type H2AnswerRow = Record<string, string | number | boolean | null>;
+
 export interface H2AnswerDraft {
   question_id: string;
   question_title: string;
-  state: "certified" | "draft" | "cannot_answer" | "demoted";
+  state: "certified" | "doubtful" | "pending" | "cannot_answer";
   confidence: number;
   sql_text: string | null;
   chart_spec: Record<string, unknown>;
+  columns: string[];
+  rows: H2AnswerRow[];
+  row_count: number;
+  truncated: boolean;
+  result_stats: Record<string, unknown>;
+  readiness_pct: number;
+  statistical_pass: boolean;
+  judge_verdict: "certified" | "doubtful" | "reject" | "unavailable" | "pending";
+  judge_confidence: number;
+  judge_reasons: string[];
   caveats: string[];
+  execution_error: string | null;
+}
+
+export interface H2AnswersResult {
+  certified_count: number;
+  doubtful_count: number;
+  pending_count: number;
+  cannot_answer_count: number;
+  answers: H2AnswerDraft[];
 }
 
 export interface H2EdaFinding {
@@ -131,6 +163,28 @@ export interface H2EdaFinding {
   confidence: number;
   effect_size: number;
   flags: string[];
+}
+
+export interface H2Resource {
+  path: string;
+  format: string;
+  ingested_at: string;
+  sensitivity?: string | null;
+  claims_created?: number;
+  claims_updated?: number;
+  conflicts_detected?: number;
+}
+
+export interface H2ResourceIngest {
+  resource_path: string;
+  resource_format: string;
+  sensitivity: string;
+  sensitivity_notes: string[];
+  claims_created: number;
+  claims_updated: number;
+  claims_skipped_locked: number;
+  conflicts_detected: number;
+  notes: string[];
 }
 
 export interface H2RelevantColumn {
@@ -168,11 +222,13 @@ export const h2 = {
       const qs = params.toString();
       return fetchJSON<H2CatalogTable[]>(`/sources/${name}/catalog${qs ? `?${qs}` : ""}`);
     },
+    relationships: (name: string) =>
+      fetchJSON<H2Relationship[]>(`/sources/${name}/relationships`),
     updateColumn: (
       sourceName: string,
       tableName: string,
       columnName: string,
-      update: { description?: string; semantic_type?: string; locked?: boolean }
+      update: { description?: string; semantic_type?: string; dtype?: string; locked?: boolean }
     ) =>
       fetchJSON<{ updated: string }>(
         `/sources/${sourceName}/catalog/${tableName}/${columnName}`,
@@ -181,6 +237,14 @@ export const h2 = {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(update),
         }
+      ),
+    suggestGoal: (name: string) =>
+      post<{ goal: string; rationale: string; available: boolean }>(
+        `/sources/${name}/suggest-goal`
+      ),
+    generateDescriptions: (name: string, overwrite = false) =>
+      post<{ updated: number; available: boolean; note?: string }>(
+        `/sources/${name}/generate-descriptions?overwrite=${overwrite}`
       ),
   },
 
@@ -204,6 +268,8 @@ export const h2 = {
         proposed_questions: H2ProposedQuestion[];
         notes: string[];
       }>("/projects", req),
+    setGoal: (id: string, goal: string) =>
+      post<{ project_id: string; goal: string }>(`/projects/${id}/goal`, { goal }),
     rerunRelevance: (id: string) =>
       post<{
         relevant_columns: H2RelevantColumn[];
@@ -213,6 +279,11 @@ export const h2 = {
     resolve: {
       build: (id: string) => post<H2ResolveCard[]>(`/projects/${id}/resolve`),
       list: (id: string) => fetchJSON<H2ResolveCard[]>(`/projects/${id}/resolve`),
+      setDisposition: (id: string, cardId: string, status: "open" | "deferred" | "resolved") =>
+        post<{ card_id: string; status: string }>(
+          `/projects/${id}/resolve/${encodeURIComponent(cardId)}/disposition`,
+          { status }
+        ),
     },
 
     readiness: {
@@ -227,11 +298,26 @@ export const h2 = {
     },
 
     answer: {
-      draft: (id: string) =>
-        post<{ certified_count: number; draft_count: number; cannot_answer_count: number; answers: H2AnswerDraft[] }>(
-          `/projects/${id}/answer`
-        ),
+      draft: (id: string) => post<H2AnswersResult>(`/projects/${id}/answer`),
+      certify: (id: string) => post<H2AnswersResult>(`/projects/${id}/answer/certify`),
     },
+
+    state: (id: string) =>
+      fetchJSON<{
+        project_id: string;
+        stale: boolean;
+        never_computed: boolean;
+        impacted_count: number;
+        last_recomputed_at: string | null;
+      }>(`/projects/${id}/state`),
+    recompute: (id: string) =>
+      post<{
+        certified_count: number;
+        doubtful_count: number;
+        pending_count: number;
+        cannot_answer_count: number;
+        recomputed_at: string;
+      }>(`/projects/${id}/recompute`),
 
     certify: {
       check: (id: string) =>
@@ -245,8 +331,8 @@ export const h2 = {
     },
 
     resources: {
-      list: (id: string) => fetchJSON<Array<{ path: string; format: string; ingested_at: string }>>(`/projects/${id}/resources`),
-      ingest: async (id: string, file: File, lock = false) => {
+      list: (id: string) => fetchJSON<H2Resource[]>(`/projects/${id}/resources`),
+      ingest: async (id: string, file: File, lock = false): Promise<H2ResourceIngest> => {
         const form = new FormData();
         form.append("file", file);
         const res = await fetch(`${BASE}/projects/${id}/resources?lock=${lock}`, {
@@ -254,13 +340,30 @@ export const h2 = {
           body: form,
         });
         if (!res.ok) throw new Error(`H2 API ${res.status}: ${await res.text()}`);
-        return res.json();
+        return res.json() as Promise<H2ResourceIngest>;
       },
     },
   },
+
+  query: (sourceName: string, sql: string) =>
+    post<{
+      columns: string[];
+      rows: H2AnswerRow[];
+      row_count: number;
+      truncated: boolean;
+      error: string | null;
+    }>("/query", { source_name: sourceName, sql }),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/** Signal that a project input changed so the recompute banner re-checks state. */
+export const HW2_INPUT_CHANGED = "hw2:inputchanged";
+export function notifyInputChanged(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(HW2_INPUT_CHANGED));
+  }
+}
 
 export function trustBadge(readiness?: H2ReadinessReport | null): {
   label: string;

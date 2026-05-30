@@ -107,9 +107,10 @@ def update_column(
     *,
     description: str | None = None,
     semantic_type: str | None = None,
+    dtype: str | None = None,
     lock: bool | None = None,
 ) -> None:
-    """Update a column's description, semantic type, and/or lock state.
+    """Update a column's description, semantic type, dtype, and/or lock state.
 
     Only fields explicitly passed (not None) are updated.
     """
@@ -124,7 +125,7 @@ def update_column(
         source_name,
         table_name,
         column_name,
-        col["dtype"],
+        dtype if dtype is not None else col["dtype"],
         nullable=bool(col.get("nullable", 1)),
         is_primary_key=bool(col.get("is_primary_key", 0)),
         description=description if description is not None else col.get("description"),

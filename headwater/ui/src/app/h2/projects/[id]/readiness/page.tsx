@@ -9,6 +9,7 @@ import {
   type H2Contract,
 } from "@/lib/h2api";
 import { ReadinessRing, HW2_COLOR } from "@/components/h2/readiness-ring";
+import { DataModelDiagram } from "@/components/h2/data-model";
 
 // ─── State pill ───────────────────────────────────────────────────────────────
 
@@ -483,6 +484,43 @@ export default function ReadinessPage() {
         can hold a certified answer next to a Draft one — and a previously
         certified answer can be revoked when the data drifts.
       </p>
+
+      {/* Data model */}
+      {report?.source_name && (
+        <div
+          style={{
+            background: HW2_COLOR.surface,
+            border: `1px solid ${HW2_COLOR.rule}`,
+            borderRadius: 12,
+            padding: "16px 20px",
+            marginBottom: 20,
+          }}
+        >
+          <div
+            style={{
+              font: "600 11px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              textTransform: "uppercase",
+              letterSpacing: "0.06em",
+              marginBottom: 4,
+            }}
+          >
+            How the data connects
+          </div>
+          <p
+            style={{
+              font: "400 12.5px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              marginBottom: 12,
+              lineHeight: 1.5,
+            }}
+          >
+            Tables in scope, their join keys, and the relationships Headwater
+            inferred. Solid edges are high-confidence; dashed need a look.
+          </p>
+          <DataModelDiagram sourceName={report.source_name} />
+        </div>
+      )}
 
       {/* Demotion alert */}
       {demotions.length > 0 && (

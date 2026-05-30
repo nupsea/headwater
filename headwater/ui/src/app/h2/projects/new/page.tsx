@@ -68,6 +68,28 @@ export default function NewProjectPage() {
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showTablePicker, setShowTablePicker] = useState(false);
+  const [contextText, setContextText] = useState("");
+  const [contextFiles, setContextFiles] = useState<File[]>([]);
+  const [suggesting, setSuggesting] = useState(false);
+  const [goalRationale, setGoalRationale] = useState("");
+
+  const suggestGoal = async () => {
+    if (!sourceName) return;
+    setSuggesting(true);
+    try {
+      const r = await h2.sources.suggestGoal(sourceName);
+      setGoal(r.goal);
+      setGoalRationale(
+        r.available
+          ? r.rationale
+          : "Suggested without a model — start Ollama for a data-aware goal."
+      );
+    } catch {
+      setGoalRationale("Could not reach the suggestion service.");
+    } finally {
+      setSuggesting(false);
+    }
+  };
 
   useEffect(() => {
     h2.sources.list().then(setSources).catch(() => {});
@@ -109,17 +131,32 @@ export default function NewProjectPage() {
     setLoading(true);
     setError(null);
     try {
+      const pid = projectId.trim();
       await h2.projects.frame({
-        project_id: projectId.trim(),
+        project_id: pid,
         source_name: sourceName,
-        display_name: displayName || projectId.trim(),
+        display_name: displayName || pid,
         goal: goal.trim(),
         decision: decision || undefined,
         target_metric: targetMetric || undefined,
         time_horizon: timeHorizon || undefined,
         selected_tables: selectedTables.size > 0 ? [...selectedTables] : undefined,
       });
-      router.push(`/h2/projects/${projectId.trim()}/understand`);
+      // Ingest any provided context so it is considered from the very start.
+      const ingests: Promise<unknown>[] = [];
+      if (contextText.trim()) {
+        ingests.push(
+          h2.projects.resources.ingest(
+            pid,
+            new File([contextText], "framing-context.md", { type: "text/markdown" })
+          )
+        );
+      }
+      for (const f of contextFiles) {
+        ingests.push(h2.projects.resources.ingest(pid, f));
+      }
+      if (ingests.length) await Promise.allSettled(ingests);
+      router.push(`/h2/projects/${pid}/understand`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to create project");
       setLoading(false);
@@ -176,16 +213,47 @@ export default function NewProjectPage() {
       <form onSubmit={submit}>
         {/* Goal */}
         <div style={{ marginBottom: 6 }}>
-          <label
+          <div
             style={{
-              font: "600 12px 'DM Sans', sans-serif",
-              color: HW2_COLOR.muted,
-              display: "block",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
               marginBottom: 8,
             }}
           >
-            The goal *
-          </label>
+            <label
+              style={{
+                font: "600 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.muted,
+              }}
+            >
+              The goal *
+            </label>
+            <button
+              type="button"
+              onClick={suggestGoal}
+              disabled={!sourceName || suggesting}
+              title={
+                sourceName
+                  ? "Infer a goal from the selected data"
+                  : "Select a data source first"
+              }
+              style={{
+                appearance: "none",
+                cursor: !sourceName || suggesting ? "default" : "pointer",
+                background: HW2_COLOR.blueSoft,
+                border: `1px solid ${HW2_COLOR.blue}44`,
+                borderRadius: 7,
+                padding: "5px 11px",
+                font: "600 11.5px 'DM Sans', sans-serif",
+                color: HW2_COLOR.blue,
+                fontFamily: "'DM Sans', sans-serif",
+                opacity: !sourceName || suggesting ? 0.5 : 1,
+              }}
+            >
+              {suggesting ? "Thinking…" : "✦ Suggest from data"}
+            </button>
+          </div>
           <textarea
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
@@ -214,6 +282,20 @@ export default function NewProjectPage() {
             }
           />
         </div>
+
+        {goalRationale && (
+          <p
+            style={{
+              font: "400 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              marginTop: 8,
+              lineHeight: 1.5,
+            }}
+          >
+            <span style={{ color: HW2_COLOR.blue, fontWeight: 600 }}>Why: </span>
+            {goalRationale}
+          </p>
+        )}
 
         {/* Project ID + Display Name */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 16 }}>
@@ -511,6 +593,89 @@ export default function NewProjectPage() {
             )}
           </div>
         )}
+
+        {/* Context inputs */}
+        <div style={{ marginTop: 28 }}>
+          <label
+            style={{
+              font: "600 12px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              display: "block",
+              marginBottom: 6,
+            }}
+          >
+            Context &amp; inputs (optional)
+          </label>
+          <p
+            style={{
+              font: "400 12.5px 'DM Sans', sans-serif",
+              color: HW2_COLOR.muted,
+              lineHeight: 1.5,
+              marginBottom: 10,
+            }}
+          >
+            Paste a data dictionary, column definitions, or notes — or attach
+            .md/.txt files. Headwater considers these when proposing and
+            certifying answers. Markdown tables (column &rarr; meaning) map
+            directly onto your data. (PDF coming later.)
+          </p>
+          <textarea
+            value={contextText}
+            onChange={(e) => setContextText(e.target.value)}
+            placeholder={
+              "e.g.\n| column | meaning |\n| --- | --- |\n| total_wait_time | service_start minus arrival_time |\n| patient_type | ER = emergency, OP = outpatient, IP = inpatient |"
+            }
+            rows={5}
+            spellCheck={false}
+            style={{
+              width: "100%",
+              resize: "vertical",
+              padding: "12px 14px",
+              background: "#fff",
+              border: `1px solid ${HW2_COLOR.rule2}`,
+              borderRadius: 10,
+              font: "500 12.5px 'DM Mono', monospace",
+              color: HW2_COLOR.ink,
+              lineHeight: 1.5,
+              outline: "none",
+              boxSizing: "border-box",
+            }}
+          />
+          <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 12 }}>
+            <label
+              style={{
+                cursor: "pointer",
+                background: HW2_COLOR.chip,
+                border: `1px solid ${HW2_COLOR.rule2}`,
+                borderRadius: 8,
+                padding: "7px 12px",
+                font: "500 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.ink2,
+              }}
+            >
+              Attach .md / .txt
+              <input
+                type="file"
+                accept=".md,.markdown,.txt,.text"
+                multiple
+                onChange={(e) =>
+                  setContextFiles(Array.from(e.target.files ?? []))
+                }
+                style={{ display: "none" }}
+              />
+            </label>
+            {contextFiles.length > 0 && (
+              <span
+                style={{
+                  font: "500 12px 'DM Mono', monospace",
+                  color: HW2_COLOR.blue,
+                }}
+              >
+                {contextFiles.map((f) => f.name).join(", ")}
+              </span>
+            )}
+          </div>
+        </div>
 
         {/* Error */}
         {error && (

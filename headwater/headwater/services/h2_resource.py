@@ -158,7 +158,16 @@ def ingest_resource(
                     resource_path=str(path),
                 )
 
-    _register_resource(store, project_id, str(path), fmt)
+    _register_resource(
+        store,
+        project_id,
+        str(path),
+        fmt,
+        sensitivity=sensitivity,
+        claims_created=result_counts["created"],
+        claims_updated=result_counts["updated"],
+        conflicts_detected=result_counts["conflicts"],
+    )
 
     return ResourceIntakeResult(
         resource_path=str(path),
@@ -729,8 +738,18 @@ def _register_resource(
     project_id: str,
     resource_path: str,
     fmt: ResourceFormat,
+    *,
+    sensitivity: Sensitivity | None = None,
+    claims_created: int = 0,
+    claims_updated: int = 0,
+    conflicts_detected: int = 0,
 ) -> None:
-    """Track ingested resource in the project's resource registry claim."""
+    """Track ingested resource in the project's resource registry claim.
+
+    Stores what the input *touched* (claims created/updated, conflicts) so the
+    Inputs surface can show the user that their context actually changed the
+    project, not just that a file was uploaded.
+    """
     from datetime import datetime
 
     registry_id = f"{project_id}:resource_registry"
@@ -742,6 +761,10 @@ def _register_resource(
         "path": resource_path,
         "format": fmt,
         "ingested_at": datetime.now().isoformat(timespec="seconds"),
+        "sensitivity": sensitivity,
+        "claims_created": claims_created,
+        "claims_updated": claims_updated,
+        "conflicts_detected": conflicts_detected,
     }
     # Replace if same path, else append
     registry = [r for r in registry if r.get("path") != resource_path] + [entry]

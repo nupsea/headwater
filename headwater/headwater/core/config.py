@@ -41,9 +41,11 @@ class HeadwaterSettings(BaseSettings):
     data_dir: Path = Path.home() / ".headwater"
 
     # LLM
-    llm_provider: Literal["none", "anthropic", "ollama", "openai_compat"] = "none"
+    # Ollama (local) is the default provider — no 3P account or key required.
+    # Connecting Anthropic/OpenAI-compatible vendors is opt-in via settings.
+    llm_provider: Literal["none", "anthropic", "ollama", "openai_compat"] = "ollama"
     llm_api_key: str | None = None
-    llm_model: str = "claude-sonnet-4-20250514"
+    llm_model: str = "qwen2.5:14b-instruct"
     llm_offline_mode: bool = False
     llm_max_tokens_per_run: int = 0
     llm_max_tokens_per_source: int = 0

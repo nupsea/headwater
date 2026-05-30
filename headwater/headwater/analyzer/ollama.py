@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_OLLAMA_DEFAULT_MODEL = "llama3.1:8b"
+_OLLAMA_DEFAULT_MODEL = "qwen2.5:14b-instruct"
 
 
 class OllamaProvider(LLMProvider):

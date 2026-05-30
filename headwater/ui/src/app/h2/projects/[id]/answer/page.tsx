@@ -2,6 +2,17 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { h2, type H2AnswerDraft } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
 
@@ -10,11 +21,11 @@ import { HW2_COLOR } from "@/components/h2/readiness-ring";
 function QStatePill({ state }: { state: string }) {
   const cfgs: Record<string, { color: string; bg: string; icon: string; label: string }> = {
     certified:    { color: HW2_COLOR.good,  bg: HW2_COLOR.goodSoft, icon: "✓", label: "Certified" },
-    draft:        { color: HW2_COLOR.muted, bg: HW2_COLOR.chip,     icon: "○", label: "Draft" },
-    demoted:      { color: HW2_COLOR.bad,   bg: HW2_COLOR.badSoft,  icon: "!", label: "Re-verify" },
+    doubtful:     { color: HW2_COLOR.warn,  bg: HW2_COLOR.warnSoft, icon: "⚠", label: "Doubtful" },
+    pending:      { color: HW2_COLOR.muted, bg: HW2_COLOR.chip,     icon: "○", label: "Not certified" },
     cannot_answer:{ color: HW2_COLOR.warn,  bg: HW2_COLOR.warnSoft, icon: "✗", label: "Can't answer" },
   };
-  const cfg = cfgs[state] ?? cfgs.draft;
+  const cfg = cfgs[state] ?? cfgs.pending;
 
   return (
     <span
@@ -39,82 +50,6 @@ function QStatePill({ state }: { state: string }) {
 }
 
 // ─── Confidence bar ───────────────────────────────────────────────────────────
-
-function ConfidenceBar({ value }: { value: number }) {
-  const pct = Math.round(value * 100);
-  const color =
-    value >= 0.85
-      ? HW2_COLOR.good
-      : value >= 0.6
-      ? HW2_COLOR.blue
-      : HW2_COLOR.warn;
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "10px 16px",
-        background: HW2_COLOR.paper,
-        border: `1px solid ${HW2_COLOR.rule}`,
-        borderRadius: 8,
-      }}
-    >
-      <div style={{ position: "relative", width: 56, height: 28, flexShrink: 0 }}>
-        <svg width="56" height="28" viewBox="0 0 56 28">
-          <path
-            d="M 4 26 A 24 24 0 0 1 52 26"
-            stroke={HW2_COLOR.rule2}
-            strokeWidth="4"
-            fill="none"
-            strokeLinecap="round"
-          />
-          <path
-            d="M 4 26 A 24 24 0 0 1 52 26"
-            stroke={color}
-            strokeWidth="4"
-            fill="none"
-            strokeLinecap="round"
-            strokeDasharray={`${(Math.PI * 24 * value).toFixed(1)} 1000`}
-          />
-        </svg>
-        <span
-          style={{
-            position: "absolute",
-            inset: 0,
-            top: 7,
-            textAlign: "center",
-            font: "600 12px 'DM Mono', monospace",
-            color: HW2_COLOR.ink,
-          }}
-        >
-          {pct}
-        </span>
-      </div>
-      <div>
-        <div
-          style={{
-            font: "600 11px 'DM Sans', sans-serif",
-            color: HW2_COLOR.muted,
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-          }}
-        >
-          Insight confidence
-        </div>
-        <div
-          style={{
-            font: "500 13px 'DM Sans', sans-serif",
-            color: color,
-          }}
-        >
-          {value >= 0.85 ? "High" : value >= 0.6 ? "Forming" : "Low"}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ─── Question sidebar item ────────────────────────────────────────────────────
 
@@ -371,15 +306,14 @@ function SqlCard({ answer }: { answer: H2AnswerDraft }) {
           <span
             style={{
               font: "700 52px 'DM Sans', sans-serif",
-              color:
-                answer.state === "demoted" ? HW2_COLOR.bad : HW2_COLOR.muted,
+              color: HW2_COLOR.muted,
               opacity: 0.06,
               letterSpacing: "0.15em",
               transform: "rotate(-12deg)",
               textTransform: "uppercase",
             }}
           >
-            {answer.state === "demoted" ? "Re-verify" : "Draft"}
+            {answer.state === "pending" ? "Not certified" : "Doubtful"}
           </span>
         </div>
       )}
@@ -517,20 +451,276 @@ function SharePanel({
   );
 }
 
+// ─── Executed result: chart ───────────────────────────────────────────────────
+
+function CardLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        font: "600 11px 'DM Sans', sans-serif",
+        color: HW2_COLOR.muted,
+        textTransform: "uppercase",
+        letterSpacing: "0.06em",
+        marginBottom: 12,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function ResultChart({ answer }: { answer: H2AnswerDraft }) {
+  const spec = answer.chart_spec as { type?: string; x?: string; y?: string };
+  const type = spec?.type;
+  if (!type || type === "table" || !spec.x || !spec.y || answer.rows.length === 0) {
+    return null;
+  }
+  const data = answer.rows;
+
+  return (
+    <div
+      style={{
+        background: HW2_COLOR.surface,
+        border: `1px solid ${HW2_COLOR.rule}`,
+        borderRadius: 12,
+        padding: "18px 18px 8px",
+      }}
+    >
+      <CardLabel>Visualization</CardLabel>
+      <ResponsiveContainer width="100%" height={280}>
+        {type === "line" ? (
+          <LineChart data={data} margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={HW2_COLOR.rule} />
+            <XAxis dataKey={spec.x} tick={{ fontSize: 11 }} stroke={HW2_COLOR.muted} />
+            <YAxis tick={{ fontSize: 11 }} stroke={HW2_COLOR.muted} />
+            <Tooltip />
+            <Line
+              type="monotone"
+              dataKey={spec.y}
+              stroke={HW2_COLOR.blue}
+              strokeWidth={2}
+              dot={false}
+            />
+          </LineChart>
+        ) : (
+          <BarChart data={data} margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={HW2_COLOR.rule} />
+            <XAxis dataKey={spec.x} tick={{ fontSize: 11 }} stroke={HW2_COLOR.muted} />
+            <YAxis tick={{ fontSize: 11 }} stroke={HW2_COLOR.muted} />
+            <Tooltip />
+            <Bar dataKey={spec.y} fill={HW2_COLOR.blue} radius={[4, 4, 0, 0]} />
+          </BarChart>
+        )}
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// ─── Executed result: data table ───────────────────────────────────────────────
+
+function ResultTable({ answer }: { answer: H2AnswerDraft }) {
+  if (answer.columns.length === 0) return null;
+  const rows = answer.rows.slice(0, 50);
+  const fmt = (v: unknown) =>
+    v === null || v === undefined
+      ? "—"
+      : typeof v === "number"
+      ? Number.isInteger(v)
+        ? v.toLocaleString()
+        : v.toFixed(2)
+      : String(v);
+
+  return (
+    <div
+      style={{
+        background: HW2_COLOR.surface,
+        border: `1px solid ${HW2_COLOR.rule}`,
+        borderRadius: 12,
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          padding: "12px 16px",
+          borderBottom: `1px solid ${HW2_COLOR.rule}`,
+        }}
+      >
+        <span style={{ font: "600 12px 'DM Sans', sans-serif", color: HW2_COLOR.ink }}>
+          Result data
+        </span>
+        <span style={{ font: "400 11px 'DM Mono', monospace", color: HW2_COLOR.faint }}>
+          {answer.row_count.toLocaleString()} row{answer.row_count === 1 ? "" : "s"}
+          {answer.truncated ? " · showing first 50" : ""}
+        </span>
+      </div>
+      <div style={{ overflowX: "auto", maxHeight: 360 }}>
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead>
+            <tr>
+              {answer.columns.map((c) => (
+                <th
+                  key={c}
+                  style={{
+                    position: "sticky",
+                    top: 0,
+                    textAlign: "left",
+                    padding: "8px 14px",
+                    background: HW2_COLOR.paper,
+                    borderBottom: `1px solid ${HW2_COLOR.rule}`,
+                    font: "600 11px 'DM Mono', monospace",
+                    color: HW2_COLOR.ink2,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {c}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, ri) => (
+              <tr key={ri}>
+                {answer.columns.map((c) => (
+                  <td
+                    key={c}
+                    style={{
+                      padding: "7px 14px",
+                      borderBottom: `1px solid ${HW2_COLOR.rule}`,
+                      font: "400 12px 'DM Mono', monospace",
+                      color: HW2_COLOR.ink2,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {fmt(row[c])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── Two-factor verdict panel ───────────────────────────────────────────────────
+
+function VerdictFactor({
+  label,
+  pass,
+  detail,
+}: {
+  label: string;
+  pass: boolean;
+  detail: string;
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+      <span
+        style={{
+          width: 18,
+          height: 18,
+          borderRadius: "50%",
+          flexShrink: 0,
+          marginTop: 1,
+          display: "grid",
+          placeItems: "center",
+          background: pass ? HW2_COLOR.good : HW2_COLOR.chip,
+          color: pass ? "#fff" : HW2_COLOR.muted,
+          font: "700 10px 'DM Sans', sans-serif",
+        }}
+      >
+        {pass ? "✓" : "○"}
+      </span>
+      <div>
+        <div style={{ font: "600 12.5px 'DM Sans', sans-serif", color: HW2_COLOR.ink }}>
+          {label}
+        </div>
+        <div style={{ font: "400 12px 'DM Sans', sans-serif", color: HW2_COLOR.muted }}>
+          {detail}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function JudgePanel({ answer }: { answer: H2AnswerDraft }) {
+  const judgeTone =
+    answer.judge_verdict === "certified"
+      ? { c: HW2_COLOR.good, label: "Approved" }
+      : answer.judge_verdict === "pending"
+      ? { c: HW2_COLOR.muted, label: "Not run yet — click Run certification" }
+      : answer.judge_verdict === "unavailable"
+      ? { c: HW2_COLOR.muted, label: "Unavailable" }
+      : { c: HW2_COLOR.warn, label: answer.judge_verdict };
+
+  return (
+    <div
+      style={{
+        background: HW2_COLOR.surface,
+        border: `1px solid ${HW2_COLOR.rule}`,
+        borderRadius: 12,
+        padding: "16px 18px",
+      }}
+    >
+      <CardLabel>Certification — both factors required</CardLabel>
+      <div style={{ display: "grid", gap: 12 }}>
+        <VerdictFactor
+          label="Statistical readiness"
+          pass={answer.statistical_pass}
+          detail={
+            answer.statistical_pass
+              ? `Evidence contracts pass (${answer.readiness_pct}% cleared).`
+              : "One or more evidence contracts failed."
+          }
+        />
+        <VerdictFactor
+          label="LLM judge"
+          pass={answer.judge_verdict === "certified"}
+          detail={`${judgeTone.label}${
+            answer.judge_confidence > 0
+              ? ` · ${Math.round(answer.judge_confidence * 100)}% confidence`
+              : ""
+          }`}
+        />
+      </div>
+      {answer.judge_reasons.length > 0 && (
+        <ul
+          style={{
+            margin: "12px 0 0",
+            paddingLeft: 18,
+            font: "400 12px 'DM Sans', sans-serif",
+            color: HW2_COLOR.ink2,
+            lineHeight: 1.5,
+          }}
+        >
+          {answer.judge_reasons.map((r, i) => (
+            <li key={i}>{r}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function AnswerPage() {
   const { id } = useParams<{ id: string }>();
-  const router = useRouter();
 
   const [answers, setAnswers] = useState<H2AnswerDraft[]>([]);
   const [counts, setCounts] = useState({
     certified: 0,
-    draft: 0,
+    doubtful: 0,
+    pending: 0,
     cannot_answer: 0,
   });
   const [loading, setLoading] = useState(true);
   const [drafting, setDrafting] = useState(false);
+  const [certifying, setCertifying] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
   const [report, setReport] = useState<string | null>(null);
   const [loadingReport, setLoadingReport] = useState(false);
@@ -540,15 +730,15 @@ export default function AnswerPage() {
     setAnswers(result.answers);
     setCounts({
       certified: result.certified_count,
-      draft: result.draft_count,
+      doubtful: result.doubtful_count,
+      pending: result.pending_count,
       cannot_answer: result.cannot_answer_count,
     });
-    // Default to first demoted, else first draft, else first
-    const demotedIdx = result.answers.findIndex((a) => a.state === "demoted");
-    const draftIdx = result.answers.findIndex((a) => a.state === "draft");
-    setActiveIdx(
-      demotedIdx >= 0 ? demotedIdx : draftIdx >= 0 ? draftIdx : 0
+    // Surface the first answer that still needs attention.
+    const attentionIdx = result.answers.findIndex(
+      (a) => a.state === "pending" || a.state === "doubtful"
     );
+    setActiveIdx(attentionIdx >= 0 ? attentionIdx : 0);
   };
 
   const redraft = async () => {
@@ -557,6 +747,22 @@ export default function AnswerPage() {
       await loadDraft();
     } finally {
       setDrafting(false);
+    }
+  };
+
+  const certify = async () => {
+    setCertifying(true);
+    try {
+      const result = await h2.projects.answer.certify(id);
+      setAnswers(result.answers);
+      setCounts({
+        certified: result.certified_count,
+        doubtful: result.doubtful_count,
+        pending: result.pending_count,
+        cannot_answer: result.cannot_answer_count,
+      });
+    } finally {
+      setCertifying(false);
     }
   };
 
@@ -634,7 +840,7 @@ export default function AnswerPage() {
         <div style={{ display: "flex", gap: 8 }}>
           <button
             onClick={redraft}
-            disabled={drafting}
+            disabled={drafting || certifying}
             style={{
               appearance: "none",
               cursor: drafting ? "default" : "pointer",
@@ -649,6 +855,25 @@ export default function AnswerPage() {
             }}
           >
             {drafting ? "Drafting…" : "Redraft"}
+          </button>
+          <button
+            onClick={certify}
+            disabled={certifying || drafting}
+            title="Run the LLM judge over executed answers (can take a few seconds per question)"
+            style={{
+              appearance: "none",
+              cursor: certifying ? "default" : "pointer",
+              background: HW2_COLOR.blue,
+              color: "#fff",
+              border: "1px solid transparent",
+              borderRadius: 8,
+              padding: "6px 12px",
+              font: "600 12px 'DM Sans', sans-serif",
+              fontFamily: "'DM Sans', sans-serif",
+              opacity: certifying ? 0.6 : 1,
+            }}
+          >
+            {certifying ? "Certifying…" : "Run certification"}
           </button>
         </div>
       </div>
@@ -691,7 +916,9 @@ export default function AnswerPage() {
           {counts.certified} certified
         </span>
         <span style={{ color: HW2_COLOR.faint }}>·</span>
-        <span style={{ color: HW2_COLOR.muted }}>{counts.draft} draft</span>
+        <span style={{ color: HW2_COLOR.muted }}>{counts.pending} not certified</span>
+        <span style={{ color: HW2_COLOR.faint }}>·</span>
+        <span style={{ color: HW2_COLOR.warn }}>{counts.doubtful} doubtful</span>
         <span style={{ color: HW2_COLOR.faint }}>·</span>
         <span style={{ color: HW2_COLOR.warn }}>
           {counts.cannot_answer} can&rsquo;t answer
@@ -795,111 +1022,36 @@ export default function AnswerPage() {
                   <QStatePill state={activeAnswer.state} />
                 </div>
 
-                {activeAnswer.state === "demoted" && (
-                  <div
-                    style={{
-                      marginTop: 12,
-                      padding: "12px 16px",
-                      borderRadius: 10,
-                      background: HW2_COLOR.badSoft,
-                      border: `1px solid ${HW2_COLOR.bad}33`,
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 12,
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 22,
-                        height: 22,
-                        borderRadius: "50%",
-                        background: HW2_COLOR.bad,
-                        color: "#fff",
-                        display: "grid",
-                        placeItems: "center",
-                        font: "700 12px 'DM Sans', sans-serif",
-                        flexShrink: 0,
-                      }}
-                    >
-                      !
-                    </span>
-                    <div
-                      style={{
-                        flex: 1,
-                        font: "400 13px 'DM Sans', sans-serif",
-                        color: HW2_COLOR.ink2,
-                        lineHeight: 1.5,
-                      }}
-                    >
-                      <strong style={{ color: HW2_COLOR.bad }}>
-                        Certification revoked.{" "}
-                      </strong>
-                      Re-verify needed before this answer can be trusted.
-                    </div>
-                    <button
-                      onClick={() =>
-                        router.push(`/h2/projects/${id}/resolve`)
-                      }
-                      style={{
-                        appearance: "none",
-                        cursor: "pointer",
-                        background: "#fff",
-                        border: `1px solid ${HW2_COLOR.rule2}`,
-                        borderRadius: 7,
-                        padding: "6px 12px",
-                        font: "500 12px 'DM Sans', sans-serif",
-                        color: HW2_COLOR.ink2,
-                        fontFamily: "'DM Sans', sans-serif",
-                        flexShrink: 0,
-                      }}
-                    >
-                      Re-verify →
-                    </button>
-                  </div>
-                )}
               </div>
 
               {activeAnswer.state === "cannot_answer" ? (
                 <CannotAnswerCard answer={activeAnswer} />
               ) : (
                 <>
+                  <JudgePanel answer={activeAnswer} />
+
+                  {activeAnswer.execution_error && (
+                    <div
+                      style={{
+                        padding: "12px 16px",
+                        background: HW2_COLOR.badSoft,
+                        border: `1px solid ${HW2_COLOR.bad}44`,
+                        borderRadius: 10,
+                        font: "400 12.5px 'DM Mono', monospace",
+                        color: HW2_COLOR.bad,
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      Query failed: {activeAnswer.execution_error}
+                    </div>
+                  )}
+
+                  <ResultChart answer={activeAnswer} />
+                  <ResultTable answer={activeAnswer} />
                   <SqlCard answer={activeAnswer} />
 
                   {activeAnswer.caveats.length > 0 && (
                     <CaveatsCard caveats={activeAnswer.caveats} />
-                  )}
-
-                  {activeAnswer.confidence > 0 && (
-                    <ConfidenceBar value={activeAnswer.confidence} />
-                  )}
-
-                  {/* Chart spec info */}
-                  {activeAnswer.chart_spec?.type && (
-                    <div
-                      style={{
-                        padding: "12px 16px",
-                        background: HW2_COLOR.surface,
-                        border: `1px solid ${HW2_COLOR.rule}`,
-                        borderRadius: 10,
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 10,
-                        font: "400 12.5px 'DM Sans', sans-serif",
-                        color: HW2_COLOR.muted,
-                      }}
-                    >
-                      <span
-                        style={{
-                          font: "600 11px 'DM Mono', monospace",
-                          color: HW2_COLOR.faint,
-                        }}
-                      >
-                        chart spec
-                      </span>
-                      <span>
-                        {String(activeAnswer.chart_spec.type)} chart suggested
-                      </span>
-                    </div>
                   )}
                 </>
               )}
