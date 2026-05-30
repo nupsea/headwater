@@ -92,6 +92,6 @@ cd ui && npx tsc --noEmit
 
 ## Documentation
 
-- [Current Architecture](docs/ARCHITECTURE.md)
-- [Active Implementation Plan](IMPLEMENTATION_PLAN.md)
-- Archived plans live in [archives](archives/).
+- Architecture & invariants: [`.claude/rules/`](../.claude/rules/) (authoritative)
+- Headwater 2 design & live build status: [`design/`](../design/) — start at
+  [HEADWATER2_REMEDIATION_PLAN.md](../design/HEADWATER2_REMEDIATION_PLAN.md)

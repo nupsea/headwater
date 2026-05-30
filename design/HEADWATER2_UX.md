@@ -313,8 +313,9 @@ deference, depth, consistency) + SageMaker Unified Studio structure.
 
 ## Shell — current (refined prototype, 2026-05-28)
 
-The refined prototype (`prototype/Headwater2_refined.html`) supersedes the two shell
-explorations above. The current shell:
+The refined prototype superseded the two shell explorations above; that static mockup was
+removed once the shell was implemented in the live UI (`headwater/ui/src/app/h2/`). The
+current shell:
 
 - **Warm, calm aesthetic**: DM Sans / DM Mono, near-white warm paper (`#faf9f6`), a
   single blue accent, hairline warm dividers, translucent blurred top bar. (Not the

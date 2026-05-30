@@ -1,0 +1,175 @@
+# Headwater 2 — Remediation Plan (live)
+
+Status: **Living — update at the start and end of every step.** Companion to
+`HEADWATER2_BUILD_STATE.md` (the diagnosis this fixes) and `HEADWATER2_VISION.md` (the north
+star every change must serve). Approach, per the build-state analysis:
+**connect-and-complete, not rebuild.** Visual language stays as-is (warm paper, DM Sans).
+
+## Working agreement (why this doc exists)
+
+The user is burned by iterations where intent/vision die between rounds and context is lost.
+This doc + `HEADWATER2_BUILD_STATE.md` are the durable memory. Rules: vision is sacred; step
+by step; write the doc before building, update status after; evidence not vibes (cite
+file:line / tests).
+
+---
+
+## Design: one project, one loop, one state
+
+A project is a single living loop. Every stage reads/writes the same derived state; any input
+change re-runs that state from the start. Three structural moves (fixing the two root causes
++ the half-wiring) in `HEADWATER2_BUILD_STATE.md`.
+
+### Move A — Project Home + first-class Inputs (fixes Root cause 1; VISION Stage 1)
+A project home at `/h2/projects/[id]` (stop the blind redirect) showing: **goal** (editable,
+re-proposes on change); **inputs considered** (persistent list of every resource fed — data
+dictionary, .md/.txt, pasted notes — with format, time, lock state, claims touched); **add
+input** any time via `POST /projects/{id}/resources` (each add fires the refresh); **current
+verdict** snapshot. Fix the stepper "Frame" target to this page. Inputs surface is a reusable
+component (also usable contextually on Resolve/Readiness gaps).
+
+### Move B — Complete the refresh spine (fixes Root cause 2; VISION "a loop, not a line")
+One recompute that runs the full fast pipeline **in order**: relevance (relevant columns +
+proposed questions) → readiness → draft SQL → execute → persist — judge/certification excluded
+(stays explicit). Move the recompute entry point earlier to include `propose_relevance`. Every
+input mutation calls `notifyInputChanged()` and flips the fingerprint (audit all write paths).
+Recompute banner re-fetches state and re-renders instead of `window.location.reload()`. One
+source of truth for the per-project readout (rail/banner/home read persisted verdicts).
+
+### Move C — Make the half-wired pieces real
+Persist question curation (keep/drop/add matters downstream); real SQL Run via `POST /h2/query`;
+specific readiness reasons + guidance (failing contracts + concrete resolution path, reusing the
+gap-card text); stop redundant auto-runs (load persisted state, recompute on demand/stale).
+
+### Move D — LLM-assisted discovery enrichment (advisory, human-verified)
+In the first few steps (Frame/Understand), the LLM proactively *proposes* discovery
+metadata for human verify-and-lock — never silently applied, never in the fast-refresh path
+(see the LLM-roles decision below). Concretely: keep heuristic profiler PK/FK/RI detection
+as the base layer; add explicit LLM actions that **(a)** generate column descriptions
+(exists), **(b)** infer table **relationships** and **business / composite keys** with a
+short rationale, and **(c)** propose semantic types. Each proposal renders in the schema /
+data-model surfaces with confidence + reason and a confirm / edit / lock control. Locking a
+proposal is an input change → flips the fingerprint → the fast loop (relevance → questions →
+readiness → answers) re-runs on verified ground truth. This is VISION Stage 2 ("here's what
+this data is", made legible) operationalized, and keeps domain knowledge out of code (it
+comes from the data's own names/stats + user inputs, per No-Domain-Hardcoding).
+
+### Invariants (must not violate)
+No raw rows to LLM (I-3); certification = facts not clicks, auto-revokes on drift; local LLM
+optional, degrade to "judge unavailable"; no domain hardcoding (context via inputs /
+`data/<domain>/`); SQLite metadata, DuckDB analytical, Polars, Arrow, `uv`; gate ruff → pytest
+→ pyright.
+
+### Out of scope (now)
+PDF parsing (accept file, defer parse); Postgres migration; multi-source beyond existing;
+the v3 NL query harness; and the pre-existing H1 `insights` test failures.
+
+---
+
+## Roadmap (checklist + progress log)
+
+Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked.
+
+### Phase 1 — The loop listens (root causes)
+- [x] **S1. Complete the refresh spine (backend).** DONE 2026-05-30. `recompute_project` now
+      runs `propose_relevance` first → relevance → questions → readiness → draft → execute
+      (LLM-free; judge stays separate). Also added the **project goal** to
+      `project_input_fingerprint` (it was missing — a goal edit now correctly flips staleness).
+      Tests: `test_recompute_reruns_relevance_from_the_beginning` (clear questions → only a
+      recompute resurrects them; a draft-only finalize does not) +
+      `test_recompute_reflects_an_input_change_in_questions`. Files: `services/h2_pipeline.py`,
+      `tests/test_h2_pipeline.py`. Gate: ruff clean; 294 H2+core tests pass, 0 regressions.
+- [x] **S2. Project Home + persistent Inputs surface (UI).** DONE 2026-05-30. `/h2/projects/[id]`
+      is now a real Frame home (editable goal that re-proposes on save, the inputs considered,
+      add-input any time, scope + proposal snapshot, Continue→Understand) — no more blind
+      redirect. New reusable `InputsPanel` (lists resources, paste/.md/.txt add, fires
+      `notifyInputChanged`). Stepper "Frame" + rail + `stageFromPath` now target the home, not
+      `/projects/new`. Backend: enriched the resource registry to record what each input
+      *touched* (claims created/updated, conflicts, sensitivity) so the surface is meaningful.
+      Files: `ui/.../projects/[id]/page.tsx`, new `components/h2/inputs-panel.tsx`,
+      `ui/.../h2/layout.tsx`, `components/h2/stepper.tsx`, `ui/src/lib/h2api.ts`,
+      `services/h2_resource.py`. Gate: ruff clean, tsc clean, 294 H2+core tests pass.
+- [ ] **S3. Wire every input → complete refresh.** Audit write paths; each calls
+      `notifyInputChanged()`; banner triggers the complete recompute and re-fetches (no full
+      page reload). Files: `ui/.../h2/layout.tsx`, stage pages, `h2api.ts`.
+
+**Phase 1 done =** feed an input anywhere → relevant columns, proposed questions, readiness,
+answers all visibly update; inputs visible and extensible; nothing is a dead end.
+
+### Phase 2 — Make the pieces real
+- [ ] **S4. Specific readiness reasons + guidance** (`readiness/page.tsx` + backend summary).
+- [ ] **S5. Persist question curation** (`services/h2_project.py`, `api/routes/h2.py`,
+      `understand/page.tsx`, `h2api.ts`).
+- [ ] **S6. Real SQL Run in Answer** via `POST /h2/query` (`answer/page.tsx`).
+- [ ] **S7. Stop redundant auto-runs** (`understand/page.tsx`, `answer/page.tsx`).
+- [ ] **S8. One readout source of truth** (`ui/.../h2/layout.tsx`, `h2api.ts`).
+- [ ] **S-LLM. LLM-assisted discovery enrichment for human verification** (Move D). Net-new
+      besides existing descriptions/goal: explicit endpoints + UI to (a) infer table
+      **relationships** and (b) identify **business / composite keys**, each with a rationale
+      and confidence, rendered in the schema / data-model surfaces with confirm/edit/lock;
+      verified+locked results feed the fast refresh. I-3-safe; degrades when no model. Wire
+      the existing `generate-descriptions` into the same verify/lock flow. Files:
+      `services/h2_enrich.py` (+ relationship/key inference), `analyzer/`, `api/routes/h2.py`,
+      `ui/.../understand/page.tsx`, `components/h2/{schema-editor,data-model}.tsx`, `h2api.ts`.
+      Gate: ruff → pytest.
+
+### Phase 3 — Validate against the vision
+- [ ] **S9. Naked-data walkthrough** on `data/radiology/` (withhold `data/_answer_key/`): run the
+      loop, paste the dictionary, confirm every stage updates and certified answers show correct
+      data + viz. Capture findings here.
+- [ ] **S10. Quality gate + sign-off** — ruff → pytest → pyright clean; mark VISION acceptance met.
+
+### Progress log
+- 2026-05-30 — Recovered 27 NUL-corrupted files (see BUILD_STATE §0). Wrote BUILD_STATE +
+  this plan into `design/`. Foundation captured.
+- 2026-05-30 — Cleaned up H1/legacy docs (see `LEGACY_DOCS_REMOVED.md`): removed the H1
+  archives, H1 `docs/`, press_release/rfp, and superseded prototypes; fixed all dangling
+  links; re-verified (0 corruption, no dangling refs, H2 tests green). Deletions staged for
+  your commit.
+- 2026-05-30 — Decisions confirmed: staged refresh (judge = explicit click) ADOPTED; LLM
+  roles ADOPTED — LLM proposes discovery metadata (descriptions, relationships, business
+  keys, semantic types) in the first few steps for human verify/lock, never in the fast
+  refresh, never auto-certify. Added Move D + roadmap S-LLM.
+- 2026-05-30 — **S1 done.** Recompute now refreshes from the beginning (relevance →
+  questions → readiness → draft → execute), LLM-free; project goal added to the input
+  fingerprint. 2 new regression tests; 294 H2+core tests pass, 0 regressions.
+- 2026-05-30 — **S2 done.** Project home replaces the blind redirect: editable goal, the
+  persistent Inputs surface (new reusable `InputsPanel` — view + add data dictionary / .md /
+  .txt any time, each add fires the refresh), scope + proposal snapshot. Stepper "Frame" and
+  rail now open the home, not the new-project form. Resource registry enriched to show what
+  each input touched. ruff + tsc clean; 294 tests pass. Next: S3 (wire every input → the
+  complete refresh; replace the banner's full-page reload).
+
+---
+
+## Decisions
+
+- **2026-05-30 — `design/` is the durable workspace.** This plan + BUILD_STATE are the living
+  layer alongside the pre-build VISION/AUDIT/PLAN. Adopted.
+- **2026-05-30 — Connect-and-complete, not rebuild.** Adopted (rationale in BUILD_STATE).
+- **2026-05-30 — Sequencing: root-cause first, step by step.** User directive. Adopted.
+- **2026-05-30 — Refresh model: staged. ADOPTED (user-confirmed).** Any input change
+  auto-runs the *complete fast* recompute (relevance → questions → readiness → draft →
+  execute, real data shown); the slow **LLM judge certification stays a separate explicit
+  click.** Keeps the local model's slow step user-controlled.
+
+- **2026-05-30 — LLM roles & timing. ADOPTED (user-directed).** The LLM is used in TWO
+  advisory ways. Both are **explicit/user-triggered** (the local model is slow), both are
+  **surfaced for human verification**, and both are **I-3-safe** (names/types/stats only,
+  never raw rows). The LLM **never auto-applies** metadata and **never auto-certifies**.
+  1. **Early discovery enrichment (Frame/Understand — "the first few steps").** The LLM
+     proposes, for human verify-and-lock: column **descriptions** (exists,
+     `h2_enrich.generate_descriptions`), an analysis **goal** (exists, `suggest_goal`),
+     table **relationships**, **business / composite keys**, and semantic types. Heuristic
+     profiler PK/FK/RI detection stands first; the LLM augments and explains it; the human
+     confirms/edits/locks. *(Relationship + business-key inference is NET-NEW — see roadmap
+     S-LLM.)*
+  2. **Certification judge (Answer).** Explicit click, unchanged.
+  **Boundary:** the *fast refresh never calls the LLM.* It consumes whatever the human has
+  verified/locked. LLM enrichment is its own explicit action → proposals → human verify/lock
+  → that locked metadata becomes a stable input the fast refresh reads. So editing meanings
+  or accepting an LLM-proposed relationship flips the fingerprint and the fast loop updates,
+  with no LLM in the recompute path.
+- **Inputs from domain folder — PROPOSED:** optionally bind `data/<domain>/` and ingest its
+  docs as inputs (keeps domain context out of code), additive to ad-hoc paste/file. *Confirm
+  before S2.*
