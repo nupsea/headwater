@@ -277,6 +277,11 @@ export const h2 = {
         relevant_columns: H2RelevantColumn[];
         proposed_questions: H2ProposedQuestion[];
       }>(`/projects/${id}/relevance`),
+    setQuestionDisposition: (id: string, questionId: string, dropped: boolean) =>
+      post<{ question_id: string; status: string; dropped: boolean }>(
+        `/projects/${id}/questions/${encodeURIComponent(questionId)}/disposition`,
+        { dropped }
+      ),
 
     resolve: {
       build: (id: string) => post<H2ResolveCard[]>(`/projects/${id}/resolve`),

@@ -155,6 +155,8 @@ def finalize_project_answers(
     )
 
     for question in store.list_questions(project_id):
+        if question.get("status") == "dropped":
+            continue  # user-curated out — excluded from answers
         qid = question["id"]
         draft = draft_by_q.get(qid)
         readiness_q = readiness_by_q.get(qid)

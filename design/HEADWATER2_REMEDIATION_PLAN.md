@@ -108,8 +108,21 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
       Plus (test-driven, same session): Understand page — Schema & meaning toggle made prominent
       (blue card, + badge, bold heading, "Review & edit"); EDA reworked into a family-overview
       chip strip + grouped, importance-sorted list capped at 10 with show-more.
-- [ ] **S5. Persist question curation** (`services/h2_project.py`, `api/routes/h2.py`,
-      `understand/page.tsx`, `h2api.ts`).
+- [x] **S5. Persist question curation** DONE 2026-05-31. ruff + tsc clean; 294 backend tests
+      pass. Keep/drop in Understand now persists and is honored everywhere (readiness, answers,
+      counts) and survives recompute. Implementation as designed below. Persist a drop via
+      question `status="dropped"`; preserve it across re-propose by changing
+      `store.upsert_question` ON CONFLICT to
+      `status=CASE WHEN questions.status='dropped' THEN 'dropped' ELSE excluded.status END`.
+      Steps: (1) edit that upsert SQL (`core/store.py`); (2) add `store.set_question_status`;
+      (3) new route `POST /projects/{id}/questions/{qid}/disposition {dropped:bool}` → set
+      status "dropped" or back to draft/cannot_answer per answerability; (4) filter
+      `status!="dropped"` in `h2_readiness.evaluate_project_readiness` (questions = list_questions),
+      `h2_pipeline.finalize_project_answers` (`for question in store.list_questions(...)`), and
+      `h2_answer.draft_project_answers` (questions = list_questions) — all three call sites
+      confirmed present; (5) `h2api.ts` add `questions.setDisposition`; (6) `understand/page.tsx`
+      init `kept` from `status!=="dropped"` and toggle calls the endpoint + `notifyInputChanged()`.
+      Defer "add custom question" (note). get_project already returns questions with status.
 - [ ] **S6. Real SQL Run in Answer** via `POST /h2/query` (`answer/page.tsx`).
 - [ ] **S7. Stop redundant auto-runs** (`understand/page.tsx`, `answer/page.tsx`).
 - [ ] **S8. One readout source of truth** (`ui/.../h2/layout.tsx`, `h2api.ts`).

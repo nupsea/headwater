@@ -626,13 +626,9 @@ export default function UnderstandPage() {
       setGoalLoaded(true);
       const qs = project.questions ?? [];
       setQuestions(qs);
-      // Initially keep all answerable questions
+      // Kept = not user-dropped (persisted via question status).
       setKept(
-        new Set(
-          qs
-            .filter((q) => q.answerability !== "cannot_answer")
-            .map((q) => q.id)
-        )
+        new Set(qs.filter((q) => q.status !== "dropped").map((q) => q.id))
       );
     } catch {
       // ignore
@@ -667,21 +663,26 @@ export default function UnderstandPage() {
   };
 
   const toggleKept = (qid: string) => {
+    const willDrop = kept.has(qid); // currently kept -> dropping it
     setKept((prev) => {
       const next = new Set(prev);
-      next.has(qid) ? next.delete(qid) : next.add(qid);
+      willDrop ? next.delete(qid) : next.add(qid);
       return next;
     });
+    h2.projects
+      .setQuestionDisposition(id, qid, willDrop)
+      .then(() => notifyInputChanged())
+      .catch(() => {});
   };
 
   const acceptAll = () => {
-    setKept(
-      new Set(
-        questions
-          .filter((q) => q.answerability !== "cannot_answer")
-          .map((q) => q.id)
-      )
-    );
+    const ids = questions
+      .filter((q) => q.answerability !== "cannot_answer")
+      .map((q) => q.id);
+    setKept(new Set(ids));
+    Promise.allSettled(
+      ids.map((qid) => h2.projects.setQuestionDisposition(id, qid, false))
+    ).then(() => notifyInputChanged());
   };
 
   useEffect(() => {

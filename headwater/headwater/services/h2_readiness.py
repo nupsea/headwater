@@ -104,7 +104,9 @@ def evaluate_project_readiness(
     snapshot = store.get_latest_source_snapshot(source_name)
     snapshot_id = snapshot["id"] if snapshot else None
 
-    questions = store.list_questions(project_id)
+    questions = [
+        q for q in store.list_questions(project_id) if q.get("status") != "dropped"
+    ]
     profiles = store.get_profiles(source_name)
     resolve_items = store.list_resolve_items(project_id)
     claims = store.list_semantic_claims(project_id)

@@ -91,7 +91,9 @@ def draft_project_answers(
     snapshot = store.get_latest_source_snapshot(source_name)
     snapshot_id = snapshot["id"] if snapshot else None
 
-    questions = store.list_questions(project_id)
+    questions = [
+        q for q in store.list_questions(project_id) if q.get("status") != "dropped"
+    ]
     claims = store.list_semantic_claims(project_id)
     relationships = store.get_relationships(source_name)
 

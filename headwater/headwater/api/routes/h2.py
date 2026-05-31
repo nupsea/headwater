@@ -402,6 +402,36 @@ def rerun_relevance(project_id: str) -> dict[str, Any]:
     }
 
 
+class QuestionDispositionRequest(BaseModel):
+    dropped: bool
+
+
+@router.post("/projects/{project_id}/questions/{question_id}/disposition")
+def set_question_disposition(
+    project_id: str, question_id: str, req: QuestionDispositionRequest
+) -> dict[str, Any]:
+    """Keep or drop a proposed question. Dropped questions are excluded from
+    readiness/answers and stay dropped across recomputes (the upsert preserves
+    a 'dropped' status). Restoring re-enables it per its answerability."""
+    store = _get_store()
+    try:
+        q = store.get_question(question_id)
+        if q is None or q.get("project_id") != project_id:
+            raise HTTPException(status_code=404, detail="Question not found.")
+        if req.dropped:
+            status = "dropped"
+        else:
+            status = (
+                "cannot_answer"
+                if q.get("answerability") == "cannot_answer"
+                else "draft"
+            )
+        store.set_question_status(question_id, status)
+    finally:
+        store.close()
+    return {"question_id": question_id, "status": status, "dropped": req.dropped}
+
+
 # ── Resolve ───────────────────────────────────────────────────────────────────
 
 @router.post("/projects/{project_id}/resolve")

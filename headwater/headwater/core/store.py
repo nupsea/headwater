@@ -564,6 +564,14 @@ class HeadwaterStore:
             item["scope"] = json.loads(item.pop("scope_json") or "{}")
         return items
 
+    def set_question_status(self, question_id: str, status: str) -> None:
+        """Set a question's status (e.g. user curation: 'dropped' or restored)."""
+        self.con.execute(
+            "UPDATE questions SET status=?, updated_at=datetime('now') WHERE id=?",
+            (status, question_id),
+        )
+        self.con.commit()
+
     def list_questions(self, project_id: str) -> list[dict[str, Any]]:
         rows = self.con.execute(
             "SELECT * FROM questions WHERE project_id = ? ORDER BY updated_at DESC, id",
@@ -673,7 +681,8 @@ class HeadwaterStore:
                 source_name = excluded.source_name,
                 title = excluded.title,
                 question_json = excluded.question_json,
-                status = excluded.status,
+                status = CASE WHEN questions.status='dropped'
+                              THEN 'dropped' ELSE excluded.status END,
                 answerability = excluded.answerability,
                 confidence = excluded.confidence,
                 updated_at = datetime('now')
