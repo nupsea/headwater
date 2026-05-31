@@ -148,7 +148,11 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
       `POST /projects/{id}/resolve/{card_id}/suggest` → {available, markdown}; reuse
       `h2_enrich` LLM helper + degrade gracefully when no model. Files: `services/h2_resolve.py`
       or `h2_enrich.py`, `api/routes/h2.py`, `ui/.../resolve/page.tsx`, `h2api.ts`.
-- [ ] **S6. Real SQL Run in Answer** via `POST /h2/query` (`answer/page.tsx`).
+- [x] **S6. Real SQL Run in Answer** DONE 2026-05-31. Replaced the fake `setTimeout` Run with a
+      real `h2.query(sourceName, sql)` (POST /h2/query, read-only sandboxed); SqlCard now takes
+      `sourceName`, runs the (optionally edited) SQL, and renders a result table (or the error /
+      no-rows), with row count + truncation note. Answer page fetches the project's source_name
+      for this. tsc clean. File: `answer/page.tsx`.
 - [ ] **S7. Stop redundant auto-runs** (`understand/page.tsx`, `answer/page.tsx`).
 - [ ] **S8. One readout source of truth** (`ui/.../h2/layout.tsx`, `h2api.ts`).
 - [ ] **S-LLM. LLM-assisted discovery enrichment for human verification** (Move D). Net-new

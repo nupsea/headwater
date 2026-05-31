@@ -13,7 +13,13 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { h2, onHw2Event, HW2_RECOMPUTED, type H2AnswerDraft } from "@/lib/h2api";
+import {
+  h2,
+  onHw2Event,
+  HW2_RECOMPUTED,
+  type H2AnswerDraft,
+  type H2AnswerRow,
+} from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
 
 // ─── State pill ───────────────────────────────────────────────────────────────
@@ -184,10 +190,42 @@ function CannotAnswerCard({ answer }: { answer: H2AnswerDraft }) {
 
 // ─── Draft query card ─────────────────────────────────────────────────────────
 
-function SqlCard({ answer }: { answer: H2AnswerDraft }) {
+function SqlCard({
+  answer,
+  sourceName,
+}: {
+  answer: H2AnswerDraft;
+  sourceName: string;
+}) {
   const [editing, setEditing] = useState(false);
   const [sql, setSql] = useState(answer.sql_text ?? "");
   const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<{
+    columns: string[];
+    rows: H2AnswerRow[];
+    row_count: number;
+    truncated: boolean;
+    error: string | null;
+  } | null>(null);
+
+  const run = async () => {
+    if (!sql.trim() || !sourceName) return;
+    setRunning(true);
+    try {
+      const r = await h2.query(sourceName, sql);
+      setResult(r);
+    } catch (e) {
+      setResult({
+        columns: [],
+        rows: [],
+        row_count: 0,
+        truncated: false,
+        error: e instanceof Error ? e.message : "Query failed.",
+      });
+    } finally {
+      setRunning(false);
+    }
+  };
 
   return (
     <div
@@ -234,13 +272,12 @@ function SqlCard({ answer }: { answer: H2AnswerDraft }) {
             {editing ? "Done" : "Edit"}
           </button>
           <button
-            onClick={() => {
-              setRunning(true);
-              setTimeout(() => setRunning(false), 800);
-            }}
+            onClick={run}
+            disabled={running || !sql.trim() || !sourceName}
+            title={!sourceName ? "Source not loaded yet" : "Execute this SQL read-only"}
             style={{
               appearance: "none",
-              cursor: "pointer",
+              cursor: running || !sql.trim() || !sourceName ? "default" : "pointer",
               background: HW2_COLOR.blue,
               color: "#fff",
               border: "1px solid transparent",
@@ -248,6 +285,7 @@ function SqlCard({ answer }: { answer: H2AnswerDraft }) {
               padding: "4px 10px",
               font: "500 12px 'DM Sans', sans-serif",
               fontFamily: "'DM Sans', sans-serif",
+              opacity: running || !sql.trim() || !sourceName ? 0.5 : 1,
             }}
           >
             {running ? "Running…" : "▶ Run"}
@@ -289,6 +327,94 @@ function SqlCard({ answer }: { answer: H2AnswerDraft }) {
         >
           {sql || "-- No query drafted yet."}
         </pre>
+      )}
+
+      {result && (
+        <div style={{ borderTop: `1px solid ${HW2_COLOR.rule}`, position: "relative", zIndex: 1 }}>
+          {result.error ? (
+            <div
+              style={{
+                padding: "12px 16px",
+                font: "400 12.5px 'DM Mono', monospace",
+                color: HW2_COLOR.bad,
+                lineHeight: 1.5,
+                background: HW2_COLOR.badSoft,
+              }}
+            >
+              {result.error}
+            </div>
+          ) : result.columns.length === 0 ? (
+            <div
+              style={{
+                padding: "12px 16px",
+                font: "400 12.5px 'DM Sans', sans-serif",
+                color: HW2_COLOR.muted,
+              }}
+            >
+              No rows returned.
+            </div>
+          ) : (
+            <>
+              <div
+                style={{
+                  padding: "8px 16px",
+                  font: "400 11px 'DM Mono', monospace",
+                  color: HW2_COLOR.faint,
+                  background: HW2_COLOR.surface,
+                }}
+              >
+                {result.row_count.toLocaleString()} row{result.row_count === 1 ? "" : "s"}
+                {result.truncated ? " · first 50 shown" : ""}
+              </div>
+              <div style={{ overflowX: "auto", maxHeight: 300, background: HW2_COLOR.surface }}>
+                <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                  <thead>
+                    <tr>
+                      {result.columns.map((c) => (
+                        <th
+                          key={c}
+                          style={{
+                            position: "sticky",
+                            top: 0,
+                            textAlign: "left",
+                            padding: "6px 14px",
+                            background: HW2_COLOR.paper,
+                            borderBottom: `1px solid ${HW2_COLOR.rule}`,
+                            font: "600 11px 'DM Mono', monospace",
+                            color: HW2_COLOR.ink2,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {c}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.rows.slice(0, 50).map((row, ri) => (
+                      <tr key={ri}>
+                        {result.columns.map((c) => (
+                          <td
+                            key={c}
+                            style={{
+                              padding: "5px 14px",
+                              borderBottom: `1px solid ${HW2_COLOR.rule}`,
+                              font: "400 12px 'DM Mono', monospace",
+                              color: HW2_COLOR.ink2,
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {row[c] === null || row[c] === undefined ? "—" : String(row[c])}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
       )}
 
       {/* Draft watermark */}
@@ -711,6 +837,7 @@ function JudgePanel({ answer }: { answer: H2AnswerDraft }) {
 export default function AnswerPage() {
   const { id } = useParams<{ id: string }>();
 
+  const [sourceName, setSourceName] = useState("");
   const [answers, setAnswers] = useState<H2AnswerDraft[]>([]);
   const [counts, setCounts] = useState({
     certified: 0,
@@ -789,6 +916,14 @@ export default function AnswerPage() {
       .catch(() => {})
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // The source name is needed to run ad-hoc SQL against the materialized source.
+  useEffect(() => {
+    h2.projects
+      .get(id)
+      .then((p) => setSourceName(p.sources?.[0]?.source_name ?? ""))
+      .catch(() => {});
   }, [id]);
 
   // A recompute re-drafts and re-executes; pull the fresh answers/data in.
@@ -1055,7 +1190,7 @@ export default function AnswerPage() {
 
                   <ResultChart answer={activeAnswer} />
                   <ResultTable answer={activeAnswer} />
-                  <SqlCard answer={activeAnswer} />
+                  <SqlCard answer={activeAnswer} sourceName={sourceName} />
 
                   {activeAnswer.caveats.length > 0 && (
                     <CaveatsCard caveats={activeAnswer.caveats} />
