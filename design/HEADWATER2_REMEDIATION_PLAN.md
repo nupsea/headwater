@@ -240,3 +240,27 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
 - **Inputs from domain folder — PROPOSED:** optionally bind `data/<domain>/` and ingest its
   docs as inputs (keeps domain context out of code), additive to ad-hoc paste/file. *Confirm
   before S2.*
+
+## S-BIND — Resolve card context binding (2026-05-31)
+
+**User-found bug:** providing context on the `cases.patient_type` enum card, saving, and
+recomputing left readiness failing `no_blocking_gaps`.
+
+**Fix shipped (commit after f4c6018):** readiness gap-clearing is now *evidence-derived* —
+`h2_readiness` subtracts columns with a satisfying semantic claim (filled enum mapping /
+non-empty definition / locked) from the high-priority-open set via new
+`_columns_with_satisfying_claim`. So defining a column (e.g. via Understand → Schema &
+meaning, which binds a proper per-column claim) clears the gap on recompute. 6 unit tests
+in `tests/test_h2_readiness_gap_clearing.py`. ruff clean; 70 tests pass.
+
+**Still queued (S-BIND remainder):** the resolve card's free-text box writes an *unbound*
+`code|meaning` table (`column_ref=""` in `_interpret_table`), so saving there alone does
+not create a column claim. Plan: a `POST /projects/{id}/resolve/{card_id}/define` that binds
+the markdown/codes directly to the card's payload {table,column}. **Interim path that works
+today: Understand → Schema & meaning.**
+
+**Tooling note (2026-05-31):** this session's tool-output channel was unstable — batches
+cancelled mid-flight and reads (sed/grep/Read) intermittently duplicated/garbled lines.
+Mitigations that held: `inspect.getsource` for reads, Edit (exact-match) + python byte-count
+assertions for writes, git for state, append-only for this doc. Do not trust raw previews;
+verify with deterministic checks.
