@@ -114,12 +114,18 @@ def evaluate_project_readiness(
     profile_map = {
         f"{p['table_name']}.{p['column_name']}": p["profile"] for p in profiles
     }
+    # Columns the user has now defined (a filled enum mapping, a non-empty
+    # definition, or a locked claim) no longer count as blocking gaps, even if
+    # the originating resolve card still reads "open".  This makes gap-clearing
+    # evidence-derived: providing a proper column definition (e.g. via Schema &
+    # meaning) clears no_blocking_gaps on the next recompute.
+    satisfied_cols: set[str] = _columns_with_satisfying_claim(claims)
     high_priority_open: set[str] = {
         f"{r['payload'].get('table','')}.{r['payload'].get('column','')}"
         for r in resolve_items
         if r.get("priority") == "high" and r.get("status") == "open"
         if r.get("payload", {}).get("column")
-    }
+    } - satisfied_cols
     conflicting_cols: set[str] = _find_conflicting_claims(claims)
 
     # Load stored EDA insight_confidence contracts (written by hw2 eda run)
@@ -309,6 +315,33 @@ def _evaluate_contracts(
         )
 
     return results
+
+
+def _columns_with_satisfying_claim(claims: list[dict[str, Any]]) -> set[str]:
+    """Return 'table.column' keys whose meaning the user has now supplied.
+
+    A column counts as satisfied when it has a claim that is either locked, a
+    non-empty free-text definition, or an enum mapping with at least one
+    non-empty meaning.  Such a column should no longer be treated as a blocking
+    gap.
+    """
+    satisfied: set[str] = set()
+    for c in claims:
+        table = c.get("table_name")
+        column = c.get("column_name")
+        if not table or not column:
+            continue
+        if c.get("locked"):
+            satisfied.add(f"{table}.{column}")
+            continue
+        value = (c.get("claim") or {}).get("value")
+        if isinstance(value, dict):
+            # enum mapping: satisfied once any code has a non-empty meaning
+            if any(str(v).strip() for v in value.values()):
+                satisfied.add(f"{table}.{column}")
+        elif isinstance(value, str) and value.strip():
+            satisfied.add(f"{table}.{column}")
+    return satisfied
 
 
 def _find_conflicting_claims(claims: list[dict[str, Any]]) -> set[str]:
