@@ -499,6 +499,20 @@ def set_resolve_disposition(
     return {"card_id": card_id, "status": req.status}
 
 
+@router.post("/projects/{project_id}/resolve/{card_id}/suggest")
+def suggest_resolution(project_id: str, card_id: str) -> dict[str, Any]:
+    """Ask the local LLM to draft a resolution for a card (for human review)."""
+    from headwater.services.h2_enrich import suggest_resolution as _suggest
+
+    store = _get_store()
+    try:
+        return _suggest(store, project_id, card_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
 # ── Ad-hoc query (power tool) ─────────────────────────────────────────────────
 
 @router.post("/query")

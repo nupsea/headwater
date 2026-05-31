@@ -123,6 +123,31 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
       confirmed present; (5) `h2api.ts` add `questions.setDisposition`; (6) `understand/page.tsx`
       init `kept` from `status!=="dropped"` and toggle calls the endpoint + `notifyInputChanged()`.
       Defer "add custom question" (note). get_project already returns questions with status.
+- [x] **S-AI-Resolve (user-requested 2026-05-31). "Ask AI" on a Resolve card.** DONE — ruff +
+      tsc clean, 20+ backend tests pass. UI: "✦ Ask AI to draft this" button in the resolve
+      card's add-context area calls the suggest endpoint and prefills the textarea (user edits +
+      Saves → ingest → refresh; never auto-applied). Backend:
+      `h2_enrich.suggest_resolution(store, project_id, card_id)` (I-3-safe: uses
+      card payload table/column + known codes/top_values; JSON `{markdown}`; degrades when no
+      model), route `POST /projects/{id}/resolve/{card_id}/suggest`, and `h2api`
+      `resolve.suggest`. UI PENDING: add an "✦ Ask AI" button in the resolve card's add-context
+      area (anchor near the `addContext` handler / the "Save context" button) that calls
+      `h2.projects.resolve.suggest(projectId, card.card_id)` and sets `ctx` to the returned
+      markdown (then existing Save → ingest → refresh). Deferred this turn because the session's
+      file-read channel stalled and the bracketed resolve path has corrupted under blind edits
+      before — finish when reads are reliable. Remaining edit is UI-only in `resolve/page.tsx`.
+      [original spec below]
+- [ ] **S-AI-Resolve (user-requested 2026-05-31). "Ask AI" on a Resolve card.** Add an
+      "✦ Ask AI" button in the resolve card's add-context area that asks the local LLM to DRAFT
+      the resolution (e.g. for `enum_mapping_needed` on `cases.patient_type`, propose meanings
+      for the known codes A/H/S/D as a `code | meaning` markdown table) and prefills the
+      textarea for the user to edit + Save (existing ingest → refresh flow). Move-D aligned:
+      LLM proposes, human verifies/saves; never auto-applied. I-3-safe (send column
+      name/type + known distinct values/top-N from the bootstrap enum claim/profile — allowed
+      by the summary contract — never raw rows). Backend: new
+      `POST /projects/{id}/resolve/{card_id}/suggest` → {available, markdown}; reuse
+      `h2_enrich` LLM helper + degrade gracefully when no model. Files: `services/h2_resolve.py`
+      or `h2_enrich.py`, `api/routes/h2.py`, `ui/.../resolve/page.tsx`, `h2api.ts`.
 - [ ] **S6. Real SQL Run in Answer** via `POST /h2/query` (`answer/page.tsx`).
 - [ ] **S7. Stop redundant auto-runs** (`understand/page.tsx`, `answer/page.tsx`).
 - [ ] **S8. One readout source of truth** (`ui/.../h2/layout.tsx`, `h2api.ts`).

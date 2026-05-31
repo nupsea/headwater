@@ -180,3 +180,83 @@ def generate_descriptions(
                 updated += 1
 
     return {"updated": updated, "available": True}
+
+
+# ── Resolve-card suggestion (Ask AI) ────────────────────────────────────────────
+
+
+def suggest_resolution(
+    store: HeadwaterStore,
+    project_id: str,
+    card_id: str,
+    *,
+    settings: HeadwaterSettings | None = None,
+    provider: LLMProvider | None = None,
+) -> dict[str, Any]:
+    """Draft a resolution for a Resolve card with the local LLM, for human review.
+
+    I-3-safe: only the column name/table and the already-surfaced known codes
+    (top-N distinct values from the card payload) are sent — never raw rows.  The
+    model proposes a markdown table the analyst edits and saves; it is never
+    auto-applied.  Degrades gracefully when no model is running.
+    """
+    card = next(
+        (r for r in store.list_resolve_items(project_id) if r["id"] == card_id), None
+    )
+    if card is None:
+        raise ValueError(f"Resolve card '{card_id}' not found.")
+
+    payload = card.get("payload") or {}
+    issue_kind = card.get("issue_kind", "")
+    table = payload.get("table")
+    column = payload.get("column")
+    top_values = payload.get("top_values") or []
+    codes = [
+        str(v[0]) if isinstance(v, (list, tuple)) else str(v)
+        for v in top_values
+        if v not in (None, "")
+    ][:12]
+
+    prov, _ = _provider(settings, provider)
+    if isinstance(prov, NoLLMProvider):
+        return {
+            "available": False,
+            "markdown": "",
+            "note": "No model available — start Ollama to draft a suggestion.",
+        }
+
+    system = (
+        "You help a data analyst document data. Propose a concise DRAFT the analyst "
+        "will review and edit. Infer ONLY from the names and the listed codes; do not "
+        "invent columns or codes. Respond as JSON only."
+    )
+    if issue_kind == "enum_mapping_needed" and column and codes:
+        prompt = (
+            f"TABLE: {table}\nCOLUMN: {column}\n"
+            f"KNOWN CODES: {', '.join(codes)}\n\n"
+            "Propose a plausible business meaning for EACH known code. "
+            'Return JSON: {"markdown": "| code | meaning |\\n| --- | --- |\\n'
+            '| <code> | <meaning> |"} covering exactly the known codes.'
+        )
+    else:
+        col_line = f"COLUMN: {table}.{column}\n" if column else ""
+        prompt = (
+            f"GAP: {card.get('title', '')}\n{card.get('body', '')}\n{col_line}\n"
+            "Propose the markdown the analyst should provide to resolve this. "
+            'Return JSON: {"markdown": "| column | meaning |\\n| --- | --- |\\n'
+            '| <column> | <meaning> |"}.'
+        )
+
+    raw = _invoke(prov, prompt, system)
+    markdown = str(raw.get("markdown") or "").strip()
+    if not markdown:
+        return {
+            "available": False,
+            "markdown": "",
+            "note": "The model returned no suggestion. Try again or write it yourself.",
+        }
+    return {
+        "available": True,
+        "markdown": markdown,
+        "note": "Draft from a local model — review and edit before saving.",
+    }

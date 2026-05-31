@@ -74,6 +74,8 @@ function ResolveCardRow({
   const [adding, setAdding] = useState(false);
   const [ctx, setCtx] = useState("");
   const [busy, setBusy] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiNote, setAiNote] = useState<string | null>(null);
   const deferred = card.status === "deferred";
 
   const defer = async () => {
@@ -110,6 +112,23 @@ function ResolveCardRow({
       onChanged();
     } finally {
       setBusy(false);
+    }
+  };
+
+  const askAI = async () => {
+    setAiBusy(true);
+    setAiNote(null);
+    try {
+      const r = await h2.projects.resolve.suggest(projectId, card.card_id);
+      if (r.available && r.markdown) {
+        // Prefill for the user to review/edit — never auto-saved.
+        setCtx((prev) => (prev.trim() ? `${prev}\n\n${r.markdown}` : r.markdown));
+      }
+      setAiNote(r.note);
+    } catch {
+      setAiNote("Could not reach the suggestion service.");
+    } finally {
+      setAiBusy(false);
     }
   };
 
@@ -263,6 +282,45 @@ function ResolveCardRow({
 
           {adding && (
             <div style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  marginBottom: 8,
+                  flexWrap: "wrap",
+                }}
+              >
+                <button
+                  onClick={askAI}
+                  disabled={aiBusy || busy}
+                  title="Let a local model draft this from the column name and its known codes — you review and edit before saving."
+                  style={{
+                    appearance: "none",
+                    cursor: aiBusy || busy ? "default" : "pointer",
+                    background: HW2_COLOR.blueSoft,
+                    border: `1px solid ${HW2_COLOR.blue}44`,
+                    borderRadius: 7,
+                    padding: "6px 12px",
+                    font: "600 12px 'DM Sans', sans-serif",
+                    color: HW2_COLOR.blue,
+                    fontFamily: "'DM Sans', sans-serif",
+                    opacity: aiBusy || busy ? 0.6 : 1,
+                  }}
+                >
+                  {aiBusy ? "Drafting…" : "✦ Ask AI to draft this"}
+                </button>
+                {aiNote && (
+                  <span
+                    style={{
+                      font: "400 11.5px 'DM Sans', sans-serif",
+                      color: HW2_COLOR.muted,
+                    }}
+                  >
+                    {aiNote}
+                  </span>
+                )}
+              </div>
               <textarea
                 value={ctx}
                 onChange={(e) => setCtx(e.target.value)}

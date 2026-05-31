@@ -291,6 +291,10 @@ export const h2 = {
           `/projects/${id}/resolve/${encodeURIComponent(cardId)}/disposition`,
           { status }
         ),
+      suggest: (id: string, cardId: string) =>
+        post<{ available: boolean; markdown: string; note: string }>(
+          `/projects/${id}/resolve/${encodeURIComponent(cardId)}/suggest`
+        ),
     },
 
     readiness: {
