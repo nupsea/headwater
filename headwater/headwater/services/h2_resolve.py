@@ -150,7 +150,7 @@ def _enum_mapping_cards(
             card_id=f"{project_id}:enum:{key}",
             issue_kind="enum_mapping_needed",
             priority=priority,
-            title=f'What do the "{col["name"]}" codes mean?',
+            title=f'What do the "{col["table_name"]}.{col["name"]}" codes mean?',
             body=(
                 f"Column `{col['table_name']}.{col['name']}` contains short codes "
                 f"({', '.join(value_list) or 'unknown'}) with no business definition. "
