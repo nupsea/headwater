@@ -76,6 +76,7 @@ function ResolveCardRow({
   const [busy, setBusy] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiNote, setAiNote] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
   const deferred = card.status === "deferred";
 
   const defer = async () => {
@@ -106,8 +107,9 @@ function ResolveCardRow({
     try {
       const file = new File([ctx], "resolve-context.md", { type: "text/markdown" });
       await h2.projects.resources.ingest(projectId, file);
-      setCtx("");
+      setSaved(ctx.trim()); // remember what was saved; show it read-only
       setAdding(false);
+      setAiNote(null);
       notifyInputChanged();
       onChanged();
     } finally {
@@ -273,74 +275,90 @@ function ResolveCardRow({
               </button>
             )}
             <button
-              onClick={() => setAdding((v) => !v)}
+              onClick={() => {
+                if (saved && !adding) {
+                  setCtx(saved); // edit again starts from the saved value
+                }
+                setAdding((v) => !v);
+              }}
               disabled={busy}
               style={primaryBtn}
             >
-              {adding ? "Cancel" : "Add context / define a term"}
+              {adding
+                ? "Cancel"
+                : saved
+                ? "Edit context"
+                : "Add context / define a term"}
             </button>
-            <button
-              onClick={askAI}
-              disabled={aiBusy || busy}
-              title="Let a local model draft a definition from the column name and its known codes — you review and edit before saving."
+            {!saved && (
+              <button
+                onClick={askAI}
+                disabled={aiBusy || busy}
+                title="Let a local model draft a definition from the column name and its known codes — you review and edit before saving."
+                style={{
+                  appearance: "none",
+                  cursor: aiBusy || busy ? "default" : "pointer",
+                  background: HW2_COLOR.blueSoft,
+                  border: `1px solid ${HW2_COLOR.blue}44`,
+                  borderRadius: 7,
+                  padding: "7px 13px",
+                  font: "600 12px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.blue,
+                  fontFamily: "'DM Sans', sans-serif",
+                  opacity: aiBusy || busy ? 0.6 : 1,
+                }}
+              >
+                {aiBusy ? "Drafting…" : "✦ Ask AI"}
+              </button>
+            )}
+          </div>
+
+          {saved && !adding && (
+            <div
               style={{
-                appearance: "none",
-                cursor: aiBusy || busy ? "default" : "pointer",
-                background: HW2_COLOR.blueSoft,
-                border: `1px solid ${HW2_COLOR.blue}44`,
-                borderRadius: 7,
-                padding: "7px 13px",
-                font: "600 12px 'DM Sans', sans-serif",
-                color: HW2_COLOR.blue,
-                fontFamily: "'DM Sans', sans-serif",
-                opacity: aiBusy || busy ? 0.6 : 1,
+                marginTop: 12,
+                padding: "12px 14px",
+                background: HW2_COLOR.goodSoft,
+                border: `1px solid ${HW2_COLOR.good}33`,
+                borderRadius: 8,
               }}
             >
-              {aiBusy ? "Drafting…" : "✦ Ask AI"}
-            </button>
-          </div>
+              <div
+                style={{
+                  font: "600 12px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.good,
+                  marginBottom: 6,
+                }}
+              >
+                ✓ Saved — press Recompute (top banner) to apply it across the workflow.
+              </div>
+              <pre
+                style={{
+                  margin: 0,
+                  font: "500 12px 'DM Mono', monospace",
+                  color: HW2_COLOR.ink2,
+                  lineHeight: 1.5,
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {saved}
+              </pre>
+            </div>
+          )}
 
           {adding && (
             <div style={{ marginTop: 12 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  marginBottom: 8,
-                  flexWrap: "wrap",
-                }}
-              >
-                <button
-                  onClick={askAI}
-                  disabled={aiBusy || busy}
-                  title="Let a local model draft this from the column name and its known codes — you review and edit before saving."
+              {aiNote && (
+                <div
                   style={{
-                    appearance: "none",
-                    cursor: aiBusy || busy ? "default" : "pointer",
-                    background: HW2_COLOR.blueSoft,
-                    border: `1px solid ${HW2_COLOR.blue}44`,
-                    borderRadius: 7,
-                    padding: "6px 12px",
-                    font: "600 12px 'DM Sans', sans-serif",
-                    color: HW2_COLOR.blue,
-                    fontFamily: "'DM Sans', sans-serif",
-                    opacity: aiBusy || busy ? 0.6 : 1,
+                    font: "400 11.5px 'DM Sans', sans-serif",
+                    color: HW2_COLOR.muted,
+                    marginBottom: 8,
                   }}
                 >
-                  {aiBusy ? "Drafting…" : "✦ Ask AI to draft this"}
-                </button>
-                {aiNote && (
-                  <span
-                    style={{
-                      font: "400 11.5px 'DM Sans', sans-serif",
-                      color: HW2_COLOR.muted,
-                    }}
-                  >
-                    {aiNote}
-                  </span>
-                )}
-              </div>
+                  {aiNote}
+                </div>
+              )}
               <textarea
                 value={ctx}
                 onChange={(e) => setCtx(e.target.value)}

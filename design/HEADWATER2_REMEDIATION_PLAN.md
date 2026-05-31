@@ -195,6 +195,17 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
   + the layout re-fetch on recompute. Phase 1 (the loop listens) is complete: feed an input
   anywhere → the whole workflow updates with no reload. tsc clean; UI integrity verified.
   Next: Phase 2 — S4 (specific readiness reasons + guidance).
+- 2026-05-31 — **S4, S5, S6 done + Understand UX + Ask-AI on Resolve.** Committed:
+  f138871 (S1,S2), a189985 (S3,S4,Understand schema/EDA), d756744 (S5 question curation),
+  089ca61 (Ask-AI suggest endpoint + editor button), 2c41e22 (S6 real SQL Run), de356df
+  (card-level Ask AI button). Decision: Ask-AI stays one-shot "draft for review" (Move-D);
+  conversational/context-holding chat = deferred v3 LLM query harness, not pulled forward.
+- 2026-05-31 — **Resolve save-flow polish (in progress).** User feedback: after Save context
+  it must (a) confirm saved, (b) collapse + show the saved value read-only with an Edit-again
+  option, (c) not show a duplicate Ask AI button (card-level + old editor-level). Fixing now.
+  Remaining roadmap: S7 (stop redundant auto-runs), S8 (one readout source of truth),
+  S9 (naked-data walkthrough), S10 (final gate). Tooling note: never `cd` into the bracketed
+  `[id]` path (zsh glob aborts the whole batch); use absolute paths / subshells.
 
 ---
 
