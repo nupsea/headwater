@@ -116,6 +116,7 @@ function ResolveCardRow({
   };
 
   const askAI = async () => {
+    setAdding(true); // open the editor so the draft is visible and editable
     setAiBusy(true);
     setAiNote(null);
     try {
@@ -277,6 +278,25 @@ function ResolveCardRow({
               style={primaryBtn}
             >
               {adding ? "Cancel" : "Add context / define a term"}
+            </button>
+            <button
+              onClick={askAI}
+              disabled={aiBusy || busy}
+              title="Let a local model draft a definition from the column name and its known codes — you review and edit before saving."
+              style={{
+                appearance: "none",
+                cursor: aiBusy || busy ? "default" : "pointer",
+                background: HW2_COLOR.blueSoft,
+                border: `1px solid ${HW2_COLOR.blue}44`,
+                borderRadius: 7,
+                padding: "7px 13px",
+                font: "600 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.blue,
+                fontFamily: "'DM Sans', sans-serif",
+                opacity: aiBusy || busy ? 0.6 : 1,
+              }}
+            >
+              {aiBusy ? "Drafting…" : "✦ Ask AI"}
             </button>
           </div>
 
