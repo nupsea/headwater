@@ -271,6 +271,84 @@ def test_judge_rejection_holds_doubtful(monkeypatch, tmp_path):
         get_settings.cache_clear()
 
 
+def test_locked_definition_supersedes_placeholders_not_conflicting():
+    """A locked definition + leftover bootstrap/relevance claims is NOT a conflict."""
+    from headwater.services.h2_readiness import _find_conflicting_claims
+
+    claims = [
+        # Empty bootstrap enum placeholder (proposed) for the same column.
+        {
+            "table_name": "cases",
+            "column_name": "patient_type",
+            "claim_type": "enum_mapping",
+            "status": "proposed",
+            "claim": {"value": {"A": "", "H": ""}},
+        },
+        # The analyst's locked interpretation — ground truth.
+        {
+            "table_name": "cases",
+            "column_name": "patient_type",
+            "claim_type": "enum_mapping",
+            "status": "locked",
+            "claim": {"value": {"A": "Adult", "H": "Home"}},
+        },
+        # A relevance claim describes but does not define the column.
+        {
+            "table_name": "cases",
+            "column_name": "arrival_time",
+            "claim_type": "relevance",
+            "status": "accepted",
+            "claim": {"score": 0.9},
+        },
+        # A locked free-text definition with no competing definition.
+        {
+            "table_name": "cases",
+            "column_name": "arrival_time",
+            "claim_type": "definition",
+            "status": "locked",
+            "claim": {"value": "when the patient arrived"},
+        },
+    ]
+
+    assert _find_conflicting_claims(claims) == set()
+
+
+def test_genuine_definition_conflicts_are_flagged():
+    """needs_review markers and two disagreeing locked definitions DO conflict."""
+    from headwater.services.h2_readiness import _find_conflicting_claims
+
+    claims = [
+        # Resource ingester found two sources disagreeing -> needs_review.
+        {
+            "table_name": "cases",
+            "column_name": "throughput_time",
+            "claim_type": "definition",
+            "status": "needs_review",
+            "claim": {"value": "minutes", "conflict_with": "seconds"},
+        },
+        # Two active definitions that disagree on value.
+        {
+            "table_name": "cases",
+            "column_name": "site",
+            "claim_type": "definition",
+            "status": "locked",
+            "claim": {"value": "clinic location"},
+        },
+        {
+            "table_name": "cases",
+            "column_name": "site",
+            "claim_type": "definition",
+            "status": "accepted",
+            "claim": {"value": "billing region"},
+        },
+    ]
+
+    assert _find_conflicting_claims(claims) == {
+        "cases.throughput_time",
+        "cases.site",
+    }
+
+
 def test_build_value_labels_from_enum_claims():
     """Locked enum_mapping claims become column -> {code: meaning} maps."""
     from headwater.services.h2_pipeline import _build_value_labels

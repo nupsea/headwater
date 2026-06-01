@@ -272,9 +272,12 @@ def _finalize_one(
         if value_labels and col in value_labels
     }
 
-    can_judge = bool(
-        statistical_pass and executed is not None and executed.ok and sql_text
-    )
+    executed_ok = bool(executed is not None and executed.ok)
+    # The judge can evaluate any answer that actually executed — it assesses
+    # whether the SQL answers the question, independent of statistical readiness.
+    can_judge = bool(executed_ok and sql_text)
+    # Eligible to certify on the statistics factor (the fast path's "pending").
+    stat_ready = bool(statistical_pass and can_judge)
 
     # Gate 2: the judge. On the fast path (run_judge=False) we stop after
     # execution and leave stat-ready answers "pending" certification.
@@ -282,7 +285,7 @@ def _finalize_one(
         judge_result = JudgeResult(
             verdict="pending", confidence=0.0, reasons=[], available=False
         )
-        state = "pending" if can_judge else "doubtful"
+        state = "pending" if stat_ready else "doubtful"
     else:
         judge_result = JudgeResult(
             verdict="unavailable", confidence=0.0, reasons=[], available=False
@@ -299,7 +302,7 @@ def _finalize_one(
             )
         state = _final_state(
             statistical_pass=statistical_pass,
-            executed_ok=bool(executed is not None and executed.ok),
+            executed_ok=executed_ok,
             judge=judge_result,
         )
 
@@ -410,15 +413,17 @@ def _doubt_reasons(
         reasons.extend(failed[:2])
     if executed is not None and executed.error:
         reasons.append(f"Query failed to execute: {executed.error}")
-    if statistical_pass and not judge.approves:
-        if not judge.available:
+    if not judge.approves:
+        if judge.available:
+            reasons.append(f"Judge withheld certification ({judge.verdict}).")
+            reasons.extend(judge.reasons[:2])
+        elif judge.verdict == "unavailable":
+            # A genuine provider failure (only set after run_judge attempted it);
+            # the fast path leaves the judge "pending" and says nothing here.
             reasons.append(
                 "LLM judge unavailable — start a local model "
                 "(e.g. `ollama pull qwen2.5:14b-instruct`) to certify."
             )
-        else:
-            reasons.append(f"Judge withheld certification ({judge.verdict}).")
-            reasons.extend(judge.reasons[:2])
     return reasons
 
 

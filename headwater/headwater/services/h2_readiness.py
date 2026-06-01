@@ -344,19 +344,61 @@ def _columns_with_satisfying_claim(claims: list[dict[str, Any]]) -> set[str]:
     return satisfied
 
 
+# Claim types that assert a *meaning* for a column. Only these can conflict on
+# definition. Relevance/EDA/role claims describe a column but never define it, so
+# they must not trigger definition_consistent failures.
+_DEFINITIONAL_CLAIM_TYPES = {"definition", "enum_mapping", "semantic_type"}
+
+
 def _find_conflicting_claims(claims: list[dict[str, Any]]) -> set[str]:
+    """Columns with genuinely conflicting *definitions*.
+
+    A locked definition is ground truth: it supersedes lower-status placeholders
+    (e.g. the empty bootstrap enum map, or a proposed suggestion) rather than
+    conflicting with them. A column is conflicting only when:
+
+      * the resource ingester explicitly flagged it ``needs_review`` (it found
+        two sources asserting different values), or
+      * two or more *active* (locked/accepted) definitions disagree on value.
+    """
     from collections import defaultdict
 
-    col_claims: dict[str, list[str]] = defaultdict(list)
+    by_col: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for c in claims:
-        if c.get("table_name") and c.get("column_name"):
-            key = f"{c['table_name']}.{c['column_name']}"
-            col_claims[key].append(c.get("status", ""))
-    return {
-        key
-        for key, statuses in col_claims.items()
-        if "locked" in statuses and len(set(statuses)) > 1
-    }
+        if not (c.get("table_name") and c.get("column_name")):
+            continue
+        if c.get("claim_type") not in _DEFINITIONAL_CLAIM_TYPES:
+            continue
+        key = f"{c['table_name']}.{c['column_name']}"
+        by_col[key].append(c)
+
+    conflicting: set[str] = set()
+    for key, col_claims in by_col.items():
+        if any(c.get("status") == "needs_review" for c in col_claims):
+            conflicting.add(key)
+            continue
+        active_values = {
+            _claim_value_signature(c)
+            for c in col_claims
+            if c.get("status") in ("locked", "accepted")
+        }
+        active_values.discard("")  # ignore empty placeholders
+        if len(active_values) > 1:
+            conflicting.add(key)
+    return conflicting
+
+
+def _claim_value_signature(claim: dict[str, Any]) -> str:
+    """A comparable signature of a claim's asserted value (empty if blank)."""
+    import json
+
+    value = (claim.get("claim") or {}).get("value")
+    if isinstance(value, dict):
+        filled = {str(k): str(v).strip() for k, v in value.items() if str(v).strip()}
+        return json.dumps(filled, sort_keys=True) if filled else ""
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _compute_readiness_pct(contracts: list[ContractResult]) -> int:
