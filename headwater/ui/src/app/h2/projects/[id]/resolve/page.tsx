@@ -107,6 +107,9 @@ function ResolveCardRow({
     try {
       const file = new File([ctx], "resolve-context.md", { type: "text/markdown" });
       await h2.projects.resources.ingest(projectId, file);
+      // S-BIND: bind the text directly to this card's column (when it has one),
+      // so the blocking gap clears without the Schema & meaning detour.
+      await h2.projects.resolve.define(projectId, card.card_id, ctx.trim());
       setSaved(ctx.trim()); // remember what was saved; show it read-only
       setAdding(false);
       setAiNote(null);

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from headwater.core.store import HeadwaterStore
+from headwater.services.h2_readiness import _columns_with_satisfying_claim
 
 ResolveIssueKind = Literal[
     "enum_mapping_needed",
@@ -78,6 +79,9 @@ def build_resolve_cards(
     profiles = store.get_profiles(source_name)
     columns = _load_all_columns(store, source_name)
     claims = store.list_semantic_claims(project_id)
+    # Columns the analyst has already defined (locked / filled enum / definition)
+    # are no longer surfaced as resolve work — the evidence clears them.
+    satisfied_cols = _columns_with_satisfying_claim(claims)
 
     profile_map: dict[str, dict[str, Any]] = {
         f"{p['table_name']}.{p['column_name']}": p["profile"] for p in profiles
@@ -89,7 +93,9 @@ def build_resolve_cards(
 
     # Enum mapping cards: short-code varchar columns
     cards.extend(
-        _enum_mapping_cards(profile_map, columns, question_columns, project_id)
+        _enum_mapping_cards(
+            profile_map, columns, question_columns, project_id, satisfied_cols
+        )
     )
 
     # Data quality risk cards: high null rates
@@ -104,7 +110,9 @@ def build_resolve_cards(
 
     # Missing definition cards: no description, affects multiple questions
     cards.extend(
-        _missing_definition_cards(columns, question_columns, claims, profile_map, project_id)
+        _missing_definition_cards(
+            columns, question_columns, claims, profile_map, project_id, satisfied_cols
+        )
     )
 
     cards = _deduplicate_and_rank(cards)
@@ -130,12 +138,15 @@ def _enum_mapping_cards(
     columns: list[dict[str, Any]],
     question_columns: dict[str, list[str]],
     project_id: str,
+    satisfied_cols: set[str],
 ) -> list[ResolveCard]:
     cards = []
     for col in columns:
         if col.get("locked"):
             continue
         key = f"{col['table_name']}.{col['name']}"
+        if key in satisfied_cols:
+            continue
         profile = profile_map.get(key, {})
         if not _is_code_like(col, profile):
             continue
@@ -231,6 +242,7 @@ def _missing_definition_cards(
     claims: list[dict[str, Any]],
     profile_map: dict[str, dict[str, Any]],
     project_id: str,
+    satisfied_cols: set[str],
 ) -> list[ResolveCard]:
     # Only flag columns that (a) have no description or semantic type, (b) affect >= 2 questions,
     # (c) are not already covered by an enum_mapping card (not code-like)
@@ -244,7 +256,7 @@ def _missing_definition_cards(
         if col.get("description") or col.get("semantic_type") or col.get("locked"):
             continue
         key = f"{col['table_name']}.{col['name']}"
-        if key in claimed_keys:
+        if key in claimed_keys or key in satisfied_cols:
             continue
         profile = profile_map.get(key, {})
         if _is_code_like(col, profile):
@@ -342,3 +354,88 @@ def _persist_cards(
                 "contract_impacts": card.contract_impacts,
             },
         )
+
+
+def define_card(
+    store: HeadwaterStore,
+    project_id: str,
+    card_id: str,
+    markdown: str,
+) -> dict[str, Any]:
+    """Bind a Resolve card's human-supplied definition directly to its column.
+
+    This is the S-BIND path. The card already knows which ``{table, column}`` it
+    is about, so the analyst's text or code table is written as a column-scoped,
+    locked semantic claim -- ground truth the fast recompute reads to clear the
+    gap and feed answers. Cards without a column (e.g. cannot-answer gaps) are
+    left to the resource-ingest path; this returns ``bound=False`` for them.
+    """
+    text = (markdown or "").strip()
+    if not text:
+        raise ValueError("No definition text provided.")
+
+    card = next(
+        (r for r in store.list_resolve_items(project_id) if r["id"] == card_id), None
+    )
+    if card is None:
+        raise ValueError(f"Resolve card '{card_id}' not found.")
+
+    payload = card.get("payload") or {}
+    table = payload.get("table")
+    column = payload.get("column")
+    if not table or not column:
+        return {"bound": False, "reason": "Card has no column to bind."}
+
+    enum_map = _parse_enum_table(text)
+    if enum_map:
+        claim_type = "enum_mapping"
+        claim = {"value": enum_map}
+    else:
+        claim_type = "definition"
+        claim = {"value": text}
+
+    project_sources = store.get_project_sources(project_id)
+    source_name = project_sources[0]["source_name"] if project_sources else None
+
+    store.upsert_semantic_claim(
+        f"{project_id}:define:{table}.{column}",
+        project_id=project_id,
+        source_name=source_name,
+        scope_type="column",
+        claim_type=claim_type,
+        claim=claim,
+        table_name=table,
+        column_name=column,
+        status="locked",
+        confidence=1.0,
+        source="user",
+        locked=True,
+    )
+    store.set_resolve_item_status(card_id, "resolved")
+    return {"bound": True, "claim_type": claim_type, "table": table, "column": column}
+
+
+def _parse_enum_table(markdown: str) -> dict[str, str]:
+    """Extract a ``{code: meaning}`` map from a markdown 2-column table, if any.
+
+    Header rows (``code``/``value``/...) and separator rows (``---``) are skipped.
+    Returns an empty dict when the text is not a code table -- the caller then
+    treats the whole text as a free-text definition.
+    """
+    enum_map: dict[str, str] = {}
+    for raw in markdown.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        code, meaning = cells[0], cells[1]
+        if not code or not meaning:
+            continue
+        if set(code) <= {"-", ":"} or set(meaning) <= {"-", ":"}:
+            continue
+        if code.lower() in ("code", "value", "key", "abbr", "abbreviation", "column"):
+            continue
+        enum_map[code] = meaning
+    return enum_map

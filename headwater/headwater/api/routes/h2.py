@@ -83,6 +83,10 @@ class ResolveDispositionRequest(BaseModel):
     status: str  # open | deferred | resolved
 
 
+class DefineCardRequest(BaseModel):
+    markdown: str
+
+
 class QueryRequest(BaseModel):
     source_name: str
     sql: str
@@ -507,6 +511,22 @@ def suggest_resolution(project_id: str, card_id: str) -> dict[str, Any]:
     store = _get_store()
     try:
         return _suggest(store, project_id, card_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
+@router.post("/projects/{project_id}/resolve/{card_id}/define")
+def define_resolve(
+    project_id: str, card_id: str, req: DefineCardRequest
+) -> dict[str, Any]:
+    """Bind a card's definition to its column as a locked semantic claim (S-BIND)."""
+    from headwater.services.h2_resolve import define_card
+
+    store = _get_store()
+    try:
+        return define_card(store, project_id, card_id, req.markdown)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     finally:

@@ -285,6 +285,16 @@ export const h2 = {
 
     resolve: {
       build: (id: string) => post<H2ResolveCard[]>(`/projects/${id}/resolve`),
+      define: (id: string, cardId: string, markdown: string) =>
+        post<{
+          bound: boolean;
+          claim_type?: string;
+          table?: string;
+          column?: string;
+          reason?: string;
+        }>(`/projects/${id}/resolve/${encodeURIComponent(cardId)}/define`, {
+          markdown,
+        }),
       list: (id: string) => fetchJSON<H2ResolveCard[]>(`/projects/${id}/resolve`),
       setDisposition: (id: string, cardId: string, status: "open" | "deferred" | "resolved") =>
         post<{ card_id: string; status: string }>(
