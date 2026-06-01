@@ -80,6 +80,8 @@ def test_define_card_writes_a_locked_column_claim(store):
     bound = next(c for c in claims if c["column_name"] == "patient_type")
     assert bound["locked"]
     assert bound["claim"]["value"] == {"A": "Adult", "H": "Household"}
+    # Raw markdown is kept so the card rehydrates exactly on a return visit.
+    assert "| A | Adult |" in bound["claim"]["text"]
 
     # Card is marked resolved so it stops surfacing as work.
     item = next(r for r in store.list_resolve_items("p1") if r["id"] == card_id)
@@ -104,6 +106,33 @@ def test_define_card_stores_free_text_as_a_definition(store):
         c for c in store.list_semantic_claims("p1") if c["column_name"] == "note"
     )
     assert claim["claim"]["value"] == "Free-text operator note field."
+
+
+def test_claim_display_round_trips_text_and_enum():
+    from headwater.api.routes.h2 import _claim_display
+
+    assert _claim_display(None) == ""
+    assert _claim_display({"claim": {"text": "service_ts minus arrival"}}) == (
+        "service_ts minus arrival"
+    )
+    rendered = _claim_display({"claim": {"value": {"A": "Adult", "H": "Household"}}})
+    assert "| A | Adult |" in rendered
+    assert "| H | Household |" in rendered
+
+
+def test_define_then_get_resolve_rehydrates_definition(store):
+    # The whole point of the bug fix: after defining, the card reports its saved
+    # text so the UI no longer shows an empty box.
+    card_id = _seed_enum_card(store)
+    define_card(store, "p1", card_id, "| code | meaning |\n| --- | --- |\n| A | Adult |")
+
+    from headwater.api.routes.h2 import _claim_display
+    from headwater.services.h2_readiness import _columns_with_satisfying_claim
+
+    claims = store.list_semantic_claims("p1")
+    assert "events.patient_type" in _columns_with_satisfying_claim(claims)
+    claim = next(c for c in claims if c["column_name"] == "patient_type")
+    assert "| A | Adult |" in _claim_display(claim)
 
 
 def test_define_card_without_a_column_is_not_bound(store):

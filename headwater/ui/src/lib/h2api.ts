@@ -97,6 +97,8 @@ export interface H2ResolveCard {
   title: string;
   body: string;
   status?: "open" | "deferred" | "resolved";
+  defined?: boolean;
+  definition?: string;
   affected_questions: string[];
   contract_impacts: string[];
 }

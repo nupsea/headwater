@@ -466,26 +466,71 @@ def build_resolve(project_id: str) -> list[dict[str, Any]]:
 
 @router.get("/projects/{project_id}/resolve")
 def get_resolve(project_id: str) -> list[dict[str, Any]]:
-    """List persisted resolve cards in the same shape as the build response."""
+    """List persisted resolve cards, rehydrated with any saved definition.
+
+    A card whose column already carries a satisfying semantic claim reports
+    ``defined=True`` and returns the analyst's saved text in ``definition`` so
+    the UI shows the saved state instead of an empty box on a return visit.
+    """
+    from headwater.services.h2_readiness import _columns_with_satisfying_claim
+
     store = _get_store()
     try:
         items = store.list_resolve_items(project_id)
+        claims = store.list_semantic_claims(project_id)
     finally:
         store.close()
 
-    return [
-        {
-            "card_id": it["id"],
-            "issue_kind": it["issue_kind"],
-            "priority": it["priority"],
-            "title": it["title"],
-            "body": it["body"],
-            "status": it.get("status", "open"),
-            "affected_questions": (it.get("payload") or {}).get("affected_questions", []),
-            "contract_impacts": (it.get("payload") or {}).get("contract_impacts", []),
-        }
-        for it in items
-    ]
+    satisfied = _columns_with_satisfying_claim(claims)
+    # list_semantic_claims is ordered newest-first, so the first claim per column
+    # is the latest the analyst saved.
+    claim_by_col: dict[str, dict[str, Any]] = {}
+    for c in claims:
+        table = c.get("table_name")
+        column = c.get("column_name")
+        if table and column:
+            claim_by_col.setdefault(f"{table}.{column}", c)
+
+    out: list[dict[str, Any]] = []
+    for it in items:
+        payload = it.get("payload") or {}
+        key = (
+            f"{payload['table']}.{payload['column']}"
+            if payload.get("table") and payload.get("column")
+            else None
+        )
+        defined = bool(key and key in satisfied)
+        definition = _claim_display(claim_by_col.get(key)) if defined else ""
+        out.append(
+            {
+                "card_id": it["id"],
+                "issue_kind": it["issue_kind"],
+                "priority": it["priority"],
+                "title": it["title"],
+                "body": it["body"],
+                "status": it.get("status", "open"),
+                "defined": defined,
+                "definition": definition,
+                "affected_questions": payload.get("affected_questions", []),
+                "contract_impacts": payload.get("contract_impacts", []),
+            }
+        )
+    return out
+
+
+def _claim_display(claim: dict[str, Any] | None) -> str:
+    """Render a saved claim back to the text the analyst would recognize."""
+    if not claim:
+        return ""
+    body = claim.get("claim") or {}
+    if body.get("text"):
+        return str(body["text"])
+    value = body.get("value")
+    if isinstance(value, dict):
+        lines = ["| code | meaning |", "| --- | --- |"]
+        lines += [f"| {k} | {v} |" for k, v in value.items()]
+        return "\n".join(lines)
+    return str(value or "")
 
 
 @router.post("/projects/{project_id}/resolve/{card_id}/disposition")

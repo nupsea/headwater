@@ -389,10 +389,12 @@ def define_card(
     enum_map = _parse_enum_table(text)
     if enum_map:
         claim_type = "enum_mapping"
-        claim = {"value": enum_map}
+        # Keep the analyst's original markdown alongside the parsed map so the
+        # Resolve card can rehydrate the exact text on a later visit.
+        claim = {"value": enum_map, "text": text}
     else:
         claim_type = "definition"
-        claim = {"value": text}
+        claim = {"value": text, "text": text}
 
     project_sources = store.get_project_sources(project_id)
     source_name = project_sources[0]["source_name"] if project_sources else None

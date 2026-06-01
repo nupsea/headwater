@@ -76,7 +76,9 @@ function ResolveCardRow({
   const [busy, setBusy] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiNote, setAiNote] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
+  // Hydrate from the persisted definition so a saved card shows its value on a
+  // return visit instead of an empty box (the claim lives in the store).
+  const [saved, setSaved] = useState<string | null>(card.definition ?? null);
   const deferred = card.status === "deferred";
 
   const defer = async () => {
