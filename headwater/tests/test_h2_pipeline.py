@@ -269,3 +269,73 @@ def test_judge_rejection_holds_doubtful(monkeypatch, tmp_path):
             store.close()
     finally:
         get_settings.cache_clear()
+
+
+def test_build_value_labels_from_enum_claims():
+    """Locked enum_mapping claims become column -> {code: meaning} maps."""
+    from headwater.services.h2_pipeline import _build_value_labels
+
+    claims = [
+        {
+            "claim_type": "enum_mapping",
+            "column_name": "patient_type",
+            "claim": {"value": {"A": "Adult", "H": "Home"}, "text": "..."},
+        },
+        # Newest wins: an earlier claim for the same column is ignored (list is
+        # ordered newest-first), and blank meanings are dropped.
+        {
+            "claim_type": "enum_mapping",
+            "column_name": "patient_type",
+            "claim": {"value": {"A": "stale"}, "text": "..."},
+        },
+        # Free-text definitions carry no code map.
+        {
+            "claim_type": "definition",
+            "column_name": "arrival_time",
+            "claim": {"value": "when the patient arrived", "text": "..."},
+        },
+    ]
+
+    labels = _build_value_labels(claims)
+
+    assert labels == {"patient_type": {"A": "Adult", "H": "Home"}}
+    assert "arrival_time" not in labels
+
+
+def test_answer_carries_value_labels_for_returned_columns(monkeypatch, tmp_path):
+    """A resolved enum for a returned column flows into the answer payload."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("vl_proj", "Break down waiting time by patient type")
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            store.upsert_semantic_claim(
+                "vl_proj:define:events.patient_type",
+                project_id="vl_proj",
+                scope_type="column",
+                claim_type="enum_mapping",
+                claim={"value": {"A": "Adult", "H": "Home"}, "text": "| A | Adult |"},
+                table_name="events",
+                column_name="patient_type",
+                status="locked",
+                confidence=1.0,
+                source="user",
+                locked=True,
+            )
+            result = finalize_project_answers(store, "vl_proj", run_judge=False)
+            # Any answer returning patient_type carries the resolved meanings;
+            # answers that don't return it carry nothing for it.
+            for a in result.answers:
+                if "patient_type" in a.columns:
+                    assert a.value_labels.get("patient_type") == {
+                        "A": "Adult",
+                        "H": "Home",
+                    }
+                else:
+                    assert "patient_type" not in a.value_labels
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()

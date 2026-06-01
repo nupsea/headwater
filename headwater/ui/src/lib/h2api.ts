@@ -150,6 +150,8 @@ export interface H2AnswerDraft {
   judge_reasons: string[];
   caveats: string[];
   execution_error: string | null;
+  /** column -> { raw code: human meaning } from resolved enum mappings. */
+  value_labels?: Record<string, Record<string, string>>;
 }
 
 export interface H2AnswersResult {

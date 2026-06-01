@@ -708,6 +708,7 @@ def _answers_payload(result: Any) -> dict[str, Any]:
                 "judge_reasons": a.judge_reasons,
                 "caveats": a.caveats,
                 "execution_error": a.execution_error,
+                "value_labels": a.value_labels,
             }
             for a in result.answers
         ],

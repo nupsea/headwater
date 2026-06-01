@@ -107,7 +107,9 @@ function QuestionItem({
       </div>
       <div
         style={{
-          font: `${active ? 600 : 500} 13px 'DM Sans', sans-serif`,
+          fontWeight: active ? 600 : 500,
+          fontSize: 13,
+          fontFamily: "'DM Sans', sans-serif",
           color: active ? HW2_COLOR.ink : HW2_COLOR.ink2,
           lineHeight: 1.35,
         }}
@@ -603,6 +605,12 @@ function ResultChart({ answer }: { answer: H2AnswerDraft }) {
   }
   const data = answer.rows;
 
+  // Relabel the category axis with resolved enum meanings (codes stay in the data).
+  const xLabels = answer.value_labels?.[spec.x];
+  const xTick = xLabels
+    ? (v: unknown) => xLabels[String(v)] ?? String(v)
+    : undefined;
+
   return (
     <div
       style={{
@@ -617,9 +625,14 @@ function ResultChart({ answer }: { answer: H2AnswerDraft }) {
         {type === "line" ? (
           <LineChart data={data} margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={HW2_COLOR.rule} />
-            <XAxis dataKey={spec.x} tick={{ fontSize: 11 }} stroke={HW2_COLOR.muted} />
+            <XAxis
+              dataKey={spec.x}
+              tickFormatter={xTick}
+              tick={{ fontSize: 11 }}
+              stroke={HW2_COLOR.muted}
+            />
             <YAxis tick={{ fontSize: 11 }} stroke={HW2_COLOR.muted} />
-            <Tooltip />
+            <Tooltip labelFormatter={xTick} />
             <Line
               type="monotone"
               dataKey={spec.y}
@@ -631,9 +644,14 @@ function ResultChart({ answer }: { answer: H2AnswerDraft }) {
         ) : (
           <BarChart data={data} margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={HW2_COLOR.rule} />
-            <XAxis dataKey={spec.x} tick={{ fontSize: 11 }} stroke={HW2_COLOR.muted} />
+            <XAxis
+              dataKey={spec.x}
+              tickFormatter={xTick}
+              tick={{ fontSize: 11 }}
+              stroke={HW2_COLOR.muted}
+            />
             <YAxis tick={{ fontSize: 11 }} stroke={HW2_COLOR.muted} />
-            <Tooltip />
+            <Tooltip labelFormatter={xTick} />
             <Bar dataKey={spec.y} fill={HW2_COLOR.blue} radius={[4, 4, 0, 0]} />
           </BarChart>
         )}
@@ -647,6 +665,7 @@ function ResultChart({ answer }: { answer: H2AnswerDraft }) {
 function ResultTable({ answer }: { answer: H2AnswerDraft }) {
   if (answer.columns.length === 0) return null;
   const rows = answer.rows.slice(0, 50);
+  const labels = answer.value_labels ?? {};
   const fmt = (v: unknown) =>
     v === null || v === undefined
       ? "—"
@@ -655,6 +674,13 @@ function ResultTable({ answer }: { answer: H2AnswerDraft }) {
         ? v.toLocaleString()
         : v.toFixed(2)
       : String(v);
+  // For coded columns, lead with the resolved meaning and keep the raw code.
+  const cell = (c: string, v: unknown) => {
+    const raw = fmt(v);
+    const meaning =
+      v === null || v === undefined ? undefined : labels[c]?.[String(v)];
+    return meaning ? `${meaning} (${raw})` : raw;
+  };
 
   return (
     <div
@@ -720,7 +746,7 @@ function ResultTable({ answer }: { answer: H2AnswerDraft }) {
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {fmt(row[c])}
+                    {cell(c, row[c])}
                   </td>
                 ))}
               </tr>

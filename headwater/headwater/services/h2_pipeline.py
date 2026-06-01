@@ -63,6 +63,9 @@ class FinalizedAnswer:
     caveats: list[str] = field(default_factory=list)
     execution_error: str | None = None
     source_snapshot_id: str | None = None
+    # column -> {raw code: human meaning}, from locked enum_mapping claims.
+    # Display-only: the SQL still groups on raw codes; the UI relabels output.
+    value_labels: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -147,6 +150,8 @@ def finalize_project_answers(
     # Column metadata for the judge (I-3-safe: names/roles/dtypes only).
     claims = store.list_semantic_claims(project_id)
     role_map = _build_col_role_map(claims, store, source_name)
+    # Resolved enum meanings flow into answer display (codes -> human labels).
+    value_labels = _build_value_labels(claims)
 
     result = FinalizedProject(
         project_id=project_id,
@@ -170,6 +175,7 @@ def finalize_project_answers(
             provider=provider,
             snapshot_id=snapshot_id,
             run_judge=run_judge,
+            value_labels=value_labels,
         )
         result.answers.append(finalized)
 
@@ -183,6 +189,28 @@ def finalize_project_answers(
     return result
 
 
+def _build_value_labels(
+    claims: list[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Map column -> {raw code: meaning} from locked enum_mapping claims.
+
+    Newest claim wins (``list_semantic_claims`` is ordered newest-first), so an
+    edited interpretation supersedes an earlier one without duplication.
+    """
+    labels: dict[str, dict[str, str]] = {}
+    for c in claims:
+        if c.get("claim_type") != "enum_mapping":
+            continue
+        col = c.get("column_name") or ""
+        value = (c.get("claim") or {}).get("value")
+        if not col or col in labels or not isinstance(value, dict):
+            continue
+        mapping = {str(k): str(v) for k, v in value.items() if str(v).strip()}
+        if mapping:
+            labels[col] = mapping
+    return labels
+
+
 def _finalize_one(
     *,
     store: HeadwaterStore,
@@ -194,6 +222,7 @@ def _finalize_one(
     provider: LLMProvider | None,
     snapshot_id: str | None,
     run_judge: bool = True,
+    value_labels: dict[str, dict[str, str]] | None = None,
 ) -> FinalizedAnswer:
     qid = question["id"]
     title = question.get("title", qid)
@@ -235,6 +264,13 @@ def _finalize_one(
         truncated = executed.truncated
         result_stats = executed.stats
         execution_error = executed.error
+
+    # Carry only the enum maps for columns this answer actually returns.
+    answer_labels = {
+        col: (value_labels or {})[col]
+        for col in columns
+        if value_labels and col in value_labels
+    }
 
     can_judge = bool(
         statistical_pass and executed is not None and executed.ok and sql_text
@@ -293,6 +329,7 @@ def _finalize_one(
         judge_reasons=judge_result.reasons,
         caveats=[c for c in caveats if c],
         execution_error=execution_error,
+        value_labels=answer_labels,
         source_snapshot_id=snapshot_id,
     )
     _persist(store, fa)
