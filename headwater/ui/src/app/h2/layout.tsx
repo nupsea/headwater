@@ -767,9 +767,31 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
       .catch(() => setActiveProject(null));
   }, [projectId]);
 
+  // Clear the active project synchronously during render when leaving a project
+  // route. Doing the clear here (not in an effect) avoids a setState-in-effect.
+  const [trackedProjectId, setTrackedProjectId] = useState(projectId);
+  if (projectId !== trackedProjectId) {
+    setTrackedProjectId(projectId);
+    if (!projectId) setActiveProject(null);
+  }
+
+  // Fetch (async) when on a project route; the early return keeps the effect
+  // free of any synchronous setState.
   useEffect(() => {
-    reloadActiveProject();
-  }, [reloadActiveProject]);
+    if (!projectId) return;
+    let cancelled = false;
+    h2.projects
+      .get(projectId)
+      .then((p) => {
+        if (!cancelled) setActiveProject(p);
+      })
+      .catch(() => {
+        if (!cancelled) setActiveProject(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
 
   // After a recompute, refresh the banner (ring/goal/counts) and the rail
   // readouts so they reflect the new derived state — no full page reload.

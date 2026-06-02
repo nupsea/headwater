@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { h2, type H2Source } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
@@ -337,12 +338,12 @@ export default function NewProjectPage() {
               }}
             >
               No sources available.{" "}
-              <a
+              <Link
                 href="/h2/sources/new"
                 style={{ color: HW2_COLOR.bad, fontWeight: 600 }}
               >
                 Connect one first.
-              </a>
+              </Link>
             </div>
           ) : (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>

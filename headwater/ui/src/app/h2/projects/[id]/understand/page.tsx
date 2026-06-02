@@ -261,9 +261,14 @@ function RelevantCols({ cols }: { cols: H2RelevantColumn[] }) {
 
 function EdaPanel({ findings }: { findings: H2EdaFinding[] }) {
   const [visible, setVisible] = useState(10);
-  useEffect(() => {
+  // Reset the visible count when a new finding set arrives. Adjusting state
+  // during render (vs. in an effect) is the React-recommended pattern and avoids
+  // the extra render pass a setState-in-effect would cause.
+  const [prevFindings, setPrevFindings] = useState(findings);
+  if (findings !== prevFindings) {
+    setPrevFindings(findings);
     setVisible(10);
-  }, [findings]);
+  }
 
   const weight = (f: H2EdaFinding) =>
     (f.flags.includes("critical") ? 1000 : 0) + f.effect_size * f.confidence;
