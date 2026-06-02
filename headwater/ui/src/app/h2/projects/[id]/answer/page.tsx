@@ -639,6 +639,137 @@ function UnplottablePanel({ measure, reason }: { measure: string; reason?: strin
   );
 }
 
+// Trust tone for a stated finding, by answer state.
+function findingTone(state: string): { c: string; bg: string; note: string } {
+  if (state === "certified")
+    return { c: HW2_COLOR.good, bg: HW2_COLOR.goodSoft, note: "Certified" };
+  if (state === "doubtful")
+    return { c: HW2_COLOR.warn, bg: HW2_COLOR.warnSoft, note: "Provisional — verify before sharing" };
+  return { c: HW2_COLOR.muted, bg: HW2_COLOR.chip, note: "Not certified yet" };
+}
+
+// The lead of the answer panel: the takeaway in plain English, trust-toned.
+function FindingCard({ answer }: { answer: H2AnswerDraft }) {
+  if (!answer.finding_headline) return null;
+  const tone = findingTone(answer.state);
+  return (
+    <div
+      style={{
+        background: "#fff",
+        border: `1px solid ${HW2_COLOR.rule}`,
+        borderLeft: `3px solid ${tone.c}`,
+        borderRadius: 12,
+        padding: "18px 20px",
+      }}
+    >
+      <div
+        style={{
+          font: "700 9.5px 'DM Sans', sans-serif",
+          letterSpacing: "0.09em",
+          textTransform: "uppercase",
+          color: tone.c,
+          marginBottom: 8,
+        }}
+      >
+        Finding · {tone.note}
+      </div>
+      <p
+        style={{
+          font: "600 19px 'DM Sans', sans-serif",
+          letterSpacing: "-0.01em",
+          color: HW2_COLOR.ink,
+          lineHeight: 1.4,
+          margin: 0,
+        }}
+      >
+        {answer.finding_headline}
+      </p>
+      {answer.finding_support && (
+        <p
+          style={{
+            font: "400 13.5px 'DM Sans', sans-serif",
+            color: HW2_COLOR.muted,
+            lineHeight: 1.5,
+            margin: "8px 0 0",
+          }}
+        >
+          {answer.finding_support}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Project-level overview: what the data shows across all answered questions.
+function FindingsSummary({
+  answers,
+  onPick,
+}: {
+  answers: H2AnswerDraft[];
+  onPick: (i: number) => void;
+}) {
+  const items = answers
+    .map((a, i) => ({ a, i }))
+    .filter(({ a }) => a.finding_headline);
+  if (items.length === 0) return null;
+  return (
+    <div
+      style={{
+        background: HW2_COLOR.surface,
+        border: `1px solid ${HW2_COLOR.rule}`,
+        borderRadius: 12,
+        padding: "16px 20px",
+        marginBottom: 24,
+      }}
+    >
+      <CardLabel>What the data shows</CardLabel>
+      <div style={{ display: "grid", gap: 8 }}>
+        {items.map(({ a, i }) => {
+          const tone = findingTone(a.state);
+          return (
+            <button
+              key={a.question_id}
+              onClick={() => onPick(i)}
+              style={{
+                appearance: "none",
+                cursor: "pointer",
+                textAlign: "left",
+                background: "transparent",
+                border: "none",
+                padding: 0,
+                display: "flex",
+                alignItems: "baseline",
+                gap: 10,
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              <span
+                style={{
+                  flexShrink: 0,
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  background: tone.c,
+                  transform: "translateY(-1px)",
+                }}
+              />
+              <span
+                style={{
+                  font: "500 13.5px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.ink2,
+                  lineHeight: 1.45,
+                }}
+              >
+                {a.finding_headline}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ResultChart({ answer }: { answer: H2AnswerDraft }) {
   const spec = answer.chart_spec as { type?: string; x?: string; y?: string };
   const type = spec?.type;
@@ -1161,6 +1292,8 @@ export default function AnswerPage() {
         </span>
       </div>
 
+      {answers.length > 0 && <FindingsSummary answers={answers} onPick={setActiveIdx} />}
+
       {answers.length === 0 ? (
         <div
           style={{
@@ -1264,6 +1397,7 @@ export default function AnswerPage() {
                 <CannotAnswerCard answer={activeAnswer} />
               ) : (
                 <>
+                  <FindingCard answer={activeAnswer} />
                   <JudgePanel answer={activeAnswer} />
 
                   {activeAnswer.execution_error && (

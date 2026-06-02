@@ -713,6 +713,8 @@ def _answers_payload(result: Any) -> dict[str, Any]:
                 "question_title": a.question_title,
                 "state": a.state,
                 "confidence": a.judge_confidence,
+                "finding_headline": a.finding_headline,
+                "finding_support": a.finding_support,
                 "sql_text": a.sql_text,
                 "chart_spec": a.chart_spec,
                 "columns": a.columns,

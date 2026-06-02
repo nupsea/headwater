@@ -169,4 +169,9 @@ def _profile_summary(profile: dict[str, Any]) -> dict[str, Any]:
     top = profile.get("top_values")
     if top:
         summary["top_values"] = [str(v[0]) for v in top[:3] if v]
+    # Cached materialized samples (for columns the profiler left without top_values)
+    # give the analyst a concrete look at the data — confidence to verify.
+    samples = profile.get("sample_values")
+    if samples and "top_values" not in summary:
+        summary["sample_values"] = [str(v) for v in samples[:3]]
     return summary

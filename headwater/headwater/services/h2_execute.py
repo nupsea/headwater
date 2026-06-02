@@ -172,14 +172,18 @@ def sample_text_columns(
     columns: list[tuple[str, str]],
     *,
     per_column: int = 8,
+    persist: bool = True,
 ) -> dict[str, list[str]]:
     """Return up to ``per_column`` distinct non-null string samples per column.
 
     Best-effort fallback for when the profile holds no sample values (e.g. a
     high-cardinality text column).  Materializes the source ONCE and samples each
-    ``(table, column)``; returns ``{"table.column": [values...]}``.  Caller should
-    only invoke this when cheaper profile samples are unavailable — it rebuilds the
-    analytical store.  Any failure yields no samples for that column (never raises).
+    ``(table, column)``; returns ``{"table.column": [values...]}``.  Any failure
+    yields no samples for that column (never raises).
+
+    With ``persist`` (default), the samples are written back into each column's
+    profile (``sample_values``) so the materialization is a one-time cost — later
+    reads find them in metadata, and the catalog can show them.
     """
     items = [
         (t, c)
@@ -207,7 +211,34 @@ def sample_text_columns(
                     out[f"{table}.{column}"] = vals
     finally:
         con.close()
+
+    if persist and out:
+        _persist_sample_values(store, source_name, out)
     return out
+
+
+def _persist_sample_values(
+    store: HeadwaterStore, source_name: str, samples: dict[str, list[str]]
+) -> None:
+    """Cache sampled values into each column's profile (best-effort, idempotent)."""
+    by_key = {
+        f"{p['table_name']}.{p['column_name']}": p for p in store.get_profiles(source_name)
+    }
+    for ref, vals in samples.items():
+        p = by_key.get(ref)
+        if not p:
+            continue
+        with contextlib.suppress(Exception):
+            profile = dict(p.get("profile") or {})
+            profile["sample_values"] = vals
+            store.upsert_profile(
+                source_name,
+                p["table_name"],
+                p["column_name"],
+                p.get("dtype") or profile.get("dtype") or "",
+                profile,
+                snapshot_id=p.get("snapshot_id"),
+            )
 
 
 def execute_project_answers(

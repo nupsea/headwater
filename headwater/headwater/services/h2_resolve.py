@@ -265,10 +265,11 @@ def _unusable_measure_cards(
         groups.setdefault(measure, []).append(q)
 
     def _profile_samples(measure: str) -> list[str]:
-        # Top values when present, else min/max (both may be null for a
-        # high-cardinality text column).
+        # Cached materialized samples first, then top values, then min/max (the
+        # latter two may be null for a high-cardinality text column).
         profile = profile_map.get(measure, {})
-        pool = [str(v[0]) for v in (profile.get("top_values") or []) if v]
+        pool = [str(v) for v in (profile.get("sample_values") or []) if str(v).strip()]
+        pool += [str(v[0]) for v in (profile.get("top_values") or []) if v]
         for k in ("min_value", "max_value"):
             val = profile.get(k)
             if val is not None and str(val).strip():

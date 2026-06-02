@@ -62,6 +62,9 @@ class FinalizedAnswer:
     judge_reasons: list[str] = field(default_factory=list)
     caveats: list[str] = field(default_factory=list)
     execution_error: str | None = None
+    # Plain-English takeaway derived from the executed result (h2_insight).
+    finding_headline: str = ""
+    finding_support: str = ""
     source_snapshot_id: str | None = None
     # The input fingerprint the judge verdict was produced against.  Persisted in
     # the judge contract so a later fast-path load can tell whether the verdict
@@ -347,6 +350,16 @@ def _finalize_one(
             judge=judge_result,
         )
 
+    # State the takeaway in plain English (deterministic, from the executed rows).
+    from headwater.services.h2_insight import summarize_answer
+
+    finding = summarize_answer(
+        chart_spec=chart_spec,
+        columns=columns,
+        rows=rows,
+        value_labels=answer_labels,
+    )
+
     fa = FinalizedAnswer(
         question_id=qid,
         question_title=title,
@@ -355,6 +368,8 @@ def _finalize_one(
         chart_spec=chart_spec,
         columns=columns,
         rows=rows,
+        finding_headline=finding.headline if finding else "",
+        finding_support=finding.support if finding else "",
         row_count=row_count,
         truncated=truncated,
         result_stats=result_stats,

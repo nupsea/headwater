@@ -151,6 +151,9 @@ export interface H2AnswerDraft {
   question_title: string;
   state: "certified" | "doubtful" | "pending" | "cannot_answer";
   confidence: number;
+  /** Plain-English takeaway from the executed result (deterministic). */
+  finding_headline?: string;
+  finding_support?: string;
   sql_text: string | null;
   chart_spec: Record<string, unknown>;
   columns: string[];
