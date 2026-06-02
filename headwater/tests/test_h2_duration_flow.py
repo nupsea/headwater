@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
+import pytest
+from typer.testing import CliRunner
+
+from headwater.cli.hw2 import app
+from headwater.core.config import get_settings
 from headwater.core.store import HeadwaterStore
 from headwater.services.h2_answer import _measure_agg_expr, _resolve_col_info
 from headwater.services.h2_readiness import _columns_with_satisfying_claim
 from headwater.services.h2_resolve import confirm_duration_derivation
+
+runner = CliRunner()
+RADIOLOGY_DATA = str(Path(__file__).resolve().parents[2] / "data" / "radiology")
 
 
 @pytest.fixture()
@@ -104,3 +112,33 @@ def test_resolve_col_info_marks_derived_text_column_as_measure():
     info = _resolve_col_info("cases.throughput_time", role_map)
     assert info["role_class"] == "measure"
     assert info["derivation_format"] == "days_hh_mm_ss"
+
+
+def test_sample_text_columns_fallback_enables_detection(monkeypatch, tmp_path):
+    """When the profile has no samples, materialize real values so a varchar
+    duration ("0 days HH:MM:SS") is still detected."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        r = runner.invoke(
+            app, ["discover", "--source", RADIOLOGY_DATA, "--name", "radiology"]
+        )
+        assert r.exit_code == 0, r.output
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            from headwater.services.h2_duration import detect_duration
+            from headwater.services.h2_execute import sample_text_columns
+
+            samples = sample_text_columns(
+                store, "radiology", [("cases", "throughput_time")]
+            )
+            vals = samples.get("cases.throughput_time", [])
+            assert vals, "should materialize real sample values"
+            proposal = detect_duration(vals)
+            assert proposal is not None
+            assert proposal.detected.id == "days_hh_mm_ss"
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()

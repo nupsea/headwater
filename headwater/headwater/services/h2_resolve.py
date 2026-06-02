@@ -14,7 +14,11 @@ from typing import Any, Literal
 
 from headwater.core.store import HeadwaterStore
 from headwater.services.h2_column_kinds import is_numeric_dtype, measure_column_ref
-from headwater.services.h2_duration import FORMATS, detect_duration
+from headwater.services.h2_duration import (
+    FORMATS,
+    detect_duration,
+    is_temporal_duration_dtype,
+)
 from headwater.services.h2_readiness import _columns_with_satisfying_claim
 
 ResolveIssueKind = Literal[
@@ -138,7 +142,13 @@ def build_resolve_cards(
     # (e.g. a duration) and can't be aggregated until it's defined/derived.
     cards.extend(
         _unusable_measure_cards(
-            questions, columns, profile_map, project_id, derived_cols
+            questions,
+            columns,
+            profile_map,
+            project_id,
+            derived_cols,
+            store=store,
+            source_name=source_name,
         )
     )
 
@@ -225,6 +235,9 @@ def _unusable_measure_cards(
     profile_map: dict[str, dict[str, Any]],
     project_id: str,
     derived_cols: set[str],
+    *,
+    store: HeadwaterStore | None = None,
+    source_name: str | None = None,
 ) -> list[ResolveCard]:
     """One lean card per text measure that blocks questions, grouped by column.
 
@@ -251,19 +264,38 @@ def _unusable_measure_cards(
             continue
         groups.setdefault(measure, []).append(q)
 
+    def _profile_samples(measure: str) -> list[str]:
+        # Top values when present, else min/max (both may be null for a
+        # high-cardinality text column).
+        profile = profile_map.get(measure, {})
+        pool = [str(v[0]) for v in (profile.get("top_values") or []) if v]
+        for k in ("min_value", "max_value"):
+            val = profile.get(k)
+            if val is not None and str(val).strip():
+                pool.append(str(val))
+        return pool
+
+    # Fallback: for a TEXT measure with no profile samples (and not a temporal
+    # dtype, which detects from the type alone), materialize a few real values so
+    # the duration shape can still be recognized. Bounded and materialize-once.
+    need = [
+        _split(m)
+        for m in groups
+        if not is_temporal_duration_dtype(dtype_by_key.get(m.lower()))
+        and not _profile_samples(m)
+    ]
+    materialized: dict[str, list[str]] = {}
+    if need and store is not None and source_name:
+        from headwater.services.h2_execute import sample_text_columns
+
+        materialized = sample_text_columns(store, source_name, need)
+
     cards: list[ResolveCard] = []
     for measure, qs in groups.items():
         table, col = _split(measure)
         label = col.replace("_", " ")
-        profile = profile_map.get(measure, {})
         dtype = dtype_by_key.get(measure.lower())
-        # Sample from top values when present, else fall back to min/max (always
-        # populated, even for high-cardinality columns where top_values is null).
-        sample_pool = [str(v[0]) for v in (profile.get("top_values") or []) if v]
-        for k in ("min_value", "max_value"):
-            val = profile.get(k)
-            if val is not None and str(val).strip():
-                sample_pool.append(str(val))
+        sample_pool = _profile_samples(measure) or materialized.get(measure, [])
         example = sample_pool[0] if sample_pool else ""
         # If it's a duration (a TIME/INTERVAL dtype, or duration-shaped text),
         # propose a one-click convert-to-minutes (user confirms or picks another).

@@ -19,6 +19,7 @@ Invariants honored here:
 from __future__ import annotations
 
 import contextlib
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -160,6 +161,53 @@ def execute_answers(
         if con is not None:
             con.close()
     return results
+
+
+_SAFE_IDENT = re.compile(r"[A-Za-z0-9_ ]+")
+
+
+def sample_text_columns(
+    store: HeadwaterStore,
+    source_name: str,
+    columns: list[tuple[str, str]],
+    *,
+    per_column: int = 8,
+) -> dict[str, list[str]]:
+    """Return up to ``per_column`` distinct non-null string samples per column.
+
+    Best-effort fallback for when the profile holds no sample values (e.g. a
+    high-cardinality text column).  Materializes the source ONCE and samples each
+    ``(table, column)``; returns ``{"table.column": [values...]}``.  Caller should
+    only invoke this when cheaper profile samples are unavailable — it rebuilds the
+    analytical store.  Any failure yields no samples for that column (never raises).
+    """
+    items = [
+        (t, c)
+        for (t, c) in columns
+        if _SAFE_IDENT.fullmatch(t) and _SAFE_IDENT.fullmatch(c)
+    ]
+    if not items:
+        return {}
+
+    out: dict[str, list[str]] = {}
+    con: duckdb.DuckDBPyConnection | None = None
+    try:
+        con, _ = materialize_source(store, source_name)
+    except Exception:
+        return {}
+    try:
+        for table, column in items:
+            with contextlib.suppress(Exception):
+                rows = con.execute(
+                    f'SELECT DISTINCT CAST("{column}" AS VARCHAR) AS v '
+                    f'FROM "{table}" WHERE "{column}" IS NOT NULL LIMIT {int(per_column)}'
+                ).fetchall()
+                vals = [str(r[0]) for r in rows if r and r[0] is not None]
+                if vals:
+                    out[f"{table}.{column}"] = vals
+    finally:
+        con.close()
+    return out
 
 
 def execute_project_answers(

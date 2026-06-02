@@ -92,6 +92,11 @@ FORMATS: dict[str, DurationFormat] = {
 # string parsing. (Real timestamps/dates are excluded: they aren't measures.)
 _TEMPORAL_DURATION_DTYPES = frozenset({"time", "time_ns", "interval", "duration"})
 
+
+def is_temporal_duration_dtype(dtype: str | None) -> bool:
+    """True for a TIME/INTERVAL dtype that detects as a duration from its type alone."""
+    return bool(dtype) and dtype.strip().lower() in _TEMPORAL_DURATION_DTYPES
+
 # A shape is a value pattern mapped to a default interpretation + alternatives.
 # Order matters: most specific first.
 _SHAPES: list[tuple[re.Pattern[str], str, list[str]]] = [
@@ -136,7 +141,7 @@ def detect_duration(
     no proposal.
     """
     samples = _clean_samples(values)
-    if dtype and dtype.strip().lower() in _TEMPORAL_DURATION_DTYPES:
+    if is_temporal_duration_dtype(dtype):
         return DurationProposal(detected=FORMATS["epoch_minutes"], samples=samples[:5])
     if not samples:
         return None
