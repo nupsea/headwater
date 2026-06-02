@@ -12,18 +12,6 @@ SAMPLE_DATA = str(Path(__file__).resolve().parents[2] / "data" / "sample")
 RADIOLOGY_DATA = str(Path(__file__).resolve().parents[2] / "data" / "radiology")
 
 
-def _make_app_and_client():
-    """Create a test FastAPI app with in-memory stores."""
-    import duckdb
-    from headwater.api.app import create_app
-    from headwater.core.metadata import MetadataStore
-
-    app = create_app()
-    app.state._in_memory = True
-    client = TestClient(app)
-    return app, client
-
-
 def _h2_client(tmp_path: Path):
     """Create a TestClient wired to the H2 store in tmp_path."""
     import os

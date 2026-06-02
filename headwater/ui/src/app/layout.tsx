@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { DM_Sans, DM_Mono } from "next/font/google";
-import { H1Shell } from "@/components/h1-shell";
 import "./globals.css";
 
 const dmSans = DM_Sans({
@@ -33,7 +32,7 @@ export default function RootLayout({
       className={`${dmSans.variable} ${dmMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-background text-foreground">
-        <H1Shell>{children}</H1Shell>
+        {children}
       </body>
     </html>
   );

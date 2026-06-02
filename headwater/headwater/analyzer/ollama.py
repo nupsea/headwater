@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
 
@@ -12,6 +12,7 @@ from headwater.analyzer.llm import (
     _BUDGET_EXHAUSTED_RESPONSE,
     _SOURCE_BUDGET_EXHAUSTED_RESPONSE,
     LLM_REQUEST_TEMPLATE_VERSION,
+    LLMAuditStore,
     LLMProvider,
     LLMTokenBudget,
     _cached_response,
@@ -21,9 +22,6 @@ from headwater.analyzer.llm import (
     make_llm_request_hash,
 )
 from headwater.core.config import HeadwaterSettings
-
-if TYPE_CHECKING:
-    from headwater.core.metadata import MetadataStore
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +34,7 @@ class OllamaProvider(LLMProvider):
     def __init__(
         self,
         settings: HeadwaterSettings,
-        store: MetadataStore | None = None,
+        store: LLMAuditStore | None = None,
         token_budget: LLMTokenBudget | None = None,
         source_name: str | None = None,
     ) -> None:
@@ -59,7 +57,7 @@ class OllamaProvider(LLMProvider):
         """Send prompt to Ollama and return parsed JSON response.
 
         Uses format: "json" to ensure valid JSON output from the model.
-        Retries once on timeout. Writes to llm_audit_log if a MetadataStore
+        Retries once on timeout. Writes to the audit log if an audit store
         was provided at init.
         """
         _system = system or (

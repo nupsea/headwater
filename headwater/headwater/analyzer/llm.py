@@ -6,14 +6,23 @@ import hashlib
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from headwater.core.config import HeadwaterSettings
 
-if TYPE_CHECKING:
-    from headwater.core.metadata import MetadataStore
-
 logger = logging.getLogger(__name__)
+
+
+class LLMAuditStore(Protocol):
+    """Minimal interface for optional LLM audit logging.
+
+    Decouples the providers from any concrete metadata store: any object exposing
+    these methods works, and ``None`` disables auditing entirely.
+    """
+
+    def insert_llm_audit(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def get_llm_token_usage(self, *args: Any, **kwargs: Any) -> int: ...
 
 LLM_REQUEST_TEMPLATE_VERSION = "llm-provider-analyze-v1"
 _SENSITIVE_KEY_RE = re.compile(
@@ -76,7 +85,7 @@ class AnthropicProvider(LLMProvider):
     def __init__(
         self,
         settings: HeadwaterSettings,
-        store: MetadataStore | None = None,
+        store: LLMAuditStore | None = None,
         token_budget: LLMTokenBudget | None = None,
         source_name: str | None = None,
     ) -> None:
@@ -95,7 +104,7 @@ class AnthropicProvider(LLMProvider):
     async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
         """Send prompt to Claude and return parsed JSON response.
 
-        Always writes to llm_audit_log if a MetadataStore was provided at init.
+        Always writes to the audit log if an audit store was provided at init.
         On failure, writes an empty response row with tokens=0.
         """
         import anthropic
@@ -256,7 +265,7 @@ class AnthropicProvider(LLMProvider):
 
 def get_provider(
     settings: HeadwaterSettings,
-    store: MetadataStore | None = None,
+    store: LLMAuditStore | None = None,
     source_name: str | None = None,
 ) -> LLMProvider:
     """Factory: return the appropriate LLM provider based on settings."""
@@ -282,7 +291,7 @@ def get_provider(
 
 
 def _cached_response(
-    store: MetadataStore | None,
+    store: LLMAuditStore | None,
     *,
     provider: str,
     model: str,
@@ -297,7 +306,7 @@ def _cached_response(
 
 
 def _raw_response_allowed(
-    store: MetadataStore | None,
+    store: LLMAuditStore | None,
     source_name: str | None,
 ) -> bool:
     if store is None:

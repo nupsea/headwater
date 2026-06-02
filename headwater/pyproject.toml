@@ -27,7 +27,6 @@ dependencies = [
 ]
 
 [project.scripts]
-headwater = "headwater.cli.main:app"
 hw2 = "headwater.cli.hw2:app"
 
 [build-system]

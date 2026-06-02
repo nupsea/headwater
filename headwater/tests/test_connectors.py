@@ -26,7 +26,6 @@ from headwater.connectors.sqlite_loader import SQLiteConnector
 from headwater.core.exceptions import ConnectorError
 from headwater.core.models import SourceConfig
 from headwater.profiler.schema import extract_schema
-from headwater.services.source_evaluation import evaluate_connector_type
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sample"
 
@@ -154,25 +153,6 @@ class TestRegistry:
         assert snowflake_caps.list_tables is True
         assert snowflake_caps.estimate_row_count is True
         assert snowflake_caps.load_to_duckdb is False
-
-    def test_oltp_connector_evaluation_reports_constraint_gap(self):
-        evaluation = evaluate_connector_type("postgres")
-
-        assert evaluation["workload"] == "oltp"
-        assert evaluation["readiness"] == "needs_review"
-        assert evaluation["maturity_mode"] == "oltp_heuristic"
-        assert any(row["key"] == "constraints" for row in evaluation["evidence"])
-        assert any("PK/FK/check" in gap for gap in evaluation["gaps"])
-        assert evaluation["profiling_policy"]["mode"] == "metadata_first"
-
-    def test_olap_connector_evaluation_uses_observe_policy(self):
-        evaluation = evaluate_connector_type("duckdb")
-
-        assert evaluation["workload"] == "olap"
-        assert evaluation["readiness"] == "ready"
-        assert evaluation["maturity_mode"] == "warehouse_metadata"
-        assert evaluation["profiling_policy"]["mode"] == "observe"
-        assert evaluation["profiling_policy"]["aggregate_only_above_rows"] == 1_000_000
 
     def test_get_planned_connector_explains_status(self):
         with pytest.raises(ConnectorError, match="preview"):
