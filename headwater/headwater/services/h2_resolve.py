@@ -13,12 +13,14 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from headwater.core.store import HeadwaterStore
+from headwater.services.h2_column_kinds import is_numeric_dtype, measure_column_ref
 from headwater.services.h2_readiness import _columns_with_satisfying_claim
 
 ResolveIssueKind = Literal[
     "enum_mapping_needed",
     "ambiguous_code",
     "missing_definition",
+    "unusable_measure",
     "data_quality_risk",
     "cannot_answer_gap",
     "structural_ambiguity",
@@ -27,6 +29,23 @@ ResolveIssueKind = Literal[
 ResolvePriority = Literal["high", "medium", "low"]
 
 _PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
+
+# Kinds this builder regenerates each run (so it may purge stale ones), plus the
+# legacy kinds it now supersedes — the verbose judge "answer_gap" cards and the
+# framing-time "insufficient_coverage" cards (replaced by cannot_answer_gap).
+# Kinds created by other flows (e.g. resource-ingestion structural_ambiguity) are
+# deliberately NOT in this set, so the purge never deletes them.
+_BUILD_OWNED_KINDS = frozenset(
+    {
+        "enum_mapping_needed",
+        "data_quality_risk",
+        "unusable_measure",
+        "cannot_answer_gap",
+        "missing_definition",
+        "answer_gap",
+        "insufficient_coverage",
+    }
+)
 
 # Code-like heuristics: short varchar with few distinct values and short average length
 _CODE_MAX_DISTINCT = 30
@@ -39,6 +58,7 @@ _CONTRACT_IMPACTS: dict[ResolveIssueKind, list[str]] = {
     "enum_mapping_needed": ["definition_consistent", "no_misleading"],
     "ambiguous_code": ["definition_consistent"],
     "missing_definition": ["definition_consistent"],
+    "unusable_measure": ["no_blocking_gaps"],
     "data_quality_risk": ["structural_integrity", "no_blocking_gaps"],
     "cannot_answer_gap": ["no_blocking_gaps"],
     "structural_ambiguity": ["structural_integrity"],
@@ -103,6 +123,14 @@ def build_resolve_cards(
         _data_quality_cards(profile_map, columns, question_columns, project_id)
     )
 
+    # Unusable-measure cards: a question's measure column is stored as text
+    # (e.g. a duration) and can't be aggregated until it's defined/derived.
+    cards.extend(
+        _unusable_measure_cards(
+            questions, columns, profile_map, project_id, satisfied_cols
+        )
+    )
+
     # Cannot-answer gap cards
     cards.extend(
         _cannot_answer_cards(questions, project_id)
@@ -156,22 +184,91 @@ def _enum_mapping_cards(
         priority: ResolvePriority = (
             "high" if len(affected) >= 2 else "medium" if affected else "low"
         )
-        label = col["name"].replace("_", " ")
+        n = len(value_list)
         card = ResolveCard(
             card_id=f"{project_id}:enum:{key}",
             issue_kind="enum_mapping_needed",
             priority=priority,
-            title=f'What do the "{col["table_name"]}.{col["name"]}" codes mean?',
+            title=f'Define the {col["name"]} codes',
+            # Lean: the concrete codes are shown as chips in the UI (payload.values).
             body=(
-                f"Column `{col['table_name']}.{col['name']}` contains short codes "
-                f"({', '.join(value_list) or 'unknown'}) with no business definition. "
-                f"Add a mapping so Headwater can correctly segment and classify {label} values."
+                f"{n} code{'s' if n != 1 else ''} with no defined meaning. "
+                "Add what each one stands for."
             ),
             affected_questions=affected,
             contract_impacts=list(_CONTRACT_IMPACTS["enum_mapping_needed"]),
-            payload={"table": col["table_name"], "column": col["name"], "top_values": value_list},
+            payload={
+                "table": col["table_name"],
+                "column": col["name"],
+                "values": value_list,
+                "category": "input",
+            },
         )
         cards.append(card)
+    return cards
+
+
+def _unusable_measure_cards(
+    questions: list[dict[str, Any]],
+    columns: list[dict[str, Any]],
+    profile_map: dict[str, dict[str, Any]],
+    project_id: str,
+    satisfied_cols: set[str],
+) -> list[ResolveCard]:
+    """One lean card per text measure that blocks questions, grouped by column.
+
+    Surfaces the concrete root cause — "this column is stored as text, so it
+    can't be averaged" — instead of a judge's prose about the SQL.  Several
+    questions that all need the same unusable measure collapse into one card.
+    """
+    dtype_by_key = {
+        f"{c['table_name']}.{c['name']}".lower(): (c.get("dtype") or "").lower()
+        for c in columns
+    }
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for q in questions:
+        if q.get("answerability") == "cannot_answer":
+            continue
+        measure = measure_column_ref(q)
+        if not measure or measure in satisfied_cols:
+            continue
+        dtype = dtype_by_key.get(measure.lower())
+        # Unknown dtype is left alone; only flag a known non-numeric measure.
+        if dtype is None or is_numeric_dtype(dtype):
+            continue
+        groups.setdefault(measure, []).append(q)
+
+    cards: list[ResolveCard] = []
+    for measure, qs in groups.items():
+        table, col = _split(measure)
+        label = col.replace("_", " ")
+        profile = profile_map.get(measure, {})
+        top_values = profile.get("top_values") or []
+        example = str(top_values[0][0]) if top_values and top_values[0] else ""
+        body = (
+            "Stored as text"
+            + (f' (e.g. "{example}")' if example else "")
+            + ", so it can't be totaled or averaged. Define how to turn it into a "
+            "number."
+        )
+        n = len(qs)
+        cards.append(
+            ResolveCard(
+                card_id=f"{project_id}:measure:{measure}",
+                issue_kind="unusable_measure",
+                priority="high" if n >= 2 else "medium",
+                title=f'Make "{label}" measurable',
+                body=body,
+                affected_questions=[q["id"] for q in qs],
+                contract_impacts=list(_CONTRACT_IMPACTS["unusable_measure"]),
+                payload={
+                    "table": table,
+                    "column": col,
+                    "affected_titles": [q.get("title") for q in qs],
+                    "category": "input",
+                },
+            )
+        )
     return cards
 
 
@@ -222,7 +319,8 @@ def _cannot_answer_cards(
         card = ResolveCard(
             card_id=f"{project_id}:gap:{q['id']}",
             issue_kind="cannot_answer_gap",
-            priority="medium",
+            # Informational: a data/coverage limitation, not a defining task.
+            priority="low",
             title=f'Gap: "{q["title"]}"',
             body=(
                 f"This question cannot be answered with the current data: {reason}. "
@@ -230,7 +328,7 @@ def _cannot_answer_cards(
             ),
             affected_questions=[q["id"]],
             contract_impacts=list(_CONTRACT_IMPACTS["cannot_answer_gap"]),
-            payload={"question_id": q["id"], "reason": reason},
+            payload={"question_id": q["id"], "reason": reason, "category": "limitation"},
         )
         cards.append(card)
     return cards
@@ -337,8 +435,20 @@ def _persist_cards(
     project_id: str,
     cards: list[ResolveCard],
 ) -> None:
+    """Persist the freshly-built card set as the single source of truth.
+
+    The builder OWNS the project's resolve items: a user's 'deferred' disposition
+    on a card that still applies is preserved, and any item no longer generated
+    (a resolved gap, a stale judge-prose card from an earlier version) is removed
+    so the screen always reflects the current data — never accumulates cruft.
+    """
+    existing = {it["id"]: it for it in store.list_resolve_items(project_id)}
+    desired_ids = {c.card_id for c in cards}
+
     for card in cards:
         question_id = card.affected_questions[0] if card.affected_questions else None
+        prev = existing.get(card.card_id)
+        status = "deferred" if prev and prev.get("status") == "deferred" else "open"
         store.upsert_resolve_item(
             card.card_id,
             project_id=project_id,
@@ -347,13 +457,17 @@ def _persist_cards(
             body=card.body,
             question_id=question_id,
             priority=card.priority,
-            status="open",
+            status=status,
             payload={
                 **card.payload,
                 "affected_questions": card.affected_questions,
                 "contract_impacts": card.contract_impacts,
             },
         )
+
+    for item_id, item in existing.items():
+        if item_id not in desired_ids and item.get("issue_kind") in _BUILD_OWNED_KINDS:
+            store.delete_resolve_item(item_id)
 
 
 def define_card(

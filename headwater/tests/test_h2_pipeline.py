@@ -252,17 +252,205 @@ def test_judge_rejection_holds_doubtful(monkeypatch, tmp_path):
             assert any(
                 a.statistical_pass and a.state == "doubtful" for a in result.answers
             )
-            # The rejection produced an actionable Resolve card (truth + ask).
+            # The judge is a certification gate, not a Resolve-card generator — it
+            # never dumps prose onto the Resolve screen (cards are structural).
             cards = store.list_resolve_items("rej_proj")
-            gap_cards = [c for c in cards if c["issue_kind"] == "answer_gap"]
-            assert gap_cards, "judge rejection should open a resolve card"
+            assert not [c for c in cards if c["issue_kind"] == "answer_gap"]
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
 
-            # Deferring it is preserved across a recompute.
-            store.set_resolve_item_status(gap_cards[0]["id"], "deferred")
-            finalize_project_answers(store, "rej_proj", provider=_RejectingProvider())
+
+def test_judge_verdict_persists_across_fast_path(monkeypatch, tmp_path):
+    """A certified verdict survives a later fast-path load (no re-judge).
+
+    The fast path never calls the model, but it must rehydrate a verdict the
+    judge already produced for unchanged inputs — otherwise navigating back to
+    the Answer page falsely shows "Not run yet".
+    """
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("persist_proj", "Analyse readings over time and by site")
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            judged = finalize_project_answers(
+                store, "persist_proj", provider=_ApprovingProvider()
+            )
+            certified_ids = {a.question_id for a in judged.answers if a.state == "certified"}
+            assert certified_ids, "expected at least one certified answer to persist"
+
+            # Fast path (no provider, run_judge=False): the verdict is rehydrated,
+            # NOT reset to pending.
+            fast = finalize_project_answers(store, "persist_proj", run_judge=False)
+            rehydrated = {a.question_id for a in fast.answers if a.state == "certified"}
+            assert certified_ids <= rehydrated, "certified verdict must persist"
+            for a in fast.answers:
+                if a.question_id in certified_ids:
+                    assert a.judge_verdict == "certified"
+                    assert a.judge_verdict != "pending"
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_judge_verdict_goes_stale_after_input_change(monkeypatch, tmp_path):
+    """Editing an input after judging marks the verdict stale (prompts re-run)."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("stale_proj", "Analyse readings over time and by site")
+        from headwater.services.h2_catalog import update_column
+
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            judged = finalize_project_answers(
+                store, "stale_proj", provider=_ApprovingProvider()
+            )
+            certified_ids = {a.question_id for a in judged.answers if a.state == "certified"}
+            assert certified_ids
+
+            # Change an input (a column's meaning) — the draft/data the judge saw
+            # no longer hold, so its verdict must come back stale, not certified.
+            table = store.get_tables("sample")[0]["name"]
+            col = store.get_columns("sample", table)[0]["name"]
+            update_column(store, "sample", table, col, description="a changed meaning")
+
+            fast = finalize_project_answers(store, "stale_proj", run_judge=False)
+            for a in fast.answers:
+                if a.question_id in certified_ids:
+                    assert a.judge_verdict == "stale"
+                    assert a.state != "certified"
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+def _seed_text_measure_questions(store, project_id: str, qids: list[tuple[str, str]]) -> str:
+    """Attach questions whose measure is a TEXT column (an unusable measure)."""
+    src = store.get_project_sources(project_id)[0]["source_name"]
+    text_col = None
+    for table in store.get_tables(src):
+        for col in store.get_columns(src, table["name"]):
+            if (col.get("dtype") or "").lower() in ("varchar", "text", "string"):
+                text_col = f"{table['name']}.{col['name']}"
+                break
+        if text_col:
+            break
+    assert text_col, "sample source should have a text column"
+    for qid, title in qids:
+        store.upsert_question(
+            qid,
+            project_id=project_id,
+            title=title,
+            question={
+                "title": title,
+                "needed_columns": [text_col],
+                "col_roles": {text_col: "measure"},
+                "answerability": "answerable",
+            },
+            source_name=src,
+            status="draft",
+            answerability="answerable",
+            confidence=0.5,
+        )
+    return text_col
+
+
+def test_unusable_measure_card_is_lean(monkeypatch, tmp_path):
+    """An unusable (text) measure produces a short, bindable card — not prose."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("lean_proj", "Analyse readings over time and by site")
+        from headwater.services.h2_resolve import build_resolve_cards
+
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            _seed_text_measure_questions(store, "lean_proj", [("lean_proj:q-a", "Q A")])
+            cards = build_resolve_cards(store, "lean_proj")
+            measure_cards = [c for c in cards if c.issue_kind == "unusable_measure"]
+            assert measure_cards, "a text measure should raise an unusable_measure card"
+            card = measure_cards[0]
+            assert len(card.body) <= 200  # lean, no certification transcript
+            assert "certification gate" not in card.body
+            # Carries its column so the analyst can define it in place (S-BIND).
+            assert card.payload.get("table") and card.payload.get("column")
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_unusable_measure_groups_questions_into_one_card(monkeypatch, tmp_path):
+    """Questions blocked by the SAME text measure collapse into one card."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("grp_proj", "Analyse readings over time and by site")
+        from headwater.services.h2_resolve import build_resolve_cards
+
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            _seed_text_measure_questions(
+                store, "grp_proj", [("grp_proj:q-a", "Q A"), ("grp_proj:q-b", "Q B")]
+            )
+            cards = build_resolve_cards(store, "grp_proj")
+            measure_cards = [c for c in cards if c.issue_kind == "unusable_measure"]
+            assert len(measure_cards) == 1, "two questions, one measure -> one card"
+            assert set(measure_cards[0].affected_questions) == {
+                "grp_proj:q-a",
+                "grp_proj:q-b",
+            }
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_rebuild_preserves_deferred_and_purges_stale(monkeypatch, tmp_path):
+    """Rebuild keeps a user's defer but removes stale judge-prose cards."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("purge_proj", "Analyse readings over time and by site")
+        from headwater.services.h2_resolve import build_resolve_cards
+
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            # A leftover verbose judge card from an earlier version.
+            store.upsert_resolve_item(
+                "purge_proj:answer_gap:old",
+                project_id="purge_proj",
+                issue_kind="answer_gap",
+                title='Resolve to certify: "..."',
+                body="The certification gate did not clear for this answer. - ...",
+                priority="high",
+                status="open",
+            )
+            _seed_text_measure_questions(store, "purge_proj", [("purge_proj:q-a", "Q A")])
+            cards = build_resolve_cards(store, "purge_proj")
+            measure_id = next(
+                c.card_id for c in cards if c.issue_kind == "unusable_measure"
+            )
+
+            # The stale judge card is gone after a rebuild.
+            ids = {c["id"] for c in store.list_resolve_items("purge_proj")}
+            assert "purge_proj:answer_gap:old" not in ids
+
+            # A user's defer survives the next rebuild.
+            store.set_resolve_item_status(measure_id, "deferred")
+            build_resolve_cards(store, "purge_proj")
             after = next(
-                c for c in store.list_resolve_items("rej_proj")
-                if c["id"] == gap_cards[0]["id"]
+                c for c in store.list_resolve_items("purge_proj") if c["id"] == measure_id
             )
             assert after["status"] == "deferred"
         finally:

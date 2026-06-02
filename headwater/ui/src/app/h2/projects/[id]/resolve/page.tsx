@@ -35,6 +35,18 @@ const primaryBtn: React.CSSProperties = {
   fontFamily: "'DM Sans', sans-serif",
 };
 
+// Human labels for the raw issue kinds — no internal jargon on screen.
+const ISSUE_LABEL: Record<string, string> = {
+  answer_gap: "Blocks an answer",
+  enum_mapping_needed: "Codes need meaning",
+  ambiguous_code: "Ambiguous codes",
+  missing_definition: "Missing definition",
+  data_quality_risk: "Data quality risk",
+  structural_ambiguity: "Structure unclear",
+  cannot_answer_gap: "Data limitation",
+  insufficient_coverage: "Not enough data",
+};
+
 function ImpactPill({ priority }: { priority: "high" | "medium" | "low" }) {
   const tones: Record<string, { bg: string; color: string }> = {
     high:   { bg: HW2_COLOR.badSoft,  color: HW2_COLOR.bad },
@@ -61,16 +73,46 @@ function ImpactPill({ priority }: { priority: "high" | "medium" | "low" }) {
   );
 }
 
+function SectionLabel({
+  dot,
+  color,
+  children,
+}: {
+  dot: string;
+  color: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        font: "600 11px 'DM Sans', sans-serif",
+        color,
+        textTransform: "uppercase",
+        letterSpacing: "0.07em",
+        marginBottom: 10,
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+      }}
+    >
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: dot }} />
+      {children}
+    </div>
+  );
+}
+
 function ResolveCardRow({
   card,
   projectId,
   onChanged,
+  defaultOpen = true,
 }: {
   card: H2ResolveCard;
   projectId: string;
   onChanged: () => void;
+  defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(card.status !== "deferred");
+  const [open, setOpen] = useState(defaultOpen && card.status !== "deferred");
   const [adding, setAdding] = useState(false);
   const [ctx, setCtx] = useState("");
   const [busy, setBusy] = useState(false);
@@ -79,6 +121,7 @@ function ResolveCardRow({
   // Hydrate from the persisted definition so a saved card shows its value on a
   // return visit instead of an empty box (the claim lives in the store).
   const [saved, setSaved] = useState<string | null>(card.definition ?? null);
+  const [showWhy, setShowWhy] = useState(false);
   const deferred = card.status === "deferred";
 
   const defer = async () => {
@@ -184,7 +227,7 @@ function ResolveCardRow({
               color: HW2_COLOR.muted,
             }}
           >
-            {card.issue_kind}
+            {ISSUE_LABEL[card.issue_kind] ?? "Needs a decision"}
             {card.affected_questions.length > 0 && (
               <span style={{ color: HW2_COLOR.faint }}>
                 {" "}
@@ -227,35 +270,86 @@ function ResolveCardRow({
           >
             {card.body}
           </p>
-          {card.contract_impacts.length > 0 && (
-            <div>
-              <div
+
+          {/* The concrete root cause, shown — e.g. the undefined codes A, H, S, D. */}
+          {(card.values?.length ?? 0) > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 6,
+                marginBottom: 12,
+              }}
+            >
+              {card.values!.map((v, i) => (
+                <span
+                  key={i}
+                  style={{
+                    font: "600 12px 'DM Mono', monospace",
+                    color: HW2_COLOR.ink,
+                    padding: "3px 9px",
+                    background: HW2_COLOR.chip,
+                    border: `1px solid ${HW2_COLOR.rule2}`,
+                    borderRadius: 5,
+                  }}
+                >
+                  {v}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* The questions this unblocks — concrete, not jargon. */}
+          {(card.affected_titles?.length ?? 0) > 0 && (
+            <ul
+              style={{
+                margin: "0 0 4px",
+                paddingLeft: 18,
+                font: "400 12.5px 'DM Sans', sans-serif",
+                color: HW2_COLOR.ink2,
+                lineHeight: 1.5,
+              }}
+            >
+              {card.affected_titles!.map((t, i) => (
+                <li key={i}>{t}</li>
+              ))}
+            </ul>
+          )}
+
+          {/* Detail (e.g. the judge's findings) stays tucked behind a disclosure
+              so the card reads as a simple ask, not a transcript. */}
+          {(card.why?.length ?? 0) > 0 && (
+            <div style={{ marginTop: 4 }}>
+              <button
+                onClick={() => setShowWhy((v) => !v)}
                 style={{
-                  font: "600 11px 'DM Sans', sans-serif",
-                  color: HW2_COLOR.muted,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                  marginBottom: 6,
+                  appearance: "none",
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                  font: "500 12px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.blue,
+                  fontFamily: "'DM Sans', sans-serif",
                 }}
               >
-                Contract impacts
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {card.contract_impacts.map((c, i) => (
-                  <span
-                    key={i}
-                    style={{
-                      font: "500 11px 'DM Mono', monospace",
-                      color: HW2_COLOR.ink2,
-                      padding: "2px 8px",
-                      background: HW2_COLOR.chip,
-                      borderRadius: 4,
-                    }}
-                  >
-                    {c}
-                  </span>
-                ))}
-              </div>
+                {showWhy ? "Hide detail" : "Why?"}
+              </button>
+              {showWhy && (
+                <ul
+                  style={{
+                    margin: "8px 0 0",
+                    paddingLeft: 18,
+                    font: "400 12px 'DM Sans', sans-serif",
+                    color: HW2_COLOR.muted,
+                    lineHeight: 1.55,
+                  }}
+                >
+                  {card.why!.map((r, i) => (
+                    <li key={i}>{r}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
 
@@ -368,7 +462,7 @@ function ResolveCardRow({
                 value={ctx}
                 onChange={(e) => setCtx(e.target.value)}
                 placeholder={
-                  "Paste a definition or note. Markdown tables map to columns, e.g.\n\n| column | meaning |\n| --- | --- |\n| total_wait_time | service_ts minus arrival_time |"
+                  "Paste a definition or note. A two-column markdown table maps codes to meanings, e.g.\n\n| code | meaning |\n| --- | --- |\n| A | Active |\n| C | Closed |"
                 }
                 spellCheck={false}
                 style={{
@@ -434,11 +528,17 @@ export default function ResolvePage() {
   }, [id]);
 
   // A recompute can open/close gap cards; reflect the new set here.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => onHw2Event(HW2_RECOMPUTED, load), [id]);
 
-  const high = cards.filter((c) => c.priority === "high");
-  const medium = cards.filter((c) => c.priority === "medium");
-  const low = cards.filter((c) => c.priority === "low");
+  // Two buckets: actionable asks the analyst can resolve now vs informational
+  // data limitations (too few days, missing source) they can't fix by defining
+  // a term. Signal over noise: the headline counts only the asks.
+  const RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  const inputCards = cards
+    .filter((c) => c.category !== "limitation")
+    .sort((a, b) => (RANK[a.priority] ?? 3) - (RANK[b.priority] ?? 3));
+  const limitationCards = cards.filter((c) => c.category === "limitation");
 
   if (loading) {
     return (
@@ -490,7 +590,7 @@ export default function ResolvePage() {
             color: HW2_COLOR.muted,
           }}
         >
-          {cards.length} item{cards.length !== 1 ? "s" : ""}
+          {inputCards.length} to address
         </span>
       </div>
 
@@ -504,9 +604,9 @@ export default function ResolvePage() {
           marginBottom: 4,
         }}
       >
-        {cards.length === 0
-          ? "Nothing to resolve."
-          : `${cards.length} thing${cards.length !== 1 ? "s" : ""} to address.`}
+        {inputCards.length === 0
+          ? "Nothing needs your input."
+          : `${inputCards.length} thing${inputCards.length !== 1 ? "s" : ""} to clear up.`}
       </h2>
       <p
         style={{
@@ -516,8 +616,8 @@ export default function ResolvePage() {
           lineHeight: 1.55,
         }}
       >
-        Ranked by how much each one moves the per-answer verdict. Resolving
-        blocking items unlocks certification for the affected questions.
+        These need a human decision — define a term, confirm a meaning, or set it
+        aside. If something isn&rsquo;t clear, open the data and develop it.
       </p>
 
       {cards.length === 0 ? (
@@ -599,98 +699,46 @@ export default function ResolvePage() {
             </button>
           </div>
 
-          <div style={{ display: "grid", gap: 20 }}>
-            {high.length > 0 && (
+          <div style={{ display: "grid", gap: 28 }}>
+            {inputCards.length > 0 && (
               <div>
-                <div
-                  style={{
-                    font: "600 11px 'DM Sans', sans-serif",
-                    color: HW2_COLOR.bad,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.07em",
-                    marginBottom: 8,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                  }}
-                >
-                  <span
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: "50%",
-                      background: HW2_COLOR.bad,
-                    }}
-                  />
-                  High priority · {high.length} item{high.length !== 1 ? "s" : ""}
-                </div>
+                <SectionLabel dot={HW2_COLOR.blue} color={HW2_COLOR.ink}>
+                  Needs your input · {inputCards.length}
+                </SectionLabel>
                 <div style={{ display: "grid", gap: 8 }}>
-                  {high.map((c) => (
+                  {inputCards.map((c) => (
                     <ResolveCardRow key={c.card_id} card={c} projectId={id} onChanged={load} />
                   ))}
                 </div>
               </div>
             )}
 
-            {medium.length > 0 && (
+            {limitationCards.length > 0 && (
               <div>
-                <div
+                <SectionLabel dot={HW2_COLOR.muted} color={HW2_COLOR.muted}>
+                  Data limitations · {limitationCards.length}
+                </SectionLabel>
+                <p
                   style={{
-                    font: "600 11px 'DM Sans', sans-serif",
-                    color: HW2_COLOR.warn,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.07em",
-                    marginBottom: 8,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
+                    font: "400 12.5px 'DM Sans', sans-serif",
+                    color: HW2_COLOR.faint,
+                    lineHeight: 1.5,
+                    margin: "-2px 0 10px",
                   }}
                 >
-                  <span
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: "50%",
-                      background: HW2_COLOR.warn,
-                    }}
-                  />
-                  Medium priority · {medium.length} item{medium.length !== 1 ? "s" : ""}
-                </div>
+                  These can&rsquo;t be cleared by defining a term — they need more
+                  or different data. Listed so you know what the data can&rsquo;t
+                  answer yet.
+                </p>
                 <div style={{ display: "grid", gap: 8 }}>
-                  {medium.map((c) => (
-                    <ResolveCardRow key={c.card_id} card={c} projectId={id} onChanged={load} />
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {low.length > 0 && (
-              <div>
-                <div
-                  style={{
-                    font: "600 11px 'DM Sans', sans-serif",
-                    color: HW2_COLOR.muted,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.07em",
-                    marginBottom: 8,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                  }}
-                >
-                  <span
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: "50%",
-                      background: HW2_COLOR.muted,
-                    }}
-                  />
-                  Low priority · {low.length} item{low.length !== 1 ? "s" : ""}
-                </div>
-                <div style={{ display: "grid", gap: 8 }}>
-                  {low.map((c) => (
-                    <ResolveCardRow key={c.card_id} card={c} projectId={id} onChanged={load} />
+                  {limitationCards.map((c) => (
+                    <ResolveCardRow
+                      key={c.card_id}
+                      card={c}
+                      projectId={id}
+                      onChanged={load}
+                      defaultOpen={false}
+                    />
                   ))}
                 </div>
               </div>

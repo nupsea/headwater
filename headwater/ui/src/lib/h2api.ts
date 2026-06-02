@@ -99,7 +99,14 @@ export interface H2ResolveCard {
   status?: "open" | "deferred" | "resolved";
   defined?: boolean;
   definition?: string;
+  /** "input" = an actionable ask; "limitation" = an informational data gap. */
+  category?: "input" | "limitation";
+  /** Detailed reasoning (e.g. judge findings), shown behind a "Why" disclosure. */
+  why?: string[];
+  /** Concrete code values (e.g. ["A","H","S","D"]) rendered as chips. */
+  values?: string[];
   affected_questions: string[];
+  affected_titles?: string[];
   contract_impacts: string[];
 }
 
@@ -145,7 +152,13 @@ export interface H2AnswerDraft {
   result_stats: Record<string, unknown>;
   readiness_pct: number;
   statistical_pass: boolean;
-  judge_verdict: "certified" | "doubtful" | "reject" | "unavailable" | "pending";
+  judge_verdict:
+    | "certified"
+    | "doubtful"
+    | "reject"
+    | "unavailable"
+    | "pending"
+    | "stale";
   judge_confidence: number;
   judge_reasons: string[];
   caveats: string[];

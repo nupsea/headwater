@@ -597,6 +597,48 @@ function CardLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Honest stand-in when a chart was intended but the measure has no numeric
+// values to plot (e.g. a text column that couldn't be aggregated to a number).
+// We never render blank axes as if they were a result.
+function UnplottablePanel({ measure, reason }: { measure: string; reason?: string }) {
+  return (
+    <div
+      style={{
+        background: HW2_COLOR.surface,
+        border: `1px solid ${HW2_COLOR.warn}44`,
+        borderRadius: 12,
+        padding: "18px 20px",
+      }}
+    >
+      <CardLabel>Visualization</CardLabel>
+      <p
+        style={{
+          font: "500 13.5px 'DM Sans', sans-serif",
+          color: HW2_COLOR.ink2,
+          lineHeight: 1.55,
+          margin: 0,
+        }}
+      >
+        Nothing to plot — <code style={{ fontFamily: "'DM Mono', monospace" }}>{measure}</code>{" "}
+        produced no numeric values, so this answer can&rsquo;t be charted or trusted yet.
+      </p>
+      {reason && (
+        <p
+          style={{
+            font: "400 12.5px 'DM Sans', sans-serif",
+            color: HW2_COLOR.muted,
+            lineHeight: 1.55,
+            marginTop: 8,
+            marginBottom: 0,
+          }}
+        >
+          {reason}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ResultChart({ answer }: { answer: H2AnswerDraft }) {
   const spec = answer.chart_spec as { type?: string; x?: string; y?: string };
   const type = spec?.type;
@@ -604,6 +646,17 @@ function ResultChart({ answer }: { answer: H2AnswerDraft }) {
     return null;
   }
   const data = answer.rows;
+
+  // A chart was intended, but if the measure is entirely non-numeric/null there
+  // is nothing to draw — surface the truth instead of empty axes.
+  const yKey = spec.y;
+  const hasNumericY = data.some((r) => {
+    const v = r[yKey];
+    return typeof v === "number" && Number.isFinite(v);
+  });
+  if (!hasNumericY) {
+    return <UnplottablePanel measure={yKey} reason={answer.caveats[0]} />;
+  }
 
   // Relabel the category axis with resolved enum meanings (codes stay in the data).
   const xLabels = answer.value_labels?.[spec.x];
@@ -799,15 +852,21 @@ function VerdictFactor({
   );
 }
 
+// Human-readable judge state. "pending" = genuinely never run; "stale" = ran
+// before but an input changed since, so its verdict no longer applies.
+const JUDGE_LABEL: Record<string, { c: string; label: string }> = {
+  certified:   { c: HW2_COLOR.good,  label: "Approved" },
+  doubtful:    { c: HW2_COLOR.warn,  label: "Withheld — see reasons below" },
+  reject:      { c: HW2_COLOR.warn,  label: "Rejected — see reasons below" },
+  pending:     { c: HW2_COLOR.muted, label: "Not run yet — click Run certification" },
+  stale:       { c: HW2_COLOR.warn,  label: "Inputs changed — re-run certification" },
+  unavailable: { c: HW2_COLOR.muted, label: "No local model available" },
+};
+
 function JudgePanel({ answer }: { answer: H2AnswerDraft }) {
   const judgeTone =
-    answer.judge_verdict === "certified"
-      ? { c: HW2_COLOR.good, label: "Approved" }
-      : answer.judge_verdict === "pending"
-      ? { c: HW2_COLOR.muted, label: "Not run yet — click Run certification" }
-      : answer.judge_verdict === "unavailable"
-      ? { c: HW2_COLOR.muted, label: "Unavailable" }
-      : { c: HW2_COLOR.warn, label: answer.judge_verdict };
+    JUDGE_LABEL[answer.judge_verdict] ??
+    { c: HW2_COLOR.warn, label: answer.judge_verdict };
 
   return (
     <div
@@ -977,6 +1036,11 @@ export default function AnswerPage() {
   }
 
   const activeAnswer = answers[activeIdx] ?? null;
+  // If the judge has produced a verdict for any answer, the action is a re-run,
+  // not a first run — mirrors the persisted truth ("pending" means never run).
+  const judgedBefore = answers.some((a) =>
+    ["certified", "doubtful", "reject", "stale"].includes(a.judge_verdict)
+  );
 
   return (
     <div
@@ -1041,7 +1105,11 @@ export default function AnswerPage() {
               opacity: certifying ? 0.6 : 1,
             }}
           >
-            {certifying ? "Certifying…" : "Run certification"}
+            {certifying
+              ? "Certifying…"
+              : judgedBefore
+              ? "Re-run certification"
+              : "Run certification"}
           </button>
         </div>
       </div>
@@ -1216,7 +1284,13 @@ export default function AnswerPage() {
 
                   <ResultChart answer={activeAnswer} />
                   <ResultTable answer={activeAnswer} />
-                  <SqlCard answer={activeAnswer} sourceName={sourceName} />
+                  {/* Key by question so the editor + run-result reset on switch —
+                      never show one question's SQL beside another's data. */}
+                  <SqlCard
+                    key={activeAnswer.question_id}
+                    answer={activeAnswer}
+                    sourceName={sourceName}
+                  />
 
                   {activeAnswer.caveats.length > 0 && (
                     <CaveatsCard caveats={activeAnswer.caveats} />

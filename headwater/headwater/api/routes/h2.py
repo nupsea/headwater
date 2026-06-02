@@ -440,67 +440,58 @@ def set_question_disposition(
 
 @router.post("/projects/{project_id}/resolve")
 def build_resolve(project_id: str) -> list[dict[str, Any]]:
+    """Rebuild resolve cards from current data and return the lean set."""
+    return _rebuild_and_format(project_id)
+
+
+@router.get("/projects/{project_id}/resolve")
+def get_resolve(project_id: str) -> list[dict[str, Any]]:
+    """Return the current resolve cards, rebuilt fresh from the data.
+
+    Building on read keeps the screen honest: cards are derived structurally
+    (undefined codes, unusable measures, coverage gaps), resolved/satisfied ones
+    drop off, and stale cards from earlier versions are purged automatically — no
+    manual Rebuild needed.
+    """
+    return _rebuild_and_format(project_id)
+
+
+def _rebuild_and_format(project_id: str) -> list[dict[str, Any]]:
+    from headwater.services.h2_readiness import _columns_with_satisfying_claim
     from headwater.services.h2_resolve import build_resolve_cards
 
     store = _get_store()
     try:
-        cards = build_resolve_cards(store, project_id)
+        build_resolve_cards(store, project_id)  # owns the set; purges stale cards
+        items = store.list_resolve_items(project_id)
+        claims = store.list_semantic_claims(project_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     finally:
         store.close()
 
-    return [
-        {
-            "card_id": c.card_id,
-            "issue_kind": c.issue_kind,
-            "priority": c.priority,
-            "title": c.title,
-            "body": c.body,
-            "affected_questions": c.affected_questions,
-            "contract_impacts": c.contract_impacts,
-        }
-        for c in cards
-    ]
-
-
-@router.get("/projects/{project_id}/resolve")
-def get_resolve(project_id: str) -> list[dict[str, Any]]:
-    """List persisted resolve cards, rehydrated with any saved definition.
-
-    A card whose column already carries a satisfying semantic claim reports
-    ``defined=True`` and returns the analyst's saved text in ``definition`` so
-    the UI shows the saved state instead of an empty box on a return visit.
-    """
-    from headwater.services.h2_readiness import _columns_with_satisfying_claim
-
-    store = _get_store()
-    try:
-        items = store.list_resolve_items(project_id)
-        claims = store.list_semantic_claims(project_id)
-    finally:
-        store.close()
-
     satisfied = _columns_with_satisfying_claim(claims)
-    # list_semantic_claims is ordered newest-first, so the first claim per column
-    # is the latest the analyst saved.
-    claim_by_col: dict[str, dict[str, Any]] = {}
-    for c in claims:
-        table = c.get("table_name")
-        column = c.get("column_name")
-        if table and column:
-            claim_by_col.setdefault(f"{table}.{column}", c)
-
     out: list[dict[str, Any]] = []
     for it in items:
+        # Once an item is resolved or its column is satisfied, it's done — keep it
+        # off the screen so the list stays lean.
+        if it.get("status") == "resolved":
+            continue
         payload = it.get("payload") or {}
         key = (
             f"{payload['table']}.{payload['column']}"
             if payload.get("table") and payload.get("column")
             else None
         )
-        defined = bool(key and key in satisfied)
-        definition = _claim_display(claim_by_col.get(key)) if defined else ""
+        if key and key in satisfied:
+            continue
+        # "limitation" = a data/coverage gap the analyst can't fix by defining a
+        # term (informational); everything else is an actionable input.
+        category = payload.get("category") or (
+            "limitation"
+            if it["issue_kind"] in ("insufficient_coverage", "cannot_answer_gap")
+            else "input"
+        )
         out.append(
             {
                 "card_id": it["id"],
@@ -509,9 +500,12 @@ def get_resolve(project_id: str) -> list[dict[str, Any]]:
                 "title": it["title"],
                 "body": it["body"],
                 "status": it.get("status", "open"),
-                "defined": defined,
-                "definition": definition,
+                "category": category,
+                # Concrete code values shown as chips for enum cards.
+                "values": payload.get("values", []),
+                "why": payload.get("why", []),
                 "affected_questions": payload.get("affected_questions", []),
+                "affected_titles": payload.get("affected_titles", []),
                 "contract_impacts": payload.get("contract_impacts", []),
             }
         )

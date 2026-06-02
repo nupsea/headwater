@@ -9,7 +9,6 @@ from pathlib import Path
 from headwater.core.config import HeadwaterSettings
 
 _TEMPORAL_ROLE_PREFIXES = {"event_ts", "start_ts", "end_ts", "time_anchor"}
-_MEASURE_ROLES = {"measure", "duration", "quantity", "metric"}
 _CATEGORY_ROLES = {"categorical", "code", "flag"}
 _WORKFLOW_HINTS = {
     "activity",

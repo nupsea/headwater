@@ -26,7 +26,12 @@ from typing import Any, Literal
 
 from headwater.analyzer.llm import LLMProvider, NoLLMProvider
 
-JudgeVerdict = Literal["certified", "doubtful", "reject", "unavailable", "pending"]
+# "pending"  — the judge has not been run for this answer yet.
+# "stale"    — the judge ran, but an input changed since; its verdict no longer
+#              applies and certification must be re-run.
+JudgeVerdict = Literal[
+    "certified", "doubtful", "reject", "unavailable", "pending", "stale"
+]
 
 _SYSTEM = (
     "You are a rigorous data-analysis reviewer. You judge whether a SQL query "

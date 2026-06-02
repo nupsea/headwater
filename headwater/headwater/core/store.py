@@ -760,6 +760,10 @@ class HeadwaterStore:
         )
         self.con.commit()
 
+    def delete_resolve_item(self, item_id: str) -> None:
+        self.con.execute("DELETE FROM resolve_items WHERE id = ?", (item_id,))
+        self.con.commit()
+
     def list_resolve_items(self, project_id: str) -> list[dict[str, Any]]:
         rows = self.con.execute(
             "SELECT * FROM resolve_items WHERE project_id = ? ORDER BY priority, updated_at DESC",

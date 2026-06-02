@@ -63,6 +63,11 @@ class FinalizedAnswer:
     caveats: list[str] = field(default_factory=list)
     execution_error: str | None = None
     source_snapshot_id: str | None = None
+    # The input fingerprint the judge verdict was produced against.  Persisted in
+    # the judge contract so a later fast-path load can tell whether the verdict
+    # still applies (same inputs -> honor it) or is stale (re-run certification).
+    # None means "do not (re)write the judge contract" — preserve what's stored.
+    judged_fingerprint: str | None = None
     # column -> {raw code: human meaning}, from locked enum_mapping claims.
     # Display-only: the SQL still groups on raw codes; the UI relabels output.
     value_labels: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -159,6 +164,11 @@ def finalize_project_answers(
         source_snapshot_id=snapshot_id,
     )
 
+    # One fingerprint for the whole pass: stamps fresh judge verdicts and decides
+    # whether a previously-stored verdict still applies on the fast path.  Inputs
+    # don't change during finalize, so the start value also reconciles the state.
+    current_fp = project_input_fingerprint(store, project_id)
+
     for question in store.list_questions(project_id):
         if question.get("status") == "dropped":
             continue  # user-curated out — excluded from answers
@@ -176,14 +186,19 @@ def finalize_project_answers(
             snapshot_id=snapshot_id,
             run_judge=run_judge,
             value_labels=value_labels,
+            current_fingerprint=current_fp,
         )
         result.answers.append(finalized)
+
+    # Resolve cards are derived structurally from the data (see h2_resolve) — the
+    # judge is a certification gate here, not a card generator, so it never dumps
+    # prose onto the Resolve screen.
 
     # Derived state now reflects the current inputs — reconcile the fingerprint
     # so the recompute banner only re-appears after a genuine input change.
     store.set_pipeline_state(
         project_id,
-        last_input_hash=project_input_fingerprint(store, project_id),
+        last_input_hash=current_fp,
         impacted_count=_impacted_count(store, project_id),
     )
     return result
@@ -223,6 +238,7 @@ def _finalize_one(
     snapshot_id: str | None,
     run_judge: bool = True,
     value_labels: dict[str, dict[str, str]] | None = None,
+    current_fingerprint: str | None = None,
 ) -> FinalizedAnswer:
     qid = question["id"]
     title = question.get("title", qid)
@@ -279,13 +295,26 @@ def _finalize_one(
     # Eligible to certify on the statistics factor (the fast path's "pending").
     stat_ready = bool(statistical_pass and can_judge)
 
-    # Gate 2: the judge. On the fast path (run_judge=False) we stop after
-    # execution and leave stat-ready answers "pending" certification.
+    # Gate 2: the judge.  On the fast path (run_judge=False) we do NOT re-run the
+    # model; instead we rehydrate any verdict already stored for this answer so it
+    # persists across navigation/recompute.  A stored verdict produced against the
+    # current inputs is honored (and can certify); one produced against older
+    # inputs comes back "stale" so the UI prompts a re-run.  Neither path ever
+    # certifies without a real judge approval — the two-factor invariant holds.
+    judged_fingerprint: str | None = None
     if not run_judge:
-        judge_result = JudgeResult(
-            verdict="pending", confidence=0.0, reasons=[], available=False
-        )
-        state = "pending" if stat_ready else "doubtful"
+        judge_result = _rehydrate_judge(store, qid, current_fingerprint)
+        if judge_result.available:
+            # A valid stored verdict for unchanged inputs — apply the gate.
+            judged_fingerprint = current_fingerprint
+            state = _final_state(
+                statistical_pass=statistical_pass,
+                executed_ok=executed_ok,
+                judge=judge_result,
+            )
+        else:
+            # pending (never run) or stale (inputs changed) — not certified yet.
+            state = "pending" if stat_ready else "doubtful"
     else:
         judge_result = JudgeResult(
             verdict="unavailable", confidence=0.0, reasons=[], available=False
@@ -300,6 +329,10 @@ def _finalize_one(
                 columns=judge_cols,
                 result_stats=result_stats,
             )
+        # Only stamp (and persist) a fingerprint when the judge actually produced
+        # a verdict; a model outage must not overwrite a prior real verdict.
+        if judge_result.available:
+            judged_fingerprint = current_fingerprint
         state = _final_state(
             statistical_pass=statistical_pass,
             executed_ok=executed_ok,
@@ -334,58 +367,46 @@ def _finalize_one(
         execution_error=execution_error,
         value_labels=answer_labels,
         source_snapshot_id=snapshot_id,
+        judged_fingerprint=judged_fingerprint,
     )
     _persist(store, fa)
-    if run_judge:
-        _sync_gap_card(store, question.get("project_id", ""), fa)
     return fa
 
 
-def _sync_gap_card(store: HeadwaterStore, project_id: str, fa: FinalizedAnswer) -> None:
-    """Turn a judge verdict into an actionable Resolve card (truth + ask).
+def _rehydrate_judge(
+    store: HeadwaterStore, question_id: str, current_fingerprint: str | None
+) -> JudgeResult:
+    """Reconstruct the last judge verdict for an answer from the stored contract.
 
-    Certified answers close their gap card.  Doubtful/rejected answers open one
-    carrying the judge's reasons and the resolution paths the user can take.
-    A user's 'defer' disposition is preserved across recomputes.
+    The fast path never calls the model; this is how a verdict the judge already
+    produced survives navigation and recompute (the central-truth principle: a
+    computed verdict lives in the store and every view reflects it).
+
+      - no stored verdict        -> "pending"  (genuinely not run yet)
+      - stored, inputs unchanged -> the verdict itself, available=True (honored)
+      - stored, inputs changed   -> "stale"    (UI offers "Re-run certification")
     """
-    if not project_id:
-        return
-    card_id = f"{project_id}:answer_gap:{fa.question_id}"
-
-    if fa.state == "certified":
-        store.set_resolve_item_status(card_id, "resolved")
-        return
-    if fa.state != "doubtful":
-        return
-
-    reasons = fa.judge_reasons or fa.caveats
-    body = (
-        "The certification gate did not clear for this answer.\n\n"
-        + "\n".join(f"- {r}" for r in reasons[:4])
-        + "\n\nResolution paths: provide a column or define a derivation, "
-        "add context (paste a data dictionary or notes), confirm a column's "
-        "meaning, or defer this to the next cycle."
+    contract = next(
+        (
+            c
+            for c in store.list_readiness_contracts(question_id)
+            if c.get("contract_type") == "judge_verdict"
+        ),
+        None,
     )
-    existing = next(
-        (r for r in store.list_resolve_items(project_id) if r["id"] == card_id), None
-    )
-    # Don't re-open something the user explicitly deferred.
-    status = "deferred" if existing and existing.get("status") == "deferred" else "open"
-    store.upsert_resolve_item(
-        card_id,
-        project_id=project_id,
-        issue_kind="answer_gap",
-        title=f'Resolve to certify: "{fa.question_title}"',
-        body=body,
-        question_id=fa.question_id,
-        priority="high" if fa.judge_verdict == "reject" else "medium",
-        status=status,
-        payload={
-            "affected_questions": [fa.question_id],
-            "contract_impacts": [],
-            "judge_verdict": fa.judge_verdict,
-            "judge_reasons": fa.judge_reasons,
-        },
+    if contract is None:
+        return JudgeResult(verdict="pending", confidence=0.0, reasons=[], available=False)
+    ev = contract.get("evidence") or {}
+    verdict = ev.get("verdict") or "pending"
+    if verdict in ("pending", "unavailable", "stale"):
+        return JudgeResult(verdict="pending", confidence=0.0, reasons=[], available=False)
+    if ev.get("judged_fingerprint") != current_fingerprint:
+        return JudgeResult(verdict="stale", confidence=0.0, reasons=[], available=False)
+    return JudgeResult(
+        verdict=verdict,
+        confidence=float(ev.get("confidence") or 0.0),
+        reasons=list(ev.get("reasons") or []),
+        available=True,
     )
 
 
@@ -461,20 +482,25 @@ def _persist(store: HeadwaterStore, fa: FinalizedAnswer) -> None:
         source_snapshot_id=fa.source_snapshot_id,
     )
 
-    # Persist the judge result as a contract for audit/display.
-    store.upsert_readiness_contract(
-        f"{fa.question_id}:contract:judge_verdict",
-        question_id=fa.question_id,
-        contract_type="judge_verdict",
-        passed=(fa.judge_verdict == "certified"),
-        note=f"{fa.judge_verdict}: {'; '.join(fa.judge_reasons)}"[:500],
-        evidence={
-            "verdict": fa.judge_verdict,
-            "confidence": fa.judge_confidence,
-            "reasons": fa.judge_reasons,
-        },
-        snapshot_id=fa.source_snapshot_id,
-    )
+    # Persist the judge result as a contract for audit/display — but only when we
+    # hold an authoritative verdict (a fresh run, or a rehydrated valid one).
+    # On the fast path with a pending/stale judge, leave the stored verdict alone
+    # so a real prior verdict is never clobbered by "not run / stale".
+    if fa.judged_fingerprint is not None:
+        store.upsert_readiness_contract(
+            f"{fa.question_id}:contract:judge_verdict",
+            question_id=fa.question_id,
+            contract_type="judge_verdict",
+            passed=(fa.judge_verdict == "certified"),
+            note=f"{fa.judge_verdict}: {'; '.join(fa.judge_reasons)}"[:500],
+            evidence={
+                "verdict": fa.judge_verdict,
+                "confidence": fa.judge_confidence,
+                "reasons": fa.judge_reasons,
+                "judged_fingerprint": fa.judged_fingerprint,
+            },
+            snapshot_id=fa.source_snapshot_id,
+        )
 
     certified_at = (
         datetime.now(UTC).isoformat() if fa.state == "certified" else None
@@ -556,10 +582,15 @@ def project_input_fingerprint(store: HeadwaterStore, project_id: str) -> str:
         ),
         key=lambda x: x["id"],
     )
+    # Only *user-facing* resolve items count as inputs.  ``answer_gap`` cards are
+    # derived — finalize opens/closes them as a side effect of judging — so
+    # including them here would feed derived state back into the staleness hash,
+    # making a just-computed judge verdict look stale on the very next load.
     payload["resolve"] = sorted(
         (
             {"id": r["id"], "status": r.get("status")}
             for r in store.list_resolve_items(project_id)
+            if r.get("issue_kind") != "answer_gap"
         ),
         key=lambda x: x["id"],
     )

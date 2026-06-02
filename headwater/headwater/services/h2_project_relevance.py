@@ -17,6 +17,7 @@ from headwater.core.models import (
     TableInfo,
 )
 from headwater.core.store import HeadwaterStore
+from headwater.services.h2_column_kinds import MEASURE_ROLES as _MEASURE_ROLES
 from headwater.services.h2_project_types import (
     _CATEGORY_NAME_HINTS,
     _CATEGORY_ROLES,
@@ -25,7 +26,6 @@ from headwater.services.h2_project_types import (
     _GOAL_SEGMENT_HINTS,
     _GOAL_TIME_HINTS,
     _GOAL_WORKFLOW_HINTS,
-    _MEASURE_ROLES,
     _RESOURCE_HINTS,
     _TEMPORAL_ROLE_PREFIXES,
     _TIME_NAME_HINTS,
@@ -417,6 +417,20 @@ def _build_question_proposals(
         focus_table=focus_table,
         target_metric=target_metric,
     ) or _first_measure_candidate(top_by_table, preferred_table=focus_table)
+    # ``target_metric`` (from the goal / first numeric column) seeded the search,
+    # but the title must name the column we actually measure — otherwise the
+    # question and its SQL diverge.  Derive the label from the chosen measure.
+    metric_label = _metric_label(measure_candidate, target_metric)
+    # When the user explicitly named the metric AND it refers to the column we
+    # chose, keep their richer wording (e.g. a two-word label) over the column's
+    # bare name.  It still names the same measure, so they can't diverge.
+    goal_metric = str(goal.get("target_metric") or "").strip()
+    if (
+        goal_metric
+        and measure_candidate
+        and _label_matches_column(goal_metric, measure_candidate)
+    ):
+        metric_label = goal_metric
     category_candidate = (
         _find_named_column_in_table(
             discovery,
@@ -462,7 +476,7 @@ def _build_question_proposals(
                 project_id,
                 source_name,
                 question_id="when-worst",
-                title=f"How does {target_metric} change over time?",
+                title=f"How does {metric_label} change over time?",
                 answerability="answerable",
                 reason="Temporal columns and a measurable signal are available.",
                 needed_columns=[time_candidate, measure_candidate],
@@ -488,7 +502,7 @@ def _build_question_proposals(
                 project_id,
                 source_name,
                 question_id="which-segment",
-                title=f"Which {category_label} has the highest {target_metric}?",
+                title=f"Which {category_label} has the highest {metric_label}?",
                 answerability=answerability,
                 reason=caveat,
                 needed_columns=[category_candidate, measure_candidate],
@@ -508,7 +522,7 @@ def _build_question_proposals(
                 project_id,
                 source_name,
                 question_id="entity-ranking",
-                title=f"Which {entity_name.replace('_id', '')} has the lowest {target_metric}?",
+                title=f"Which {entity_name.replace('_id', '')} has the lowest {metric_label}?",
                 answerability="answerable",
                 reason="The source includes a stable entity key and a measurable outcome.",
                 needed_columns=[entity_candidate, measure_candidate],
@@ -528,7 +542,7 @@ def _build_question_proposals(
                     project_id,
                     source_name,
                     question_id="week-over-week",
-                    title=f"Has {target_metric} changed week-over-week?",
+                    title=f"Has {metric_label} changed week-over-week?",
                     answerability="answerable",
                     reason="At least two weeks of temporal coverage are present.",
                     needed_columns=(
@@ -550,7 +564,7 @@ def _build_question_proposals(
                     project_id,
                     source_name,
                     question_id="week-over-week",
-                    title=f"Has {target_metric} changed week-over-week?",
+                    title=f"Has {metric_label} changed week-over-week?",
                     answerability="cannot_answer",
                     reason=(
                         "Week-over-week needs at least 14 days of coverage; "
@@ -598,7 +612,7 @@ def _build_question_proposals(
                 project_id,
                 source_name,
                 question_id="workflow-step",
-                title=f"Which workflow step contributes most to {target_metric}?",
+                title=f"Which workflow step contributes most to {metric_label}?",
                 answerability="answerable_with_caveat",
                 reason=(
                     "Workflow-like columns exist, but the frame may still "
@@ -634,6 +648,33 @@ def _build_question_proposals(
         )
 
     return proposals[:4]
+
+
+def _metric_label(measure_candidate: str | None, fallback: str) -> str:
+    """The label a question title uses for its measure.
+
+    It MUST name the column the answer actually aggregates, or the question asks
+    about one thing while the SQL computes another (observed bug: a title saying
+    "hour day of arrival" while the query averaged ``total_duration``).  When no
+    measure column is chosen, fall back to the inferred/goal label.
+    """
+    if not measure_candidate:
+        return fallback
+    _, name = _candidate_parts(measure_candidate)
+    return _friendly_name(name)
+
+
+def _label_matches_column(label: str, measure_candidate: str) -> bool:
+    """True when an explicit metric label shares a word with the measure column.
+
+    Used to decide whether the user's wording names the same thing as the chosen
+    column — if so we keep their wording; if not we fall back to the column's own
+    name so the title never misnames the measure.
+    """
+    _, col = _candidate_parts(measure_candidate)
+    label_tokens = set(re.findall(r"[a-z0-9]+", label.lower()))
+    col_tokens = set(re.findall(r"[a-z0-9]+", col.lower()))
+    return bool(label_tokens & col_tokens)
 
 
 def _cr(col: H2RelevantColumn | str | None) -> str:
@@ -690,9 +731,15 @@ def _persist_question(
             issue_kind="insufficient_coverage",
             title=title,
             body=reason,
-            priority="high" if answerability == "cannot_answer" else "medium",
+            # A coverage/data limitation is informational — the analyst can't fix
+            # it by defining a term, so it never ranks as a high-priority ask.
+            priority="low",
             status="open",
-            payload={"needed_columns": needed, "answerability": answerability},
+            payload={
+                "needed_columns": needed,
+                "answerability": answerability,
+                "category": "limitation",
+            },
         )
     return H2QuestionProposal(
         question_id=full_id,

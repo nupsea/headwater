@@ -14,6 +14,27 @@ runner = CliRunner()
 SAMPLE_DATA = str(Path(__file__).resolve().parents[2] / "data" / "sample")
 
 
+def test_metric_label_follows_measured_column():
+    """A question title must name the column its SQL actually measures.
+
+    Regression for the divergence where a title said "hour day of arrival" while
+    the query averaged ``total_duration`` — the question asked one thing and the
+    answer computed another.
+    """
+    from headwater.services.h2_project_relevance import (
+        _label_matches_column,
+        _metric_label,
+    )
+
+    # The label is derived from the measured column, not a divergent inferred one.
+    assert _metric_label("events.total_duration", "hour day of arrival") == "total duration"
+    # With no measure column, fall back to the inferred/goal label.
+    assert _metric_label(None, "metric") == "metric"
+    # The user's richer wording is kept only when it names the same column.
+    assert _label_matches_column("inspection score", "inspections.score") is True
+    assert _label_matches_column("hour day of arrival", "events.total_duration") is False
+
+
 def test_h2_project_frame_and_relevance_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
     get_settings.cache_clear()

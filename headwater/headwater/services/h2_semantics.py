@@ -36,17 +36,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from headwater.core.store import HeadwaterStore
+from headwater.services.h2_column_kinds import (
+    NUMERIC_DTYPES as _NUMERIC_DTYPES,
+)
+from headwater.services.h2_column_kinds import (
+    TIMESTAMP_DTYPES as _TIMESTAMP_DTYPES,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_TIMESTAMP_DTYPES = frozenset({
-    "timestamp", "date", "datetime", "timestamptz", "timestamp with time zone",
-    "timestamp without time zone",
-})
-_NUMERIC_DTYPES = frozenset({
-    "int", "int8", "int16", "int32", "int64", "integer", "bigint", "smallint",
-    "float", "float32", "float64", "double", "decimal", "numeric", "real",
-})
+# Numeric/timestamp dtype vocab is shared (h2_column_kinds).
 _BOOL_DTYPES = frozenset({"bool", "boolean"})
 
 _ID_SUFFIXES = re.compile(r"(^id$|_id$|_key$|_uuid$|_pk$|_fk$|_ref$)", re.I)

@@ -19,6 +19,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from headwater.core.store import HeadwaterStore
+from headwater.services.h2_column_kinds import (
+    MEASURE_ROLES as _MEASURE_ROLES,
+)
+from headwater.services.h2_column_kinds import (
+    NUMERIC_DTYPES as _NUMERIC_DTYPES,
+)
+from headwater.services.h2_column_kinds import (
+    TIMESTAMP_DTYPES as _TIMESTAMP_DTYPES,
+)
 
 # Question type tags encoded in the question ID suffix
 _TEMPORAL_TAGS = {"when-worst", "temporal", "trend", "over-time"}
@@ -26,18 +35,11 @@ _SEGMENT_TAGS = {"which-segment", "segment", "breakdown", "highest", "lowest"}
 _RANKING_TAGS = {"entity-ranking", "ranking", "best", "worst"}
 _COVERAGE_TAGS = {"coverage", "summary", "overview"}
 
-# Column roles mapped to SQL behaviour
+# Column roles mapped to SQL behaviour.  Dtype/measure-role vocab is shared (one
+# source of truth in h2_column_kinds); the role sets below are answer-specific.
 _TIMESTAMP_ROLES = {"event_ts", "start_ts", "end_ts", "time_anchor", "temporal"}
-_MEASURE_ROLES = {"measure", "duration", "quantity", "metric", "amount"}
 _CATEGORY_ROLES = {"categorical", "code", "flag", "category"}
 _IDENTITY_ROLES = {"identifier", "foreign_key", "entity", "primary_key"}
-
-_NUMERIC_DTYPES = {
-    "int", "int8", "int16", "int32", "int64", "integer",
-    "float", "float32", "float64", "double", "decimal",
-    "numeric", "real", "bigint", "smallint",
-}
-_TIMESTAMP_DTYPES = {"timestamp", "date", "datetime", "timestamptz"}
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
