@@ -86,6 +86,9 @@ export interface H2Project {
   updated_at: string;
   questions?: H2Question[];
   sources?: Array<{ source_name: string; selected_tables: string[] }>;
+  /** Verdict-based counts (the canonical readout source). */
+  certified_count?: number;
+  question_count?: number;
 }
 
 export interface H2Question {

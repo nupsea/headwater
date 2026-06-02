@@ -89,7 +89,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked.
       Files: `ui/.../projects/[id]/page.tsx`, new `components/h2/inputs-panel.tsx`,
       `ui/.../h2/layout.tsx`, `components/h2/stepper.tsx`, `ui/src/lib/h2api.ts`,
       `services/h2_resource.py`. Gate: ruff clean, tsc clean, 294 H2+core tests pass.
-- [ ] **S3. Wire every input → complete refresh.** Audit write paths; each calls
+- [x] **S3. Wire every input → complete refresh.** Audit write paths; each calls
       `notifyInputChanged()`; banner triggers the complete recompute and re-fetches (no full
       page reload). Files: `ui/.../h2/layout.tsx`, stage pages, `h2api.ts`.
 
@@ -153,8 +153,8 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
       `sourceName`, runs the (optionally edited) SQL, and renders a result table (or the error /
       no-rows), with row count + truncation note. Answer page fetches the project's source_name
       for this. tsc clean. File: `answer/page.tsx`.
-- [ ] **S7. Stop redundant auto-runs** (`understand/page.tsx`, `answer/page.tsx`).
-- [ ] **S8. One readout source of truth** (`ui/.../h2/layout.tsx`, `h2api.ts`).
+- [x] **S7. Stop redundant auto-runs** (`understand/page.tsx`, `answer/page.tsx`).
+- [x] **S8. One readout source of truth** (`ui/.../h2/layout.tsx`, `h2api.ts`).
 - [ ] **S-LLM. LLM-assisted discovery enrichment for human verification** (Move D). Net-new
       besides existing descriptions/goal: explicit endpoints + UI to (a) infer table
       **relationships** and (b) identify **business / composite keys**, each with a rationale
@@ -264,3 +264,11 @@ cancelled mid-flight and reads (sed/grep/Read) intermittently duplicated/garbled
 Mitigations that held: `inspect.getsource` for reads, Edit (exact-match) + python byte-count
 assertions for writes, git for state, append-only for this doc. Do not trust raw previews;
 verify with deterministic checks.
+- 2026-06-02 — **S8 done (real bug) + S7 done.** S8: the rail/banner counted
+  `question.status==='certified'`, which finalize never sets — so the readout was stuck at
+  0/0. Now `store.project_verdict_summary` counts certified from persisted `readiness_verdicts`
+  (the one true source); attached to GET /projects + /projects/{id}; `computeProjectReadout`
+  reads it. S7: the Answer page re-ran the full pipeline (materialize+execute) on every mount;
+  added a session `ANSWER_CACHE` so re-navigation reuses the payload (recompute/Redraft/certify
+  refresh it). S3 confirmed already done (no window.location.reload; HW2_RECOMPUTED in place).
+  ruff+tsc+eslint clean; 519 backend tests pass. Remaining: S-LLM, S9, S10.

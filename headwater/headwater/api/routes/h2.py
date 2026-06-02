@@ -387,7 +387,14 @@ def frame_project(req: FrameProjectRequest) -> dict[str, Any]:
 def list_projects() -> list[dict[str, Any]]:
     store = _get_store()
     try:
-        return store.list_projects()
+        projects = store.list_projects()
+        # Attach verdict-based counts so the rail readout reflects real
+        # certification (one source of truth), not question.status.
+        for p in projects:
+            counts = store.project_verdict_summary(p["id"])
+            p["certified_count"] = counts["certified"]
+            p["question_count"] = counts["total"]
+        return projects
     finally:
         store.close()
 
@@ -401,7 +408,14 @@ def get_project(project_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
         questions = store.list_questions(project_id)
         sources = store.get_project_sources(project_id)
-        return {**project, "questions": questions, "sources": sources}
+        counts = store.project_verdict_summary(project_id)
+        return {
+            **project,
+            "questions": questions,
+            "sources": sources,
+            "certified_count": counts["certified"],
+            "question_count": counts["total"],
+        }
     finally:
         store.close()
 

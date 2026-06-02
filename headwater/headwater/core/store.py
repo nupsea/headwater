@@ -597,6 +597,24 @@ class HeadwaterStore:
             item["goal"] = json.loads(item.pop("goal_json") or "{}")
         return items
 
+    def project_verdict_summary(self, project_id: str) -> dict[str, int]:
+        """Certified / total counts from persisted verdicts (the one true source).
+
+        Counts answerable, non-dropped questions as the total and those whose
+        latest readiness verdict is ``certified`` — NOT ``question.status`` (which
+        finalize never flips), so the rail/banner/home all read the real verdict.
+        """
+        total = 0
+        certified = 0
+        for q in self.list_questions(project_id):
+            if q.get("answerability") == "cannot_answer" or q.get("status") == "dropped":
+                continue
+            total += 1
+            verdict = self.get_readiness_verdict(f"{q['id']}:verdict:latest")
+            if verdict and verdict.get("state") == "certified":
+                certified += 1
+        return {"certified": certified, "total": total}
+
     def upsert_project_source(
         self,
         project_id: str,

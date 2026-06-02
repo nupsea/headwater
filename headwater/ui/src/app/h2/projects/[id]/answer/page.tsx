@@ -19,8 +19,15 @@ import {
   HW2_RECOMPUTED,
   type H2AnswerDraft,
   type H2AnswerRow,
+  type H2AnswersResult,
 } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+
+// Session cache of the last answer payload per project, so navigating back to
+// Answer doesn't redundantly re-run the pipeline (materialize + execute). A real
+// input change fires HW2_RECOMPUTED, which refreshes + re-caches; Redraft forces
+// a fresh run; certification re-caches its result.
+const ANSWER_CACHE = new Map<string, H2AnswersResult>();
 
 // ─── State pill ───────────────────────────────────────────────────────────────
 
@@ -1068,8 +1075,7 @@ export default function AnswerPage() {
   const [report, setReport] = useState<string | null>(null);
   const [loadingReport, setLoadingReport] = useState(false);
 
-  const loadDraft = async () => {
-    const result = await h2.projects.answer.draft(id);
+  const apply = (result: H2AnswersResult) => {
     setAnswers(result.answers);
     setCounts({
       certified: result.certified_count,
@@ -1082,6 +1088,12 @@ export default function AnswerPage() {
       (a) => a.state === "pending" || a.state === "doubtful"
     );
     setActiveIdx(attentionIdx >= 0 ? attentionIdx : 0);
+  };
+
+  const loadDraft = async () => {
+    const result = await h2.projects.answer.draft(id);
+    ANSWER_CACHE.set(id, result);
+    apply(result);
   };
 
   const redraft = async () => {
@@ -1097,13 +1109,8 @@ export default function AnswerPage() {
     setCertifying(true);
     try {
       const result = await h2.projects.answer.certify(id);
-      setAnswers(result.answers);
-      setCounts({
-        certified: result.certified_count,
-        doubtful: result.doubtful_count,
-        pending: result.pending_count,
-        cannot_answer: result.cannot_answer_count,
-      });
+      ANSWER_CACHE.set(id, result);
+      apply(result);
     } finally {
       setCertifying(false);
     }
@@ -1128,6 +1135,14 @@ export default function AnswerPage() {
   };
 
   useEffect(() => {
+    // Reuse the cached payload on re-navigation (no redundant pipeline run);
+    // only fetch (which executes) on a cold load. Recompute/Redraft refresh it.
+    const cached = ANSWER_CACHE.get(id);
+    if (cached) {
+      apply(cached);
+      setLoading(false);
+      return;
+    }
     loadDraft()
       .catch(() => {})
       .finally(() => setLoading(false));

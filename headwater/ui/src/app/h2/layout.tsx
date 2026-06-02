@@ -41,12 +41,15 @@ export function useH2Context() {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function computeProjectReadout(project: H2Project) {
-  const questions = project.questions ?? [];
-  const total = questions.length;
+  // Verdict-based counts from the backend are the source of truth; fall back to
+  // question.status only if they aren't present.
+  const total =
+    project.question_count ??
+    (project.questions ?? []).filter((q) => q.answerability !== "cannot_answer").length;
+  const certifiedCount =
+    project.certified_count ??
+    (project.questions ?? []).filter((q) => q.status === "certified").length;
   if (total === 0) return { pct: 0, certifiedCount: 0, total: 0 };
-  const certifiedCount = questions.filter(
-    (q) => q.status === "certified"
-  ).length;
   const pct = Math.round((certifiedCount / total) * 100);
   return { pct, certifiedCount, total };
 }
