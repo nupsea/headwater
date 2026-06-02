@@ -155,6 +155,18 @@ def get_source(source_name: str) -> dict[str, Any]:
         store.close()
 
 
+@router.delete("/sources/{source_name}")
+def delete_source(source_name: str) -> dict[str, Any]:
+    """Remove a source, its catalog, and any project left with no source."""
+    store = _get_store()
+    try:
+        if store.get_source(source_name) is None:
+            raise HTTPException(status_code=404, detail=f"Source '{source_name}' not found.")
+        return store.delete_source(source_name)
+    finally:
+        store.close()
+
+
 @router.get("/sources/{source_name}/browse")
 def browse_source_tables(source_name: str) -> list[dict[str, Any]]:
     """List a source's tables (cheap, no profiling) for subset selection."""

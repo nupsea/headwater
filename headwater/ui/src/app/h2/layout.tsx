@@ -890,20 +890,6 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
             </span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {/* H1 link */}
-            <Link
-              href="/"
-              style={{
-                font: "500 11px 'DM Sans', sans-serif",
-                color: HW2_COLOR.muted,
-                textDecoration: "none",
-                padding: "4px 8px",
-                borderRadius: 6,
-                background: HW2_COLOR.chip,
-              }}
-            >
-              Switch to H1
-            </Link>
             <button
               style={{
                 appearance: "none",

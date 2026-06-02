@@ -276,6 +276,73 @@ class HeadwaterStore:
         row = self.con.execute("SELECT * FROM sources WHERE name = ?", (name,)).fetchone()
         return dict(row) if row else None
 
+    def delete_project(self, project_id: str) -> None:
+        """Delete a project and everything derived from it."""
+        qids = [
+            r[0]
+            for r in self.con.execute(
+                "SELECT id FROM questions WHERE project_id = ?", (project_id,)
+            ).fetchall()
+        ]
+        if qids:
+            marks = ",".join("?" * len(qids))
+            for tbl in ("readiness_contracts", "readiness_verdicts", "answer_artifacts"):
+                self.con.execute(
+                    f"DELETE FROM {tbl} WHERE question_id IN ({marks})", qids
+                )
+        for tbl in (
+            "questions",
+            "semantic_claims",
+            "resolve_items",
+            "pipeline_state",
+            "project_sources",
+        ):
+            self.con.execute(f"DELETE FROM {tbl} WHERE project_id = ?", (project_id,))
+        self.con.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        self.con.commit()
+
+    def delete_source(self, name: str) -> dict[str, Any]:
+        """Delete a source, its catalog, and any project left with no source.
+
+        Cascades: the source's snapshots/tables/columns/profiles/relationships,
+        the source row, and project links to it.  A project that has no remaining
+        source afterward is itself deleted (it can no longer function).
+        """
+        linked = [
+            r[0]
+            for r in self.con.execute(
+                "SELECT project_id FROM project_sources WHERE source_name = ?", (name,)
+            ).fetchall()
+        ]
+        # Resolve dependent projects first (so their rows that reference the
+        # source are gone before we drop it): delete a project left with no other
+        # source; just unlink one that keeps another.
+        orphaned: list[str] = []
+        for pid in linked:
+            other = self.con.execute(
+                "SELECT COUNT(*) FROM project_sources WHERE project_id = ? AND source_name != ?",
+                (pid, name),
+            ).fetchone()[0]
+            if other == 0:
+                self.delete_project(pid)
+                orphaned.append(pid)
+            else:
+                self.con.execute(
+                    "DELETE FROM project_sources WHERE project_id = ? AND source_name = ?",
+                    (pid, name),
+                )
+        # Clear residual references to the source on any surviving project rows.
+        for tbl in ("questions", "semantic_claims"):
+            self.con.execute(
+                f"UPDATE {tbl} SET source_name = NULL WHERE source_name = ?", (name,)
+            )
+        # Drop the catalog (children before parents), then the source row.
+        for tbl in ("profiles", "columns", "tables", "relationships", "source_snapshots"):
+            self.con.execute(f"DELETE FROM {tbl} WHERE source_name = ?", (name,))
+        self.con.execute("DELETE FROM sources WHERE name = ?", (name,))
+        self.con.commit()
+        return {"source": name, "deleted_projects": orphaned}
+
     def record_source_snapshot(
         self,
         source_name: str,

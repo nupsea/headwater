@@ -327,6 +327,25 @@ export default function SourceCatalogPage() {
   const [tables, setTables] = useState<H2CatalogTable[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [removing, setRemoving] = useState(false);
+
+  const removeSource = async () => {
+    if (
+      !window.confirm(
+        `Remove source "${sourceName}"? This deletes its catalog and any project ` +
+          "that uses only this source. This cannot be undone."
+      )
+    )
+      return;
+    setRemoving(true);
+    try {
+      await h2.sources.remove(sourceName);
+      router.push("/h2");
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to remove source");
+      setRemoving(false);
+    }
+  };
 
   useEffect(() => {
     h2.sources
@@ -413,23 +432,45 @@ export default function SourceCatalogPage() {
           </p>
         </div>
 
-        <button
-          onClick={() => router.push("/h2/projects/new")}
-          style={{
-            appearance: "none",
-            cursor: "pointer",
-            background: HW2_COLOR.ink,
-            color: "#fff",
-            border: "1px solid transparent",
-            borderRadius: 10,
-            padding: "10px 18px",
-            font: "600 13px 'DM Sans', sans-serif",
-            fontFamily: "'DM Sans', sans-serif",
-            whiteSpace: "nowrap",
-          }}
-        >
-          + New project
-        </button>
+        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+          <button
+            onClick={removeSource}
+            disabled={removing}
+            title="Remove this source and its catalog from Headwater"
+            style={{
+              appearance: "none",
+              cursor: removing ? "default" : "pointer",
+              background: "#fff",
+              color: HW2_COLOR.bad,
+              border: `1px solid ${HW2_COLOR.bad}55`,
+              borderRadius: 10,
+              padding: "10px 16px",
+              font: "500 13px 'DM Sans', sans-serif",
+              fontFamily: "'DM Sans', sans-serif",
+              whiteSpace: "nowrap",
+              opacity: removing ? 0.6 : 1,
+            }}
+          >
+            {removing ? "Removing…" : "Remove source"}
+          </button>
+          <button
+            onClick={() => router.push("/h2/projects/new")}
+            style={{
+              appearance: "none",
+              cursor: "pointer",
+              background: HW2_COLOR.ink,
+              color: "#fff",
+              border: "1px solid transparent",
+              borderRadius: 10,
+              padding: "10px 18px",
+              font: "600 13px 'DM Sans', sans-serif",
+              fontFamily: "'DM Sans', sans-serif",
+              whiteSpace: "nowrap",
+            }}
+          >
+            + New project
+          </button>
+        </div>
       </div>
 
       {/* Search */}

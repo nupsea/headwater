@@ -19,6 +19,10 @@ async function post<T>(url: string, body?: unknown): Promise<T> {
   });
 }
 
+async function del<T>(url: string): Promise<T> {
+  return fetchJSON<T>(url, { method: "DELETE" });
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface H2Source {
@@ -260,6 +264,9 @@ export const h2 = {
       const qs = params.toString();
       return fetchJSON<H2CatalogTable[]>(`/sources/${name}/catalog${qs ? `?${qs}` : ""}`);
     },
+    // Remove a source, its catalog, and any project left with no source.
+    remove: (name: string) =>
+      del<{ source: string; deleted_projects: string[] }>(`/sources/${name}`),
     // Cheap catalog browse (no profiling) for picking a subset from a big source.
     browse: (name: string) =>
       fetchJSON<H2BrowseTable[]>(`/sources/${name}/browse`),
