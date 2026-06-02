@@ -332,12 +332,19 @@ def _ts_trunc_expr(col: dict[str, Any]) -> str:
 
 def _measure_agg_expr(col: dict[str, Any], caveats: list[str]) -> str:
     c = _q(col["column"])
+    # A confirmed duration derivation turns a text column into numeric minutes.
+    fmt = col.get("derivation_format")
+    if fmt:
+        from headwater.services.h2_duration import to_minutes_sql
+
+        return f"AVG({to_minutes_sql(c, fmt)})"
     if col["dtype"] in _NUMERIC_DTYPES:
         return f"AVG({c})"
-    # varchar measure (e.g. HH:MM duration strings) — flag as needing cast
+    # varchar measure (e.g. HH:MM duration strings) with no confirmed derivation —
+    # flag it (the resolve flow can propose a parse-to-minutes derivation).
     caveats.append(
-        f'"{col["column"]}" is varchar; cast to numeric before aggregating '
-        f"(e.g. EXTRACT(EPOCH FROM CAST({col['column']} AS INTERVAL)) / 60)."
+        f'"{col["column"]}" is text and has no numeric derivation yet; '
+        "define how to convert it (e.g. a duration to minutes) before aggregating."
     )
     return f"AVG(TRY_CAST({c} AS DOUBLE))"
 
@@ -373,6 +380,11 @@ def _resolve_col_info(
     explicit = (explicit_roles or {}).get(col_ref)
     role = explicit or role_info.get("semantic_role") or role_info.get("semantic_type") or ""
     role_class = _classify_role(role, dtype)
+    # A confirmed derivation (e.g. a parsed duration) makes a text column a usable
+    # numeric measure, regardless of its raw dtype.
+    derivation_format = role_info.get("derivation_format")
+    if derivation_format:
+        role_class = "measure"
 
     return {
         "ref": col_ref,
@@ -383,6 +395,7 @@ def _resolve_col_info(
         "dtype": dtype,
         "safe": safe,
         "resource_defined": role_info.get("resource_defined", False),
+        "derivation_format": derivation_format,
     }
 
 
@@ -452,6 +465,18 @@ def _build_col_role_map(
             ),
             "resource_defined": bool(claim.get("claim", {}).get("selected")),
         }
+
+    # Derivation claims (e.g. a confirmed duration parse) record the format so the
+    # SQL builder can convert the text column to a numeric measure.
+    for claim in claims:
+        if claim.get("claim_type") != "derivation":
+            continue
+        table = claim.get("table_name") or ""
+        col = claim.get("column_name") or ""
+        fmt = (claim.get("claim") or {}).get("format")
+        if not table or not col or not fmt:
+            continue
+        role_map.setdefault(f"{table}.{col}".lower(), {})["derivation_format"] = fmt
 
     return role_map
 

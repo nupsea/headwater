@@ -87,6 +87,10 @@ class DefineCardRequest(BaseModel):
     markdown: str
 
 
+class DeriveCardRequest(BaseModel):
+    format_id: str
+
+
 class QueryRequest(BaseModel):
     source_name: str
     sql: str
@@ -483,7 +487,10 @@ def _rebuild_and_format(project_id: str) -> list[dict[str, Any]]:
             if payload.get("table") and payload.get("column")
             else None
         )
-        if key and key in satisfied:
+        # A meaning-definition hides enum/definition cards, but an unusable_measure
+        # card is cleared only by a derivation (tracked via status=resolved), not
+        # by a definition — so don't hide it here.
+        if key and key in satisfied and it["issue_kind"] != "unusable_measure":
             continue
         # "limitation" = a data/coverage gap the analyst can't fix by defining a
         # term (informational); everything else is an actionable input.
@@ -503,6 +510,8 @@ def _rebuild_and_format(project_id: str) -> list[dict[str, Any]]:
                 "category": category,
                 # Concrete code values shown as chips for enum cards.
                 "values": payload.get("values", []),
+                # Duration parse-to-minutes proposal for unusable-measure cards.
+                "derivation": payload.get("derivation"),
                 "why": payload.get("why", []),
                 "affected_questions": payload.get("affected_questions", []),
                 "affected_titles": payload.get("affected_titles", []),
@@ -566,6 +575,22 @@ def define_resolve(
     store = _get_store()
     try:
         return define_card(store, project_id, card_id, req.markdown)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
+@router.post("/projects/{project_id}/resolve/{card_id}/derive")
+def derive_resolve(
+    project_id: str, card_id: str, req: DeriveCardRequest
+) -> dict[str, Any]:
+    """Confirm a parse-to-minutes duration derivation for an unusable-measure card."""
+    from headwater.services.h2_resolve import confirm_duration_derivation
+
+    store = _get_store()
+    try:
+        return confirm_duration_derivation(store, project_id, card_id, req.format_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     finally:

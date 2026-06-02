@@ -105,6 +105,14 @@ export interface H2ResolveCard {
   why?: string[];
   /** Concrete code values (e.g. ["A","H","S","D"]) rendered as chips. */
   values?: string[];
+  /** Proposed parse-to-minutes derivation for an unusable (text) measure. */
+  derivation?: {
+    kind: string;
+    unit: string;
+    detected: { id: string; label: string };
+    options: { id: string; label: string }[];
+    samples: string[];
+  } | null;
   affected_questions: string[];
   affected_titles?: string[];
   contract_impacts: string[];
@@ -321,6 +329,11 @@ export const h2 = {
       suggest: (id: string, cardId: string) =>
         post<{ available: boolean; markdown: string; note: string }>(
           `/projects/${id}/resolve/${encodeURIComponent(cardId)}/suggest`
+        ),
+      derive: (id: string, cardId: string, formatId: string) =>
+        post<{ applied: boolean; format?: string; unit?: string; reason?: string }>(
+          `/projects/${id}/resolve/${encodeURIComponent(cardId)}/derive`,
+          { format_id: formatId }
         ),
     },
 

@@ -183,6 +183,18 @@ function ResolveCardRow({
     }
   };
 
+  // Confirm a one-click duration parse (the chosen unit) for a text measure.
+  const derive = async (formatId: string) => {
+    setBusy(true);
+    try {
+      await h2.projects.resolve.derive(projectId, card.card_id, formatId);
+      notifyInputChanged();
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -296,6 +308,62 @@ function ResolveCardRow({
                   {v}
                 </span>
               ))}
+            </div>
+          )}
+
+          {/* One-click duration parse: a best-guess convert + alternative units.
+              Advisory — the user picks the interpretation; it's applied on click. */}
+          {card.derivation && (
+            <div style={{ marginBottom: 12 }}>
+              {card.derivation.samples.length > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: 6,
+                    marginBottom: 8,
+                  }}
+                >
+                  {card.derivation.samples.slice(0, 4).map((s, i) => (
+                    <span
+                      key={i}
+                      style={{
+                        font: "500 12px 'DM Mono', monospace",
+                        color: HW2_COLOR.ink2,
+                        padding: "3px 9px",
+                        background: HW2_COLOR.chip,
+                        borderRadius: 5,
+                      }}
+                    >
+                      {s}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {card.derivation.options.map((opt, i) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => derive(opt.id)}
+                    disabled={busy}
+                    title={`Parse ${opt.label} to ${card.derivation!.unit}`}
+                    style={{
+                      appearance: "none",
+                      cursor: busy ? "default" : "pointer",
+                      background: i === 0 ? HW2_COLOR.blueSoft : "#fff",
+                      border: `1px solid ${i === 0 ? HW2_COLOR.blue + "44" : HW2_COLOR.rule2}`,
+                      borderRadius: 7,
+                      padding: "7px 13px",
+                      font: `${i === 0 ? "600" : "500"} 12px 'DM Sans', sans-serif`,
+                      color: i === 0 ? HW2_COLOR.blue : HW2_COLOR.ink2,
+                      fontFamily: "'DM Sans', sans-serif",
+                      opacity: busy ? 0.6 : 1,
+                    }}
+                  >
+                    {i === 0 ? "Convert" : "It's"} {opt.label} → {card.derivation!.unit}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 

@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from headwater.core.store import HeadwaterStore
 from headwater.services.h2_column_kinds import is_numeric_dtype, measure_column_ref
+from headwater.services.h2_duration import FORMATS, detect_duration
 from headwater.services.h2_readiness import _columns_with_satisfying_claim
 
 ResolveIssueKind = Literal[
@@ -102,6 +103,16 @@ def build_resolve_cards(
     # Columns the analyst has already defined (locked / filled enum / definition)
     # are no longer surfaced as resolve work — the evidence clears them.
     satisfied_cols = _columns_with_satisfying_claim(claims)
+    # Columns with a confirmed numeric derivation (e.g. a parsed duration). A
+    # meaning-definition does NOT make a text measure aggregatable — only a
+    # derivation does — so unusable-measure cards key off this set, not satisfaction.
+    derived_cols = {
+        f"{c['table_name']}.{c['column_name']}"
+        for c in claims
+        if c.get("claim_type") == "derivation"
+        and c.get("table_name")
+        and c.get("column_name")
+    }
 
     profile_map: dict[str, dict[str, Any]] = {
         f"{p['table_name']}.{p['column_name']}": p["profile"] for p in profiles
@@ -127,7 +138,7 @@ def build_resolve_cards(
     # (e.g. a duration) and can't be aggregated until it's defined/derived.
     cards.extend(
         _unusable_measure_cards(
-            questions, columns, profile_map, project_id, satisfied_cols
+            questions, columns, profile_map, project_id, derived_cols
         )
     )
 
@@ -213,13 +224,15 @@ def _unusable_measure_cards(
     columns: list[dict[str, Any]],
     profile_map: dict[str, dict[str, Any]],
     project_id: str,
-    satisfied_cols: set[str],
+    derived_cols: set[str],
 ) -> list[ResolveCard]:
     """One lean card per text measure that blocks questions, grouped by column.
 
     Surfaces the concrete root cause — "this column is stored as text, so it
     can't be averaged" — instead of a judge's prose about the SQL.  Several
     questions that all need the same unusable measure collapse into one card.
+    Cleared by a confirmed derivation (``derived_cols``), not by a mere
+    definition: a meaning doesn't make text aggregatable.
     """
     dtype_by_key = {
         f"{c['table_name']}.{c['name']}".lower(): (c.get("dtype") or "").lower()
@@ -230,7 +243,7 @@ def _unusable_measure_cards(
         if q.get("answerability") == "cannot_answer":
             continue
         measure = measure_column_ref(q)
-        if not measure or measure in satisfied_cols:
+        if not measure or measure in derived_cols:
             continue
         dtype = dtype_by_key.get(measure.lower())
         # Unknown dtype is left alone; only flag a known non-numeric measure.
@@ -243,13 +256,42 @@ def _unusable_measure_cards(
         table, col = _split(measure)
         label = col.replace("_", " ")
         profile = profile_map.get(measure, {})
-        top_values = profile.get("top_values") or []
-        example = str(top_values[0][0]) if top_values and top_values[0] else ""
-        body = (
-            "Stored as text"
-            + (f' (e.g. "{example}")' if example else "")
-            + ", so it can't be totaled or averaged. Define how to turn it into a "
-            "number."
+        dtype = dtype_by_key.get(measure.lower())
+        # Sample from top values when present, else fall back to min/max (always
+        # populated, even for high-cardinality columns where top_values is null).
+        sample_pool = [str(v[0]) for v in (profile.get("top_values") or []) if v]
+        for k in ("min_value", "max_value"):
+            val = profile.get(k)
+            if val is not None and str(val).strip():
+                sample_pool.append(str(val))
+        example = sample_pool[0] if sample_pool else ""
+        # If it's a duration (a TIME/INTERVAL dtype, or duration-shaped text),
+        # propose a one-click convert-to-minutes (user confirms or picks another).
+        proposal = detect_duration(sample_pool, dtype=dtype)
+        if proposal:
+            body = (
+                f"This is a duration ({proposal.detected.label}); convert it to "
+                f"{proposal.unit} so it can be totaled or averaged"
+                + (" — or pick another interpretation." if proposal.alternatives else ".")
+            )
+        else:
+            body = (
+                "This value can't be totaled or averaged as-is"
+                + (f' (e.g. "{example}")' if example else "")
+                + ". Define how to turn it into a number."
+            )
+        derivation = (
+            {
+                "kind": "duration",
+                "unit": proposal.unit,
+                "detected": {"id": proposal.detected.id, "label": proposal.detected.label},
+                "options": [
+                    {"id": f.id, "label": f.label} for f in proposal.all_formats
+                ],
+                "samples": proposal.samples,
+            }
+            if proposal
+            else None
         )
         n = len(qs)
         cards.append(
@@ -266,6 +308,7 @@ def _unusable_measure_cards(
                     "column": col,
                     "affected_titles": [q.get("title") for q in qs],
                     "category": "input",
+                    "derivation": derivation,
                 },
             )
         )
@@ -555,3 +598,58 @@ def _parse_enum_table(markdown: str) -> dict[str, str]:
             continue
         enum_map[code] = meaning
     return enum_map
+
+
+def confirm_duration_derivation(
+    store: HeadwaterStore,
+    project_id: str,
+    card_id: str,
+    format_id: str,
+) -> dict[str, Any]:
+    """Confirm a parse-to-minutes derivation for an unusable-measure card.
+
+    Writes a locked ``derivation`` semantic claim binding the card's column to a
+    duration format. The claim flows through the recompute fingerprint so the
+    answer generator then aggregates the parsed minutes (see h2_answer), and the
+    column counts as satisfied so the card clears. Advisory: only applied on the
+    user's explicit confirmation of a format.
+    """
+    fmt = FORMATS.get(format_id)
+    if fmt is None:
+        raise ValueError(f"Unknown duration format '{format_id}'.")
+
+    card = next(
+        (r for r in store.list_resolve_items(project_id) if r["id"] == card_id), None
+    )
+    if card is None:
+        raise ValueError(f"Resolve card '{card_id}' not found.")
+    payload = card.get("payload") or {}
+    table = payload.get("table")
+    column = payload.get("column")
+    if not table or not column:
+        return {"applied": False, "reason": "Card has no column to derive."}
+
+    project_sources = store.get_project_sources(project_id)
+    source_name = project_sources[0]["source_name"] if project_sources else None
+
+    store.upsert_semantic_claim(
+        f"{project_id}:derive:{table}.{column}",
+        project_id=project_id,
+        source_name=source_name,
+        scope_type="column",
+        claim_type="derivation",
+        claim={
+            "value": f"{fmt.label} parsed to minutes",
+            "kind": "duration",
+            "format": format_id,
+            "unit": "minutes",
+        },
+        table_name=table,
+        column_name=column,
+        status="locked",
+        confidence=1.0,
+        source="user",
+        locked=True,
+    )
+    store.set_resolve_item_status(card_id, "resolved")
+    return {"applied": True, "format": format_id, "unit": "minutes"}
