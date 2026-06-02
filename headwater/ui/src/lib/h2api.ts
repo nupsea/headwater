@@ -48,6 +48,14 @@ export interface H2CatalogTable {
   columns: H2CatalogColumn[];
 }
 
+/** A table in a source's catalog as seen by the cheap browse listing. */
+export interface H2BrowseTable {
+  table: string;
+  schema: string | null;
+  est_rows: number | null;
+  ingested: boolean;
+}
+
 export interface H2Relationship {
   from_table: string;
   from_column: string;
@@ -252,6 +260,15 @@ export const h2 = {
       const qs = params.toString();
       return fetchJSON<H2CatalogTable[]>(`/sources/${name}/catalog${qs ? `?${qs}` : ""}`);
     },
+    // Cheap catalog browse (no profiling) for picking a subset from a big source.
+    browse: (name: string) =>
+      fetchJSON<H2BrowseTable[]>(`/sources/${name}/browse`),
+    // Ingest only the selected subset (profile embedded / register warehouse).
+    ingest: (name: string, tables: string[]) =>
+      post<{ ingested: string[]; profiled: boolean; snapshot_id: string | null }>(
+        `/sources/${name}/ingest`,
+        { tables }
+      ),
     relationships: (name: string) =>
       fetchJSON<H2Relationship[]>(`/sources/${name}/relationships`),
     updateColumn: (

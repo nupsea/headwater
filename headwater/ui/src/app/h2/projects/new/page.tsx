@@ -3,8 +3,20 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { h2, type H2Source } from "@/lib/h2api";
+import { h2, type H2BrowseTable, type H2Source } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+
+const pickBtn: React.CSSProperties = {
+  appearance: "none",
+  cursor: "pointer",
+  background: "#fff",
+  border: `1px solid ${HW2_COLOR.rule2}`,
+  borderRadius: 7,
+  padding: "5px 10px",
+  font: "500 11.5px 'DM Sans', sans-serif",
+  color: HW2_COLOR.ink2,
+  whiteSpace: "nowrap",
+};
 
 function Field({
   label,
@@ -55,7 +67,8 @@ function Field({
 export default function NewProjectPage() {
   const router = useRouter();
   const [sources, setSources] = useState<H2Source[]>([]);
-  const [tables, setTables] = useState<Array<{ table_name: string; row_count: number; description: string | null }>>([]);
+  const [tables, setTables] = useState<H2BrowseTable[]>([]);
+  const [tableSearch, setTableSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -103,12 +116,18 @@ export default function NewProjectPage() {
       setSelectedTables(new Set());
       return;
     }
+    // Browse the source's catalog (cheap, no profiling) so even a big warehouse
+    // lists without ingesting. Pre-select already-ingested tables; for a fresh
+    // source nothing is pre-selected — the analyst picks the project's subset.
     h2.sources
-      .catalog(sourceName)
-      .then((catalog) => {
-        setTables(catalog);
-        // Pre-select all tables
-        setSelectedTables(new Set(catalog.map((t) => t.table_name)));
+      .browse(sourceName)
+      .then((rows) => {
+        setTables(rows);
+        const ingested = rows.filter((t) => t.ingested).map((t) => t.table);
+        setSelectedTables(
+          new Set(ingested.length ? ingested : rows.length <= 12 ? rows.map((t) => t.table) : [])
+        );
+        setShowTablePicker(rows.length > 12 && ingested.length === 0);
       })
       .catch(() => setTables([]));
   }, [sourceName]);
@@ -120,6 +139,24 @@ export default function NewProjectPage() {
       return next;
     });
   };
+
+  const tableQuery = tableSearch.trim().toLowerCase();
+  const filteredTables = tableQuery
+    ? tables.filter(
+        (t) =>
+          t.table.toLowerCase().includes(tableQuery) ||
+          (t.schema ?? "").toLowerCase().includes(tableQuery)
+      )
+    : tables;
+  const selectFiltered = (on: boolean) =>
+    setSelectedTables((prev) => {
+      const next = new Set(prev);
+      for (const t of filteredTables) {
+        if (on) next.add(t.table);
+        else next.delete(t.table);
+      }
+      return next;
+    });
 
   const ready =
     goal.trim().length >= 6 &&
@@ -133,6 +170,11 @@ export default function NewProjectPage() {
     setError(null);
     try {
       const pid = projectId.trim();
+      // Ingest ONLY the selected subset first (profiles embedded tables / registers
+      // warehouse schema), so the project pulls just what it needs.
+      if (selectedTables.size > 0) {
+        await h2.sources.ingest(sourceName, [...selectedTables]);
+      }
       await h2.projects.frame({
         project_id: pid,
         source_name: sourceName,
@@ -474,8 +516,8 @@ export default function NewProjectPage() {
                   color: HW2_COLOR.muted,
                 }}
               >
-                Data scope · {selectedTables.size} table
-                {selectedTables.size !== 1 ? "s" : ""} selected
+                Data scope · {selectedTables.size} of {tables.length} table
+                {tables.length !== 1 ? "s" : ""} selected
               </label>
               <button
                 type="button"
@@ -491,13 +533,13 @@ export default function NewProjectPage() {
                   fontFamily: "'DM Sans', sans-serif",
                 }}
               >
-                {showTablePicker ? "Hide" : "Edit table picks"}
+                {showTablePicker ? "Hide" : "Choose tables"}
               </button>
             </div>
 
             {!showTablePicker ? (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {[...selectedTables].map((tname) => (
+                {[...selectedTables].slice(0, 30).map((tname) => (
                   <span
                     key={tname}
                     style={{
@@ -511,6 +553,16 @@ export default function NewProjectPage() {
                     {tname}
                   </span>
                 ))}
+                {selectedTables.size > 30 && (
+                  <span style={{ font: "500 12px 'DM Sans', sans-serif", color: HW2_COLOR.muted }}>
+                    +{selectedTables.size - 30} more
+                  </span>
+                )}
+                {selectedTables.size === 0 && (
+                  <span style={{ font: "400 12.5px 'DM Sans', sans-serif", color: HW2_COLOR.warn }}>
+                    No tables selected — choose the ones this project needs.
+                  </span>
+                )}
               </div>
             ) : (
               <div
@@ -523,72 +575,130 @@ export default function NewProjectPage() {
               >
                 <div
                   style={{
-                    padding: "8px 14px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "8px 12px",
                     background: HW2_COLOR.paper,
                     borderBottom: `1px solid ${HW2_COLOR.rule}`,
-                    font: "400 11px 'DM Sans', sans-serif",
-                    color: HW2_COLOR.muted,
                   }}
                 >
-                  Pick the tables in scope. Profiles are reused — picking
-                  doesn&rsquo;t re-scan.
+                  <input
+                    value={tableSearch}
+                    onChange={(e) => setTableSearch(e.target.value)}
+                    placeholder={`Search ${tables.length} tables…`}
+                    style={{
+                      flex: 1,
+                      padding: "6px 10px",
+                      border: `1px solid ${HW2_COLOR.rule2}`,
+                      borderRadius: 7,
+                      font: "500 12.5px 'DM Sans', sans-serif",
+                      color: HW2_COLOR.ink,
+                      outline: "none",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => selectFiltered(true)}
+                    style={pickBtn}
+                  >
+                    Select{tableQuery ? " shown" : " all"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectFiltered(false)}
+                    style={pickBtn}
+                  >
+                    Clear{tableQuery ? " shown" : ""}
+                  </button>
                 </div>
-                <div
-                  style={{ maxHeight: 320, overflowY: "auto", padding: "8px 6px" }}
-                >
-                  {tables.map((t) => {
-                    const sel = selectedTables.has(t.table_name);
-                    return (
-                      <label
-                        key={t.table_name}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 10,
-                          padding: "6px 12px",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={sel}
-                          onChange={() => toggleTable(t.table_name)}
-                          style={{ accentColor: HW2_COLOR.blue }}
-                        />
-                        <span
+                <div style={{ maxHeight: 340, overflowY: "auto", padding: "6px 4px" }}>
+                  {filteredTables.length === 0 ? (
+                    <div style={{ padding: "14px", font: "400 12.5px 'DM Sans', sans-serif", color: HW2_COLOR.faint }}>
+                      No tables match &ldquo;{tableSearch}&rdquo;.
+                    </div>
+                  ) : (
+                    filteredTables.slice(0, 300).map((t) => {
+                      const sel = selectedTables.has(t.table);
+                      return (
+                        <label
+                          key={t.table}
                           style={{
-                            font: "500 12px 'DM Mono', monospace",
-                            color: HW2_COLOR.ink2,
-                            minWidth: 160,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            padding: "5px 12px",
+                            cursor: "pointer",
+                            background: sel ? HW2_COLOR.blueSoft : "transparent",
+                            borderRadius: 6,
                           }}
                         >
-                          {t.table_name}
-                        </span>
-                        <span
-                          style={{
-                            flex: 1,
-                            font: "400 12px 'DM Sans', sans-serif",
-                            color: HW2_COLOR.muted,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {t.description ?? ""}
-                        </span>
-                        <span
-                          style={{
-                            font: "400 11px 'DM Mono', monospace",
-                            color: HW2_COLOR.faint,
-                          }}
-                        >
-                          {t.row_count >= 1000
-                            ? `${(t.row_count / 1000).toFixed(1)}k`
-                            : t.row_count}
-                        </span>
-                      </label>
-                    );
-                  })}
+                          <input
+                            type="checkbox"
+                            checked={sel}
+                            onChange={() => toggleTable(t.table)}
+                            style={{ accentColor: HW2_COLOR.blue }}
+                          />
+                          {t.schema && (
+                            <span
+                              style={{
+                                font: "400 11px 'DM Mono', monospace",
+                                color: HW2_COLOR.faint,
+                              }}
+                            >
+                              {t.schema}.
+                            </span>
+                          )}
+                          <span
+                            style={{
+                              flex: 1,
+                              font: "500 12px 'DM Mono', monospace",
+                              color: HW2_COLOR.ink2,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {t.table}
+                          </span>
+                          {t.ingested && (
+                            <span
+                              style={{
+                                font: "600 9px 'DM Sans', sans-serif",
+                                letterSpacing: "0.06em",
+                                textTransform: "uppercase",
+                                color: HW2_COLOR.good,
+                                background: HW2_COLOR.goodSoft,
+                                padding: "1px 6px",
+                                borderRadius: 3,
+                              }}
+                            >
+                              Ingested
+                            </span>
+                          )}
+                          {t.est_rows != null && (
+                            <span
+                              style={{
+                                font: "400 11px 'DM Mono', monospace",
+                                color: HW2_COLOR.faint,
+                                minWidth: 44,
+                                textAlign: "right",
+                              }}
+                            >
+                              {t.est_rows >= 1000
+                                ? `${(t.est_rows / 1000).toFixed(1)}k`
+                                : t.est_rows}
+                            </span>
+                          )}
+                        </label>
+                      );
+                    })
+                  )}
+                  {filteredTables.length > 300 && (
+                    <div style={{ padding: "8px 12px", font: "400 11px 'DM Sans', sans-serif", color: HW2_COLOR.faint }}>
+                      Showing first 300 — refine your search to narrow further.
+                    </div>
+                  )}
                 </div>
               </div>
             )}

@@ -91,6 +91,10 @@ class DeriveCardRequest(BaseModel):
     format_id: str
 
 
+class IngestTablesRequest(BaseModel):
+    tables: list[str]
+
+
 class QueryRequest(BaseModel):
     source_name: str
     sql: str
@@ -147,6 +151,36 @@ def get_source(source_name: str) -> dict[str, Any]:
         tables = store.get_tables(source_name)
         snapshot = store.get_latest_source_snapshot(source_name)
         return {**src, "tables": tables, "latest_snapshot": snapshot}
+    finally:
+        store.close()
+
+
+@router.get("/sources/{source_name}/browse")
+def browse_source_tables(source_name: str) -> list[dict[str, Any]]:
+    """List a source's tables (cheap, no profiling) for subset selection."""
+    from headwater.services.h2_source import list_source_tables
+
+    store = _get_store()
+    try:
+        return list_source_tables(store, source_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
+@router.post("/sources/{source_name}/ingest")
+def ingest_source_tables(
+    source_name: str, req: IngestTablesRequest
+) -> dict[str, Any]:
+    """Ingest ONLY the selected subset of a source's tables (profile / register)."""
+    from headwater.services.h2_source import ingest_tables
+
+    store = _get_store()
+    try:
+        return ingest_tables(store, source_name, req.tables)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     finally:
         store.close()
 
