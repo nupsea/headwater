@@ -260,3 +260,135 @@ def suggest_resolution(
         "markdown": markdown,
         "note": "Draft from a local model — review and edit before saving.",
     }
+
+
+# ── Relationship + key inference (Move D — advisory, human-verified) ───────────
+
+
+def _valid_columns(store: HeadwaterStore, source_name: str) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for t in store.get_tables(source_name):
+        out[t["name"]] = {c["name"] for c in store.get_columns(source_name, t["name"])}
+    return out
+
+
+def suggest_relationships(
+    store: HeadwaterStore,
+    source_name: str,
+    *,
+    settings: HeadwaterSettings | None = None,
+    provider: LLMProvider | None = None,
+) -> dict[str, Any]:
+    """Propose foreign-key-style relationships between tables (advisory).
+
+    I-3-safe: only table/column names + dtypes are sent.  Heuristic detection
+    stays the base layer; this augments it with a rationale for human verify/lock.
+    Degrades to ``available=False`` with no model.
+    """
+    if store.get_source(source_name) is None:
+        raise ValueError(f"Source '{source_name}' not found.")
+    brief = _schema_brief(store, source_name)
+    prov, _ = _provider(settings, provider)
+    if isinstance(prov, NoLLMProvider) or len(brief) < 2:
+        return {
+            "available": False,
+            "relationships": [],
+            "note": "No model available — start Ollama.",
+        }
+
+    system = (
+        "You are a data modeler. Given only table and column names with types, "
+        "infer likely foreign-key relationships between tables (a column in one "
+        "table referencing a key in another). Only use columns that exist. "
+        "Respond as JSON only."
+    )
+    prompt = (
+        "SCHEMA (names and types only):\n"
+        f"{json.dumps(brief, indent=2, default=str)}\n\n"
+        'Return JSON: {"relationships": [{"from_table": "...", "from_column": "...", '
+        '"to_table": "...", "to_column": "...", "rationale": "<short why>", '
+        '"confidence": <0..1>}]}'
+    )
+    raw = _invoke(prov, prompt, system)
+    valid = _valid_columns(store, source_name)
+    out = []
+    for r in raw.get("relationships") or []:
+        ft, fc = str(r.get("from_table") or ""), str(r.get("from_column") or "")
+        tt, tc = str(r.get("to_table") or ""), str(r.get("to_column") or "")
+        if fc in valid.get(ft, set()) and tc in valid.get(tt, set()) and ft != tt:
+            out.append(
+                {
+                    "from_table": ft,
+                    "from_column": fc,
+                    "to_table": tt,
+                    "to_column": tc,
+                    "rationale": str(r.get("rationale") or "").strip(),
+                    "confidence": round(float(r.get("confidence") or 0.0), 2),
+                }
+            )
+    return {"available": True, "relationships": out}
+
+
+def suggest_keys(
+    store: HeadwaterStore,
+    source_name: str,
+    *,
+    settings: HeadwaterSettings | None = None,
+    provider: LLMProvider | None = None,
+) -> dict[str, Any]:
+    """Propose the business / composite key column(s) per table (advisory).
+
+    Adds per-column uniqueness (an I-3-safe stat) so the model can reason about
+    which columns identify a row.  Degrades when no model is available.
+    """
+    if store.get_source(source_name) is None:
+        raise ValueError(f"Source '{source_name}' not found.")
+    profiles = {
+        f"{p['table_name']}.{p['column_name']}": p["profile"]
+        for p in store.get_profiles(source_name)
+    }
+    brief = []
+    for t in store.get_tables(source_name):
+        cols = []
+        for c in store.get_columns(source_name, t["name"]):
+            prof = profiles.get(f"{t['name']}.{c['name']}", {})
+            cols.append(
+                {
+                    "name": c["name"],
+                    "dtype": c.get("dtype"),
+                    "uniqueness": prof.get("uniqueness_ratio"),
+                }
+            )
+        brief.append({"table": t["name"], "columns": cols})
+
+    prov, _ = _provider(settings, provider)
+    if isinstance(prov, NoLLMProvider) or not brief:
+        return {"available": False, "keys": [], "note": "No model available — start Ollama."}
+
+    system = (
+        "You are a data modeler. For each table, identify the column(s) that form "
+        "its primary / business key (uniquely identify a row). Prefer columns with "
+        "uniqueness near 1.0. Only use columns that exist. Respond as JSON only."
+    )
+    prompt = (
+        "SCHEMA (names, types, uniqueness 0..1):\n"
+        f"{json.dumps(brief, indent=2, default=str)}\n\n"
+        'Return JSON: {"keys": [{"table": "...", "columns": ["..."], '
+        '"rationale": "<short why>", "confidence": <0..1>}]}'
+    )
+    raw = _invoke(prov, prompt, system)
+    valid = _valid_columns(store, source_name)
+    out = []
+    for k in raw.get("keys") or []:
+        table = str(k.get("table") or "")
+        cols = [str(c) for c in (k.get("columns") or []) if str(c) in valid.get(table, set())]
+        if table and cols:
+            out.append(
+                {
+                    "table": table,
+                    "columns": cols,
+                    "rationale": str(k.get("rationale") or "").strip(),
+                    "confidence": round(float(k.get("confidence") or 0.0), 2),
+                }
+            )
+    return {"available": True, "keys": out}

@@ -13,6 +13,7 @@ import {
 } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
 import { SchemaEditor } from "@/components/h2/schema-editor";
+import { AiSuggestions } from "@/components/h2/ai-suggestions";
 
 // ─── Primitives ──────────────────────────────────────────────────────────────
 
@@ -859,8 +860,9 @@ export default function UnderstandPage() {
             </span>
           </button>
           {showSchema && (
-            <div style={{ marginTop: 12 }}>
+            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
               <SchemaEditor sourceName={sourceName} projectId={id} />
+              <AiSuggestions sourceName={sourceName} />
             </div>
           )}
         </div>

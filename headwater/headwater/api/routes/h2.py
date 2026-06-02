@@ -95,6 +95,19 @@ class IngestTablesRequest(BaseModel):
     tables: list[str]
 
 
+class ConfirmRelationshipRequest(BaseModel):
+    from_table: str
+    from_column: str
+    to_table: str
+    to_column: str
+    confidence: float = 1.0
+
+
+class ConfirmKeyRequest(BaseModel):
+    table: str
+    columns: list[str]
+
+
 class QueryRequest(BaseModel):
     source_name: str
     sql: str
@@ -286,6 +299,78 @@ def get_relationships(source_name: str) -> list[dict[str, Any]]:
         }
         for r in rels
     ]
+
+
+@router.post("/sources/{source_name}/suggest-relationships")
+def suggest_relationships(source_name: str) -> dict[str, Any]:
+    """LLM-propose table relationships for human verify/lock (metadata only)."""
+    from headwater.services.h2_enrich import suggest_relationships as _suggest
+
+    store = _get_store()
+    try:
+        return _suggest(store, source_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
+@router.post("/sources/{source_name}/suggest-keys")
+def suggest_keys(source_name: str) -> dict[str, Any]:
+    """LLM-propose business/composite keys per table for human verify/lock."""
+    from headwater.services.h2_enrich import suggest_keys as _suggest
+
+    store = _get_store()
+    try:
+        return _suggest(store, source_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
+@router.post("/sources/{source_name}/relationships")
+def confirm_relationship(
+    source_name: str, req: ConfirmRelationshipRequest
+) -> dict[str, Any]:
+    """Persist a user-confirmed relationship (ground truth for the data model)."""
+    store = _get_store()
+    try:
+        if store.get_source(source_name) is None:
+            raise HTTPException(status_code=404, detail=f"Source '{source_name}' not found.")
+        store.insert_relationship(
+            source_name,
+            req.from_table,
+            req.from_column,
+            req.to_table,
+            req.to_column,
+            "foreign_key",
+            req.confidence,
+            1.0,  # user-confirmed → full referential integrity
+        )
+        return {"confirmed": True}
+    finally:
+        store.close()
+
+
+@router.post("/sources/{source_name}/keys")
+def confirm_key(source_name: str, req: ConfirmKeyRequest) -> dict[str, Any]:
+    """Lock the confirmed key column(s) as identifiers (flips the fingerprint)."""
+    from headwater.services.h2_catalog import update_column
+
+    store = _get_store()
+    try:
+        if store.get_source(source_name) is None:
+            raise HTTPException(status_code=404, detail=f"Source '{source_name}' not found.")
+        for col in req.columns:
+            update_column(
+                store, source_name, req.table, col, semantic_type="identifier", lock=True
+            )
+        return {"locked": req.columns}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
 
 
 @router.patch("/sources/{source_name}/catalog/{table_name}/{column_name}")

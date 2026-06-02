@@ -52,6 +52,22 @@ export interface H2CatalogTable {
   columns: H2CatalogColumn[];
 }
 
+/** LLM-proposed relationship / key (advisory, for human verify + lock). */
+export interface H2RelProposal {
+  from_table: string;
+  from_column: string;
+  to_table: string;
+  to_column: string;
+  rationale: string;
+  confidence: number;
+}
+export interface H2KeyProposal {
+  table: string;
+  columns: string[];
+  rationale: string;
+  confidence: number;
+}
+
 /** A table in a source's catalog as seen by the cheap browse listing. */
 export interface H2BrowseTable {
   table: string;
@@ -281,6 +297,25 @@ export const h2 = {
       ),
     relationships: (name: string) =>
       fetchJSON<H2Relationship[]>(`/sources/${name}/relationships`),
+    // Move D — LLM proposes relationships/keys for human verify + lock.
+    suggestRelationships: (name: string) =>
+      post<{ available: boolean; note?: string; relationships: H2RelProposal[] }>(
+        `/sources/${name}/suggest-relationships`
+      ),
+    suggestKeys: (name: string) =>
+      post<{ available: boolean; note?: string; keys: H2KeyProposal[] }>(
+        `/sources/${name}/suggest-keys`
+      ),
+    confirmRelationship: (name: string, rel: H2RelProposal) =>
+      post<{ confirmed: boolean }>(`/sources/${name}/relationships`, {
+        from_table: rel.from_table,
+        from_column: rel.from_column,
+        to_table: rel.to_table,
+        to_column: rel.to_column,
+        confidence: rel.confidence,
+      }),
+    confirmKey: (name: string, table: string, columns: string[]) =>
+      post<{ locked: string[] }>(`/sources/${name}/keys`, { table, columns }),
     updateColumn: (
       sourceName: string,
       tableName: string,

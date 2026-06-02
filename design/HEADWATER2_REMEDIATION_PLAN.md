@@ -155,7 +155,7 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
       for this. tsc clean. File: `answer/page.tsx`.
 - [x] **S7. Stop redundant auto-runs** (`understand/page.tsx`, `answer/page.tsx`).
 - [x] **S8. One readout source of truth** (`ui/.../h2/layout.tsx`, `h2api.ts`).
-- [ ] **S-LLM. LLM-assisted discovery enrichment for human verification** (Move D). Net-new
+- [x] **S-LLM. LLM-assisted discovery enrichment for human verification** (Move D). Net-new
       besides existing descriptions/goal: explicit endpoints + UI to (a) infer table
       **relationships** and (b) identify **business / composite keys**, each with a rationale
       and confidence, rendered in the schema / data-model surfaces with confirm/edit/lock;
@@ -272,3 +272,14 @@ verify with deterministic checks.
   added a session `ANSWER_CACHE` so re-navigation reuses the payload (recompute/Redraft/certify
   refresh it). S3 confirmed already done (no window.location.reload; HW2_RECOMPUTED in place).
   ruff+tsc+eslint clean; 519 backend tests pass. Remaining: S-LLM, S9, S10.
+- 2026-06-03 — **S-LLM done (Move D).** LLM relationship + business/composite-key inference,
+  advisory + human-verified + I-3-safe + degrade-gracefully. Backend: `h2_enrich.
+  suggest_relationships` / `suggest_keys` (names/dtypes/uniqueness only; proposals validated
+  against real columns), endpoints `POST /sources/{name}/{suggest-relationships,suggest-keys,
+  relationships,keys}` (confirm persists a relationship / locks key columns as identifiers →
+  flips the fingerprint → fast loop re-runs on verified ground truth). UI: `components/h2/
+  ai-suggestions.tsx` (✦ Suggest relationships / keys, proposals with rationale + confidence +
+  Confirm/Lock) mounted in Understand → Schema & meaning. Existing generate-descriptions/goal
+  already verify/lock via the schema editor. 4 inference tests (stub provider). 523 backend
+  tests pass; ruff/tsc/eslint clean; UI build clean. Remaining: S9 (naked-data walkthrough),
+  S10 (gate: pyright).
