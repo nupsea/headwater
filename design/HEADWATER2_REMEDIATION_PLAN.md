@@ -1,4 +1,4 @@
-# Headwater 2 — Remediation Plan (live)
+# Headwater 2 — Remediation Plan (COMPLETE 2026-06-03 — all S1–S10 done)
 
 Status: **Living — update at the start and end of every step.** Companion to
 `HEADWATER2_BUILD_STATE.md` (the diagnosis this fixes) and `HEADWATER2_VISION.md` (the north
@@ -137,7 +137,7 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
       file-read channel stalled and the bracketed resolve path has corrupted under blind edits
       before — finish when reads are reliable. Remaining edit is UI-only in `resolve/page.tsx`.
       [original spec below]
-- [ ] **S-AI-Resolve (user-requested 2026-05-31). "Ask AI" on a Resolve card.** Add an
+- [x] **S-AI-Resolve (user-requested 2026-05-31). "Ask AI" on a Resolve card.** Add an
       "✦ Ask AI" button in the resolve card's add-context area that asks the local LLM to DRAFT
       the resolution (e.g. for `enum_mapping_needed` on `cases.patient_type`, propose meanings
       for the known codes A/H/S/D as a `code | meaning` markdown table) and prefills the
