@@ -146,7 +146,7 @@ def finalize_project_answers(
     snapshot_id = readiness.source_snapshot_id
 
     # 3. Execute every answerable draft once against a freshly materialized source.
-    exec_items = [
+    exec_items: list[tuple[str, str | None]] = [
         (d.question_id, d.sql_text)
         for d in drafts.answers
         if d.state != "cannot_answer" and d.sql_text
@@ -492,7 +492,7 @@ def _persist(store: HeadwaterStore, fa: FinalizedAnswer) -> None:
         question_id=fa.question_id,
         state=fa.state,
         readiness_pct=fa.readiness_pct,
-        trust_bucket=_trust_bucket(fa.state, fa.readiness_pct),
+        trust_bucket=_trust_bucket(fa.state, fa.readiness_pct),  # type: ignore[arg-type]
         summary=_verdict_summary(fa),
         source_snapshot_id=fa.source_snapshot_id,
     )
@@ -595,7 +595,7 @@ def project_input_fingerprint(store: HeadwaterStore, project_id: str) -> str:
             }
             for c in store.list_semantic_claims(project_id)
         ),
-        key=lambda x: x["id"],
+        key=lambda x: str(x["id"]),
     )
     # Only *user-facing* resolve items count as inputs.  ``answer_gap`` cards are
     # derived — finalize opens/closes them as a side effect of judging — so
@@ -607,7 +607,7 @@ def project_input_fingerprint(store: HeadwaterStore, project_id: str) -> str:
             for r in store.list_resolve_items(project_id)
             if r.get("issue_kind") != "answer_gap"
         ),
-        key=lambda x: x["id"],
+        key=lambda x: str(x["id"]),
     )
 
     blob = json.dumps(payload, sort_keys=True, default=str)

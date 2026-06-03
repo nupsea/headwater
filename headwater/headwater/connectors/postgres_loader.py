@@ -93,6 +93,8 @@ class PostgresConnector:
     def connect(self, config: SourceConfig) -> None:
         """Open a psycopg2 connection; raises HeadwaterConnectionError on failure."""
         _require_psycopg2()
+        import psycopg2  # bound here (the guard above ensured it's importable)
+
         if config.uri is None:
             raise ConnectorError("PostgresConnector requires a URI (config.uri)")
         self._dsn = config.uri
@@ -221,7 +223,7 @@ class PostgresConnector:
         with self._conn.cursor() as cur:  # type: ignore[union-attr]
             cur.execute(sql)
             row = cur.fetchone()
-            col_names = [desc[0] for desc in cur.description]
+            col_names = [desc[0] for desc in (cur.description or [])]
 
         if row is None:
             return {}

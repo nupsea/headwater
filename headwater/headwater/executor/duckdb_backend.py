@@ -23,7 +23,9 @@ class DuckDBBackend:
         """Execute arbitrary SQL and return result as a Polars DataFrame."""
         result = self._con.execute(sql)
         arrow = result.to_arrow_table()
-        return pl.from_arrow(arrow)
+        df = pl.from_arrow(arrow)
+        assert isinstance(df, pl.DataFrame)
+        return df
 
     def execute_sql(self, sql: str) -> None:
         """Execute SQL without returning results."""
@@ -72,7 +74,8 @@ class DuckDBBackend:
             table_ref = model.sql[idx_table:idx_as].strip()
             try:
                 result = self._con.execute(f"SELECT COUNT(*) FROM {table_ref}")
-                return result.fetchone()[0]
+                row = result.fetchone()
+                return row[0] if row else None
             except Exception:
                 return None
         return None
@@ -89,6 +92,7 @@ class DuckDBBackend:
                 "WHERE table_schema = ? AND table_name = ?",
                 [schema, table],
             )
-            return result.fetchone()[0] > 0
+            row = result.fetchone()
+            return bool(row and row[0] > 0)
         except Exception:
             return False

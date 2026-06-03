@@ -41,6 +41,7 @@ def profile_table(
 
     arrow_table = con.execute(query).to_arrow_table()
     df = pl.from_arrow(arrow_table)
+    assert isinstance(df, pl.DataFrame)
 
     profiles: list[ColumnProfile] = []
     for col_info in table.columns:

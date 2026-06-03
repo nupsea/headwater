@@ -70,7 +70,9 @@ def extract_schema(con: duckdb.DuckDBPyConnection, schema: str) -> list[TableInf
     tables: list[TableInfo] = []
     for (table_name,) in table_rows:
         # Row count
-        row_count = con.execute(f'SELECT COUNT(*) FROM "{schema}"."{table_name}"').fetchone()[0]
+        row_count = (
+            con.execute(f'SELECT COUNT(*) FROM "{schema}"."{table_name}"').fetchone() or (0,)
+        )[0]
 
         # Columns
         col_rows = con.execute(

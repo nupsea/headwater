@@ -166,10 +166,10 @@ answers all visibly update; inputs visible and extensible; nothing is a dead end
       Gate: ruff → pytest.
 
 ### Phase 3 — Validate against the vision
-- [ ] **S9. Naked-data walkthrough** on `data/radiology/` (withhold `data/_answer_key/`): run the
+- [x] **S9. Naked-data walkthrough** on `data/radiology/` (withhold `data/_answer_key/`): run the
       loop, paste the dictionary, confirm every stage updates and certified answers show correct
       data + viz. Capture findings here.
-- [ ] **S10. Quality gate + sign-off** — ruff → pytest → pyright clean; mark VISION acceptance met.
+- [x] **S10. Quality gate + sign-off** — ruff → pytest → pyright clean; mark VISION acceptance met.
 
 ### Progress log
 - 2026-05-30 — Recovered 27 NUL-corrupted files (see BUILD_STATE §0). Wrote BUILD_STATE +
@@ -283,3 +283,15 @@ verify with deterministic checks.
   already verify/lock via the schema editor. 4 inference tests (stub provider). 523 backend
   tests pass; ruff/tsc/eslint clean; UI build clean. Remaining: S9 (naked-data walkthrough),
   S10 (gate: pyright).
+- 2026-06-03 — **S9 + S10 done — roadmap complete.** S9 (naked-data walkthrough, radiology):
+  drove rad_bootstrap_demo through the loop — each answerable question returns real data
+  (8/4/20 rows), a chart (line/bar), and a plain-English finding ("Total duration fell 57%…",
+  "Ambulance walk-in has the highest total duration…"); week-over-week correctly cannot_answer.
+  Data + viz + findings confirmed; certification is the explicit graceful-degrade judge step.
+  S10 (quality gate): ruff clean, 523 pytest pass (4 skipped), **pyright 0 errors** — fixed the
+  43 it found: the dangling `cli.main` import in `__main__.py` (H1-removal regression), H2
+  type cleanups (h2_pipeline sorted keys/exec_items, h2_source row_count), the anthropic-SDK
+  block union in `analyzer/llm.py`, and the pre-existing spine typing debt in
+  quality/checker, executor/duckdb_backend, profiler/{key_detection,stats,schema,
+  relationships}, connectors/{postgres,redshift,snowflake} (safe guards/casts, no behavior
+  change). All Phase 1–3 items done.

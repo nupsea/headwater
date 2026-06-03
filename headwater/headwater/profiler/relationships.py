@@ -55,7 +55,7 @@ def detect_relationships(
                 from_column=fk_col,
                 to_table=pk_table,
                 to_column=pk_col,
-                type=rel_type,
+                type=rel_type,  # type: ignore[arg-type]
                 confidence=round(confidence, 2),
                 referential_integrity=round(integrity, 4),
                 source="inferred_name" if integrity < 1.0 else "inferred_value",

@@ -359,8 +359,8 @@ def detect_composite_keys(
         if not isinstance(stats, dict):
             continue
 
-        distinct = _get_stat(stats, "distinct_count", 0)
-        null_count = _get_stat(stats, "null_count", 0)
+        distinct = _get_stat(stats, "distinct_count", 0) or 0
+        null_count = _get_stat(stats, "null_count", 0) or 0
         null_rate = null_count / row_count if row_count else 0
         uniqueness = distinct / row_count if row_count else 0
 

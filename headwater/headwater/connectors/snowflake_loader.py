@@ -39,7 +39,7 @@ class SnowflakeConnector:
         parts = _parse_snowflake_uri(config.uri)
         self._database = parts.get("database")
         self._schema = parts.get("schema")
-        kwargs = {
+        kwargs: dict[str, object] = {
             key: value
             for key, value in parts.items()
             if key

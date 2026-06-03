@@ -75,7 +75,7 @@ def _check_not_null(
 ) -> ContractCheckResult:
     """Check that a column has no null values."""
     sql = f'SELECT COUNT(*) FROM {rule.model_name} WHERE "{rule.column_name}" IS NULL'
-    null_count = con.execute(sql).fetchone()[0]
+    null_count = (con.execute(sql).fetchone() or (0,))[0]
     return ContractCheckResult(
         rule_id=rule.id or "",
         model_name=rule.model_name,
@@ -120,7 +120,7 @@ def _check_unique(
 ) -> ContractCheckResult:
     """Check that a column has all unique values."""
     sql = f'SELECT COUNT(*) - COUNT(DISTINCT "{rule.column_name}") FROM {rule.model_name}'
-    duplicate_count = con.execute(sql).fetchone()[0]
+    duplicate_count = (con.execute(sql).fetchone() or (0,))[0]
     return ContractCheckResult(
         rule_id=rule.id or "",
         model_name=rule.model_name,
@@ -138,7 +138,7 @@ def _check_range(
 ) -> ContractCheckResult:
     """Check that all values fall within the expected range."""
     sql = f"SELECT COUNT(*) FROM {rule.model_name} WHERE NOT ({rule.expression})"
-    out_of_range = con.execute(sql).fetchone()[0]
+    out_of_range = (con.execute(sql).fetchone() or (0,))[0]
     return ContractCheckResult(
         rule_id=rule.id or "",
         model_name=rule.model_name,
@@ -159,7 +159,7 @@ def _check_cardinality(
         f"SELECT COUNT(*) FROM {rule.model_name} "
         f'WHERE "{rule.column_name}" IS NOT NULL AND NOT ({rule.expression})'
     )
-    unexpected = con.execute(sql).fetchone()[0]
+    unexpected = (con.execute(sql).fetchone() or (0,))[0]
     return ContractCheckResult(
         rule_id=rule.id or "",
         model_name=rule.model_name,
@@ -177,7 +177,7 @@ def _check_row_count(
 ) -> ContractCheckResult:
     """Check that the table has at least the expected row count."""
     sql = f"SELECT COUNT(*) FROM {rule.model_name}"
-    row_count = con.execute(sql).fetchone()[0]
+    row_count = (con.execute(sql).fetchone() or (0,))[0]
     passed = _evaluate_count_expression(rule.expression, row_count)
     return ContractCheckResult(
         rule_id=rule.id or "",
@@ -242,7 +242,7 @@ def _check_generic(
 ) -> ContractCheckResult:
     """Fallback: evaluate the expression as a WHERE clause."""
     sql = f"SELECT COUNT(*) FROM {rule.model_name} WHERE NOT ({rule.expression})"
-    violations = con.execute(sql).fetchone()[0]
+    violations = (con.execute(sql).fetchone() or (0,))[0]
     return ContractCheckResult(
         rule_id=rule.id or "",
         model_name=rule.model_name,

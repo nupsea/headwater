@@ -156,7 +156,8 @@ class AnthropicProvider(LLMProvider):
                 system=_system,
                 messages=[{"role": "user", "content": prompt}],
             )
-            response_text = msg.content[0].text
+            # content[0] is a union of block types; only TextBlock has .text.
+            response_text = getattr(msg.content[0], "text", "") if msg.content else ""
             tokens_in = msg.usage.input_tokens
             tokens_out = msg.usage.output_tokens
             self._token_budget.record(tokens_in + tokens_out)

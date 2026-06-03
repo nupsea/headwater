@@ -438,6 +438,7 @@ class RedshiftConnector:
 
     def _cursor(self):
         self._assert_connected()
+        assert self._conn is not None
         return self._conn.cursor()
 
     def _execute(self, sql: str) -> None:

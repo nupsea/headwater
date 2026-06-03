@@ -334,7 +334,7 @@ def ingest_tables(
                         config.name,
                         name,
                         schema_name=_schema_of(name),
-                        row_count=est,
+                        row_count=int(est) if est is not None else 0,
                         description=None,
                         domain=None,
                         selected=True,
