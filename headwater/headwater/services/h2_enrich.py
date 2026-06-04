@@ -210,10 +210,13 @@ def suggest_resolution(
     issue_kind = card.get("issue_kind", "")
     table = payload.get("table")
     column = payload.get("column")
-    top_values = payload.get("top_values") or []
+    # The enum card stores its codes under "values" (shown as chips); accept the
+    # older "top_values" too. Without this the codes were lost and the model fell
+    # back to a generic template instead of mapping the actual codes.
+    raw_codes = payload.get("values") or payload.get("top_values") or []
     codes = [
         str(v[0]) if isinstance(v, (list, tuple)) else str(v)
-        for v in top_values
+        for v in raw_codes
         if v not in (None, "")
     ][:12]
 

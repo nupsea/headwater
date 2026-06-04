@@ -355,3 +355,61 @@ class TestJoinSafetyGuard:
         rel_confidence = {("t1", "t2"): 0.99}
         caveats = _check_join_safety(col_info, rel_confidence)
         assert not caveats, "High-confidence join must not produce caveat"
+
+
+class TestCrossTableJoinSQL:
+    """The builder JOINs a measure in one table to a dimension in a related one."""
+
+    def _cols(self):
+        return [
+            {"table": "patients", "column": "patient_type", "role_class": "category",
+             "dtype": "varchar", "safe": True, "role": "categorical",
+             "resource_defined": False, "derivation_format": None},
+            {"table": "visits", "column": "wait_minutes", "role_class": "measure",
+             "dtype": "integer", "safe": True, "role": "measure",
+             "resource_defined": False, "derivation_format": None},
+        ]
+
+    def test_segment_across_related_tables_emits_join(self):
+        from headwater.services.h2_answer import _build_sql_and_chart
+
+        rel_join = {
+            frozenset({"visits", "patients"}): {
+                "from_table": "visits", "from_column": "patient_id",
+                "to_table": "patients", "to_column": "id", "confidence": 0.95,
+            }
+        }
+        sql, chart = _build_sql_and_chart("segment", self._cols(), "src", [], rel_join)
+        assert sql is not None
+        assert "JOIN" in sql
+        assert '"visits"."patient_id" = "patients"."id"' in sql
+        assert '"patients"."patient_type"' in sql
+        assert "AVG(" in sql and '"visits"."wait_minutes"' in sql
+        assert chart["type"] == "bar"
+
+    def test_low_confidence_relationship_does_not_join(self):
+        from headwater.services.h2_answer import _build_sql_and_chart
+
+        rel_join = {
+            frozenset({"visits", "patients"}): {
+                "from_table": "visits", "from_column": "patient_id",
+                "to_table": "patients", "to_column": "id", "confidence": 0.40,
+            }
+        }
+        sql, _ = _build_sql_and_chart("segment", self._cols(), "src", [], rel_join)
+        # Falls back to single-table (no confident join key) rather than a bad join.
+        assert sql is not None and "JOIN" not in sql
+
+    def test_same_table_segment_has_no_join(self):
+        from headwater.services.h2_answer import _build_sql_and_chart
+
+        cols = [
+            {"table": "visits", "column": "dept", "role_class": "category",
+             "dtype": "varchar", "safe": True, "role": "categorical",
+             "resource_defined": False, "derivation_format": None},
+            {"table": "visits", "column": "wait_minutes", "role_class": "measure",
+             "dtype": "integer", "safe": True, "role": "measure",
+             "resource_defined": False, "derivation_format": None},
+        ]
+        sql, _ = _build_sql_and_chart("segment", cols, "src", [], {})
+        assert sql is not None and "JOIN" not in sql

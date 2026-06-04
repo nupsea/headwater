@@ -148,3 +148,39 @@ def test_define_card_without_a_column_is_not_bound(store):
     result = define_card(store, "p1", "p1:gap:q1", "some context")
     assert result["bound"] is False
     assert store.list_semantic_claims("p1") == []
+
+
+def test_list_definitions_returns_saved_editable_context(store):
+    card_id = _seed_enum_card(store)
+    define_card(
+        store, "p1", card_id,
+        "| code | meaning |\n| --- | --- |\n| A | Adult |\n| H | Home |",
+    )
+
+    from headwater.services.h2_resolve import list_definitions
+
+    defs = list_definitions(store, "p1")
+    assert len(defs) == 1
+    d = defs[0]
+    assert (d["table"], d["column"]) == ("events", "patient_type")
+    assert d["claim_type"] == "enum_mapping"
+    assert d["values"] == ["A", "H"]
+    assert "| A | Adult |" in d["text"]  # original markdown, for editing
+
+
+def test_bind_definition_edits_in_place_without_a_live_card(store):
+    """Saved context is editable later even after the card is gone."""
+    from headwater.services.h2_resolve import bind_definition, list_definitions
+
+    # First save (no resolve card needs to exist).
+    bind_definition(store, "p1", "events", "patient_type",
+                    "| code | meaning |\n| --- | --- |\n| A | Adult |")
+    # Edit: revise the meaning.
+    bind_definition(store, "p1", "events", "patient_type",
+                    "| code | meaning |\n| --- | --- |\n| A | Ambulatory |")
+
+    defs = list_definitions(store, "p1")
+    assert len(defs) == 1, "editing must not create a duplicate"
+    claim = next(c for c in store.list_semantic_claims("p1") if c["column_name"] == "patient_type")
+    assert claim["claim"]["value"] == {"A": "Ambulatory"}
+    assert claim["locked"]

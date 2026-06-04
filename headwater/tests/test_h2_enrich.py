@@ -109,3 +109,58 @@ def test_update_column_dtype_persists(monkeypatch, tmp_path):
             store.close()
     finally:
         get_settings.cache_clear()
+
+
+class _RecordingProvider:
+    """Captures the last prompt and returns a per-code mapping when codes appear."""
+
+    def __init__(self) -> None:
+        self.last_prompt = ""
+
+    async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
+        self.last_prompt = prompt
+        return {"markdown": "| code | meaning |\n| --- | --- |\n| A | Adult |"}
+
+
+def test_resolve_suggestion_feeds_enum_codes_to_model(monkeypatch, tmp_path):
+    """Regression: the enum card stores codes under payload['values'].
+
+    The suggester must read that key so the model maps the actual codes — not
+    fall back to the generic '| column | meaning |' template (the bug where
+    A/H/S/D were lost and the draft hallucinated).
+    """
+    from headwater.services.h2_enrich import suggest_resolution
+
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        store.upsert_source("src", "csv")
+        store.upsert_project("p", slug="p", display_name="P")
+        store.upsert_resolve_item(
+            "p:enum:cases.patient_type",
+            project_id="p",
+            issue_kind="enum_mapping_needed",
+            title="Define the patient_type codes",
+            body="4 codes with no defined meaning.",
+            priority="high",
+            status="open",
+            payload={
+                "table": "cases",
+                "column": "patient_type",
+                "values": ["A", "H", "S", "D"],
+                "category": "input",
+            },
+        )
+        prov = _RecordingProvider()
+        out = suggest_resolution(store, "p", "p:enum:cases.patient_type", provider=prov)
+        assert out["available"] is True
+        # The enum branch ran: the prompt names the column and the actual codes.
+        assert "KNOWN CODES: A, H, S, D" in prov.last_prompt
+        assert "patient_type" in prov.last_prompt
+        # Not the generic fallback prompt.
+        assert "<column>" not in prov.last_prompt
+        store.close()
+    finally:
+        get_settings.cache_clear()

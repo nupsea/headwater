@@ -534,6 +534,17 @@ def _build_question_proposals(
             )
         )
 
+    cross = _cross_table_question(
+        store,
+        project_id,
+        source_name,
+        top_by_table,
+        source_snapshot_id,
+        existing=[set(p.needed_columns) for p in proposals],
+    )
+    if cross is not None:
+        proposals.append(cross)
+
     if coverage_days is not None:
         if coverage_days >= 14 and time_candidate:
             proposals.append(
@@ -647,7 +658,80 @@ def _build_question_proposals(
             )
         )
 
-    return proposals[:4]
+    return proposals[:5]
+
+
+def _table_measure(
+    top_by_table: dict[str, list[H2RelevantColumn]], table: str
+) -> str | None:
+    """A measure column strictly within ``table`` (no cross-table fallback)."""
+    for column in top_by_table.get(table, []):
+        role = (column.semantic_role or "").lower()
+        name = column.column_name.lower()
+        if role in _MEASURE_ROLES and not any(h in name for h in _GEOGRAPHIC_HINTS):
+            return f"{column.table_name}.{column.column_name}"
+    return None
+
+
+def _cross_table_question(
+    store: HeadwaterStore,
+    project_id: str,
+    source_name: str,
+    top_by_table: dict[str, list[H2RelevantColumn]],
+    snapshot_id: str | None,
+    *,
+    existing: list[set[str]] | None = None,
+) -> H2QuestionProposal | None:
+    """Propose a JOIN-based question when two related tables let us segment a
+    measure in one by a dimension in the other.
+
+    Entirely relationship- and role-driven — no dataset-specific assumptions: it
+    only fires when a detected relationship (confidence >= 0.80) links a table
+    holding a measure to a table holding a categorical dimension.  The answer
+    builder emits the JOIN from the same relationship.  Skips a pair that another
+    proposal already covers (so it never duplicates an existing question).
+    """
+    existing = existing or []
+    relationships = sorted(
+        store.get_relationships(source_name),
+        key=lambda r: float(r.get("confidence") or 0.0),
+        reverse=True,
+    )
+    for rel in relationships:
+        conf = float(rel.get("confidence") or 0.0)
+        if conf < 0.80:
+            continue
+        ta, tb = rel.get("from_table"), rel.get("to_table")
+        if not ta or not tb or ta == tb:
+            continue
+        # A measure in one table, a dimension in the other (try both directions).
+        for measure_tbl, dim_tbl in ((ta, tb), (tb, ta)):
+            measure = _table_measure(top_by_table, measure_tbl)
+            dim = _first_column_in_table(top_by_table, dim_tbl, _CATEGORY_ROLES)
+            if not measure or dim is None:
+                continue
+            if {_cr(dim), measure} in existing:
+                continue  # another question already covers this exact pair
+            measure_label = _friendly_name(_candidate_parts(measure)[1])
+            dim_label = _friendly_name(dim.column_name)
+            return _persist_question(
+                store,
+                project_id,
+                source_name,
+                question_id="cross-segment",
+                title=f"How does {measure_label} vary by {dim_label}?",
+                answerability="answerable",
+                reason=(
+                    f"'{measure_tbl}' and '{dim_tbl}' are linked by a "
+                    f"{int(conf * 100)}%-confidence relationship, so the measure "
+                    "can be segmented across the related dimension via a join."
+                ),
+                needed_columns=[_cr(dim), measure],
+                confidence=round(min(0.8, conf), 2),
+                snapshot_id=snapshot_id,
+                col_roles={_cr(dim): "categorical", _cr(measure): "measure"},
+            )
+    return None
 
 
 def _metric_label(measure_candidate: str | None, fallback: str) -> str:

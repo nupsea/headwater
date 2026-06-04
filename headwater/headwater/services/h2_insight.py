@@ -12,13 +12,39 @@ small helper.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
+
+# Column-name hints that a category axis is really a time axis (→ line chart).
+_TEMPORAL_HINT = re.compile(
+    r"period|date|_at\b|time|month|year|week|day|quarter|hour", re.IGNORECASE
+)
 
 # Below this relative change a trend is "held steady" rather than rose/fell.
 _FLAT_PCT = 0.05
 # Only call out a top-vs-bottom ratio when it's material.
 _MIN_RATIO = 1.2
+
+# A question's wording tells us which end of the ranking is the answer. "Which
+# segment has the lowest wait?" should surface the lowest, not the highest.
+# Only unambiguous directional words — "worst"/"best" depend on whether high is
+# good or bad for the measure, so we don't guess from them.
+_LOW_INTENT = re.compile(
+    r"\b(lowest|least|smallest|fewest|shortest|minimum|min|bottom)\b",
+    re.IGNORECASE,
+)
+_HIGH_INTENT = re.compile(
+    r"\b(highest|most|largest|greatest|longest|maximum|max|top)\b",
+    re.IGNORECASE,
+)
+
+
+def _ranking_intent(title: str | None) -> str:
+    """Return 'low' or 'high' (default) for the end of the ranking the question asks for."""
+    if title and _LOW_INTENT.search(title) and not _HIGH_INTENT.search(title):
+        return "low"
+    return "high"
 
 
 @dataclass(frozen=True)
@@ -64,6 +90,26 @@ def _label(col: str, value: Any, value_labels: dict[str, dict[str, str]]) -> str
     return mapping.get(str(value)) or str(value)
 
 
+def infer_chart_spec(
+    columns: list[str], rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Pick a chart for an arbitrary result (e.g. a promoted console query).
+
+    First numeric column is the measure (y); first non-numeric column is the
+    category/time axis (x).  A time-like x name → line, else bar.  Falls back to
+    a plain table when there's nothing sensible to plot.
+    """
+    if not columns or not rows:
+        return {"type": "table"}
+    sample = rows[:20]
+    numeric = [c for c in columns if any(_num(r.get(c)) is not None for r in sample)]
+    non_numeric = [c for c in columns if c not in numeric]
+    if not numeric or not non_numeric:
+        return {"type": "table"}
+    x, y = non_numeric[0], numeric[0]
+    return {"type": "line" if _TEMPORAL_HINT.search(x) else "bar", "x": x, "y": y}
+
+
 def summarize_answer(
     *,
     chart_spec: dict[str, Any] | None,
@@ -71,8 +117,14 @@ def summarize_answer(
     rows: list[dict[str, Any]],
     value_labels: dict[str, dict[str, str]] | None = None,
     unit: str | None = None,
+    title: str | None = None,
 ) -> Finding | None:
-    """Return a one-line finding for an executed answer, or None if not derivable."""
+    """Return a one-line finding for an executed answer, or None if not derivable.
+
+    ``title`` orients ranking findings: a question that asks for the *lowest*
+    surfaces the lowest segment, not the highest — the finding must answer the
+    question that was actually asked.
+    """
     if not rows:
         return None
     spec = chart_spec or {}
@@ -82,7 +134,7 @@ def summarize_answer(
     suffix = f" {unit}" if unit else ""
 
     if ctype == "bar" and x and y:
-        return _segment_finding(rows, x, y, labels, suffix)
+        return _segment_finding(rows, x, y, labels, suffix, _ranking_intent(title))
     if ctype == "line" and x and y:
         return _temporal_finding(rows, x, y, suffix)
     return _coverage_finding(rows, columns)
@@ -94,6 +146,7 @@ def _segment_finding(
     y: str,
     labels: dict[str, dict[str, str]],
     suffix: str,
+    intent: str = "high",
 ) -> Finding | None:
     pairs = [
         (_label(x, r.get(x), labels), _num(r.get(y)))
@@ -104,19 +157,34 @@ def _segment_finding(
     if not pairs:
         return None
     pairs.sort(key=lambda p: p[1], reverse=True)
-    top_label, top_val = pairs[0]
     name = _measure_name(y)
-    headline = f"{top_label} has the highest {name}: {_fmt(top_val)}{suffix}."
+    high_label, high_val = pairs[0]
+    low_label, low_val = pairs[-1]
+
+    if intent == "low":
+        # The question asked for the lowest — lead with it.
+        headline = f"{low_label} has the lowest {name}: {_fmt(low_val)}{suffix}."
+        support = ""
+        if len(pairs) > 1:
+            if low_val > 0 and high_val / low_val >= _MIN_RATIO:
+                support = (
+                    f"Highest is {high_label} ({_fmt(high_val)}{suffix}), "
+                    f"{high_val / low_val:.1f}x higher."
+                )
+            else:
+                support = f"Highest is {high_label} ({_fmt(high_val)}{suffix})."
+        return Finding(headline=headline, support=support)
+
+    headline = f"{high_label} has the highest {name}: {_fmt(high_val)}{suffix}."
     support = ""
     if len(pairs) > 1:
-        bot_label, bot_val = pairs[-1]
-        if bot_val > 0 and top_val / bot_val >= _MIN_RATIO:
+        if low_val > 0 and high_val / low_val >= _MIN_RATIO:
             support = (
-                f"{top_val / bot_val:.1f}x the lowest, {bot_label} "
-                f"({_fmt(bot_val)}{suffix})."
+                f"{high_val / low_val:.1f}x the lowest, {low_label} "
+                f"({_fmt(low_val)}{suffix})."
             )
         else:
-            support = f"Lowest is {bot_label} ({_fmt(bot_val)}{suffix})."
+            support = f"Lowest is {low_label} ({_fmt(low_val)}{suffix})."
     return Finding(headline=headline, support=support)
 
 

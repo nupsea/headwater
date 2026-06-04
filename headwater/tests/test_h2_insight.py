@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from headwater.services.h2_insight import summarize_answer
+from headwater.services.h2_insight import infer_chart_spec, summarize_answer
 
 
 def test_segment_finding_states_top_and_ratio():
@@ -15,6 +15,47 @@ def test_segment_finding_states_top_and_ratio():
     assert "B has the highest wait" in f.headline
     assert "48" in f.headline
     assert "lowest" in f.support and "A" in f.support
+
+
+def test_segment_finding_respects_lowest_intent():
+    # The question asks for the lowest — the finding must lead with the lowest,
+    # not the highest bar.
+    f = summarize_answer(
+        title="Patient type with the lowest duration",
+        chart_spec={"type": "bar", "x": "patient_type", "y": "total_duration"},
+        columns=["patient_type", "total_duration"],
+        rows=[
+            {"patient_type": "Stable", "total_duration": 3.9},
+            {"patient_type": "Admitted", "total_duration": 8.8},
+        ],
+    )
+    assert f is not None
+    assert "Stable has the lowest" in f.headline and "3.9" in f.headline
+    assert "Highest is Admitted" in f.support
+
+
+def test_segment_finding_default_is_highest():
+    f = summarize_answer(
+        title="Which patient type has the highest duration?",
+        chart_spec={"type": "bar", "x": "patient_type", "y": "total_duration"},
+        columns=["patient_type", "total_duration"],
+        rows=[
+            {"patient_type": "Stable", "total_duration": 3.9},
+            {"patient_type": "Admitted", "total_duration": 8.8},
+        ],
+    )
+    assert f is not None and "Admitted has the highest" in f.headline
+
+
+def test_mixed_intent_falls_back_to_highest():
+    # "highest" and "lowest" both present → don't guess; keep default.
+    f = summarize_answer(
+        title="Spread between highest and lowest duration",
+        chart_spec={"type": "bar", "x": "seg", "y": "dur"},
+        columns=["seg", "dur"],
+        rows=[{"seg": "A", "dur": 1}, {"seg": "B", "dur": 9}],
+    )
+    assert f is not None and "B has the highest" in f.headline
 
 
 def test_segment_finding_uses_value_labels():
@@ -66,6 +107,28 @@ def test_coverage_finding_reports_record_count():
     )
     assert f is not None and "3,193 records" in f.headline
     assert "2023-01-01" in f.support
+
+
+def test_infer_chart_spec_bar_for_category_measure():
+    spec = infer_chart_spec(
+        ["modality", "exam_count"],
+        [{"modality": "CT", "exam_count": 90}, {"modality": "MR", "exam_count": 40}],
+    )
+    assert spec == {"type": "bar", "x": "modality", "y": "exam_count"}
+
+
+def test_infer_chart_spec_line_for_temporal_axis():
+    spec = infer_chart_spec(
+        ["exam_month", "exam_count"],
+        [{"exam_month": "2023-01", "exam_count": 12}],
+    )
+    assert spec["type"] == "line" and spec["x"] == "exam_month"
+
+
+def test_infer_chart_spec_table_when_unplottable():
+    assert infer_chart_spec(["only_text"], [{"only_text": "x"}]) == {"type": "table"}
+    assert infer_chart_spec([], []) == {"type": "table"}
+    assert infer_chart_spec(["a", "b"], [{"a": 1, "b": 2}]) == {"type": "table"}
 
 
 def test_no_finding_without_numeric_data():

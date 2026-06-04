@@ -115,3 +115,58 @@ def test_h2_project_frame_and_relevance_end_to_end(monkeypatch, tmp_path):
             store.close()
     finally:
         get_settings.cache_clear()
+
+
+def test_cross_table_question_is_proposed_from_relationship(tmp_path):
+    """A confident relationship between a measure table and a dimension table
+    yields a JOIN-based question — driven by the relationship, not the dataset."""
+    from headwater.services.h2_project_relevance import _cross_table_question
+    from headwater.services.h2_project_types import H2RelevantColumn
+
+    store = HeadwaterStore(tmp_path / "h2_metadata.db")
+    store.init()
+    try:
+        store.upsert_source("src", "json")
+        store.upsert_project("proj", slug="proj", display_name="Proj")
+        store.insert_relationship(
+            "src", "visits", "patient_id", "patients", "id",
+            "many_to_one", 0.95, 1.0,
+        )
+        top_by_table = {
+            "patients": [
+                H2RelevantColumn("patients", "patient_type", "categorical", 9.0, ""),
+            ],
+            "visits": [
+                H2RelevantColumn("visits", "wait_minutes", "measure", 8.0, ""),
+            ],
+        }
+        proposal = _cross_table_question(store, "proj", "src", top_by_table, None)
+        assert proposal is not None
+        q = store.get_question(proposal.question_id)["question"]
+        assert set(q["needed_columns"]) == {"patients.patient_type", "visits.wait_minutes"}
+        assert q["col_roles"]["patients.patient_type"] == "categorical"
+        assert q["col_roles"]["visits.wait_minutes"] == "measure"
+    finally:
+        store.close()
+
+
+def test_no_cross_table_question_without_confident_relationship(tmp_path):
+    """A weak/absent relationship must not fabricate a join question."""
+    from headwater.services.h2_project_relevance import _cross_table_question
+    from headwater.services.h2_project_types import H2RelevantColumn
+
+    store = HeadwaterStore(tmp_path / "h2_metadata.db")
+    store.init()
+    try:
+        store.upsert_source("src", "json")
+        store.insert_relationship(
+            "src", "visits", "patient_id", "patients", "id",
+            "many_to_one", 0.40, 0.5,  # below the 0.80 join threshold
+        )
+        top_by_table = {
+            "patients": [H2RelevantColumn("patients", "patient_type", "categorical", 9.0, "")],
+            "visits": [H2RelevantColumn("visits", "wait_minutes", "measure", 8.0, "")],
+        }
+        assert _cross_table_question(store, "proj", "src", top_by_table, None) is None
+    finally:
+        store.close()

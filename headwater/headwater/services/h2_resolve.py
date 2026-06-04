@@ -576,11 +576,31 @@ def define_card(
     if not table or not column:
         return {"bound": False, "reason": "Card has no column to bind."}
 
+    result = bind_definition(store, project_id, table, column, text)
+    store.set_resolve_item_status(card_id, "resolved")
+    return {"bound": True, **result}
+
+
+def bind_definition(
+    store: HeadwaterStore,
+    project_id: str,
+    table: str,
+    column: str,
+    markdown: str,
+) -> dict[str, Any]:
+    """Write (or update) a column's human definition as a locked semantic claim.
+
+    Keyed by ``{project}:define:{table}.{column}`` so re-saving edits the same
+    claim — the saved context persists and is editable later, never lost. The
+    analyst's original markdown is kept in ``claim['text']`` for rehydration.
+    """
+    text = (markdown or "").strip()
+    if not text:
+        raise ValueError("No definition text provided.")
+
     enum_map = _parse_enum_table(text)
     if enum_map:
         claim_type = "enum_mapping"
-        # Keep the analyst's original markdown alongside the parsed map so the
-        # Resolve card can rehydrate the exact text on a later visit.
         claim = {"value": enum_map, "text": text}
     else:
         claim_type = "definition"
@@ -603,8 +623,49 @@ def define_card(
         source="user",
         locked=True,
     )
-    store.set_resolve_item_status(card_id, "resolved")
-    return {"bound": True, "claim_type": claim_type, "table": table, "column": column}
+    return {"claim_type": claim_type, "table": table, "column": column}
+
+
+def list_definitions(
+    store: HeadwaterStore, project_id: str
+) -> list[dict[str, Any]]:
+    """Return the analyst's saved column definitions, newest-first, deduplicated.
+
+    These are the locked claims written by :func:`bind_definition` — saved
+    context the Resolve screen shows collapsed and lets the analyst edit later.
+    Only claims carrying the original ``text`` (human-authored) are returned.
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for c in store.list_semantic_claims(project_id):
+        if c.get("claim_type") not in ("enum_mapping", "definition"):
+            continue
+        claim = c.get("claim") or {}
+        text = claim.get("text")
+        table, column = c.get("table_name"), c.get("column_name")
+        if not text or not table or not column:
+            continue
+        key = f"{table}.{column}"
+        if key in seen:
+            continue  # newest wins (claims are newest-first)
+        seen.add(key)
+        value = claim.get("value")
+        codes = sorted(value.keys()) if isinstance(value, dict) else []
+        out.append(
+            {
+                "table": table,
+                "column": column,
+                "claim_type": c.get("claim_type"),
+                "text": text,
+                "values": codes,
+                "title": (
+                    f"{column} codes"
+                    if c.get("claim_type") == "enum_mapping"
+                    else f"{column} definition"
+                ),
+            }
+        )
+    return out
 
 
 def _parse_enum_table(markdown: str) -> dict[str, str]:

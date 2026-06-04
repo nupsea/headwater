@@ -31,7 +31,7 @@ from headwater.services.h2_column_kinds import (
 
 # Question type tags encoded in the question ID suffix
 _TEMPORAL_TAGS = {"when-worst", "temporal", "trend", "over-time"}
-_SEGMENT_TAGS = {"which-segment", "segment", "breakdown", "highest", "lowest"}
+_SEGMENT_TAGS = {"which-segment", "segment", "breakdown", "highest", "lowest", "cross-segment"}
 _RANKING_TAGS = {"entity-ranking", "ranking", "best", "worst"}
 _COVERAGE_TAGS = {"coverage", "summary", "overview"}
 
@@ -101,6 +101,7 @@ def draft_project_answers(
 
     col_role_map = _build_col_role_map(claims, store, source_name)
     rel_confidence = _build_rel_confidence_map(relationships)
+    rel_join = _build_rel_join_map(relationships)
 
     result = ProjectAnswers(project_id=project_id)
 
@@ -113,6 +114,7 @@ def draft_project_answers(
             verdict=verdict,
             col_role_map=col_role_map,
             rel_confidence=rel_confidence,
+            rel_join=rel_join,
             source_name=source_name,
             snapshot_id=snapshot_id,
         )
@@ -138,6 +140,7 @@ def _draft_answer(
     rel_confidence: dict[tuple[str, str], float],
     source_name: str,
     snapshot_id: str | None,
+    rel_join: dict[frozenset[str], dict[str, Any]] | None = None,
 ) -> AnswerDraft:
     qid = question["id"]
     title = question.get("title", qid)
@@ -161,6 +164,21 @@ def _draft_answer(
     readiness_pct = int(verdict["readiness_pct"]) if verdict else 0
     confidence = round(readiness_pct / 100.0, 2)
 
+    # A promoted console query carries its own SQL — use it verbatim (the analyst
+    # wrote it); the chart is inferred from the result at finalize time.
+    user_sql = q_payload.get("user_sql")
+    if user_sql:
+        return AnswerDraft(
+            question_id=qid,
+            question_title=title,
+            state=state,
+            sql_text=str(user_sql),
+            chart_spec={},
+            confidence=confidence,
+            caveats=[],
+            source_snapshot_id=snapshot_id,
+        )
+
     question_type = _detect_question_type(qid, title)
     caveats: list[str] = []
 
@@ -177,7 +195,9 @@ def _draft_answer(
     join_caveats = _check_join_safety(col_info, rel_confidence)
     caveats.extend(join_caveats)
 
-    sql, chart_spec = _build_sql_and_chart(question_type, col_info, source_name, caveats)
+    sql, chart_spec = _build_sql_and_chart(
+        question_type, col_info, source_name, caveats, rel_join or {}
+    )
 
     return AnswerDraft(
         question_id=qid,
@@ -198,7 +218,9 @@ def _build_sql_and_chart(
     col_info: list[dict[str, Any]],
     source_name: str,
     caveats: list[str],
+    rel_join: dict[frozenset[str], dict[str, Any]] | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
+    rel_join = rel_join or {}
     ts_cols = [c for c in col_info if c["role_class"] == "timestamp"]
     measure_cols = [c for c in col_info if c["role_class"] == "measure"]
     cat_cols = [c for c in col_info if c["role_class"] == "category"]
@@ -218,7 +240,18 @@ def _build_sql_and_chart(
     group_col = cat_cols[0] if cat_cols else (id_cols[0] if id_cols else None)
     if question_type in ("segment", "ranking") and group_col and measure_cols:
         sort_asc = question_type == "ranking"
-        return _segmentation_sql(primary_table, group_col, measure_cols[0], caveats,
+        measure_col = measure_cols[0]
+        # Cross-table insight: when the dimension and measure live in different
+        # tables that a confident relationship joins, build the JOIN rather than
+        # silently collapsing to one table.
+        gt, mt = group_col["table"], measure_col["table"]
+        if gt and mt and gt != mt:
+            rel = rel_join.get(frozenset({gt, mt}))
+            if rel and float(rel.get("confidence") or 0.0) >= 0.80:
+                return _segmentation_sql_joined(
+                    group_col, measure_col, rel, caveats, sort_asc=sort_asc
+                )
+        return _segmentation_sql(primary_table, group_col, measure_col, caveats,
                                  sort_asc=sort_asc)
 
     if question_type == "coverage":
@@ -286,6 +319,41 @@ def _segmentation_sql(
     return sql, chart
 
 
+def _segmentation_sql_joined(
+    group_col: dict[str, Any],
+    measure_col: dict[str, Any],
+    rel: dict[str, Any],
+    caveats: list[str],
+    *,
+    sort_asc: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """Group a measure in one table by a dimension in a related table (JOIN)."""
+    gt, mt = group_col["table"], measure_col["table"]
+    g_ref = f"{_q(gt)}.{_q(group_col['column'])}"
+    c_alias = _safe_alias(group_col["column"])
+    m_alias = _safe_alias(f"avg_{measure_col['column']}")
+    measure_expr = _measure_agg_expr(measure_col, caveats, qualifier=mt)
+    join_on = (
+        f"{_q(rel['from_table'])}.{_q(rel['from_column'])} = "
+        f"{_q(rel['to_table'])}.{_q(rel['to_column'])}"
+    )
+    order_dir = "ASC" if sort_asc else "DESC"
+    sql = (
+        f"SELECT\n"
+        f"    {g_ref} AS {c_alias},\n"
+        f"    {measure_expr} AS {m_alias},\n"
+        f"    COUNT(*) AS record_count\n"
+        f"FROM {_q(mt)}\n"
+        f"JOIN {_q(gt)} ON {join_on}\n"
+        f"WHERE {g_ref} IS NOT NULL\n"
+        f"GROUP BY {g_ref}\n"
+        f"ORDER BY {m_alias} {order_dir}\n"
+        f"LIMIT 20"
+    )
+    chart = {"type": "bar", "x": c_alias, "y": m_alias, "record_count": "record_count"}
+    return sql, chart
+
+
 def _coverage_sql(
     table: str,
     col_info: list[dict[str, Any]],
@@ -330,8 +398,11 @@ def _ts_trunc_expr(col: dict[str, Any]) -> str:
     return f"CAST({c} AS DATE)"
 
 
-def _measure_agg_expr(col: dict[str, Any], caveats: list[str]) -> str:
-    c = _q(col["column"])
+def _measure_agg_expr(
+    col: dict[str, Any], caveats: list[str], qualifier: str | None = None
+) -> str:
+    # Qualify the column with its table when building a join (avoids ambiguity).
+    c = f"{_q(qualifier)}.{_q(col['column'])}" if qualifier else _q(col["column"])
     # A confirmed duration derivation turns a text column into numeric minutes.
     fmt = col.get("derivation_format")
     if fmt:
@@ -489,6 +560,26 @@ def _build_rel_confidence_map(
         key = (rel.get("from_table", ""), rel.get("to_table", ""))
         existing = result.get(key, 0.0)
         result[key] = max(existing, float(rel.get("confidence") or 0.0))
+    return result
+
+
+def _build_rel_join_map(
+    relationships: list[dict[str, Any]],
+) -> dict[frozenset[str], dict[str, Any]]:
+    """Map an unordered table pair -> the highest-confidence relationship joining them.
+
+    Lets the answer builder JOIN two related tables (a dimension in one, a measure
+    in the other) instead of silently collapsing to a single table.
+    """
+    result: dict[frozenset[str], dict[str, Any]] = {}
+    for rel in relationships:
+        ft, tt = rel.get("from_table", ""), rel.get("to_table", "")
+        if not ft or not tt or ft == tt:
+            continue
+        key = frozenset({ft, tt})
+        conf = float(rel.get("confidence") or 0.0)
+        if conf >= float(result.get(key, {}).get("confidence") or 0.0):
+            result[key] = rel
     return result
 
 

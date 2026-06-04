@@ -105,6 +105,8 @@ export interface H2Project {
   /** Verdict-based counts (the canonical readout source). */
   certified_count?: number;
   question_count?: number;
+  /** Primary source (set by the list endpoint) for console-side filtering. */
+  source_name?: string | null;
 }
 
 export interface H2Question {
@@ -149,6 +151,17 @@ export interface H2ResolveCard {
   contract_impacts: string[];
 }
 
+export interface H2Definition {
+  table: string;
+  column: string;
+  claim_type: "enum_mapping" | "definition";
+  /** The analyst's original markdown — editable. */
+  text: string;
+  /** Codes covered, for enum mappings (chips). */
+  values: string[];
+  title: string;
+}
+
 export interface H2Contract {
   contract_type: string;
   passed: boolean;
@@ -182,6 +195,8 @@ export interface H2AnswerDraft {
   question_title: string;
   state: "certified" | "doubtful" | "pending" | "cannot_answer";
   confidence: number;
+  /** The components confidence was blended from (readiness/completeness/verification). */
+  confidence_breakdown?: Record<string, number>;
   /** Plain-English takeaway from the executed result (deterministic). */
   finding_headline?: string;
   finding_support?: string;
@@ -362,6 +377,16 @@ export const h2 = {
       }>("/projects", req),
     setGoal: (id: string, goal: string) =>
       post<{ project_id: string; goal: string }>(`/projects/${id}/goal`, { goal }),
+    promoteQuery: async (id: string, title: string, sql: string) => {
+      const res = await post<{ question_id: string; title: string; project_id: string }>(
+        `/projects/${id}/questions`,
+        { title, sql },
+      );
+      // The project gained a tracked question — drop any stale cached answers so
+      // the Answer page re-drafts and shows it on next visit.
+      ANSWER_CACHE.delete(id);
+      return res;
+    },
     rerunRelevance: (id: string) =>
       post<{
         relevant_columns: H2RelevantColumn[];
@@ -399,6 +424,16 @@ export const h2 = {
         post<{ applied: boolean; format?: string; unit?: string; reason?: string }>(
           `/projects/${id}/resolve/${encodeURIComponent(cardId)}/derive`,
           { format_id: formatId }
+        ),
+    },
+
+    /** Saved, editable column definitions (persisted context). */
+    definitions: {
+      list: (id: string) => fetchJSON<H2Definition[]>(`/projects/${id}/definitions`),
+      save: (id: string, table: string, column: string, markdown: string) =>
+        post<{ claim_type: string; table: string; column: string }>(
+          `/projects/${id}/definitions`,
+          { table, column, markdown }
         ),
     },
 
@@ -472,6 +507,16 @@ export const h2 = {
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/** Module-level cache of finalized answers, keyed by project id. Shared so a
+ *  mutation elsewhere (e.g. promoting a console query) can invalidate it and the
+ *  Answer page shows fresh state on its next visit — one source of truth. */
+const ANSWER_CACHE = new Map<string, H2AnswersResult>();
+export const answerCache = {
+  get: (id: string) => ANSWER_CACHE.get(id),
+  set: (id: string, result: H2AnswersResult) => ANSWER_CACHE.set(id, result),
+  clear: (id: string) => ANSWER_CACHE.delete(id),
+};
 
 /** Signal that a project input changed so the recompute banner re-checks state. */
 export const HW2_INPUT_CHANGED = "hw2:inputchanged";

@@ -597,12 +597,19 @@ class HeadwaterStore:
             item["goal"] = json.loads(item.pop("goal_json") or "{}")
         return items
 
-    def project_verdict_summary(self, project_id: str) -> dict[str, int]:
+    def project_verdict_summary(
+        self, project_id: str, current_fingerprint: str | None = None
+    ) -> dict[str, int]:
         """Certified / total counts from persisted verdicts (the one true source).
 
         Counts answerable, non-dropped questions as the total and those whose
         latest readiness verdict is ``certified`` — NOT ``question.status`` (which
         finalize never flips), so the rail/banner/home all read the real verdict.
+
+        When ``current_fingerprint`` is given, a verdict only counts as certified
+        if the judge produced it against the *current* inputs.  A verdict judged
+        against older inputs is stale — not certified anymore — so this readout
+        agrees with the Answer page instead of showing a misleading count.
         """
         total = 0
         certified = 0
@@ -611,8 +618,20 @@ class HeadwaterStore:
                 continue
             total += 1
             verdict = self.get_readiness_verdict(f"{q['id']}:verdict:latest")
-            if verdict and verdict.get("state") == "certified":
-                certified += 1
+            if not (verdict and verdict.get("state") == "certified"):
+                continue
+            if current_fingerprint is not None:
+                judged_fp = next(
+                    (
+                        (c.get("evidence") or {}).get("judged_fingerprint")
+                        for c in self.list_readiness_contracts(q["id"])
+                        if c.get("contract_type") == "judge_verdict"
+                    ),
+                    None,
+                )
+                if judged_fp != current_fingerprint:
+                    continue  # stale — re-certification needed
+            certified += 1
         return {"certified": certified, "total": total}
 
     def upsert_project_source(

@@ -8,6 +8,7 @@ import {
   onHw2Event,
   HW2_RECOMPUTED,
   type H2ResolveCard,
+  type H2Definition,
 } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
 
@@ -567,18 +568,167 @@ function ResolveCardRow({
   );
 }
 
+/** A saved definition: collapsed by default, expandable to review and edit.
+ *  The context is never lost — it lives as a locked claim keyed by table.column. */
+function DefinedRow({
+  def,
+  projectId,
+  onChanged,
+}: {
+  def: H2Definition;
+  projectId: string;
+  onChanged: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(def.text);
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    if (!text.trim()) return;
+    setBusy(true);
+    try {
+      await h2.projects.definitions.save(projectId, def.table, def.column, text.trim());
+      setEditing(false);
+      notifyInputChanged();
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${HW2_COLOR.rule}`,
+        borderRadius: 12,
+        background: "#fff",
+        overflow: "hidden",
+      }}
+    >
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          appearance: "none",
+          cursor: "pointer",
+          width: "100%",
+          background: "transparent",
+          border: "none",
+          padding: "12px 16px",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          textAlign: "left",
+        }}
+      >
+        <span style={{ color: HW2_COLOR.good, fontSize: 13 }}>✓</span>
+        <span style={{ font: "600 13.5px 'DM Sans', sans-serif", color: HW2_COLOR.ink }}>
+          {def.column}
+        </span>
+        <span style={{ font: "400 11px 'DM Mono', monospace", color: HW2_COLOR.faint }}>
+          {def.table}
+        </span>
+        <span style={{ marginLeft: "auto", color: HW2_COLOR.faint, fontSize: 11 }}>
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+
+      {open && (
+        <div style={{ padding: "0 16px 14px" }}>
+          {!editing ? (
+            <>
+              <pre
+                style={{
+                  margin: 0,
+                  padding: "10px 12px",
+                  background: HW2_COLOR.paper,
+                  borderRadius: 8,
+                  font: "400 12px 'DM Mono', monospace",
+                  color: HW2_COLOR.ink2,
+                  whiteSpace: "pre-wrap",
+                  lineHeight: 1.5,
+                }}
+              >
+                {def.text}
+              </pre>
+              <button
+                onClick={() => {
+                  setText(def.text);
+                  setEditing(true);
+                }}
+                style={{ ...secondaryBtn, marginTop: 10 }}
+              >
+                Edit
+              </button>
+            </>
+          ) : (
+            <>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                spellCheck={false}
+                style={{
+                  width: "100%",
+                  minHeight: 110,
+                  padding: "10px 12px",
+                  background: "#fff",
+                  border: `1px solid ${HW2_COLOR.rule2}`,
+                  borderRadius: 8,
+                  font: "400 12.5px 'DM Mono', monospace",
+                  color: HW2_COLOR.ink,
+                  lineHeight: 1.5,
+                  resize: "vertical",
+                  outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <button
+                  onClick={save}
+                  disabled={busy || !text.trim()}
+                  style={{
+                    appearance: "none",
+                    cursor: busy ? "default" : "pointer",
+                    background: HW2_COLOR.blue,
+                    color: "#fff",
+                    border: "1px solid transparent",
+                    borderRadius: 8,
+                    padding: "8px 14px",
+                    font: "600 12.5px 'DM Sans', sans-serif",
+                    opacity: busy || !text.trim() ? 0.5 : 1,
+                  }}
+                >
+                  {busy ? "Saving…" : "Save — triggers a refresh"}
+                </button>
+                <button onClick={() => setEditing(false)} style={secondaryBtn}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ResolvePage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [cards, setCards] = useState<H2ResolveCard[]>([]);
+  const [definitions, setDefinitions] = useState<H2Definition[]>([]);
   const [loading, setLoading] = useState(true);
   const [rebuilding, setRebuilding] = useState(false);
 
-  const load = () =>
-    h2.projects.resolve
+  const load = () => {
+    // Saved context is loaded alongside the open cards so it persists on the
+    // screen (collapsed, editable) instead of vanishing once a gap is cleared.
+    h2.projects.definitions.list(id).then(setDefinitions).catch(() => {});
+    return h2.projects.resolve
       .list(id)
       .then((c) => setCards(c))
       .finally(() => setLoading(false));
+  };
 
   const rebuild = async () => {
     setRebuilding(true);
@@ -813,6 +963,35 @@ export default function ResolvePage() {
             )}
           </div>
         </>
+      )}
+
+      {definitions.length > 0 && (
+        <div style={{ marginTop: 28 }}>
+          <SectionLabel dot={HW2_COLOR.good} color={HW2_COLOR.muted}>
+            Defined context · {definitions.length}
+          </SectionLabel>
+          <p
+            style={{
+              font: "400 12.5px 'DM Sans', sans-serif",
+              color: HW2_COLOR.faint,
+              lineHeight: 1.5,
+              margin: "-2px 0 10px",
+            }}
+          >
+            Context you&rsquo;ve saved. It stays here so you can review or edit it
+            anytime — recompute reads it as ground truth.
+          </p>
+          <div style={{ display: "grid", gap: 8 }}>
+            {definitions.map((d) => (
+              <DefinedRow
+                key={`${d.table}.${d.column}`}
+                def={d}
+                projectId={id}
+                onChanged={load}
+              />
+            ))}
+          </div>
+        </div>
       )}
 
       {/* CTA */}

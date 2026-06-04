@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import {
   h2,
   type H2AnswerRow,
   type H2CatalogTable,
+  type H2Project,
   type H2Source,
 } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
@@ -191,6 +193,13 @@ export default function QueryConsolePage() {
     row_count: number;
     truncated: boolean;
   } | null>(null);
+  // Promote-to-insight (track a console query as a certifiable answer).
+  const [projects, setProjects] = useState<H2Project[]>([]);
+  const [promoteOpen, setPromoteOpen] = useState(false);
+  const [promoteTitle, setPromoteTitle] = useState("");
+  const [promoteProject, setPromoteProject] = useState("");
+  const [promoting, setPromoting] = useState(false);
+  const [promoted, setPromoted] = useState<{ projectId: string; title: string } | null>(null);
 
   useEffect(() => {
     h2.sources
@@ -200,7 +209,11 @@ export default function QueryConsolePage() {
         if (s[0]) setSource(s[0].name);
       })
       .catch(() => {});
+    h2.projects.list().then(setProjects).catch(() => {});
   }, []);
+
+  // Only projects framed on the source being explored can track this query.
+  const sourceProjects = projects.filter((p) => p.source_name === source);
 
   // Load the catalog for the selected source so it's at hand while querying.
   useEffect(() => {
@@ -237,6 +250,8 @@ export default function QueryConsolePage() {
     if (!source || !sql.trim()) return;
     setRunning(true);
     setError(null);
+    setPromoted(null);
+    setPromoteOpen(false);
     try {
       const r = await h2.query(source, sql);
       if (r.error) {
@@ -250,6 +265,28 @@ export default function QueryConsolePage() {
       setResult(null);
     } finally {
       setRunning(false);
+    }
+  };
+
+  const openPromote = () => {
+    setPromoted(null);
+    setPromoteProject(sourceProjects[0]?.id ?? "");
+    setPromoteOpen((o) => !o);
+  };
+
+  const promote = async () => {
+    if (!promoteProject || !promoteTitle.trim()) return;
+    setPromoting(true);
+    setError(null);
+    try {
+      await h2.projects.promoteQuery(promoteProject, promoteTitle.trim(), sql);
+      setPromoted({ projectId: promoteProject, title: promoteTitle.trim() });
+      setPromoteOpen(false);
+      setPromoteTitle("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not track this query.");
+    } finally {
+      setPromoting(false);
     }
   };
 
@@ -298,9 +335,10 @@ export default function QueryConsolePage() {
           marginBottom: 20,
         }}
       >
-        Read-only SQL against a freshly materialized source. Click a table or
-        column in the catalog to insert it. Use bare table names (e.g.{" "}
-        <code style={{ fontFamily: "'DM Mono', monospace" }}>SELECT * FROM exams LIMIT 10</code>).
+        Read-only SQL against a freshly materialized source — all of its tables
+        are loaded, so you can <b>join across tables</b> for richer insights and
+        track the result as a certifiable answer. Click a table or column in the
+        catalog to insert it.
       </p>
 
       <div
@@ -344,7 +382,7 @@ export default function QueryConsolePage() {
             ref={taRef}
             value={sql}
             onChange={(e) => setSql(e.target.value)}
-            placeholder="SELECT * FROM exams LIMIT 20"
+            placeholder={"SELECT a.category, AVG(b.value) AS avg_value\nFROM table_a a JOIN table_b b ON a.id = b.a_id\nGROUP BY a.category ORDER BY avg_value DESC"}
             spellCheck={false}
             style={{
               width: "100%",
@@ -386,7 +424,142 @@ export default function QueryConsolePage() {
                 {result.truncated ? " · first 500 shown" : ""}
               </span>
             )}
+            {result && !error && (
+              <button
+                onClick={openPromote}
+                style={{
+                  appearance: "none",
+                  cursor: "pointer",
+                  marginLeft: "auto",
+                  background: promoteOpen ? HW2_COLOR.blueSoft : "#fff",
+                  color: HW2_COLOR.blue,
+                  border: `1.5px solid ${HW2_COLOR.blue}`,
+                  borderRadius: 8,
+                  padding: "8px 14px",
+                  font: "600 12.5px 'DM Sans', sans-serif",
+                }}
+              >
+                + Track as insight
+              </button>
+            )}
           </div>
+
+          {promoteOpen && result && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: "14px 16px",
+                background: HW2_COLOR.surface,
+                border: `1px solid ${HW2_COLOR.rule}`,
+                borderRadius: 10,
+              }}
+            >
+              <div
+                style={{
+                  font: "600 11px 'DM Sans', sans-serif",
+                  letterSpacing: "0.06em",
+                  textTransform: "uppercase",
+                  color: HW2_COLOR.muted,
+                  marginBottom: 4,
+                }}
+              >
+                Track as a certifiable insight
+              </div>
+              <p
+                style={{
+                  font: "400 12.5px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.muted,
+                  margin: "0 0 12px",
+                  lineHeight: 1.5,
+                }}
+              >
+                Saves this query as a tracked question. It runs through the same
+                draft → finding → two-factor certification as proposed questions.
+              </p>
+              {sourceProjects.length === 0 ? (
+                <p style={{ font: "400 12.5px 'DM Sans', sans-serif", color: HW2_COLOR.faint, margin: 0 }}>
+                  No project is framed on <b>{source}</b> yet. Frame a project on
+                  this source first, then track queries into it.
+                </p>
+              ) : (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <input
+                    value={promoteTitle}
+                    onChange={(e) => setPromoteTitle(e.target.value)}
+                    placeholder="Question title (e.g. Exam volume by modality)"
+                    style={{
+                      flex: "1 1 260px",
+                      minWidth: 0,
+                      padding: "9px 12px",
+                      background: "#fff",
+                      border: `1px solid ${HW2_COLOR.rule2}`,
+                      borderRadius: 8,
+                      font: "500 13px 'DM Sans', sans-serif",
+                      color: HW2_COLOR.ink,
+                      outline: "none",
+                    }}
+                  />
+                  <select
+                    value={promoteProject}
+                    onChange={(e) => setPromoteProject(e.target.value)}
+                    style={{
+                      padding: "9px 12px",
+                      background: "#fff",
+                      border: `1px solid ${HW2_COLOR.rule2}`,
+                      borderRadius: 8,
+                      font: "500 13px 'DM Sans', sans-serif",
+                      color: HW2_COLOR.ink2,
+                    }}
+                  >
+                    {sourceProjects.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.display_name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={promote}
+                    disabled={promoting || !promoteTitle.trim() || !promoteProject}
+                    style={{
+                      appearance: "none",
+                      cursor: promoting ? "default" : "pointer",
+                      background: HW2_COLOR.blue,
+                      color: "#fff",
+                      border: "1px solid transparent",
+                      borderRadius: 8,
+                      padding: "9px 16px",
+                      font: "600 13px 'DM Sans', sans-serif",
+                      opacity: promoting || !promoteTitle.trim() || !promoteProject ? 0.5 : 1,
+                    }}
+                  >
+                    {promoting ? "Tracking…" : "Track"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {promoted && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: "12px 16px",
+                background: HW2_COLOR.goodSoft,
+                border: `1px solid ${HW2_COLOR.good}44`,
+                borderRadius: 10,
+                font: "400 13px 'DM Sans', sans-serif",
+                color: HW2_COLOR.ink2,
+              }}
+            >
+              Tracked “{promoted.title}”.{" "}
+              <Link
+                href={`/h2/projects/${promoted.projectId}/answer`}
+                style={{ color: HW2_COLOR.blue, fontWeight: 600 }}
+              >
+                Open in answers →
+              </Link>
+            </div>
+          )}
 
           {error && (
             <div

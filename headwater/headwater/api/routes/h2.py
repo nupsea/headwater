@@ -470,15 +470,24 @@ def frame_project(req: FrameProjectRequest) -> dict[str, Any]:
 
 @router.get("/projects")
 def list_projects() -> list[dict[str, Any]]:
+    from headwater.services.h2_pipeline import project_input_fingerprint
+
     store = _get_store()
     try:
         projects = store.list_projects()
         # Attach verdict-based counts so the rail readout reflects real
-        # certification (one source of truth), not question.status.
+        # certification (one source of truth), not question.status.  Pass the
+        # current fingerprint so stale (re-cert-needed) verdicts aren't counted
+        # as certified — the readout then agrees with the Answer page.
         for p in projects:
-            counts = store.project_verdict_summary(p["id"])
+            fp = project_input_fingerprint(store, p["id"])
+            counts = store.project_verdict_summary(p["id"], fp)
             p["certified_count"] = counts["certified"]
             p["question_count"] = counts["total"]
+            # Primary source, so the Query console can filter projects to the
+            # source the analyst is exploring when promoting a query.
+            srcs = store.get_project_sources(p["id"])
+            p["source_name"] = srcs[0]["source_name"] if srcs else None
         return projects
     finally:
         store.close()
@@ -486,6 +495,8 @@ def list_projects() -> list[dict[str, Any]]:
 
 @router.get("/projects/{project_id}")
 def get_project(project_id: str) -> dict[str, Any]:
+    from headwater.services.h2_pipeline import project_input_fingerprint
+
     store = _get_store()
     try:
         project = store.get_project(project_id)
@@ -493,7 +504,9 @@ def get_project(project_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
         questions = store.list_questions(project_id)
         sources = store.get_project_sources(project_id)
-        counts = store.project_verdict_summary(project_id)
+        counts = store.project_verdict_summary(
+            project_id, project_input_fingerprint(store, project_id)
+        )
         return {
             **project,
             "questions": questions,
@@ -726,6 +739,43 @@ def define_resolve(
         store.close()
 
 
+@router.get("/projects/{project_id}/definitions")
+def list_definitions(project_id: str) -> list[dict[str, Any]]:
+    """The analyst's saved column definitions — persisted, editable context."""
+    from headwater.services.h2_resolve import list_definitions as _list
+
+    store = _get_store()
+    try:
+        return _list(store, project_id)
+    finally:
+        store.close()
+
+
+class SaveDefinitionRequest(BaseModel):
+    table: str
+    column: str
+    markdown: str
+
+
+@router.post("/projects/{project_id}/definitions")
+def save_definition(project_id: str, req: SaveDefinitionRequest) -> dict[str, Any]:
+    """Create or edit a saved column definition (keyed by table.column).
+
+    Works whether or not a live Resolve card still exists for the column, so the
+    analyst can revise saved context at any time.  Re-binds the locked claim;
+    the next recompute reads it.
+    """
+    from headwater.services.h2_resolve import bind_definition
+
+    store = _get_store()
+    try:
+        return bind_definition(store, project_id, req.table, req.column, req.markdown)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        store.close()
+
+
 @router.post("/projects/{project_id}/resolve/{card_id}/derive")
 def derive_resolve(
     project_id: str, card_id: str, req: DeriveCardRequest
@@ -768,6 +818,79 @@ def run_query(req: QueryRequest) -> dict[str, Any]:
         "truncated": result.truncated,
         "error": result.error,
     }
+
+
+class PromoteQueryRequest(BaseModel):
+    title: str
+    sql: str
+
+
+@router.post("/projects/{project_id}/questions", status_code=status.HTTP_201_CREATED)
+def promote_query(project_id: str, req: PromoteQueryRequest) -> dict[str, Any]:
+    """Promote an ad-hoc console query to a tracked, certifiable answer.
+
+    The analyst's SQL is validated against the project's source, then persisted
+    as a question carrying its own ``user_sql``. From here it flows through the
+    normal draft → execute → finding → two-factor certify pipeline like any
+    proposed question. (Full NL-to-SQL authoring is deferred to v3.)
+    """
+    import hashlib
+
+    from headwater.services.h2_execute import execute_one, materialize_source
+
+    title = req.title.strip()
+    sql = req.sql.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="A title is required.")
+    if not sql:
+        raise HTTPException(status_code=422, detail="SQL is required.")
+
+    store = _get_store()
+    con = None
+    try:
+        project = store.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+        srcs = store.get_project_sources(project_id)
+        if not srcs:
+            raise HTTPException(status_code=422, detail="Project has no source to query.")
+        source_name = srcs[0]["source_name"]
+
+        # Validate the SQL actually runs before tracking it — never persist a
+        # broken query as an answer.
+        con, _ = materialize_source(store, source_name)
+        result = execute_one(con, "adhoc", sql)
+        if result.error:
+            raise HTTPException(status_code=422, detail=f"Query failed: {result.error}")
+
+        digest = hashlib.sha1(sql.encode("utf-8")).hexdigest()[:8]
+        question_id = f"{project_id}:user:{digest}"
+        store.upsert_question(
+            question_id,
+            project_id=project_id,
+            title=title,
+            question={
+                "title": title,
+                "reason": "Promoted from the SQL console by an analyst.",
+                "needed_columns": [],
+                "col_roles": {},
+                "answerability": "answerable",
+                "user_sql": sql,
+                "source": "user",
+            },
+            source_name=source_name,
+            status="draft",
+            answerability="answerable",
+            confidence=0.5,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        if con is not None:
+            con.close()
+        store.close()
+
+    return {"question_id": question_id, "title": title, "project_id": project_id}
 
 
 # ── Readiness ─────────────────────────────────────────────────────────────────
@@ -857,7 +980,8 @@ def _answers_payload(result: Any) -> dict[str, Any]:
                 "question_id": a.question_id,
                 "question_title": a.question_title,
                 "state": a.state,
-                "confidence": a.judge_confidence,
+                "confidence": a.display_confidence,
+                "confidence_breakdown": a.confidence_breakdown,
                 "finding_headline": a.finding_headline,
                 "finding_support": a.finding_support,
                 "sql_text": a.sql_text,

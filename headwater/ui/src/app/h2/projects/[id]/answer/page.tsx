@@ -15,6 +15,7 @@ import {
 } from "recharts";
 import {
   h2,
+  answerCache,
   onHw2Event,
   HW2_RECOMPUTED,
   type H2AnswerDraft,
@@ -26,8 +27,9 @@ import { HW2_COLOR } from "@/components/h2/readiness-ring";
 // Session cache of the last answer payload per project, so navigating back to
 // Answer doesn't redundantly re-run the pipeline (materialize + execute). A real
 // input change fires HW2_RECOMPUTED, which refreshes + re-caches; Redraft forces
-// a fresh run; certification re-caches its result.
-const ANSWER_CACHE = new Map<string, H2AnswersResult>();
+// a fresh run; certification re-caches its result. Lives in h2api (shared) so a
+// mutation elsewhere (promoting a console query) can invalidate it.
+const ANSWER_CACHE = answerCache;
 
 // ─── State pill ───────────────────────────────────────────────────────────────
 
@@ -124,6 +126,7 @@ function QuestionItem({
         {answer.question_title}
       </div>
       <div
+        title={confidenceBreakdownText(answer.confidence_breakdown)}
         style={{
           marginTop: 6,
           font: "500 10.5px 'DM Mono', monospace",
@@ -134,6 +137,32 @@ function QuestionItem({
       </div>
     </button>
   );
+}
+
+/** Human labels for confidence components. */
+const CONF_LABEL: Record<string, string> = {
+  readiness: "readiness",
+  completeness: "completeness",
+  verification: "judge",
+};
+
+/** Render one "label value" pair. The judge factor reads "unverified" at 0 so
+ *  it isn't mistaken for "the judge scored 0" on a not-yet-judged answer. */
+function confidenceParts(breakdown: Record<string, number>): string[] {
+  return Object.entries(breakdown).map(([k, v]) => {
+    if (k === "verification" && v === 0) return "judge unverified";
+    return `${CONF_LABEL[k] ?? k} ${Math.round(v * 100)}%`;
+  });
+}
+
+/** A readable derivation of the confidence number for the rail tooltip. */
+function confidenceBreakdownText(
+  breakdown: Record<string, number> | undefined
+): string {
+  if (!breakdown || Object.keys(breakdown).length === 0) {
+    return "No evidence yet — run the query and certification.";
+  }
+  return "Calculated from " + confidenceParts(breakdown).join(" · ");
 }
 
 // ─── Cannot-answer card ───────────────────────────────────────────────────────
@@ -1051,6 +1080,23 @@ function JudgePanel({ answer }: { answer: H2AnswerDraft }) {
           ))}
         </ul>
       )}
+      <div
+        style={{
+          marginTop: 14,
+          paddingTop: 12,
+          borderTop: `1px solid ${HW2_COLOR.rule}`,
+          font: "500 12px 'DM Mono', monospace",
+          color: HW2_COLOR.ink2,
+        }}
+      >
+        Confidence {Math.round(answer.confidence * 100)}%
+        <span style={{ color: HW2_COLOR.faint, fontWeight: 400 }}>
+          {answer.confidence_breakdown &&
+          Object.keys(answer.confidence_breakdown).length > 0
+            ? "  =  " + confidenceParts(answer.confidence_breakdown).join(" · ")
+            : ""}
+        </span>
+      </div>
     </div>
   );
 }

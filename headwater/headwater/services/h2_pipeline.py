@@ -71,6 +71,9 @@ class FinalizedAnswer:
     # still applies (same inputs -> honor it) or is stale (re-run certification).
     # None means "do not (re)write the judge contract" — preserve what's stored.
     judged_fingerprint: str | None = None
+    # Calculated confidence (blended evidence) + its component breakdown.
+    display_confidence: float = 0.0
+    confidence_breakdown: dict[str, float] = field(default_factory=dict)
     # column -> {raw code: human meaning}, from locked enum_mapping claims.
     # Display-only: the SQL still groups on raw codes; the UI relabels output.
     value_labels: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -266,6 +269,7 @@ def _finalize_one(
     chart_spec = dict(draft.chart_spec) if draft else {}
     caveats = list(draft.caveats) if draft else []
     readiness_pct = readiness_q.readiness_pct if readiness_q else 0
+    is_user_query = bool(q_payload.get("user_sql"))
     statistical_pass = bool(
         readiness_q and all(c.passed for c in readiness_q.contracts) and readiness_q.contracts
     )
@@ -292,6 +296,16 @@ def _finalize_one(
     }
 
     executed_ok = bool(executed is not None and executed.ok)
+    # A promoted console query has no template-derived contracts, so its
+    # statistical factor is simply "did the analyst's SQL execute cleanly". The
+    # judge still independently gates whether it answers the question. We also
+    # infer a chart from the shape of the result so it reads as an answer.
+    if is_user_query:
+        from headwater.services.h2_insight import infer_chart_spec
+
+        statistical_pass = executed_ok
+        if executed_ok and not chart_spec:
+            chart_spec = infer_chart_spec(columns, rows)
     # The judge can evaluate any answer that actually executed — it assesses
     # whether the SQL answers the question, independent of statistical readiness.
     can_judge = bool(executed_ok and sql_text)
@@ -305,19 +319,26 @@ def _finalize_one(
     # inputs comes back "stale" so the UI prompts a re-run.  Neither path ever
     # certifies without a real judge approval — the two-factor invariant holds.
     judged_fingerprint: str | None = None
-    if not run_judge:
-        judge_result = _rehydrate_judge(store, qid, current_fingerprint)
-        if judge_result.available:
-            # A valid stored verdict for unchanged inputs — apply the gate.
-            judged_fingerprint = current_fingerprint
-            state = _final_state(
-                statistical_pass=statistical_pass,
-                executed_ok=executed_ok,
-                judge=judge_result,
-            )
-        else:
-            # pending (never run) or stale (inputs changed) — not certified yet.
-            state = "pending" if stat_ready else "doubtful"
+    # A verdict already produced against the *current* inputs is the source of
+    # truth either way: the fast path rehydrates it, and recertify honors it
+    # rather than re-judging.  This keeps certification stable — re-running the
+    # judge never re-litigates (and a non-deterministic model never flips) an
+    # answer already decided for these inputs.  The model is invoked only for
+    # answers that lack a fresh verdict (never judged, or stale after an input
+    # change), and only when run_judge is set.
+    stored = _rehydrate_judge(store, qid, current_fingerprint)
+    if stored.available:
+        judge_result = stored
+        judged_fingerprint = current_fingerprint
+        state = _final_state(
+            statistical_pass=statistical_pass,
+            executed_ok=executed_ok,
+            judge=judge_result,
+        )
+    elif not run_judge:
+        # Fast path, no fresh verdict: pending (never run) or stale (inputs moved).
+        judge_result = stored
+        state = "pending" if stat_ready else "doubtful"
     else:
         judge_result = JudgeResult(
             verdict="unavailable", confidence=0.0, reasons=[], available=False
@@ -332,15 +353,19 @@ def _finalize_one(
                 columns=judge_cols,
                 result_stats=result_stats,
             )
-        # Only stamp (and persist) a fingerprint when the judge actually produced
-        # a verdict; a model outage must not overwrite a prior real verdict.
         if judge_result.available:
+            # A real, fresh verdict — stamp the fingerprint and apply the gate.
             judged_fingerprint = current_fingerprint
-        state = _final_state(
-            statistical_pass=statistical_pass,
-            executed_ok=executed_ok,
-            judge=judge_result,
-        )
+            state = _final_state(
+                statistical_pass=statistical_pass,
+                executed_ok=executed_ok,
+                judge=judge_result,
+            )
+        else:
+            # The model could not produce a verdict (outage / nothing to judge).
+            # Never demote: hold pending if stat-ready, else doubtful.  A prior
+            # real verdict, if any, was already honored above.
+            state = "pending" if stat_ready else "doubtful"
 
     if state == "doubtful":
         caveats = caveats + _doubt_reasons(
@@ -358,6 +383,14 @@ def _finalize_one(
         columns=columns,
         rows=rows,
         value_labels=answer_labels,
+        title=title,
+    )
+
+    confidence, confidence_breakdown = _answer_confidence(
+        executed_ok=executed_ok,
+        readiness_q=readiness_q,
+        result_stats=result_stats,
+        judge=judge_result,
     )
 
     fa = FinalizedAnswer(
@@ -383,6 +416,8 @@ def _finalize_one(
         value_labels=answer_labels,
         source_snapshot_id=snapshot_id,
         judged_fingerprint=judged_fingerprint,
+        display_confidence=confidence,
+        confidence_breakdown=confidence_breakdown,
     )
     _persist(store, fa)
     return fa
@@ -434,6 +469,70 @@ def _final_state(
     if judge.approves:
         return "certified"
     return "doubtful"
+
+
+def _result_completeness(result_stats: dict[str, Any]) -> float | None:
+    """Mean non-null fraction across the result's numeric columns (else all).
+
+    A clean aggregate trends to ~1.0; a degenerate / all-null measure trends to
+    0, which correctly drags confidence down.  Reads only aggregate stats, so it
+    is fully domain-agnostic.
+    """
+    cols = result_stats.get("columns") or {}
+    row_count = int(result_stats.get("row_count") or 0)
+    if row_count <= 0 or not cols:
+        return None
+
+    def _nn(info: dict[str, Any]) -> float:
+        return max(0.0, min(1.0, (row_count - int(info.get("null_count") or 0)) / row_count))
+
+    numeric = [
+        _nn(info)
+        for info in cols.values()
+        if any(t in str(info.get("dtype", "")).lower() for t in ("int", "float", "dec", "double"))
+    ]
+    fracs = numeric or [_nn(info) for info in cols.values()]
+    return sum(fracs) / len(fracs) if fracs else None
+
+
+def _answer_confidence(
+    *,
+    executed_ok: bool,
+    readiness_q: QuestionReadiness | None,
+    result_stats: dict[str, Any],
+    judge: JudgeResult,
+) -> tuple[float, dict[str, float]]:
+    """A *calculated* 0..1 confidence, blended from real, domain-agnostic signals.
+
+    Components (each in 0..1, only counted when actually available):
+      - ``readiness``: weighted fraction of evidence contracts that pass
+        (``readiness_pct``) — included only when contracts were evaluated.
+      - ``completeness``: non-null fraction of the result's measure cells.
+      - ``verification``: the judge's own confidence when it certified, else 0 —
+        weighted highest, as it is the certification gate (so an unverified but
+        data-ready answer lands meaningfully below a certified one).
+
+    Returns ``(confidence, components)`` so the UI can show how it was derived —
+    it is a derived number, never a constant.
+    """
+    if not executed_ok:
+        return 0.0, {}
+    comps: dict[str, float] = {}
+    weights: dict[str, float] = {}
+    if readiness_q is not None and readiness_q.contracts:
+        comps["readiness"] = round(readiness_q.readiness_pct / 100.0, 2)
+        weights["readiness"] = 1.0
+    completeness = _result_completeness(result_stats)
+    if completeness is not None:
+        comps["completeness"] = round(completeness, 2)
+        weights["completeness"] = 1.0
+    comps["verification"] = (
+        round(max(0.0, min(1.0, judge.confidence)), 2) if judge.approves else 0.0
+    )
+    weights["verification"] = 2.0
+    total = sum(weights.values())
+    score = sum(comps[k] * weights[k] for k in weights) / total if total else 0.0
+    return round(score, 2), comps
 
 
 def _doubt_reasons(

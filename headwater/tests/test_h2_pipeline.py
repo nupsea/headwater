@@ -29,6 +29,20 @@ class _RejectingProvider:
         return {"verdict": "reject", "confidence": 0.2, "reasons": ["ambiguous mapping"]}
 
 
+class _FlakyProvider:
+    """Certifies on the first call, then flips to reject — models the
+    non-determinism that was demoting already-certified answers on recertify."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
+        self.calls += 1
+        if self.calls == 1:
+            return {"verdict": "certified", "confidence": 0.9, "reasons": ["ok"]}
+        return {"verdict": "reject", "confidence": 0.1, "reasons": ["changed my mind"]}
+
+
 def _frame(project_id: str, goal: str) -> None:
     assert runner.invoke(
         app, ["discover", "--source", SAMPLE_DATA, "--name", "sample"]
@@ -329,6 +343,183 @@ def test_judge_verdict_goes_stale_after_input_change(monkeypatch, tmp_path):
             store.close()
     finally:
         get_settings.cache_clear()
+
+
+def test_stale_verdict_not_counted_as_certified(monkeypatch, tmp_path):
+    """The certified readout must drop a verdict once its inputs change.
+
+    Regression: the rail/home counted a stale 'certified' verdict, so it showed
+    e.g. 4/4 while the Answer page treated those answers as needing re-cert.
+    The fingerprint-aware count keeps every view in agreement (central truth).
+    """
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("stalecount_proj", "Analyse readings over time and by site")
+        from headwater.services.h2_catalog import update_column
+        from headwater.services.h2_pipeline import project_input_fingerprint
+
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            finalize_project_answers(
+                store, "stalecount_proj", provider=_ApprovingProvider()
+            )
+            fp = project_input_fingerprint(store, "stalecount_proj")
+            fresh = store.project_verdict_summary("stalecount_proj", fp)
+            assert fresh["certified"] >= 1, "expected certified answers after judging"
+
+            # Change an input — the prior verdicts are now stale.
+            table = store.get_tables("sample")[0]["name"]
+            col = store.get_columns("sample", table)[0]["name"]
+            update_column(store, "sample", table, col, description="changed meaning")
+
+            new_fp = project_input_fingerprint(store, "stalecount_proj")
+            assert new_fp != fp, "input change must flip the fingerprint"
+            stale_aware = store.project_verdict_summary("stalecount_proj", new_fp)
+            assert stale_aware["certified"] == 0, "stale verdicts must not count as certified"
+            # Without the fingerprint the raw count still shows the old verdicts —
+            # which is exactly the misleading readout we removed from the API.
+            raw = store.project_verdict_summary("stalecount_proj")
+            assert raw["certified"] >= 1
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_recertify_is_idempotent_and_never_demotes(monkeypatch, tmp_path):
+    """Re-running the judge for unchanged inputs must not re-litigate a verdict.
+
+    Regression: clicking "recertify" re-judged every answer, so a skeptical /
+    non-deterministic model would flip previously-certified answers to doubtful.
+    A verdict produced against the current inputs is the source of truth and
+    must persist until an input actually changes.
+    """
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("idem_proj", "Analyse readings over time and by site")
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            flaky = _FlakyProvider()
+            first = finalize_project_answers(store, "idem_proj", provider=flaky)
+            certified_ids = {a.question_id for a in first.answers if a.state == "certified"}
+            assert certified_ids, "expected at least one certified answer"
+
+            # Recertify with the same (now-rejecting) provider: certified answers
+            # are honored from the store and NOT demoted.
+            second = finalize_project_answers(store, "idem_proj", provider=flaky)
+            for a in second.answers:
+                if a.question_id in certified_ids:
+                    assert a.state == "certified", "recertify must not demote"
+                    assert a.judge_verdict == "certified"
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_unavailable_judge_on_recertify_does_not_demote(monkeypatch, tmp_path):
+    """A model outage during recertify must preserve prior certified verdicts."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("outage_proj", "Analyse readings over time and by site")
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            first = finalize_project_answers(
+                store, "outage_proj", provider=_ApprovingProvider()
+            )
+            certified_ids = {a.question_id for a in first.answers if a.state == "certified"}
+            assert certified_ids
+
+            # Recertify while the model is unavailable.
+            second = finalize_project_answers(
+                store, "outage_proj", provider=NoLLMProvider()
+            )
+            for a in second.answers:
+                if a.question_id in certified_ids:
+                    assert a.state == "certified", "outage must not demote"
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_confidence_is_calculated_from_real_components(monkeypatch, tmp_path):
+    """Confidence is a weighted blend of real signals, exposed as a breakdown.
+
+    Not a constant: it carries readiness/completeness/verification components and
+    certifying (adding the judge factor) raises it above the unverified value.
+    """
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("conf_proj", "Analyse readings over time and by site")
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            fast = finalize_project_answers(store, "conf_proj", run_judge=False)
+            pend = [a for a in fast.answers if a.state == "pending"]
+            assert pend, "expected pending answers on the fast path"
+            for a in pend:
+                # Real components are present and the score equals their blend.
+                assert set(a.confidence_breakdown) <= {
+                    "readiness", "completeness", "verification"
+                }
+                assert a.confidence_breakdown.get("verification") == 0.0
+                assert 0.0 <= a.display_confidence < 1.0
+
+            judged = finalize_project_answers(
+                store, "conf_proj", provider=_ApprovingProvider()
+            )
+            for a in judged.answers:
+                if a.state == "certified":
+                    # The judge factor (0.92) lifts confidence above the
+                    # unverified blend, and the component is recorded.
+                    assert a.confidence_breakdown["verification"] == 0.92
+                    assert a.display_confidence > 0.5
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_answer_confidence_blend_and_completeness():
+    """Unit-level: the confidence is the weighted mean of its components."""
+    from headwater.analyzer.judge import JudgeResult
+    from headwater.services.h2_pipeline import (
+        _answer_confidence,
+        _result_completeness,
+    )
+
+    class _RQ:
+        readiness_pct = 80
+        contracts = [object()]  # non-empty → readiness factor counts
+
+    stats_full = {"row_count": 10, "columns": {"avg_x": {"dtype": "Float64", "null_count": 0}}}
+    # readiness .8 (w1) + completeness 1.0 (w1) + verification .9 (w2) = 3.5/4 = .88
+    conf, comps = _answer_confidence(
+        executed_ok=True,
+        readiness_q=_RQ(),
+        result_stats=stats_full,
+        judge=JudgeResult(verdict="certified", confidence=0.9, reasons=[], available=True),
+    )
+    assert comps == {"readiness": 0.8, "completeness": 1.0, "verification": 0.9}
+    assert conf == round((0.8 + 1.0 + 2 * 0.9) / 4, 2)
+
+    # A half-null measure drops completeness to 0.5 — confidence is lower.
+    stats_half = {"row_count": 10, "columns": {"avg_x": {"dtype": "Float64", "null_count": 5}}}
+    assert _result_completeness(stats_half) == 0.5
+
+    # No executed result → zero, no components.
+    assert _answer_confidence(
+        executed_ok=False, readiness_q=None, result_stats={},
+        judge=JudgeResult(verdict="pending", confidence=0.0, reasons=[], available=False),
+    ) == (0.0, {})
 
 
 def _seed_text_measure_questions(store, project_id: str, qids: list[tuple[str, str]]) -> str:
