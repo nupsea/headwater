@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from headwater.core.config import HeadwaterSettings
+    from headwater.core.store import HeadwaterStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,15 +115,22 @@ class NullProjection:
         return None
 
 
-def make_projection(settings: HeadwaterSettings) -> KnowledgeProjection:
-    """Return the configured backend. Defaults to the (P1) NullProjection.
+def make_projection(
+    settings: HeadwaterSettings, store: HeadwaterStore | None = None
+) -> KnowledgeProjection:
+    """Return the configured backend.
 
-    P2 wires ``SQLiteGraphBackend`` for ``knowledge_backend == "sqlite"``;
-    duckpgq/kuzu stay ``NotImplementedError`` until benchmarked into existence.
+    ``sqlite`` (default) returns the persistent ``SQLiteGraphBackend`` when a store
+    is given, else a ``NullProjection`` (e.g. unit contexts with no graph). duckpgq
+    and kuzu stay ``NotImplementedError`` until benchmarked into existence.
     """
     backend = getattr(settings, "knowledge_backend", "sqlite")
     if backend in ("duckpgq", "kuzu"):
         raise NotImplementedError(
             f"knowledge_backend={backend!r} is not implemented yet; use 'sqlite'."
         )
-    return NullProjection()
+    if store is None:
+        return NullProjection()
+    from headwater.knowledge.sqlite_backend import SQLiteGraphBackend
+
+    return SQLiteGraphBackend(store)

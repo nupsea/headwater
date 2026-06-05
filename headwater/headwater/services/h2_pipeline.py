@@ -777,7 +777,7 @@ def _recompute_project_via_engine(
     if store.get_project(project_id) is None:
         raise ValueError(f"Project '{project_id}' is not registered.")
 
-    projection = make_projection(settings)
+    projection = make_projection(settings, store)
     state = ProjectState(project_id, store, projection)
     ctx = NodeCtx(settings=settings, llm=None, run_slow=run_judge)
     runner = NodeRunner(NodeCache(store), projection, ProvenanceLedger(store))

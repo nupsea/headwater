@@ -5,6 +5,13 @@ provenance edges between them, behind a ``KnowledgeProjection`` interface so the
 backend (SQLite-adjacency default, DuckPGQ/Kuzu optional) is swappable.
 """
 
+from headwater.knowledge.ontology import (
+    ColumnStats,
+    Concept,
+    ConceptAssignment,
+    Relation,
+    classify_column,
+)
 from headwater.knowledge.projection import (
     GraphEdge,
     GraphFact,
@@ -15,8 +22,12 @@ from headwater.knowledge.projection import (
     Path,
     make_projection,
 )
+from headwater.knowledge.sqlite_backend import SQLiteGraphBackend
 
 __all__ = [
+    "ColumnStats",
+    "Concept",
+    "ConceptAssignment",
     "GraphEdge",
     "GraphFact",
     "GraphNode",
@@ -24,5 +35,8 @@ __all__ = [
     "Match",
     "NullProjection",
     "Path",
+    "Relation",
+    "SQLiteGraphBackend",
+    "classify_column",
     "make_projection",
 ]
