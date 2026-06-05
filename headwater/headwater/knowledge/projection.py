@@ -75,6 +75,8 @@ class KnowledgeProjection(Protocol):
 
     def neighbors(self, node_id: str, rel: str | None = None) -> list[GraphNode]: ...
 
+    def nodes_of_type(self, *types: str) -> list[GraphNode]: ...
+
     def paths(self, src: str, dst: str, *, max_hops: int = 3) -> list[Path]: ...
 
     def match_measure_dimension(
@@ -101,6 +103,9 @@ class NullProjection:
         return None
 
     def neighbors(self, node_id: str, rel: str | None = None) -> list[GraphNode]:
+        return []
+
+    def nodes_of_type(self, *types: str) -> list[GraphNode]:
         return []
 
     def paths(self, src: str, dst: str, *, max_hops: int = 3) -> list[Path]:
