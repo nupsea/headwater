@@ -1,39 +1,63 @@
-# Headwater 2 — Design Reference
+# Headwater 2 — Design Index
 
-Home for the renewed-architecture / design / UX work. The design was vetted first
-(design-first-workflow); **implementation is now underway** on `feat/cdx_revision_hw` —
-see the Status section and the two **Living** docs below for current build state.
+Single entry point for the design corpus. Read top-to-bottom: north star → current
+direction → build spec. Everything below the canon is reference or history.
 
-## Documents
+## North star (unchanged)
 
-| File | What |
+Headwater tells a data professional **whether their data can answer a business question**,
+helps them produce a **trustworthy answer**, and **keeps that verdict honest over time**.
+Project = a business goal; data sources are a shared pool; certification is evidence-derived,
+per-answer, and **fails closed** ("the badge is sacred"). Full statement:
+[HEADWATER2_VISION.md](HEADWATER2_VISION.md).
+
+## Current direction — the Reasoning Engine (canonical, build these)
+
+The engine reframe: a stateful **reasoning graph** (control plane) over a persistent
+**knowledge projection** (data plane); every fact has provenance; recompute is **surgical**;
+LLM proposes, deterministic/ML verify. Reviewed and corrected (no Kuzu bet; interface-first;
+fail-closed certification; safe-aggregate learning parked).
+
+| Doc | Role |
 |---|---|
-| [HEADWATER2_VISION.md](HEADWATER2_VISION.md) | Product vision — problem-centric pivot, gated 4-stage lifecycle, the readiness "truth" wedge, GTM |
-| [HEADWATER2_PERSONAS.md](HEADWATER2_PERSONAS.md) | Persona problems mapped to lifecycle + modules, externally validated |
-| [HEADWATER2_AUDIT.md](HEADWATER2_AUDIT.md) | H1 code audit — keep / mine / cut against the H2 model |
-| [HEADWATER2_BUILD.md](HEADWATER2_BUILD.md) | Package layout, test bed, staged build plan (gated), information architecture |
-| [HEADWATER2_IMPLEMENTATION_PLAN.md](HEADWATER2_IMPLEMENTATION_PLAN.md) | Execution plan — architecture rules, data model, stages, verification gates, dataset-agnostic safeguards |
-| [HEADWATER2_UX.md](HEADWATER2_UX.md) | Guided workflow + UX flows, wireframes, IA, anti-overload rules |
-| [HEADWATER2_BUILD_STATE.md](HEADWATER2_BUILD_STATE.md) | **Living.** What is actually built on `feat/cdx_revision_hw` and where it's broken — deep problem analysis + the 2026-05-30 corruption-recovery record |
-| [HEADWATER2_REMEDIATION_PLAN.md](HEADWATER2_REMEDIATION_PLAN.md) | **Living.** Connect-and-complete design + step-by-step roadmap (checklist + progress log) + decisions |
-| [h1-capabilities-to-reuse.md](h1-capabilities-to-reuse.md) | Which H1 inspection capabilities to bring forward, and status |
-| [LEGACY_DOCS_REMOVED.md](LEGACY_DOCS_REMOVED.md) | Record of the H1/legacy docs removed 2026-05-30 and where their value now lives |
-| [prototype/Headwater-handoff_update.zip](prototype/Headwater-handoff_update.zip) | Design handoff bundle (latest). Build from the `hw2-*` source inside it. The older `Headwater-handoff.zip` and the static `Headwater2_refined.html` were removed once implementation began. |
+| [HEADWATER_REASONING_ENGINE_PLAN.md](HEADWATER_REASONING_ENGINE_PLAN.md) | **Architecture & roadmap.** The two graphs, KnowledgeProjection abstraction, ontology, fail-closed cert, PII trust boundary, P1–P4 phases with acceptance proofs. Start here. |
+| [HEADWATER_REASONING_ENGINE_SPEC.md](HEADWATER_REASONING_ENGINE_SPEC.md) | **Implementation spec.** P1 to the file/function level — package layout, node/runner/ledger, SQLite schema, the goal-aware-question vertical, the readiness fail-closed edits, the 5-PR sequence, the test suite. |
+
+Engine vocabulary never leaks to the UI: users see "what I think this column means / why
+this question / what this answer depends on / what would break certification." The five-stage
+stepper (Frame → Understand → Resolve → Readiness → Answer & Share) is unchanged — the engine
+changes what is *behind* each screen. Stepper/flows: [HEADWATER2_UX.md](HEADWATER2_UX.md).
+
+## Reference (still load-bearing)
+
+| Doc | Why keep |
+|---|---|
+| [HEADWATER2_UX.md](HEADWATER2_UX.md) | Guided workflow, wireframes, anti-overload rules. The engine builds behind these screens. |
+| [HEADWATER2_PERSONAS.md](HEADWATER2_PERSONAS.md) | Who we build for (analyst / analytics engineer / consultant beachhead). |
+| [HEADWATER2_AUDIT.md](HEADWATER2_AUDIT.md) | Keep/mine/cut of the H1 spine — the strangler salvage map (connectors, profiler, executor, generator, quality). |
+| [HEADWATER2_INSIGHT_PAGE.md](HEADWATER2_INSIGHT_PAGE.md) | Insight-page proposal; informs the P3 insight battery / "what this answer depends on" surface. |
+| [h1-capabilities-to-reuse.md](h1-capabilities-to-reuse.md) | H1 inspection powers kept as source-level tools. |
+| [H1_REMOVAL.md](H1_REMOVAL.md) | Record of the H1 removal (2026-06-02). |
+
+## Superseded
+
+Archived 2026-06-05 to `../archives/h2_design_2026-06-05/` (see its `ARCHIVED.md`):
+`HEADWATER_NEXT_DIRECTION.md` → PLAN; `HEADWATER2_BUILD.md` → SPEC §1 + PLAN roadmap;
+`HEADWATER2_REMEDIATION_PLAN.md` → done (S1–S10), engine arc is the successor.
+
+Kept in place but superseded for generation: [HEADWATER2_QUESTION_COMPREHENSION.md](HEADWATER2_QUESTION_COMPREHENSION.md)
+— absorbed by PLAN §3.4 + SPEC §8, but its §4 I-3-safe schema brief is still the canonical
+reference the SPEC cites.
 
 ## Test bed
 
-- `../data/radiology/` — Radiology Workflow Simulation (CC BY 4.0). Naked CSVs; docs
-  withheld to `../data/_answer_key/` as a grading key.
+- `../data/radiology/` — Radiology Workflow Simulation (CC BY 4.0). Naked CSVs; provided
+  docs withheld to `../data/_answer_key/` as a grading key (naked-data / design-first rule).
 - `../data/media/` — MovieLens (gitignored; no redistribution).
 
 ## Status
 
-Design (vision, personas, audit, build plan, UX) drafted and the refined prototype iterated.
-**Implementation is underway on branch `feat/cdx_revision_hw`** — the five-stage workflow,
-two-factor certification, and recompute spine are built but not yet coherent end to end. The
-current build is tracked in **HEADWATER2_BUILD_STATE.md**; the connect-and-complete work in
-**HEADWATER2_REMEDIATION_PLAN.md** (start there for live status). Superseded design
-generations live in `../archives/h2_design_2026-05-28/`.
-
-> 2026-05-30: recovered 27 NUL-corrupted source files (filesystem event; restored from git
-> HEAD, verified). Details in HEADWATER2_BUILD_STATE.md §0.
+Implementation on `feat/cdx_revision_hw`. The five-stage workflow, two-factor certification,
+and the linear recompute spine exist; the reasoning-engine arc (PLAN/SPEC) replaces the
+linear recompute with the surgical node graph and fixes the fail-open certification.
+Superseded design generations live in `../archives/`.
