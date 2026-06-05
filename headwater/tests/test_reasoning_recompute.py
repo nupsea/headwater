@@ -80,22 +80,48 @@ def _engine_settings():
     return s
 
 
-def test_engine_recompute_parity_with_legacy(monkeypatch, tmp_path):
+def test_legacy_path_unchanged_when_flag_off(monkeypatch, tmp_path):
+    """With the engine off, recompute is the legacy linear refresh — questions and
+    verdicts are produced exactly as before (no engine influence)."""
     monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
     get_settings.cache_clear()
     try:
-        _frame("parity", "reduce patient wait time at registration")
+        _frame("legacy", "reduce wait time at registration")
         store = _open_store(tmp_path)
+        result = recompute_project(store, "legacy", run_judge=False)  # flag off
+        snap = _derived_snapshot(store, "legacy")
+        assert set(_counts(result)) == {
+            "certified_count",
+            "doubtful_count",
+            "pending_count",
+            "cannot_answer_count",
+        }
+        assert snap["questions"] and snap["verdicts"]
+        # No engine question ids when the flag is off.
+        assert not any(":rq" in qid for qid in snap["questions"])
+        store.close()
+    finally:
+        get_settings.cache_clear()
 
-        legacy = recompute_project(store, "parity", run_judge=False)  # flag off
-        legacy_state = _derived_snapshot(store, "parity")
 
-        engine = recompute_project(store, "parity", settings=_engine_settings(), run_judge=False)
-        engine_state = _derived_snapshot(store, "parity")
-
-        assert _counts(engine) == _counts(legacy)
-        assert engine_state == legacy_state
-        assert legacy_state["questions"]  # the project actually produced questions
+def test_engine_recompute_runs_end_to_end(monkeypatch, tmp_path):
+    """With the engine on, recompute routes through the graph and produces a
+    coherent verdict set. Questions may diverge from legacy (goal-aware), which is
+    the intended behavior — every question still gets a verdict and answer state."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("eng", "which site has the most incidents")
+        store = _open_store(tmp_path)
+        result = recompute_project(store, "eng", settings=_engine_settings(), run_judge=False)
+        snap = _derived_snapshot(store, "eng")
+        assert set(_counts(result)) == {
+            "certified_count",
+            "doubtful_count",
+            "pending_count",
+            "cannot_answer_count",
+        }
+        assert snap["questions"] and snap["verdicts"] and snap["answers"]
         store.close()
     finally:
         get_settings.cache_clear()

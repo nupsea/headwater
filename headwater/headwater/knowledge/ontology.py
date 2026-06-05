@@ -58,8 +58,22 @@ _UNIT_CUES: tuple[tuple[str, str], ...] = (
     ("rate", r"(rate|ratio|pct|percent|share|fraction|avg_|mean_)"),
 )
 
-_NUMERIC = {"int", "integer", "float", "double", "decimal", "number", "numeric"}
-_TEMPORAL = {"date", "datetime", "timestamp", "time"}
+# dtype-family prefixes (handles int64/float64/bigint/timestamp_ns/... from any engine).
+_NUMERIC_PREFIXES = (
+    "int", "float", "double", "decimal", "numeric", "real", "number",
+    "bigint", "smallint", "tinyint", "long",
+)
+_TEMPORAL_PREFIXES = ("date", "datetime", "timestamp", "time")
+
+
+def _is_numeric(dtype: str) -> bool:
+    d = dtype.lower()
+    return d != "bool" and any(d.startswith(p) for p in _NUMERIC_PREFIXES)
+
+
+def _is_temporal(dtype: str) -> bool:
+    d = dtype.lower()
+    return any(d.startswith(p) for p in _TEMPORAL_PREFIXES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +151,7 @@ def classify_column(stats: ColumnStats) -> ConceptAssignment:
     dtype = stats.dtype.lower()
 
     # 1. TimeAnchor — temporal dtype or an unambiguous time-like name.
-    if dtype in _TEMPORAL or _TIME_RE.search(name) or _TIME_AT_RE.search(name):
+    if _is_temporal(dtype) or _TIME_RE.search(name) or _TIME_AT_RE.search(name):
         return ConceptAssignment(stats.ref, "TimeAnchor", {"grain": "row"}, 0.85)
 
     # 2. Identifier — key-shaped name, or a near-unique key/fk column.
@@ -149,7 +163,7 @@ def classify_column(stats: ColumnStats) -> ConceptAssignment:
         return ConceptAssignment(stats.ref, "Location", {"kind": "location"}, 0.7)
 
     # 4. Measure — numeric, not an identifier, with a unit cue or wide spread.
-    if dtype in _NUMERIC:
+    if _is_numeric(dtype):
         unit = _unit_for(name)
         conf = 0.85 if unit else 0.6
         return ConceptAssignment(stats.ref, "Measure", {"unit": unit or "quantity"}, conf)

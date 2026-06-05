@@ -163,3 +163,12 @@ def test_assignment_to_node_carries_table_and_meta():
     assert node.id == "col:events.total_duration"
     assert node.type == "Measure"
     assert node.props["table"] == "events" and node.props["unit"] == "duration"
+
+
+def test_classifier_handles_engine_dtype_families():
+    # Real engines emit int64/float64/timestamp_ns/... — match by family, not exact.
+    assert classify_column(_stats("t.value", "float64", 900)).concept == "Measure"
+    assert classify_column(_stats("t.qty", "int64", 500)).concept == "Measure"
+    assert classify_column(_stats("t.ts", "timestamp_ns", 900)).concept == "TimeAnchor"
+    # bool is not a measure.
+    assert classify_column(_stats("t.is_active", "bool", 2)).concept != "Measure"

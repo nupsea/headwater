@@ -50,6 +50,32 @@ def version() -> None:
 
 
 @app.command()
+def engine(
+    action: str = typer.Argument("status", help="on | off | status — toggle the reasoning engine"),
+) -> None:
+    """Enable/disable the goal-aware reasoning engine (persists to settings.json).
+
+    Restart the API/UI backend after changing this — settings are read once at
+    startup. With the engine on, framing a project proposes goal-aware questions
+    by graph traversal instead of templates.
+    """
+    from headwater.core.config import get_settings, save_settings_to_file
+
+    settings = get_settings()
+    action = action.lower()
+    if action in ("on", "off"):
+        settings.reasoning_engine = action == "on"
+        save_settings_to_file(settings)
+        get_settings.cache_clear()
+    state = "on" if settings.reasoning_engine else "off"
+    color = "green" if settings.reasoning_engine else "yellow"
+    console.print(f"Reasoning engine: [{color}]{state}[/{color}]")
+    console.print(f"  Knowledge backend: {settings.knowledge_backend}")
+    if action in ("on", "off"):
+        console.print("  Saved. Restart the backend for the change to take effect.")
+
+
+@app.command()
 def status() -> None:
     """Show the current Headwater 2 scaffold status."""
     from headwater.core.config import get_settings
@@ -217,7 +243,9 @@ def resolve(
 
     console.print(f"\n[bold]Resolve items for {project_id}[/bold] ({len(cards)} total)\n")
     for card in cards:
-        color = "red" if card.priority == "high" else "yellow" if card.priority == "medium" else "dim"  # noqa: E501
+        color = (
+            "red" if card.priority == "high" else "yellow" if card.priority == "medium" else "dim"
+        )  # noqa: E501
         console.print(f"[{color}][{card.priority.upper()}][/{color}] {card.title}")
         console.print(f"  {card.body[:120]}...")
         if card.affected_questions:
@@ -254,9 +282,7 @@ def readiness(
     console.print()
     for q in report.questions:
         state_color = (
-            "green" if q.state == "certified"
-            else "red" if q.state == "cannot_answer"
-            else "yellow"
+            "green" if q.state == "certified" else "red" if q.state == "cannot_answer" else "yellow"
         )
         console.print(
             f"[{state_color}]{q.state.upper().replace('_', ' ')}[/{state_color}] "
@@ -297,9 +323,7 @@ def report(
             text = build_report(store, project_id)
             console.print(text)
         else:
-            out_path = output or (
-                settings.data_dir / "reports" / f"{project_id}.md"
-            )
+            out_path = output or (settings.data_dir / "reports" / f"{project_id}.md")
             written = write_report(store, project_id, out_path)
             console.print(f"Report written to: {written}")
     finally:
@@ -334,8 +358,10 @@ def answer(
     )
     for ans in result.answers:
         state_color = (
-            "green" if ans.state == "certified"
-            else "red" if ans.state == "cannot_answer"
+            "green"
+            if ans.state == "certified"
+            else "red"
+            if ans.state == "cannot_answer"
             else "yellow"
         )
         stamp = f"[{state_color}]{ans.state.upper().replace('_', ' ')}[/{state_color}]"
@@ -383,8 +409,7 @@ def certify(
 
     if report.demotions:
         console.print(
-            f"\n[red]Demoted {len(report.demotions)} question(s)[/red] "
-            f"(previously certified):\n"
+            f"\n[red]Demoted {len(report.demotions)} question(s)[/red] (previously certified):\n"
         )
         for rec in report.demotions:
             console.print(f"  [red]DEMOTED[/red]  {rec.question_title}")
@@ -426,9 +451,7 @@ def catalog_show(
 
     for tbl in tables:
         console.print(
-            f"\n[bold]{tbl.table_name}[/bold]  "
-            f"{tbl.row_count:,} rows  "
-            f"{len(tbl.columns)} columns"
+            f"\n[bold]{tbl.table_name}[/bold]  {tbl.row_count:,} rows  {len(tbl.columns)} columns"
         )
         header = f"{'Column':<28} {'Type':>10} {'Semantic':>14} {'Null%':>6} {'Distinct':>9}"
         console.print(header)
@@ -466,7 +489,10 @@ def catalog_set(
     store = _open_h2_store(store_path)
     try:
         update_column(
-            store, source, table, column,
+            store,
+            source,
+            table,
+            column,
             description=description,
             semantic_type=semantic_type,
             lock=lock or None,
@@ -524,8 +550,7 @@ def eda_run(
             f"conf={finding.confidence:.2f}  {finding.title}{flag_str}"
         )
     console.print(
-        f"\nRun [bold]hw2 readiness --project-id {project_id}[/bold] "
-        "to see updated contract state."
+        f"\nRun [bold]hw2 readiness --project-id {project_id}[/bold] to see updated contract state."
     )
 
 
@@ -631,8 +656,7 @@ def _print_bootstrap_hints(store_path: Path | None, project_id: str) -> None:
     bootstrap_cols = [
         f"{c['table_name']}.{c['column_name']}"
         for c in claims
-        if c.get("source") == "bootstrap:profile"
-        and c.get("claim_type") == "enum_mapping"
+        if c.get("source") == "bootstrap:profile" and c.get("claim_type") == "enum_mapping"
     ]
     if not bootstrap_cols:
         return

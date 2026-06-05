@@ -106,17 +106,19 @@ def propose_relevance(
             source="relevance",
             locked=column.score >= 4.0,
         )
-    top_questions = _build_question_proposals(
-        source_view,
-        semantic_map,
-        project_goal,
-        relevant_columns,
-        selected_tables=selected_table_names,
-        project_id=project_id,
-        source_name=source_name,
-        store=store,
-        source_snapshot_id=source_snapshot_id,
-    )
+    top_questions = _maybe_engine_questions(store, project_id, source_name, source_snapshot_id)
+    if top_questions is None:
+        top_questions = _build_question_proposals(
+            source_view,
+            semantic_map,
+            project_goal,
+            relevant_columns,
+            selected_tables=selected_table_names,
+            project_id=project_id,
+            source_name=source_name,
+            store=store,
+            source_snapshot_id=source_snapshot_id,
+        )
 
     notes: list[str] = []
     if not selected_table_names:
@@ -221,7 +223,6 @@ def _goal_text(goal: dict[str, Any]) -> str:
         " ".join(str(note) for note in goal.get("notes") or []),
     ]
     return " ".join(part for part in parts if part).strip().lower()
-
 
 
 def _goal_intents(
@@ -425,11 +426,7 @@ def _build_question_proposals(
     # chose, keep their richer wording (e.g. a two-word label) over the column's
     # bare name.  It still names the same measure, so they can't diverge.
     goal_metric = str(goal.get("target_metric") or "").strip()
-    if (
-        goal_metric
-        and measure_candidate
-        and _label_matches_column(goal_metric, measure_candidate)
-    ):
+    if goal_metric and measure_candidate and _label_matches_column(goal_metric, measure_candidate):
         metric_label = goal_metric
     category_candidate = (
         _find_named_column_in_table(
@@ -661,9 +658,7 @@ def _build_question_proposals(
     return proposals[:5]
 
 
-def _table_measure(
-    top_by_table: dict[str, list[H2RelevantColumn]], table: str
-) -> str | None:
+def _table_measure(top_by_table: dict[str, list[H2RelevantColumn]], table: str) -> str | None:
     """A measure column strictly within ``table`` (no cross-table fallback)."""
     for column in top_by_table.get(table, []):
         role = (column.semantic_role or "").lower()
@@ -768,6 +763,58 @@ def _cr(col: H2RelevantColumn | str | None) -> str:
     if isinstance(col, H2RelevantColumn):
         return f"{col.table_name}.{col.column_name}"
     return str(col)
+
+
+def _maybe_engine_questions(
+    store: HeadwaterStore,
+    project_id: str,
+    source_name: str,
+    snapshot_id: str | None,
+) -> list[H2QuestionProposal] | None:
+    """Goal-aware questions from the reasoning engine, when enabled.
+
+    Returns ``None`` (so callers fall back to the heuristic templates) when the
+    ``reasoning_engine`` flag is off or no measure x dimension pattern satisfies
+    the goal. When it succeeds it replaces the project's prior engine question set
+    (``<project>:rq*``) so the questions stay current with the goal.
+    """
+    from headwater.core.config import get_settings
+
+    settings = get_settings()
+    if not getattr(settings, "reasoning_engine", False):
+        return None
+
+    from headwater.reasoning.nodes import run_question_vertical
+
+    specs = run_question_vertical(store, project_id, settings=settings)
+    if not specs:
+        return None
+
+    stale = [
+        q["id"]
+        for q in store.list_questions(project_id)
+        if str(q["id"]).startswith(f"{project_id}:rq")
+    ]
+    store.delete_questions(stale)
+
+    proposals: list[H2QuestionProposal] = []
+    for i, spec in enumerate(specs):
+        proposals.append(
+            _persist_question(
+                store,
+                project_id,
+                source_name,
+                question_id=f"rq{i}",
+                title=str(spec.get("title") or f"Question {i + 1}"),
+                answerability="answerable",
+                reason=str(spec.get("reason") or "Goal-aware question from the reasoning engine."),
+                needed_columns=list(spec.get("needed_columns") or []),
+                confidence=float(spec.get("score") or 0.8),
+                snapshot_id=snapshot_id,
+                col_roles=dict(spec.get("col_roles") or {}),
+            )
+        )
+    return proposals
 
 
 def _persist_question(
@@ -1248,12 +1295,44 @@ def _find_named_column(discovery: DiscoveryResult, hints: set[str]) -> str | Non
 
 # ── Resource context helpers ──────────────────────────────────────────────────
 
-_DEFINITION_STOP_WORDS = frozenset({
-    "the", "and", "for", "are", "was", "were", "has", "have", "had",
-    "its", "with", "from", "this", "that", "which", "each", "all",
-    "can", "may", "will", "used", "been", "per", "not", "but", "also",
-    "into", "than", "more", "over", "when", "where", "how", "any",
-})
+_DEFINITION_STOP_WORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "are",
+        "was",
+        "were",
+        "has",
+        "have",
+        "had",
+        "its",
+        "with",
+        "from",
+        "this",
+        "that",
+        "which",
+        "each",
+        "all",
+        "can",
+        "may",
+        "will",
+        "used",
+        "been",
+        "per",
+        "not",
+        "but",
+        "also",
+        "into",
+        "than",
+        "more",
+        "over",
+        "when",
+        "where",
+        "how",
+        "any",
+    }
+)
 
 
 def _resource_context_from_claims(
@@ -1290,7 +1369,8 @@ def _resource_context_from_claims(
             value = claim.get("claim", {}).get("value")
             if isinstance(value, str):
                 words = {
-                    w for w in re.findall(r"[a-z][a-z0-9]+", value.lower())
+                    w
+                    for w in re.findall(r"[a-z][a-z0-9]+", value.lower())
                     if w not in _DEFINITION_STOP_WORDS and len(w) >= 3
                 }
                 vocab_words |= words

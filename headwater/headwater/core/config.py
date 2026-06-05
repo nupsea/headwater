@@ -28,6 +28,8 @@ _PERSISTED_KEYS = frozenset(
         "mart_min_relationships",
         "mart_min_metric_columns",
         "mart_min_rows",
+        "reasoning_engine",
+        "knowledge_backend",
     }
 )
 

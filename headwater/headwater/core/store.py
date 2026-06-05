@@ -338,6 +338,28 @@ class HeadwaterStore:
         self.con.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         self.con.commit()
 
+    def delete_questions(self, question_ids: list[str]) -> None:
+        """Delete specific questions and their derived verdicts/answers/resolve items.
+
+        Used by the reasoning engine to replace a project's prior goal-aware
+        question set (ids ``<project>:rq*``) so the questions stay current with the
+        goal. Cascades the same dependents as :meth:`delete_project`.
+        """
+        if not question_ids:
+            return
+        marks = ",".join("?" * len(question_ids))
+        for tbl in (
+            "readiness_contracts",
+            "readiness_verdicts",
+            "answer_artifacts",
+            "resolve_items",
+        ):
+            self.con.execute(
+                f"DELETE FROM {tbl} WHERE question_id IN ({marks})", question_ids
+            )
+        self.con.execute(f"DELETE FROM questions WHERE id IN ({marks})", question_ids)
+        self.con.commit()
+
     def delete_source(self, name: str) -> dict[str, Any]:
         """Delete a source, its catalog, and any project left with no source.
 
