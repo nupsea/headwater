@@ -745,6 +745,70 @@ def recompute_project(
     settings: HeadwaterSettings | None = None,
     run_judge: bool = False,
 ) -> dict[str, Any]:
+    """Recompute derived state and mark it fresh.
+
+    Dispatches to the reasoning-graph runner when ``settings.reasoning_engine`` is
+    on (surgical: a run with no input change skips the stages), else to the legacy
+    linear refresh. Both produce identical store side effects and return summary.
+    """
+    settings = settings or get_settings()
+    if getattr(settings, "reasoning_engine", False):
+        return _recompute_project_via_engine(
+            store, project_id, settings=settings, run_judge=run_judge
+        )
+    return _legacy_recompute_project(
+        store, project_id, settings=settings, run_judge=run_judge
+    )
+
+
+def _recompute_project_via_engine(
+    store: HeadwaterStore,
+    project_id: str,
+    *,
+    settings: HeadwaterSettings,
+    run_judge: bool,
+) -> dict[str, Any]:
+    """Route recompute through the typed-node graph (PR2 parity wrapping)."""
+    from headwater.knowledge import make_projection
+    from headwater.reasoning import NodeCache, NodeCtx, NodeRunner, ProjectState
+    from headwater.reasoning.ledger import ProvenanceLedger
+    from headwater.reasoning.nodes import build_recompute_graph
+
+    if store.get_project(project_id) is None:
+        raise ValueError(f"Project '{project_id}' is not registered.")
+
+    projection = make_projection(settings)
+    state = ProjectState(project_id, store, projection)
+    ctx = NodeCtx(settings=settings, llm=None, run_slow=run_judge)
+    runner = NodeRunner(NodeCache(store), projection, ProvenanceLedger(store))
+    runner.run(build_recompute_graph(run_judge=run_judge), state, ctx)
+
+    # The runner adopts cached outputs into state on a skip, so the answer counts
+    # are available whether or not the node re-ran this pass.
+    counts = state.output_of("answers") or {}
+    fingerprint = project_input_fingerprint(store, project_id)
+    store.set_pipeline_state(
+        project_id,
+        last_input_hash=fingerprint,
+        impacted_count=_impacted_count(store, project_id),
+    )
+    return {
+        "project_id": project_id,
+        "certified_count": counts.get("certified_count", 0),
+        "doubtful_count": counts.get("doubtful_count", 0),
+        "pending_count": counts.get("pending_count", 0),
+        "cannot_answer_count": counts.get("cannot_answer_count", 0),
+        "recomputed_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _legacy_recompute_project(
+    store: HeadwaterStore,
+    project_id: str,
+    *,
+    settings: HeadwaterSettings | None = None,
+    run_judge: bool = False,
+) -> dict[str, Any]:
     """Re-run the derived state *from the beginning* and mark it fresh.
 
     This is the complete fast refresh that enforces the cross-cutting rule: any
