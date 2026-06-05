@@ -215,6 +215,43 @@ CREATE TABLE IF NOT EXISTS pipeline_state (
     impacted_count INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Reasoning engine: node output cache, provenance ledger, knowledge projection.
+CREATE TABLE IF NOT EXISTS node_cache (
+    node_id     TEXT NOT NULL,
+    input_hash  TEXT NOT NULL,
+    output_json TEXT NOT NULL DEFAULT '{}',
+    computed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (node_id, input_hash)
+);
+
+CREATE TABLE IF NOT EXISTS node_provenance (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact_id     TEXT,
+    produced_by TEXT NOT NULL,
+    input_hash  TEXT NOT NULL,
+    lane        TEXT NOT NULL,
+    model_id    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_node_provenance_fact ON node_provenance(fact_id);
+
+CREATE TABLE IF NOT EXISTS graph_node (
+    id         TEXT PRIMARY KEY,
+    type       TEXT NOT NULL,
+    props_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS graph_edge (
+    src        TEXT NOT NULL,
+    rel        TEXT NOT NULL,
+    dst        TEXT NOT NULL,
+    props_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (src, rel, dst)
+);
+CREATE INDEX IF NOT EXISTS idx_graph_edge_src ON graph_edge(src, rel);
+CREATE INDEX IF NOT EXISTS idx_graph_edge_dst ON graph_edge(dst, rel);
 """
 
 

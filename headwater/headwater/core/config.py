@@ -69,6 +69,12 @@ class HeadwaterSettings(BaseSettings):
     mart_min_metric_columns: int = 1
     mart_min_rows: int = 100
 
+    # Reasoning engine (capability-gated; default off keeps the legacy path)
+    reasoning_engine: bool = False
+    knowledge_backend: Literal["sqlite", "duckpgq", "kuzu"] = "sqlite"
+    insight_battery: bool = False
+    pii_detection: bool = False
+
     @property
     def metadata_db_path(self) -> Path:
         return self.data_dir / "metadata.db"
