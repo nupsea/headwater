@@ -132,6 +132,7 @@ def test_two_goals_diverge_on_same_graph(graph_state):
 
 def test_vertical_runs_on_sample_data(monkeypatch, tmp_path):
     monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("HEADWATER_LLM_PROVIDER", "none")  # deterministic path, no live LLM
     get_settings.cache_clear()
     try:
         assert (
@@ -164,6 +165,91 @@ def test_vertical_runs_on_sample_data(monkeypatch, tmp_path):
         assert isinstance(specs, list)
         graph = SQLiteGraphBackend(store)
         assert graph.nodes_of_type("Measure", "Dimension", "Location", "Identifier")
+        store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+# ── LLM propose + verify (stub provider, hermetic) ────────────────────────────
+
+
+class _StubProvider:
+    """Returns a fixed proposal: one valid, one hallucinated, one cross-table."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    async def analyze(self, prompt: str, system: str = "") -> dict:
+        return self._payload
+
+
+def test_llm_propose_verifies_and_grounds(monkeypatch, tmp_path):
+    from headwater.reasoning.nodes.llm_propose import propose_and_verify
+
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        assert (
+            cli.invoke(app, ["discover", "--source", SAMPLE_DATA, "--name", "sample"]).exit_code
+            == 0
+        )
+        assert (
+            cli.invoke(
+                app,
+                [
+                    "project",
+                    "frame",
+                    "--project-id",
+                    "llm",
+                    "--source",
+                    "sample",
+                    "--name",
+                    "llm",
+                    "--goal",
+                    "stats by site",
+                ],
+            ).exit_code
+            == 0
+        )
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        from headwater.core.config import get_settings as gs
+        from headwater.knowledge import make_projection
+        from headwater.reasoning import NodeCache, NodeRunner, ProvenanceLedger
+        from headwater.reasoning.nodes.vertical import build_question_vertical
+
+        settings = gs()
+        proj = make_projection(settings, store)
+        # populate the ontology graph via the vertical's ontology.map node
+        state = ProjectState("llm", store, proj)
+        NodeRunner(NodeCache(store), proj, ProvenanceLedger(store)).run(
+            build_question_vertical(), state, NodeCtx(settings=settings, run_slow=True)
+        )
+        real_cols = {
+            f"{t['name']}.{c['name']}"
+            for t in store.get_tables("sample")
+            for c in store.get_columns("sample", t["name"])
+        }
+        a, b = sorted(real_cols)[0], sorted(real_cols)[1]
+        provider = _StubProvider(
+            {
+                "questions": [
+                    {"title": "Real one", "intent": "ranking", "measure": a, "dimension": b},
+                    {
+                        "title": "Hallucinated",
+                        "intent": "ranking",
+                        "measure": "nope.nada",
+                        "dimension": b,
+                    },
+                ]
+            }
+        )
+        specs = propose_and_verify(
+            store, "llm", projection=proj, provider=provider, goal_text="stats by site"
+        )
+        titles = [s["title"] for s in specs]
+        assert "Real one" in titles  # verified, kept
+        assert "Hallucinated" not in titles  # dropped (column does not exist)
         store.close()
     finally:
         get_settings.cache_clear()

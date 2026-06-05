@@ -72,6 +72,12 @@ class QuestionGenNode(BaseNode):
             specs, facts = self._trend(proj, measure_kinds, unit)
         if not specs:  # segment/rank, or trend with no time anchor
             specs, facts = self._by_dimension(proj, measure_kinds, dim_kinds, unit, comparison)
+        if not specs:
+            # Relax: the parsed kinds matched nothing — fall back to any measure
+            # against any dimension/location so the engine is never silently empty.
+            broad_m = measure_kinds | {"quantity", "count", "amount", "duration", "rate"}
+            broad_d = dim_kinds | {"category", "step", "location", "status"}
+            specs, facts = self._by_dimension(proj, broad_m, broad_d, unit, comparison)
 
         out = [asdict(s) for s in specs]
         prov = self._prov(state, facts)

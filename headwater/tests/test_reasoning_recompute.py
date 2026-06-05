@@ -77,6 +77,7 @@ def _counts(result: dict) -> dict:
 def _engine_settings():
     s = get_settings()
     s.reasoning_engine = True
+    s.llm_provider = "none"  # exercise the deterministic vertical (no live LLM in tests)
     return s
 
 

@@ -30,11 +30,14 @@ def build_question_vertical() -> Graph:
 def run_question_vertical(
     store: HeadwaterStore, project_id: str, *, settings: Any
 ) -> list[dict[str, Any]]:
-    """Build the ontology, parse the goal, traverse for goal-aware questions.
+    """Build the ontology, then ask the LLM to propose goal-grounded questions.
 
-    Returns the question specs (title / intent / needed_columns / col_roles /
-    reason / unit / score). Empty when no measure x dimension pattern satisfies
-    the goal — callers should fall back to the heuristic templates then.
+    Two tiers: the LLM reads the goal + the ontology-derived schema brief and
+    proposes questions mapping the user's vocabulary to real columns (verified
+    against the catalog). If no model is available or nothing verifies, fall back
+    to the deterministic graph traversal. Returns question specs (title / intent /
+    needed_columns / col_roles / reason / unit / score), empty when neither tier
+    produces anything — callers then use the heuristic templates.
     """
     projection = make_projection(settings, store)
     state = ProjectState(project_id, store, projection)
@@ -43,4 +46,35 @@ def run_question_vertical(
     ctx = NodeCtx(settings=settings, llm=None, run_slow=True)
     runner = NodeRunner(NodeCache(store), projection, ProvenanceLedger(store))
     runner.run(build_question_vertical(), state, ctx)
-    return state.output_of("question.gen") or []
+    deterministic = state.output_of("question.gen") or []
+
+    llm_specs = _llm_proposals(store, project_id, projection, settings)
+    return llm_specs or deterministic
+
+
+def _llm_proposals(
+    store: HeadwaterStore, project_id: str, projection: Any, settings: Any
+) -> list[dict[str, Any]]:
+    """LLM-driven, verified proposals — or [] on any failure (graceful)."""
+    try:
+        from headwater.analyzer.llm import NoLLMProvider, get_provider
+        from headwater.reasoning.nodes.goal_parse import _goal_text
+        from headwater.reasoning.nodes.llm_propose import propose_and_verify
+
+        reasoning_model = getattr(settings, "reasoning_model", "") or settings.llm_model
+        provider = get_provider(settings.model_copy(update={"llm_model": reasoning_model}))
+        if isinstance(provider, NoLLMProvider):
+            return []
+        goal = (store.get_project(project_id) or {}).get("goal") or {}
+        goal_text = _goal_text(goal)
+        if not goal_text.strip():
+            return []
+        return propose_and_verify(
+            store,
+            project_id,
+            projection=projection,
+            provider=provider,
+            goal_text=goal_text,
+        )
+    except Exception:
+        return []
