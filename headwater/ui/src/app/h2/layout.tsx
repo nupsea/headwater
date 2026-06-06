@@ -26,12 +26,19 @@ interface H2ContextValue {
   projects: H2Project[];
   sources: H2Source[];
   reload: () => void;
+  /** Whether a long LLM analysis is currently running (drives the global bar). */
+  analysis: { active: boolean; label: string };
+  /** Run an async op while showing the global "Analysing with AI" bar. Owned by
+   *  the layout, so it survives client-side navigation to other H2 pages. */
+  runAnalysis: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
 }
 
 const H2Context = createContext<H2ContextValue>({
   projects: [],
   sources: [],
   reload: () => {},
+  analysis: { active: false, label: "" },
+  runAnalysis: (_label, fn) => fn(),
 });
 
 export function useH2Context() {
@@ -653,6 +660,57 @@ function ProjectBanner({
 
 // ─── Recompute banner (staged) ───────────────────────────────────────────────
 
+/** Global indeterminate progress strip shown while the LLM is analysing. Rendered
+ *  in the persistent layout, so it stays put when the user switches pages. */
+function AnalysisBar({ active, label }: { active: boolean; label: string }) {
+  if (!active) return null;
+  return (
+    <div style={{ position: "sticky", top: 0, zIndex: 30 }}>
+      <div
+        style={{
+          position: "relative",
+          height: 3,
+          background: HW2_COLOR.blue + "22",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            background: HW2_COLOR.blue,
+            borderRadius: 2,
+            animation: "hw2-indeterminate 1.15s ease-in-out infinite",
+          }}
+        />
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "7px 32px",
+          background: HW2_COLOR.blue + "0e",
+          borderBottom: `1px solid ${HW2_COLOR.blue}22`,
+          font: "600 12px 'DM Sans', sans-serif",
+        }}
+      >
+        <span
+          aria-hidden
+          style={{ color: HW2_COLOR.blue, animation: "hw2-pulse 1.4s ease-in-out infinite" }}
+        >
+          ✦
+        </span>
+        <span style={{ color: HW2_COLOR.blue }}>{label || "Analysing with AI…"}</span>
+        <span style={{ color: HW2_COLOR.ink2, fontWeight: 500 }}>
+          — you can keep working; this finishes in the background.
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function RecomputeBanner({ projectId }: { projectId: string }) {
   const [state, setState] = useState<{
     stale: boolean;
@@ -660,6 +718,7 @@ function RecomputeBanner({ projectId }: { projectId: string }) {
     impacted_count: number;
   } | null>(null);
   const [busy, setBusy] = useState(false);
+  const { runAnalysis } = useH2Context();
 
   const load = useCallback(() => {
     h2.projects
@@ -680,7 +739,11 @@ function RecomputeBanner({ projectId }: { projectId: string }) {
   const recompute = async () => {
     setBusy(true);
     try {
-      await h2.projects.recompute(projectId);
+      // Routed through runAnalysis so the global "Analysing" bar shows and persists
+      // even if the user navigates to Catalog while this runs.
+      await runAnalysis("Re-analysing your goal and data…", () =>
+        h2.projects.recompute(projectId)
+      );
       // Re-check our own staleness (the banner hides once fresh) and tell every
       // open view to re-fetch — a seamless refresh instead of a full reload.
       load();
@@ -743,6 +806,21 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
   const [projects, setProjects] = useState<H2Project[]>([]);
   const [sources, setSources] = useState<H2Source[]>([]);
   const [activeProject, setActiveProject] = useState<H2Project | null>(null);
+  const [analysis, setAnalysis] = useState({ active: false, label: "" });
+
+  // Owned by the (persistent) layout, so an in-flight analysis and its bar survive
+  // client-side navigation between H2 pages (e.g. switching to Catalog).
+  const runAnalysis = useCallback(
+    async <T,>(label: string, fn: () => Promise<T>): Promise<T> => {
+      setAnalysis({ active: true, label });
+      try {
+        return await fn();
+      } finally {
+        setAnalysis({ active: false, label: "" });
+      }
+    },
+    []
+  );
 
   const reload = useCallback(() => {
     Promise.all([h2.projects.list(), h2.sources.list()])
@@ -826,7 +904,7 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <H2Context.Provider value={{ projects, sources, reload }}>
+    <H2Context.Provider value={{ projects, sources, reload, analysis, runAnalysis }}>
       <div
         style={{
           height: "100vh",
@@ -951,6 +1029,9 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
               minWidth: 0,
             }}
           >
+            {/* Global: shows on every H2 page (incl. Catalog) and persists while
+                the user navigates during a long analysis. */}
+            <AnalysisBar active={analysis.active} label={analysis.label} />
             {activeProject ? (
               <>
                 <ProjectBanner

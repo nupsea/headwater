@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { h2, type H2BrowseTable, type H2Source } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+import { useH2Context } from "@/app/h2/layout";
 
 const pickBtn: React.CSSProperties = {
   appearance: "none",
@@ -66,6 +67,7 @@ function Field({
 
 export default function NewProjectPage() {
   const router = useRouter();
+  const { runAnalysis } = useH2Context();
   const [sources, setSources] = useState<H2Source[]>([]);
   const [tables, setTables] = useState<H2BrowseTable[]>([]);
   const [tableSearch, setTableSearch] = useState("");
@@ -175,16 +177,20 @@ export default function NewProjectPage() {
       if (selectedTables.size > 0) {
         await h2.sources.ingest(sourceName, [...selectedTables]);
       }
-      await h2.projects.frame({
-        project_id: pid,
-        source_name: sourceName,
-        display_name: displayName || pid,
-        goal: goal.trim(),
-        decision: decision || undefined,
-        target_metric: targetMetric || undefined,
-        time_horizon: timeHorizon || undefined,
-        selected_tables: selectedTables.size > 0 ? [...selectedTables] : undefined,
-      });
+      // Framing runs the goal-aware analysis (the LLM maps your goal to the data);
+      // show the global bar while it works.
+      await runAnalysis("Analysing your data and goal…", () =>
+        h2.projects.frame({
+          project_id: pid,
+          source_name: sourceName,
+          display_name: displayName || pid,
+          goal: goal.trim(),
+          decision: decision || undefined,
+          target_metric: targetMetric || undefined,
+          time_horizon: timeHorizon || undefined,
+          selected_tables: selectedTables.size > 0 ? [...selectedTables] : undefined,
+        })
+      );
       // Ingest any provided context so it is considered from the very start.
       const ingests: Promise<unknown>[] = [];
       if (contextText.trim()) {
