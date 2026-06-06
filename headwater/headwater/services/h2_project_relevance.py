@@ -106,7 +106,9 @@ def propose_relevance(
             source="relevance",
             locked=column.score >= 4.0,
         )
-    top_questions = _maybe_engine_questions(store, project_id, source_name, source_snapshot_id)
+    top_questions = _maybe_engine_questions(
+        store, project_id, source_name, source_snapshot_id, goal_text
+    )
     if top_questions is None:
         top_questions = _build_question_proposals(
             source_view,
@@ -765,18 +767,37 @@ def _cr(col: H2RelevantColumn | str | None) -> str:
     return str(col)
 
 
+def _proposal_from_row(q: dict[str, Any]) -> H2QuestionProposal:
+    """Rebuild a proposal from a stored question row (the keep-stable path)."""
+    payload = q.get("question") or {}
+    return H2QuestionProposal(
+        question_id=str(q["id"]),
+        title=str(q.get("title") or payload.get("title") or ""),
+        answerability=str(q.get("answerability") or payload.get("answerability") or "answerable"),
+        reason=str(payload.get("reason") or ""),
+        needed_columns=list(payload.get("needed_columns") or []),
+        confidence=float(q.get("confidence") or 0.0),
+    )
+
+
 def _maybe_engine_questions(
     store: HeadwaterStore,
     project_id: str,
     source_name: str,
     snapshot_id: str | None,
+    goal_text: str,
 ) -> list[H2QuestionProposal] | None:
     """Goal-aware questions from the reasoning engine, when enabled.
 
-    Returns ``None`` (so callers fall back to the heuristic templates) when the
-    ``reasoning_engine`` flag is off or no measure x dimension pattern satisfies
-    the goal. When it succeeds it replaces the project's prior engine question set
-    (``<project>:rq*``) so the questions stay current with the goal.
+    Stability is the contract: the engine question set is generated ONCE per goal
+    and then left alone. Answering a question, defining a term, resolving an item,
+    or any recompute that does not change the goal returns the EXACT same questions
+    (and keeps their verdicts/answers). Only a new or edited goal regenerates them.
+    This prevents the confusing "questions vanish as I work" behavior — a recompute
+    must never silently rewrite the question set the user is acting on.
+
+    Returns ``None`` (callers fall back to heuristic templates) only when the engine
+    is off, or when there are no questions yet and the engine produces none.
     """
     from headwater.core.config import get_settings
 
@@ -784,22 +805,32 @@ def _maybe_engine_questions(
     if not getattr(settings, "reasoning_engine", False):
         return None
 
+    from headwater.reasoning.cache import NodeCache
+    from headwater.reasoning.types import stable_hash
+
+    cache = NodeCache(store)
+    goal_sig = stable_hash(goal_text or "")
+    existing = [
+        q
+        for q in store.list_questions(project_id)
+        if str(q["id"]).startswith(f"{project_id}:rq")
+    ]
+    prev_sig = cache.get("engine.goalsig", project_id)
+
+    # Already generated for this goal -> keep them exactly as they are.
+    if existing and prev_sig == goal_sig:
+        return [_proposal_from_row(q) for q in existing]
+
     from headwater.reasoning.nodes import run_question_vertical
 
     specs = run_question_vertical(store, project_id, settings=settings)
     if not specs:
-        return None
+        # Engine produced nothing this run; never wipe an existing set to templates.
+        return [_proposal_from_row(q) for q in existing] if existing else None
 
-    # Idempotent: only remove engine questions that are no longer proposed. Keeping
-    # the unchanged ones preserves their verdicts/answers across recomputes that did
-    # not touch the goal (a derivation confirm, a definition edit, a disposition) —
-    # the central-truth axiom: questions are stable unless the goal/schema changes.
+    # New or changed goal: (re)generate the engine question set.
     desired_ids = {f"{project_id}:rq{i}" for i in range(len(specs))}
-    stale = [
-        q["id"]
-        for q in store.list_questions(project_id)
-        if str(q["id"]).startswith(f"{project_id}:rq") and q["id"] not in desired_ids
-    ]
+    stale = [q["id"] for q in existing if q["id"] not in desired_ids]
     store.delete_questions(stale)
 
     proposals: list[H2QuestionProposal] = []
@@ -819,6 +850,7 @@ def _maybe_engine_questions(
                 col_roles=dict(spec.get("col_roles") or {}),
             )
         )
+    cache.put("engine.goalsig", project_id, goal_sig)
     return proposals
 
 
