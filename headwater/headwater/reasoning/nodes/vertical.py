@@ -39,6 +39,10 @@ def run_question_vertical(
     needed_columns / col_roles / reason / unit / score), empty when neither tier
     produces anything — callers then use the heuristic templates.
     """
+    from headwater.reasoning.nodes.goal_parse import _goal_text
+    from headwater.reasoning.nodes.llm_propose import build_schema_brief
+    from headwater.reasoning.types import stable_hash
+
     projection = make_projection(settings, store)
     state = ProjectState(project_id, store, projection)
     # ontology.map and goal.parse are L-lane; this is an explicit on-demand
@@ -48,47 +52,45 @@ def run_question_vertical(
     runner.run(build_question_vertical(), state, ctx)
     deterministic = state.output_of("question.gen") or []
 
-    llm_specs = _llm_proposals(store, project_id, projection, settings)
-    return llm_specs or deterministic
+    # Cache the FINAL question set by (goal + schema + model), so the expensive LLM
+    # is attempted AT MOST ONCE per goal/schema — even if it times out and we fall
+    # back to deterministic. Without this, a slow/timing-out model is re-attempted
+    # on every recompute. Only a goal/scope/schema change invalidates the cache.
+    goal_text = _goal_text((store.get_project(project_id) or {}).get("goal") or {})
+    if not goal_text.strip():
+        return deterministic
+    reasoning_model = getattr(settings, "reasoning_model", "") or settings.llm_model
+    brief = build_schema_brief(store, project_id, projection)
+    cache = NodeCache(store)
+    key = stable_hash([project_id, goal_text, brief, reasoning_model])
+    cached = cache.get("question.vertical", key)
+    if cached is not None:
+        return cached
+
+    llm_specs = _attempt_llm(store, project_id, projection, settings, goal_text, brief)
+    result = llm_specs or deterministic
+    cache.put("question.vertical", key, result)  # cache the outcome either way
+    return result
 
 
-def _llm_proposals(
-    store: HeadwaterStore, project_id: str, projection: Any, settings: Any
+def _attempt_llm(
+    store: HeadwaterStore,
+    project_id: str,
+    projection: Any,
+    settings: Any,
+    goal_text: str,
+    brief: str,
 ) -> list[dict[str, Any]]:
-    """LLM-driven, verified proposals — or [] on any failure (graceful).
-
-    Cached by (goal + schema brief + model): an unrelated recompute (a definition
-    edit, a derivation confirm, a resolve disposition) does not change the goal or
-    the schema, so it reuses the cached proposals — no repeated 40s LLM call and no
-    question churn. Only a goal/scope/schema change invalidates the cache.
-    """
+    """One verified LLM attempt — or [] on no model / error / timeout (graceful)."""
     try:
         from headwater.analyzer.llm import NoLLMProvider, get_provider
-        from headwater.reasoning.cache import NodeCache
-        from headwater.reasoning.nodes.goal_parse import _goal_text
-        from headwater.reasoning.nodes.llm_propose import (
-            build_schema_brief,
-            propose_and_verify,
-        )
-        from headwater.reasoning.types import stable_hash
-
-        goal = (store.get_project(project_id) or {}).get("goal") or {}
-        goal_text = _goal_text(goal)
-        if not goal_text.strip():
-            return []
+        from headwater.reasoning.nodes.llm_propose import propose_and_verify
 
         reasoning_model = getattr(settings, "reasoning_model", "") or settings.llm_model
-        brief = build_schema_brief(store, project_id, projection)
-        cache = NodeCache(store)
-        key = stable_hash([project_id, goal_text, brief, reasoning_model])
-        cached = cache.get("llm.propose", key)
-        if cached is not None:
-            return cached
-
         provider = get_provider(settings.model_copy(update={"llm_model": reasoning_model}))
         if isinstance(provider, NoLLMProvider):
             return []
-        specs = propose_and_verify(
+        return propose_and_verify(
             store,
             project_id,
             projection=projection,
@@ -96,8 +98,5 @@ def _llm_proposals(
             goal_text=goal_text,
             brief=brief,
         )
-        if specs:  # never cache a transient empty/failed result
-            cache.put("llm.propose", key, specs)
-        return specs
     except Exception:
         return []

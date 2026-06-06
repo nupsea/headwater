@@ -65,20 +65,35 @@ def _selected_tables(store: HeadwaterStore, project_id: str) -> tuple[str, list[
     return source, list(selected)
 
 
+# Concepts worth offering the model as measures/dimensions/axes. Identifiers and
+# unclassified columns are omitted to keep the prompt small and focused (faster,
+# more reliable local-model inference).
+_USEFUL_CONCEPTS = {"Measure", "Dimension", "Location", "TimeAnchor", "Code"}
+
+
 def build_schema_brief(
     store: HeadwaterStore, project_id: str, projection: KnowledgeProjection
 ) -> str:
-    """Compact, I-3-safe schema: columns + inferred role + table relationships."""
+    """Compact, I-3-safe schema: usable columns + inferred role + relationships.
+
+    Only concept-bearing columns (measures, dimensions, locations, time anchors,
+    codes) are listed — that is everything a question can be built from, and it
+    keeps the prompt small enough for a local model to answer quickly.
+    """
     source, selected = _selected_tables(store, project_id)
     cmap = _concept_map(projection)
     lines: list[str] = []
     for t in selected:
-        lines.append(f"TABLE {t}:")
+        rows = []
         for c in store.get_columns(source, t):
             ref = f"{t}.{c['name']}"
             concept, hint = cmap.get(ref, ("", ""))
-            tag = f" [{concept}{(' ' + hint) if hint else ''}]" if concept else ""
-            lines.append(f"  {ref}{tag}")
+            if concept not in _USEFUL_CONCEPTS:
+                continue
+            rows.append(f"  {ref} [{concept}{(' ' + hint) if hint else ''}]")
+        if rows:
+            lines.append(f"TABLE {t}:")
+            lines.extend(rows)
     rels = store.get_relationships(source)
     if rels:
         lines.append("RELATIONSHIPS:")
