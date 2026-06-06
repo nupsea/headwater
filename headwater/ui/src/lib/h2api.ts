@@ -361,6 +361,8 @@ export const h2 = {
     list: () => fetchJSON<H2Project[]>("/projects"),
     get: (id: string) => fetchJSON<H2Project>(`/projects/${id}`),
     remove: (id: string) => del<{ deleted: string }>(`/projects/${id}`),
+    regenerateQuestions: (id: string) =>
+      post<{ certified_count: number }>(`/projects/${id}/questions/regenerate`),
     frame: (req: {
       project_id: string;
       source_name: string;

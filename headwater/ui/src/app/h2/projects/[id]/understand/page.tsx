@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import {
   h2,
   notifyInputChanged,
+  notifyRecomputed,
   onHw2Event,
   HW2_RECOMPUTED,
   type H2Question,
@@ -12,6 +13,7 @@ import {
   type H2EdaFinding,
 } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+import { useH2Context } from "@/app/h2/layout";
 import { SchemaEditor } from "@/components/h2/schema-editor";
 import { AiSuggestions } from "@/components/h2/ai-suggestions";
 
@@ -610,6 +612,8 @@ function GoalGate({
 export default function UnderstandPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const { runAnalysis } = useH2Context();
+  const [regenerating, setRegenerating] = useState(false);
 
   const [questions, setQuestions] = useState<H2Question[]>([]);
   const [relevance, setRelevance] = useState<H2RelevantColumn[]>([]);
@@ -689,6 +693,30 @@ export default function UnderstandPage() {
     Promise.allSettled(
       ids.map((qid) => h2.projects.setQuestionDisposition(id, qid, false))
     ).then(() => notifyInputChanged());
+  };
+
+  const regenerate = async () => {
+    if (
+      !window.confirm(
+        "Regenerate the question set from your goal?\n\nThis replaces the current " +
+          "questions (and any answers or verdicts on them) with a fresh AI analysis " +
+          "of your goal and data. Use this after changing scope or to retry."
+      )
+    )
+      return;
+    setRegenerating(true);
+    try {
+      await runAnalysis("Regenerating questions from your goal…", () =>
+        h2.projects.regenerateQuestions(id)
+      );
+      await load();
+      notifyInputChanged();
+      notifyRecomputed();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to regenerate questions");
+    } finally {
+      setRegenerating(false);
+    }
   };
 
   useEffect(() => {
@@ -1010,22 +1038,43 @@ export default function UnderstandPage() {
               own.
             </div>
           </div>
-          <button
-            onClick={acceptAll}
-            style={{
-              appearance: "none",
-              cursor: "pointer",
-              background: "#fff",
-              border: `1px solid ${HW2_COLOR.rule2}`,
-              borderRadius: 8,
-              padding: "6px 12px",
-              font: "500 12px 'DM Sans', sans-serif",
-              color: HW2_COLOR.ink2,
-              fontFamily: "'DM Sans', sans-serif",
-            }}
-          >
-            Accept all answerable
-          </button>
+          <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+            <button
+              onClick={regenerate}
+              disabled={regenerating}
+              title="Re-run the AI analysis of your goal and replace the question set"
+              style={{
+                appearance: "none",
+                cursor: regenerating ? "default" : "pointer",
+                background: "#fff",
+                border: `1px solid ${HW2_COLOR.rule2}`,
+                borderRadius: 8,
+                padding: "6px 12px",
+                font: "500 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.blue,
+                fontFamily: "'DM Sans', sans-serif",
+                opacity: regenerating ? 0.6 : 1,
+              }}
+            >
+              {regenerating ? "Regenerating…" : "↻ Regenerate"}
+            </button>
+            <button
+              onClick={acceptAll}
+              style={{
+                appearance: "none",
+                cursor: "pointer",
+                background: "#fff",
+                border: `1px solid ${HW2_COLOR.rule2}`,
+                borderRadius: 8,
+                padding: "6px 12px",
+                font: "500 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.ink2,
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              Accept all answerable
+            </button>
+          </div>
         </div>
 
         <div style={{ padding: "12px 22px 18px", display: "grid", gap: 8 }}>

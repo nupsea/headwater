@@ -250,3 +250,42 @@ def test_engine_questions_survive_unrelated_recompute(monkeypatch, tmp_path):
         store.close()
     finally:
         get_settings.cache_clear()
+
+
+def test_regenerate_restores_question_set(monkeypatch, tmp_path):
+    """Explicit regenerate rebuilds the full engine question set (recovery path)."""
+    from headwater.services.h2_pipeline import regenerate_engine_questions
+
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("regen", "which site has the most incidents")
+        store = _open_store(tmp_path)
+        settings = _engine_settings()
+        recompute_project(store, "regen", settings=settings, run_judge=False)
+        full = {
+            qid
+            for qid in _derived_snapshot(store, "regen")["questions"]
+            if ":rq" in qid
+        }
+        assert full, "engine should have produced rq questions"
+
+        # Simulate the old churn bug having dropped a question.
+        store.delete_questions([sorted(full)[0]])
+        degraded = {
+            qid
+            for qid in _derived_snapshot(store, "regen")["questions"]
+            if ":rq" in qid
+        }
+        assert len(degraded) < len(full)
+
+        regenerate_engine_questions(store, "regen", settings=settings)
+        restored = {
+            qid
+            for qid in _derived_snapshot(store, "regen")["questions"]
+            if ":rq" in qid
+        }
+        assert restored == full  # deterministic vertical -> the same full set
+        store.close()
+    finally:
+        get_settings.cache_clear()

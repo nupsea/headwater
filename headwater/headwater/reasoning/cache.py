@@ -38,3 +38,16 @@ class NodeCache:
             (node_id, input_hash, json.dumps(output, default=str, sort_keys=True)),
         )
         self._store.con.commit()
+
+    def invalidate(self, node_id: str, input_hash: str | None = None) -> None:
+        """Drop a node's cached output (one entry, or all entries for the node)."""
+        if input_hash is None:
+            self._store.con.execute(
+                "DELETE FROM node_cache WHERE node_id = ?", (node_id,)
+            )
+        else:
+            self._store.con.execute(
+                "DELETE FROM node_cache WHERE node_id = ? AND input_hash = ?",
+                (node_id, input_hash),
+            )
+        self._store.con.commit()

@@ -761,6 +761,44 @@ def recompute_project(
     )
 
 
+def regenerate_engine_questions(
+    store: HeadwaterStore,
+    project_id: str,
+    *,
+    settings: HeadwaterSettings | None = None,
+) -> dict[str, Any]:
+    """Explicitly re-run the goal-aware analysis and replace the question set.
+
+    Engine questions are normally generated once per goal and kept stable, so this
+    is the deliberate "give me a fresh set" action (e.g. after adding tables, or to
+    retry the model). It clears the engine question set + the caches that pin it,
+    then recomputes — producing a fresh LLM-proposed set and its verdicts.
+    """
+    settings = settings or get_settings()
+    if not getattr(settings, "reasoning_engine", False):
+        # Engine off: just re-run the normal recompute (templates).
+        return recompute_project(store, project_id, settings=settings)
+
+    from headwater.reasoning.cache import NodeCache
+
+    rq_ids = [
+        q["id"]
+        for q in store.list_questions(project_id)
+        if str(q["id"]).startswith(f"{project_id}:rq")
+    ]
+    store.delete_questions(rq_ids)
+
+    cache = NodeCache(store)
+    cache.invalidate("engine.goalsig", project_id)  # force regeneration for this project
+    # Clear the LLM result + the deterministic recompute nodes so the next run is
+    # genuinely fresh. Other projects keep their questions (their goalsig stands),
+    # so a global clear only forces a cheap recompute for them, never a re-LLM.
+    for node_id in ("question.vertical", "relevance", "answers"):
+        cache.invalidate(node_id)
+
+    return recompute_project(store, project_id, settings=settings)
+
+
 def _recompute_project_via_engine(
     store: HeadwaterStore,
     project_id: str,
