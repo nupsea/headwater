@@ -191,6 +191,9 @@ function ResolveCardRow({
       await h2.projects.resolve.derive(projectId, card.card_id, formatId);
       notifyInputChanged();
       onChanged();
+    } catch {
+      // Surface a friendly note instead of crashing the page on a failed call.
+      setAiNote("Could not apply the conversion. Please try again.");
     } finally {
       setBusy(false);
     }

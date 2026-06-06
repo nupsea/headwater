@@ -55,26 +55,49 @@ def run_question_vertical(
 def _llm_proposals(
     store: HeadwaterStore, project_id: str, projection: Any, settings: Any
 ) -> list[dict[str, Any]]:
-    """LLM-driven, verified proposals — or [] on any failure (graceful)."""
+    """LLM-driven, verified proposals — or [] on any failure (graceful).
+
+    Cached by (goal + schema brief + model): an unrelated recompute (a definition
+    edit, a derivation confirm, a resolve disposition) does not change the goal or
+    the schema, so it reuses the cached proposals — no repeated 40s LLM call and no
+    question churn. Only a goal/scope/schema change invalidates the cache.
+    """
     try:
         from headwater.analyzer.llm import NoLLMProvider, get_provider
+        from headwater.reasoning.cache import NodeCache
         from headwater.reasoning.nodes.goal_parse import _goal_text
-        from headwater.reasoning.nodes.llm_propose import propose_and_verify
+        from headwater.reasoning.nodes.llm_propose import (
+            build_schema_brief,
+            propose_and_verify,
+        )
+        from headwater.reasoning.types import stable_hash
 
-        reasoning_model = getattr(settings, "reasoning_model", "") or settings.llm_model
-        provider = get_provider(settings.model_copy(update={"llm_model": reasoning_model}))
-        if isinstance(provider, NoLLMProvider):
-            return []
         goal = (store.get_project(project_id) or {}).get("goal") or {}
         goal_text = _goal_text(goal)
         if not goal_text.strip():
             return []
-        return propose_and_verify(
+
+        reasoning_model = getattr(settings, "reasoning_model", "") or settings.llm_model
+        brief = build_schema_brief(store, project_id, projection)
+        cache = NodeCache(store)
+        key = stable_hash([project_id, goal_text, brief, reasoning_model])
+        cached = cache.get("llm.propose", key)
+        if cached is not None:
+            return cached
+
+        provider = get_provider(settings.model_copy(update={"llm_model": reasoning_model}))
+        if isinstance(provider, NoLLMProvider):
+            return []
+        specs = propose_and_verify(
             store,
             project_id,
             projection=projection,
             provider=provider,
             goal_text=goal_text,
+            brief=brief,
         )
+        if specs:  # never cache a transient empty/failed result
+            cache.put("llm.propose", key, specs)
+        return specs
     except Exception:
         return []

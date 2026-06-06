@@ -205,3 +205,48 @@ def test_judge_run_has_distinct_answers_identity(monkeypatch, tmp_path):
         store.close()
     finally:
         get_settings.cache_clear()
+
+
+def test_engine_questions_survive_unrelated_recompute(monkeypatch, tmp_path):
+    """A recompute that does not touch the goal/schema (e.g. a derivation confirm)
+    must NOT churn the engine question set or wipe its verdicts. Regression for the
+    bug where every recompute regenerated all rq* questions."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _frame("stable", "which site has the most incidents")
+        store = _open_store(tmp_path)
+        settings = _engine_settings()
+        recompute_project(store, "stable", settings=settings, run_judge=False)
+        snap1 = _derived_snapshot(store, "stable")
+        rq1 = {qid for qid in snap1["questions"] if ":rq" in qid}
+        assert rq1, "engine should have produced rq questions"
+
+        # An unrelated locked claim (models a confirmed duration derivation): it
+        # changes the recompute fingerprint but not the goal or the schema.
+        store.upsert_semantic_claim(
+            "stable:derive:incidents.patient_age",
+            project_id="stable",
+            source_name="sample",
+            scope_type="column",
+            claim_type="derivation",
+            claim={"unit": "minutes", "format": "epoch_minutes"},
+            table_name="incidents",
+            column_name="patient_age",
+            status="locked",
+            confidence=1.0,
+            source="user",
+            locked=True,
+        )
+        recompute_project(store, "stable", settings=settings, run_judge=False)
+        snap2 = _derived_snapshot(store, "stable")
+        rq2 = {qid for qid in snap2["questions"] if ":rq" in qid}
+
+        assert rq2 == rq1  # same engine questions — no churn
+        # verdicts for the unchanged questions survived (not wiped by a delete).
+        for qid in rq1:
+            if qid in snap1["verdicts"]:
+                assert qid in snap2["verdicts"]
+        store.close()
+    finally:
+        get_settings.cache_clear()

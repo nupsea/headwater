@@ -98,9 +98,11 @@ def propose_and_verify(
     projection: KnowledgeProjection,
     provider: Any,
     goal_text: str,
+    brief: str | None = None,
 ) -> list[dict[str, Any]]:
     """Ask the model for goal-grounded questions; return only verified ones."""
-    brief = build_schema_brief(store, project_id, projection)
+    if brief is None:
+        brief = build_schema_brief(store, project_id, projection)
     prompt = f"GOAL:\n{goal_text.strip()}\n\nDATA SCHEMA:\n{brief}\n\nReturn JSON only."
     try:
         result = _invoke(provider, prompt, _SYSTEM)

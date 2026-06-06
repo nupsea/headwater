@@ -790,10 +790,15 @@ def _maybe_engine_questions(
     if not specs:
         return None
 
+    # Idempotent: only remove engine questions that are no longer proposed. Keeping
+    # the unchanged ones preserves their verdicts/answers across recomputes that did
+    # not touch the goal (a derivation confirm, a definition edit, a disposition) —
+    # the central-truth axiom: questions are stable unless the goal/schema changes.
+    desired_ids = {f"{project_id}:rq{i}" for i in range(len(specs))}
     stale = [
         q["id"]
         for q in store.list_questions(project_id)
-        if str(q["id"]).startswith(f"{project_id}:rq")
+        if str(q["id"]).startswith(f"{project_id}:rq") and q["id"] not in desired_ids
     ]
     store.delete_questions(stale)
 
