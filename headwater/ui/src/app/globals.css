@@ -66,3 +66,7 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+
+/* Reveal the per-project delete button only on row hover. */
+.hw2-proj-row .hw2-del { opacity: 0; transition: opacity 0.12s ease; }
+.hw2-proj-row:hover .hw2-del { opacity: 1; }

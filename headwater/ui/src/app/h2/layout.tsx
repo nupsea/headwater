@@ -280,6 +280,25 @@ function H2Rail({
 }) {
   const primarySource = sources[0] ?? null;
   const activeProjectId = projectIdFromPath(pathname);
+  const { reload } = useH2Context();
+
+  const deleteProject = async (p: H2Project) => {
+    if (
+      !window.confirm(
+        `Delete project "${p.display_name}"?\n\nThis permanently removes its goal, ` +
+          "questions, verdicts, and answers. The shared data source is not affected. " +
+          "This cannot be undone."
+      )
+    )
+      return;
+    try {
+      await h2.projects.remove(p.id);
+      if (activeProjectId === p.id || activeProjectId === p.slug) onNavigate("/h2");
+      reload();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to delete project");
+    }
+  };
 
   return (
     <aside
@@ -472,28 +491,74 @@ function H2Rail({
               activeProjectId === p.id || activeProjectId === p.slug;
 
             return (
-              <RailItem
-                key={p.id}
-                active={isActive}
-                onClick={() => onNavigate(`/h2/projects/${p.id}`)}
-                icon={
-                  <ReadinessRing
-                    value={ro.pct}
-                    certified={
-                      ro.certifiedCount === ro.total &&
-                      ro.total > 0 &&
-                      !hasDrift
-                    }
-                    demoted={hasDrift}
-                    size={18}
-                    stroke={2.5}
-                    showLabel={false}
-                    animate={false}
-                  />
-                }
-                label={p.display_name}
-                hint={`${p.questions?.length ?? 0} q · ${ro.certifiedCount}/${ro.total} cert.`}
-              />
+              <div key={p.id} className="hw2-proj-row" style={{ position: "relative" }}>
+                <RailItem
+                  active={isActive}
+                  onClick={() => onNavigate(`/h2/projects/${p.id}`)}
+                  icon={
+                    <ReadinessRing
+                      value={ro.pct}
+                      certified={
+                        ro.certifiedCount === ro.total &&
+                        ro.total > 0 &&
+                        !hasDrift
+                      }
+                      demoted={hasDrift}
+                      size={18}
+                      stroke={2.5}
+                      showLabel={false}
+                      animate={false}
+                    />
+                  }
+                  label={p.display_name}
+                  hint={`${p.questions?.length ?? 0} q · ${ro.certifiedCount}/${ro.total} cert.`}
+                />
+                <button
+                  className="hw2-del"
+                  title="Delete project"
+                  aria-label={`Delete project ${p.display_name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteProject(p);
+                  }}
+                  style={{
+                    position: "absolute",
+                    top: "50%",
+                    right: 6,
+                    transform: "translateY(-50%)",
+                    appearance: "none",
+                    cursor: "pointer",
+                    background: "#fff",
+                    border: `1px solid ${HW2_COLOR.rule2}`,
+                    borderRadius: 6,
+                    width: 24,
+                    height: 24,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: HW2_COLOR.muted,
+                    padding: 0,
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.color = HW2_COLOR.bad;
+                    e.currentTarget.style.borderColor = HW2_COLOR.bad + "66";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.color = HW2_COLOR.muted;
+                    e.currentTarget.style.borderColor = HW2_COLOR.rule2;
+                  }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path
+                      d="M3 6h18M8 6V4h8v2m-9 0v14a1 1 0 001 1h8a1 1 0 001-1V6M10 11v6M14 11v6"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
             );
           })
         )}

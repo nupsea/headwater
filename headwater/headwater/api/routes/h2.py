@@ -180,6 +180,20 @@ def delete_source(source_name: str) -> dict[str, Any]:
         store.close()
 
 
+@router.delete("/projects/{project_id}")
+def delete_project(project_id: str) -> dict[str, Any]:
+    """Delete a project and everything derived from it (questions, verdicts,
+    answers, claims, resolve items). Shared sources are untouched."""
+    store = _get_store()
+    try:
+        if store.get_project(project_id) is None:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+        store.delete_project(project_id)
+        return {"deleted": project_id}
+    finally:
+        store.close()
+
+
 @router.get("/sources/{source_name}/browse")
 def browse_source_tables(source_name: str) -> list[dict[str, Any]]:
     """List a source's tables (cheap, no profiling) for subset selection."""
