@@ -3,7 +3,9 @@
 const BASE = "/api/h2";
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, init);
+  // Never serve a cached API response — derived state changes constantly (delete,
+  // recompute, recertify), so a stale list/verdict would look like a no-op.
+  const res = await fetch(`${BASE}${url}`, { cache: "no-store", ...init });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`H2 API ${res.status}: ${body}`);
