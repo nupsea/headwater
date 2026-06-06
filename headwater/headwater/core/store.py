@@ -327,10 +327,12 @@ class HeadwaterStore:
                 self.con.execute(
                     f"DELETE FROM {tbl} WHERE question_id IN ({marks})", qids
                 )
+        # Order matters with foreign_keys=ON: resolve_items.question_id references
+        # questions(id), so resolve_items must go before questions.
         for tbl in (
+            "resolve_items",
             "questions",
             "semantic_claims",
-            "resolve_items",
             "pipeline_state",
             "project_sources",
         ):

@@ -38,6 +38,19 @@ def test_delete_project_cascades_but_spares_source_and_siblings(tmp_path):
         summary="x",
         source_snapshot_id=None,
     )
+    # A resolve item whose question_id references the question — this is what made
+    # a real project's delete fail (FK constraint) when questions were deleted first.
+    s.upsert_resolve_item(
+        "p_drop:q1:gap",
+        project_id="p_drop",
+        question_id="p_drop:q1",
+        issue_kind="insufficient_coverage",
+        title="gap",
+        body="b",
+        priority="low",
+        status="open",
+        payload={},
+    )
 
     s.delete_project("p_drop")
 
