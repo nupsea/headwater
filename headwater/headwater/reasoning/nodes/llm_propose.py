@@ -106,6 +106,73 @@ def build_schema_brief(
     return "\n".join(lines)
 
 
+_USER_Q_SYSTEM = (
+    "You map ONE analytical question to the columns needed to answer it. Given a "
+    "QUESTION and a DATA SCHEMA, pick exactly one measure column and one "
+    "grouping-or-time column, using ONLY columns listed in the schema. Map the "
+    "user's words to the closest real columns. Respond with STRICT JSON:\n"
+    '{"title": "a clear question title", "measure": "table.column", '
+    '"dimension": "table.column", "intent": "ranking|trend|segment"}\n'
+    "If the question cannot be answered from these columns, return {}."
+)
+
+
+def map_user_question(
+    store: HeadwaterStore,
+    project_id: str,
+    *,
+    projection: KnowledgeProjection,
+    provider: Any,
+    question_text: str,
+    brief: str | None = None,
+) -> dict[str, Any] | None:
+    """Map one user-typed question to verified columns, or None if it can't be."""
+    if brief is None:
+        brief = build_schema_brief(store, project_id, projection)
+    prompt = f"QUESTION:\n{question_text.strip()}\n\nDATA SCHEMA:\n{brief}\n\nReturn JSON only."
+    try:
+        result = _invoke(provider, prompt, _USER_Q_SYSTEM)
+    except Exception:
+        return None
+    if not isinstance(result, dict):
+        return None
+
+    measure = str(result.get("measure") or "").strip()
+    dimension = str(result.get("dimension") or "").strip()
+    title = str(result.get("title") or question_text).strip()
+
+    source, selected = _selected_tables(store, project_id)
+    real = {
+        f"{t}.{c['name']}" for t in selected for c in store.get_columns(source, t)
+    }
+    if measure not in real or dimension not in real or measure == dimension:
+        return None
+    mt, dt = measure.split(".")[0], dimension.split(".")[0]
+    if mt != dt:
+        rel_pairs = {
+            frozenset((r["from_table"], r["to_table"]))
+            for r in store.get_relationships(source)
+        }
+        if frozenset((mt, dt)) not in rel_pairs:
+            return None
+
+    dim_is_time = _concept_map(projection).get(dimension, ("", ""))[0] == "TimeAnchor"
+    if dim_is_time:
+        intent, role = "trend", "event_ts"
+    else:
+        claimed = result.get("intent")
+        intent = claimed if claimed in {"ranking", "segment"} else "segment"
+        role = "categorical"
+    return {
+        "title": title,
+        "intent": intent,
+        "needed_columns": [measure, dimension],
+        "col_roles": {measure: "measure", dimension: role},
+        "reason": "Added by you, mapped to your columns.",
+        "score": 0.9,
+    }
+
+
 def propose_and_verify(
     store: HeadwaterStore,
     project_id: str,

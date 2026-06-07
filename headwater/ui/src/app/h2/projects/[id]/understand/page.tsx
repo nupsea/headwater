@@ -614,6 +614,10 @@ export default function UnderstandPage() {
   const router = useRouter();
   const { runAnalysis } = useH2Context();
   const [regenerating, setRegenerating] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newQuestion, setNewQuestion] = useState("");
+  const [addNote, setAddNote] = useState("");
+  const [addError, setAddError] = useState(false);
 
   const [questions, setQuestions] = useState<H2Question[]>([]);
   const [relevance, setRelevance] = useState<H2RelevantColumn[]>([]);
@@ -716,6 +720,31 @@ export default function UnderstandPage() {
       alert(e instanceof Error ? e.message : "Failed to regenerate questions");
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  const addOwnQuestion = async () => {
+    const text = newQuestion.trim();
+    if (!text) return;
+    setAddNote("");
+    setAddError(false);
+    try {
+      const r = await runAnalysis("Mapping your question to the data…", () =>
+        h2.projects.addCustomQuestion(id, text)
+      );
+      if (r.added) {
+        setNewQuestion("");
+        setAdding(false);
+        await load();
+        notifyInputChanged();
+        notifyRecomputed();
+      } else {
+        setAddError(true);
+        setAddNote(r.note || "Couldn't add that question.");
+      }
+    } catch (e) {
+      setAddError(true);
+      setAddNote(e instanceof Error ? e.message : "Failed to add the question.");
     }
   };
 
@@ -1098,6 +1127,103 @@ export default function UnderstandPage() {
                 onToggle={() => toggleKept(q.id)}
               />
             ))
+          )}
+
+          {/* Add your own — typed in plain English, mapped to your columns. */}
+          {adding ? (
+            <div
+              style={{
+                display: "grid",
+                gap: 8,
+                padding: "12px",
+                border: `1px dashed ${HW2_COLOR.rule2}`,
+                borderRadius: 10,
+              }}
+            >
+              <input
+                autoFocus
+                value={newQuestion}
+                onChange={(e) => setNewQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") addOwnQuestion();
+                  if (e.key === "Escape") {
+                    setAdding(false);
+                    setAddNote("");
+                  }
+                }}
+                placeholder="e.g. average wait time by department"
+                style={{
+                  appearance: "none",
+                  border: `1px solid ${HW2_COLOR.rule2}`,
+                  borderRadius: 8,
+                  padding: "9px 11px",
+                  font: "400 13px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.ink,
+                  outline: "none",
+                }}
+              />
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                  onClick={addOwnQuestion}
+                  style={{
+                    appearance: "none",
+                    cursor: "pointer",
+                    background: HW2_COLOR.blue,
+                    color: "#fff",
+                    border: "1px solid transparent",
+                    borderRadius: 8,
+                    padding: "7px 13px",
+                    font: "600 12px 'DM Sans', sans-serif",
+                  }}
+                >
+                  Add question
+                </button>
+                <button
+                  onClick={() => {
+                    setAdding(false);
+                    setAddNote("");
+                    setAddError(false);
+                  }}
+                  style={{
+                    appearance: "none",
+                    cursor: "pointer",
+                    background: "transparent",
+                    color: HW2_COLOR.muted,
+                    border: "none",
+                    font: "500 12px 'DM Sans', sans-serif",
+                  }}
+                >
+                  Cancel
+                </button>
+                {addNote && (
+                  <span
+                    style={{
+                      font: `${addError ? 500 : 400} 12px 'DM Sans', sans-serif`,
+                      color: addError ? HW2_COLOR.bad : HW2_COLOR.muted,
+                    }}
+                  >
+                    {addError ? "⚠ " : ""}
+                    {addNote}
+                  </span>
+                )}
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setAdding(true)}
+              style={{
+                appearance: "none",
+                cursor: "pointer",
+                justifySelf: "start",
+                background: "transparent",
+                border: "none",
+                padding: "6px 0",
+                font: "600 13px 'DM Sans', sans-serif",
+                color: HW2_COLOR.blue,
+              }}
+            >
+              + Add your own question
+            </button>
           )}
         </div>
       </div>

@@ -205,3 +205,63 @@ def test_resolve_suggestion_feeds_enum_codes_to_model(monkeypatch, tmp_path):
         store.close()
     finally:
         get_settings.cache_clear()
+
+
+class _MapQProvider:
+    """Stub: maps a user question to the first two real columns of a table."""
+
+    def __init__(self, measure: str, dimension: str):
+        self._m = measure
+        self._d = dimension
+
+    async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
+        return {
+            "title": "My custom question",
+            "measure": self._m,
+            "dimension": self._d,
+            "intent": "segment",
+        }
+
+
+def test_add_custom_question_maps_and_persists(monkeypatch, tmp_path):
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("HEADWATER_REASONING_ENGINE", "true")
+    get_settings.cache_clear()
+    try:
+        _discover()
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        store.upsert_project("p", slug="p", display_name="P")
+        store.upsert_project_source("p", "sample", selected_tables=[])
+        # pick two real columns from one table to map to
+        from headwater.knowledge import make_projection
+        from headwater.reasoning.nodes.llm_propose import map_user_question
+
+        tbl = store.get_tables("sample")[0]["name"]
+        cols = store.get_columns("sample", tbl)
+        measure = f"{tbl}.{cols[0]['name']}"
+        dimension = f"{tbl}.{cols[1]['name']}"
+        proj = make_projection(get_settings(), store)
+        spec = map_user_question(
+            store,
+            "p",
+            projection=proj,
+            provider=_MapQProvider(measure, dimension),
+            question_text="anything",
+        )
+        assert spec is not None
+        assert spec["needed_columns"] == [measure, dimension]
+        assert spec["col_roles"][measure] == "measure"
+
+        # a hallucinated column is rejected
+        bad = map_user_question(
+            store,
+            "p",
+            projection=proj,
+            provider=_MapQProvider("nope.nada", dimension),
+            question_text="anything",
+        )
+        assert bad is None
+    finally:
+        get_settings.cache_clear()
+        store.close()

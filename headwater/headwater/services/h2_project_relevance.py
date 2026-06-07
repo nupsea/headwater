@@ -767,6 +767,85 @@ def _cr(col: H2RelevantColumn | str | None) -> str:
     return str(col)
 
 
+def add_custom_question(
+    store: HeadwaterStore, project_id: str, text: str
+) -> dict[str, Any]:
+    """Add a user-typed question, mapped to real columns by the engine.
+
+    Plain-English question -> the model picks the measure + grouping/time column
+    (verified against the catalog) -> persisted as an answerable question that
+    flows through the normal draft/execute/certify pipeline. User questions
+    (``<project>:uq*``) are independent of the engine set, so Regenerate never
+    removes them. Surfaces a concrete reason when it can't (no model, unmappable).
+    """
+    from headwater.analyzer.llm import NoLLMProvider, check_llm_available, get_provider
+    from headwater.core.config import get_settings
+    from headwater.knowledge import make_projection
+    from headwater.reasoning.nodes.llm_propose import build_schema_brief, map_user_question
+
+    text = (text or "").strip()
+    if not text:
+        return {"added": False, "note": "Type a question first."}
+    if store.get_project(project_id) is None:
+        raise ValueError(f"Project '{project_id}' is not registered.")
+    sources = store.get_project_sources(project_id)
+    source_name = sources[0]["source_name"] if sources else None
+
+    settings = get_settings()
+    model = getattr(settings, "reasoning_model", "") or settings.llm_model
+    ok, why = check_llm_available(settings, model=model)
+    if not ok:
+        return {"added": False, "note": why}
+    provider = get_provider(settings.model_copy(update={"llm_model": model}))
+    if isinstance(provider, NoLLMProvider):
+        return {"added": False, "note": "AI is off — no model configured."}
+
+    projection = make_projection(settings, store)
+    brief = build_schema_brief(store, project_id, projection)
+    spec = map_user_question(
+        store,
+        project_id,
+        projection=projection,
+        provider=provider,
+        question_text=text,
+        brief=brief,
+    )
+    if not spec:
+        return {
+            "added": False,
+            "note": (
+                "Couldn't map that to your columns. Try naming a measure and a "
+                "grouping (e.g. 'average wait time by department'), or use the "
+                "Query console for custom SQL."
+            ),
+        }
+
+    n = sum(
+        1
+        for q in store.list_questions(project_id)
+        if str(q["id"]).startswith(f"{project_id}:uq")
+    )
+    snapshot_id = (
+        (store.get_latest_source_snapshot(source_name) or {}).get("id")
+        if source_name
+        else None
+    )
+    prop = _persist_question(
+        store,
+        project_id,
+        source_name,
+        question_id=f"uq{n}",
+        title=str(spec["title"]),
+        answerability="answerable",
+        reason=str(spec.get("reason") or "Added by you."),
+        needed_columns=list(spec["needed_columns"]),
+        confidence=float(spec.get("score") or 0.8),
+        snapshot_id=snapshot_id,
+        col_roles=dict(spec.get("col_roles") or {}),
+    )
+    return {"added": True, "question_id": prop.question_id, "title": str(spec["title"])}
+
+
 def _proposal_from_row(q: dict[str, Any]) -> H2QuestionProposal:
     """Rebuild a proposal from a stored question row (the keep-stable path)."""
     payload = q.get("question") or {}

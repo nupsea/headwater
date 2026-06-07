@@ -180,6 +180,26 @@ def delete_source(source_name: str) -> dict[str, Any]:
         store.close()
 
 
+class CustomQuestionRequest(BaseModel):
+    text: str
+
+
+@router.post("/projects/{project_id}/questions/custom")
+def add_custom_question(project_id: str, req: CustomQuestionRequest) -> dict[str, Any]:
+    """Add a user-typed question, mapped to the project's columns by the engine."""
+    from headwater.services.h2_project_relevance import (
+        add_custom_question as _add,
+    )
+
+    store = _get_store()
+    try:
+        if store.get_project(project_id) is None:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+        return _add(store, project_id, req.text)
+    finally:
+        store.close()
+
+
 @router.post("/projects/{project_id}/questions/regenerate")
 def regenerate_questions(project_id: str) -> dict[str, Any]:
     """Force a fresh goal-aware question analysis, replacing the current set."""

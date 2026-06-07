@@ -363,6 +363,11 @@ export const h2 = {
     remove: (id: string) => del<{ deleted: string }>(`/projects/${id}`),
     regenerateQuestions: (id: string) =>
       post<{ certified_count: number }>(`/projects/${id}/questions/regenerate`),
+    addCustomQuestion: (id: string, text: string) =>
+      post<{ added: boolean; note?: string; question_id?: string; title?: string }>(
+        `/projects/${id}/questions/custom`,
+        { text }
+      ),
     frame: (req: {
       project_id: string;
       source_name: string;
