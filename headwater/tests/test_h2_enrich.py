@@ -92,6 +92,47 @@ def test_generate_descriptions_unavailable_without_model(monkeypatch, tmp_path):
         get_settings.cache_clear()
 
 
+class _FailingProvider:
+    """Stub that mimics a reachable model whose calls silently return nothing
+    (timeout / dropped connection — the Ollama provider swallows these as {})."""
+
+    async def analyze(self, prompt: str, system: str = "") -> dict[str, Any]:
+        return {}
+
+
+def test_generate_descriptions_surfaces_silent_failure(monkeypatch, tmp_path):
+    """A model that returns nothing must report available=False with a reason —
+    never a misleading 'Generated 0 descriptions' success."""
+    monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        _discover()
+        store = HeadwaterStore(tmp_path / "h2_metadata.db")
+        store.init()
+        try:
+            res = generate_descriptions(store, "sample", provider=_FailingProvider())
+            assert res["available"] is False
+            assert res["updated"] == 0
+            assert res["note"]  # a concrete, user-facing reason
+        finally:
+            store.close()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_check_llm_available_reports_reason_when_off(monkeypatch, tmp_path):
+    from headwater.analyzer.llm import check_llm_available
+    from headwater.core.config import HeadwaterSettings
+
+    ok, msg = check_llm_available(HeadwaterSettings(llm_provider="none"))
+    assert ok is False and msg
+
+    ok, msg = check_llm_available(
+        HeadwaterSettings(llm_provider="anthropic", llm_api_key=None)
+    )
+    assert ok is False and "key" in msg.lower()
+
+
 def test_update_column_dtype_persists(monkeypatch, tmp_path):
     monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
     get_settings.cache_clear()

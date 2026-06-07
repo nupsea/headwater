@@ -134,23 +134,33 @@ def generate_descriptions(
     Skips locked columns and (unless overwrite) columns that already have a
     description.  Returns counts.  Never overwrites raw data; metadata only.
     """
+    from headwater.analyzer.llm import check_llm_available
     from headwater.services.h2_catalog import update_column
 
     if store.get_source(source_name) is None:
         raise ValueError(f"Source '{source_name}' not found.")
 
-    prov, _ = _provider(settings, provider)
+    settings = settings or get_settings()
+    # Use the capable reasoning model (qwen) rather than a possibly-weak default.
+    model = getattr(settings, "reasoning_model", "") or settings.llm_model
+    if provider is None:
+        ok, why = check_llm_available(settings, model=model)
+        if not ok:
+            return {"updated": 0, "available": False, "note": why}
+        provider = get_provider(settings.model_copy(update={"llm_model": model}))
+    prov = provider
     if isinstance(prov, NoLLMProvider):
-        return {"updated": 0, "available": False, "note": "No model available."}
+        return {"updated": 0, "available": False, "note": "AI is off — no model configured."}
 
     system = (
         "You write concise, plain-English data dictionary entries. Given a table "
         "name and its columns (name + type), return a one-sentence description for "
-        "each column INFERRED FROM ITS NAME. Only include columns you are "
-        "reasonably confident about; omit the rest. Respond as JSON only."
+        "EACH listed column, inferred from its name and type. Respond as JSON only."
     )
 
     updated = 0
+    attempted = 0
+    failed_calls = 0
     for t in store.get_tables(source_name):
         cols = store.get_columns(source_name, t["name"])
         targets = [
@@ -161,6 +171,7 @@ def generate_descriptions(
         ]
         if not targets:
             continue
+        attempted += 1
         prompt = (
             f"TABLE: {t['name']}\n"
             "COLUMNS (name: type):\n"
@@ -169,7 +180,10 @@ def generate_descriptions(
             'e.g. {"created_at": "Timestamp when the record was created."}'
         )
         raw = _invoke(prov, prompt, system)
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or not raw:
+            # Empty result from a reachable model almost always means the call
+            # failed (timeout / dropped connection) — track it so we can tell the user.
+            failed_calls += 1
             continue
         valid = {c["name"] for c in targets}
         for name, desc in raw.items():
@@ -179,7 +193,20 @@ def generate_descriptions(
                 )
                 updated += 1
 
-    return {"updated": updated, "available": True}
+    if attempted and updated == 0:
+        # Reachable when we started, but produced nothing — surface it, don't pretend.
+        return {
+            "updated": 0,
+            "available": False,
+            "note": (
+                f"The model ({model}) returned no descriptions — it may have timed "
+                "out or be too small. Try again, or set a stronger reasoning model."
+            ),
+        }
+    note = ""
+    if failed_calls:
+        note = f"{failed_calls} table(s) failed (model timeout) — re-run to fill the rest."
+    return {"updated": updated, "available": True, "note": note}
 
 
 # ── Resolve-card suggestion (Ask AI) ────────────────────────────────────────────
