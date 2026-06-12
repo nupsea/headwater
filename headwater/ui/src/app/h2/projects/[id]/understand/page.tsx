@@ -13,6 +13,7 @@ import {
   type H2EdaFinding,
 } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+import { useConfirm } from "@/components/h2/confirm-dialog";
 import { useH2Context } from "@/app/h2/layout";
 import { SchemaEditor } from "@/components/h2/schema-editor";
 import { AiSuggestions } from "@/components/h2/ai-suggestions";
@@ -613,6 +614,7 @@ export default function UnderstandPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const { runAnalysis } = useH2Context();
+  const { confirm, confirmDialog } = useConfirm();
   const [regenerating, setRegenerating] = useState(false);
   const [adding, setAdding] = useState(false);
   const [newQuestion, setNewQuestion] = useState("");
@@ -700,14 +702,15 @@ export default function UnderstandPage() {
   };
 
   const regenerate = async () => {
-    if (
-      !window.confirm(
-        "Regenerate the question set from your goal?\n\nThis replaces the current " +
-          "questions (and any answers or verdicts on them) with a fresh AI analysis " +
-          "of your goal and data. Use this after changing scope or to retry."
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: "Regenerate the question set?",
+      body:
+        "This replaces the current questions (and any answers or verdicts on " +
+        "them) with a fresh AI analysis of your goal and data. Use this after " +
+        "changing scope or to retry.",
+      confirmLabel: "Regenerate",
+    });
+    if (!ok) return;
     setRegenerating(true);
     try {
       await runAnalysis("Regenerating questions from your goal…", () =>
@@ -808,6 +811,7 @@ export default function UnderstandPage() {
         fontFamily: "'DM Sans', sans-serif",
       }}
     >
+      {confirmDialog}
       <span
         style={{
           font: "600 11px 'DM Sans', sans-serif",

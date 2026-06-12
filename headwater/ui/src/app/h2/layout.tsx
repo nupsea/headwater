@@ -19,12 +19,17 @@ import {
 } from "@/lib/h2api";
 import { ReadinessRing, HW2_COLOR } from "@/components/h2/readiness-ring";
 import { Stepper, type StageKey } from "@/components/h2/stepper";
+import { useConfirm } from "@/components/h2/confirm-dialog";
 
 // ─── Context ────────────────────────────────────────────────────────────────
 
 interface H2ContextValue {
   projects: H2Project[];
   sources: H2Source[];
+  /** The source the workspace is scoped to. Projects, Catalog, and Query all
+   *  operate within this source's context. */
+  activeSource: string | null;
+  setActiveSource: (name: string) => void;
   reload: () => void;
   /** Whether a long LLM analysis is currently running (drives the global bar). */
   analysis: { active: boolean; label: string };
@@ -36,10 +41,14 @@ interface H2ContextValue {
 const H2Context = createContext<H2ContextValue>({
   projects: [],
   sources: [],
+  activeSource: null,
+  setActiveSource: () => {},
   reload: () => {},
   analysis: { active: false, label: "" },
   runAnalysis: (_label, fn) => fn(),
 });
+
+const ACTIVE_SOURCE_KEY = "hw2.activeSource";
 
 export function useH2Context() {
   return useContext(H2Context);
@@ -270,27 +279,34 @@ function RailDivider() {
 function H2Rail({
   sources,
   projects,
+  activeSource,
+  onSelectSource,
   pathname,
   onNavigate,
 }: {
   sources: H2Source[];
   projects: H2Project[];
+  activeSource: string | null;
+  onSelectSource: (name: string) => void;
   pathname: string;
   onNavigate: (href: string) => void;
 }) {
-  const primarySource = sources[0] ?? null;
+  const primarySource =
+    sources.find((s) => s.name === activeSource) ?? sources[0] ?? null;
   const activeProjectId = projectIdFromPath(pathname);
   const { reload } = useH2Context();
+  const { confirm, confirmDialog } = useConfirm();
 
   const deleteProject = async (p: H2Project) => {
-    if (
-      !window.confirm(
-        `Delete project "${p.display_name}"?\n\nThis permanently removes its goal, ` +
-          "questions, verdicts, and answers. The shared data source is not affected. " +
-          "This cannot be undone."
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Delete project "${p.display_name}"?`,
+      body:
+        "This permanently removes its goal, questions, verdicts, and answers. " +
+        "The shared data source is not affected. This cannot be undone.",
+      confirmLabel: "Delete project",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await h2.projects.remove(p.id);
       if (activeProjectId === p.id || activeProjectId === p.slug) onNavigate("/h2");
@@ -312,6 +328,7 @@ function H2Rail({
         overflowY: "auto",
       }}
     >
+      {confirmDialog}
       {/* Source switcher */}
       <div style={{ padding: "16px 14px 8px" }}>
         <div
@@ -327,59 +344,77 @@ function H2Rail({
           Source
         </div>
 
-        {primarySource ? (
-          <button
-            onClick={() => onNavigate(`/h2/sources/${encodeURIComponent(primarySource.name)}`)}
-            style={{
-              appearance: "none",
-              cursor: "pointer",
-              width: "100%",
-              background: "#fff",
-              border: `1px solid ${HW2_COLOR.rule2}`,
-              borderRadius: 8,
-              padding: "8px 10px",
-              textAlign: "left",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontFamily: "'DM Sans', sans-serif",
-            }}
-          >
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: "50%",
-                background: primarySource.latest_snapshot_id
-                  ? HW2_COLOR.good
-                  : HW2_COLOR.faint,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <div
-                style={{
-                  font: "600 13px 'DM Sans', sans-serif",
-                  color: HW2_COLOR.ink,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {primarySource.name}
-              </div>
-              <div
-                style={{
-                  font: "500 10px 'DM Mono', monospace",
-                  color: HW2_COLOR.muted,
-                  marginTop: 1,
-                }}
-              >
-                {primarySource.type}
-                {primarySource.latest_snapshot_id ? " · profiled" : " · not profiled"}
-              </div>
-            </span>
-          </button>
+        {sources.length > 0 ? (
+          <div style={{ display: "grid", gap: 4 }}>
+            {sources.map((s) => {
+              const isActive = primarySource?.name === s.name;
+              return (
+                <button
+                  key={s.name}
+                  onClick={() => {
+                    onSelectSource(s.name);
+                    onNavigate(`/h2/sources/${encodeURIComponent(s.name)}`);
+                  }}
+                  title={
+                    isActive
+                      ? "Open this source's catalog"
+                      : "Switch the workspace to this source"
+                  }
+                  style={{
+                    appearance: "none",
+                    cursor: "pointer",
+                    width: "100%",
+                    background: isActive ? "#fff" : "transparent",
+                    border: isActive
+                      ? `1px solid ${HW2_COLOR.blue}66`
+                      : `1px solid transparent`,
+                    borderRadius: 8,
+                    padding: "8px 10px",
+                    textAlign: "left",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    fontFamily: "'DM Sans', sans-serif",
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      background: s.latest_snapshot_id
+                        ? HW2_COLOR.good
+                        : HW2_COLOR.faint,
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        font: `${isActive ? 600 : 500} 13px 'DM Sans', sans-serif`,
+                        color: isActive ? HW2_COLOR.ink : HW2_COLOR.ink2,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {s.name}
+                    </div>
+                    <div
+                      style={{
+                        font: "500 10px 'DM Mono', monospace",
+                        color: HW2_COLOR.muted,
+                        marginTop: 1,
+                      }}
+                    >
+                      {s.type}
+                      {isActive ? " · active" : ""}
+                    </div>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         ) : (
           <div
             style={{
@@ -451,9 +486,9 @@ function H2Rail({
 
       <RailDivider />
 
-      {/* Projects */}
+      {/* Projects (scoped to the active source) */}
       <RailSection
-        label="Projects"
+        label={primarySource ? `Projects · ${primarySource.name}` : "Projects"}
         action={
           <button
             onClick={() => onNavigate("/h2/projects/new")}
@@ -617,9 +652,6 @@ function ProjectBanner({
         padding: "20px 32px 14px",
         background: HW2_COLOR.paper,
         borderBottom: `1px solid ${HW2_COLOR.rule}`,
-        position: "sticky",
-        top: 0,
-        zIndex: 5,
       }}
     >
       <div
@@ -726,11 +758,13 @@ function ProjectBanner({
 // ─── Recompute banner (staged) ───────────────────────────────────────────────
 
 /** Global indeterminate progress strip shown while the LLM is analysing. Rendered
- *  in the persistent layout, so it stays put when the user switches pages. */
+ *  in the persistent layout, so it stays put when the user switches pages. NOT
+ *  sticky by itself — the layout stacks it with the project banner in one sticky
+ *  header group so the two can never overlap while scrolling. */
 function AnalysisBar({ active, label }: { active: boolean; label: string }) {
   if (!active) return null;
   return (
-    <div style={{ position: "sticky", top: 0, zIndex: 30 }}>
+    <div>
       <div
         style={{
           position: "relative",
@@ -872,6 +906,32 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
   const [sources, setSources] = useState<H2Source[]>([]);
   const [activeProject, setActiveProject] = useState<H2Project | null>(null);
   const [analysis, setAnalysis] = useState({ active: false, label: "" });
+  // Starts null on server AND first client render (then hydrates from
+  // localStorage in an effect) so SSR and client markup match.
+  const [activeSource, setActiveSourceState] = useState<string | null>(null);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(ACTIVE_SOURCE_KEY);
+    if (stored) setActiveSourceState(stored);
+  }, []);
+
+  const setActiveSource = useCallback((name: string) => {
+    setActiveSourceState(name);
+    try {
+      window.localStorage.setItem(ACTIVE_SOURCE_KEY, name);
+    } catch {
+      // private mode / storage full — scoping still works for this session
+    }
+  }, []);
+
+  // Keep the active source valid: fall back to the first connected source when
+  // the stored one was removed (or nothing is stored yet).
+  useEffect(() => {
+    if (sources.length === 0) return;
+    if (!activeSource || !sources.some((s) => s.name === activeSource)) {
+      setActiveSource(sources[0].name);
+    }
+  }, [sources, activeSource, setActiveSource]);
 
   // Owned by the (persistent) layout, so an in-flight analysis and its bar survive
   // client-side navigation between H2 pages (e.g. switching to Catalog).
@@ -968,8 +1028,24 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
     router.push(stageMap[key]);
   };
 
+  // Everything in the workspace is a projection of the active source: the rail,
+  // the home view, and project pickers all see only this source's projects.
+  const scopedProjects = activeSource
+    ? projects.filter((p) => !p.source_name || p.source_name === activeSource)
+    : projects;
+
   return (
-    <H2Context.Provider value={{ projects, sources, reload, analysis, runAnalysis }}>
+    <H2Context.Provider
+      value={{
+        projects: scopedProjects,
+        sources,
+        activeSource,
+        setActiveSource,
+        reload,
+        analysis,
+        runAnalysis,
+      }}
+    >
       <div
         style={{
           height: "100vh",
@@ -1081,7 +1157,9 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
         >
           <H2Rail
             sources={sources}
-            projects={projects}
+            projects={scopedProjects}
+            activeSource={activeSource}
+            onSelectSource={setActiveSource}
             pathname={pathname}
             onNavigate={handleNavigate}
           />
@@ -1095,20 +1173,31 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
             }}
           >
             {/* Global: shows on every H2 page (incl. Catalog) and persists while
-                the user navigates during a long analysis. */}
-            <AnalysisBar active={analysis.active} label={analysis.label} />
+                the user navigates during a long analysis. The analysis bar and
+                the project banner live in ONE sticky group so they stack —
+                never overlap — while scrolling. */}
             {activeProject ? (
               <>
-                <ProjectBanner
-                  project={activeProject}
-                  stage={stage}
-                  onJumpStage={handleJumpStage}
-                />
+                <div style={{ position: "sticky", top: 0, zIndex: 30 }}>
+                  <AnalysisBar active={analysis.active} label={analysis.label} />
+                  <ProjectBanner
+                    project={activeProject}
+                    stage={stage}
+                    onJumpStage={handleJumpStage}
+                  />
+                </div>
                 <RecomputeBanner projectId={activeProject.id} />
                 <div>{children}</div>
               </>
             ) : (
-              children
+              <>
+                {analysis.active && (
+                  <div style={{ position: "sticky", top: 0, zIndex: 30 }}>
+                    <AnalysisBar active={analysis.active} label={analysis.label} />
+                  </div>
+                )}
+                {children}
+              </>
             )}
           </main>
         </div>

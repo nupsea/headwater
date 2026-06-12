@@ -50,6 +50,9 @@ export interface H2CatalogColumn {
 export interface H2CatalogTable {
   table_name: string;
   row_count: number;
+  /** True when statistics exist — a profiled 0 is VERIFIED empty; an
+   *  unprofiled 0 just means "unknown". */
+  profiled?: boolean;
   description: string | null;
   columns: H2CatalogColumn[];
 }
@@ -290,9 +293,12 @@ export const h2 = {
     get: (name: string) =>
       fetchJSON<H2Source & { tables: unknown[]; latest_snapshot: unknown }>(`/sources/${name}`),
     discover: (path: string, sourceType?: string, name?: string) =>
-      post<{ snapshot_id: string; table_count: number }>("/sources", {
-        path, source_type: sourceType, name,
-      }),
+      post<{
+        source_name: string;
+        source_type: string;
+        snapshot_id: string;
+        table_count: number;
+      }>("/sources", { path, source_type: sourceType, name }),
     catalog: (name: string, table?: string, projectId?: string) => {
       const params = new URLSearchParams();
       if (table) params.set("table", table);
@@ -308,10 +314,26 @@ export const h2 = {
       fetchJSON<H2BrowseTable[]>(`/sources/${name}/browse`),
     // Ingest only the selected subset (profile embedded / register warehouse).
     ingest: (name: string, tables: string[]) =>
-      post<{ ingested: string[]; profiled: boolean; snapshot_id: string | null }>(
-        `/sources/${name}/ingest`,
-        { tables }
+      post<{
+        ingested: string[];
+        failed: Array<{ table: string; error: string }>;
+        profiled: boolean;
+        snapshot_id: string | null;
+      }>(`/sources/${name}/ingest`, { tables }),
+    // Drop one table from the source's catalog (re-addable from Browse).
+    removeTable: (name: string, table: string) =>
+      del<{ removed: string }>(
+        `/sources/${name}/tables/${encodeURIComponent(table)}`
       ),
+    // Re-profile every ingested table (fills missing/stale statistics).
+    refreshStats: (name: string) =>
+      post<{
+        ingested: string[];
+        failed: Array<{ table: string; error: string }>;
+        unprofiled?: Array<{ table: string; error: string }>;
+        profiled: boolean;
+        snapshot_id: string | null;
+      }>(`/sources/${name}/refresh-stats`),
     relationships: (name: string) =>
       fetchJSON<H2Relationship[]>(`/sources/${name}/relationships`),
     // Move D — LLM proposes relationships/keys for human verify + lock.

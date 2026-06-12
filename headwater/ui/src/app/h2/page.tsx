@@ -1,70 +1,25 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { h2, type H2Project, type H2Source } from "@/lib/h2api";
+import { type H2Project } from "@/lib/h2api";
 import { ReadinessRing, HW2_COLOR } from "@/components/h2/readiness-ring";
+import { useH2Context } from "./layout";
 
 function computeReadout(project: H2Project) {
-  const questions = project.questions ?? [];
-  const total = questions.length;
+  // Verdict-based counts from the list endpoint are the source of truth.
+  const total =
+    project.question_count ?? (project.questions ?? []).length;
+  const certifiedCount =
+    project.certified_count ??
+    (project.questions ?? []).filter((q) => q.status === "certified").length;
   if (total === 0) return { pct: 0, certifiedCount: 0, total: 0 };
-  const certifiedCount = questions.filter((q) => q.status === "certified").length;
   return { pct: Math.round((certifiedCount / total) * 100), certifiedCount, total };
 }
 
 export default function H2HomePage() {
   const router = useRouter();
-  const [projects, setProjects] = useState<H2Project[]>([]);
-  const [sources, setSources] = useState<H2Source[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    Promise.all([h2.projects.list(), h2.sources.list()])
-      .then(([p, s]) => {
-        setProjects(p);
-        setSources(s);
-      })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, []);
-
-  if (loading) {
-    return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "60vh",
-          font: "400 14px 'DM Sans', sans-serif",
-          color: HW2_COLOR.muted,
-        }}
-      >
-        Loading…
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={{ maxWidth: 640, margin: "48px auto", padding: "0 32px" }}>
-        <div
-          style={{
-            padding: "14px 18px",
-            background: HW2_COLOR.badSoft,
-            border: `1px solid ${HW2_COLOR.bad}44`,
-            borderRadius: 10,
-            font: "500 13px 'DM Sans', sans-serif",
-            color: HW2_COLOR.bad,
-          }}
-        >
-          {error}
-        </div>
-      </div>
-    );
-  }
+  // Layout-owned data: projects are already scoped to the active source.
+  const { projects, sources, activeSource, setActiveSource } = useH2Context();
 
   return (
     <div
@@ -93,7 +48,7 @@ export default function H2HomePage() {
               textTransform: "uppercase",
             }}
           >
-            Workspace
+            {activeSource ? `Workspace · ${activeSource}` : "Workspace"}
           </span>
           <h1
             style={{
@@ -261,16 +216,28 @@ export default function H2HomePage() {
         ) : (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
             {sources.map((s) => (
-              <div
+              <button
                 key={s.name}
+                onClick={() => setActiveSource(s.name)}
+                title={
+                  s.name === activeSource
+                    ? "Active source"
+                    : "Switch the workspace to this source"
+                }
                 style={{
+                  appearance: "none",
+                  cursor: "pointer",
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 8,
                   padding: "8px 12px",
                   background: HW2_COLOR.surface,
-                  border: `1px solid ${HW2_COLOR.rule}`,
+                  border:
+                    s.name === activeSource
+                      ? `1.5px solid ${HW2_COLOR.blue}`
+                      : `1px solid ${HW2_COLOR.rule}`,
                   borderRadius: 8,
+                  fontFamily: "'DM Sans', sans-serif",
                 }}
               >
                 <span
@@ -299,17 +266,17 @@ export default function H2HomePage() {
                 >
                   {s.type}
                 </span>
-                {s.latest_snapshot_id && (
+                {s.name === activeSource && (
                   <span
                     style={{
                       font: "500 10px 'DM Sans', sans-serif",
-                      color: HW2_COLOR.good,
+                      color: HW2_COLOR.blue,
                     }}
                   >
-                    profiled
+                    active
                   </span>
                 )}
-              </div>
+              </button>
             ))}
           </div>
         )}
