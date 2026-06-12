@@ -146,11 +146,19 @@ class SnowflakeConnector:
             name = column["name"]
             quoted = _quote_identifier(name)
             alias = _safe_alias(name)
+            # Numeric/temporal min-max must use the native type — casting to
+            # varchar first gives lexicographic bounds ("9" > "19"). Text-ish
+            # types are cast so the result row stays uniformly stringable.
+            if _orders_natively(str(column.get("data_type") or "")):
+                min_expr, max_expr = f"MIN({quoted})", f"MAX({quoted})"
+            else:
+                min_expr = f"MIN(TO_VARCHAR({quoted}))"
+                max_expr = f"MAX(TO_VARCHAR({quoted}))"
             selects.extend(
                 [
                     f"COUNT({quoted}) AS _nn_{alias}",
-                    f"MIN(TO_VARCHAR({quoted})) AS _min_{alias}",
-                    f"MAX(TO_VARCHAR({quoted})) AS _max_{alias}",
+                    f"{min_expr} AS _min_{alias}",
+                    f"{max_expr} AS _max_{alias}",
                     f"COUNT(DISTINCT {quoted}) AS _dist_{alias}",
                 ]
             )
@@ -323,6 +331,19 @@ def _format_table(
     if database == default_database:
         return f"{schema}.{table}"
     return f"{database}.{schema}.{table}"
+
+
+# Type families whose native MIN/MAX is meaningful (Snowflake type names:
+# NUMBER, FLOAT, DATE, TIME, TIMESTAMP_NTZ/_LTZ/_TZ, ...).
+_NATIVE_ORDER_TYPES = (
+    "number", "int", "numeric", "decimal", "double", "real", "float",
+    "date", "time",
+)
+
+
+def _orders_natively(data_type: str) -> bool:
+    dt = data_type.lower()
+    return any(k in dt for k in _NATIVE_ORDER_TYPES)
 
 
 def _quote_identifier(value: str) -> str:

@@ -476,6 +476,55 @@ class HeadwaterStore:
         )
         self.con.commit()
 
+    def delete_table(self, source_name: str, table_name: str) -> None:
+        """Remove one table from a source's catalog.
+
+        Cascades the table's columns, profiles, and any relationship that
+        touches it, and prunes the table from every project's selected set so
+        project scope stays consistent with the catalog.  Staleness detection
+        picks up the change on the next recompute.
+        """
+        rows = self.con.execute(
+            """
+            SELECT project_id, selected_tables_json
+              FROM project_sources
+             WHERE source_name = ?
+            """,
+            (source_name,),
+        ).fetchall()
+        for project_id, selected_json in rows:
+            selected = json.loads(selected_json or "[]")
+            if table_name not in selected:
+                continue
+            self.con.execute(
+                """
+                UPDATE project_sources
+                   SET selected_tables_json = ?, updated_at = datetime('now')
+                 WHERE project_id = ? AND source_name = ?
+                """,
+                (_json([t for t in selected if t != table_name]), project_id, source_name),
+            )
+        self.con.execute(
+            "DELETE FROM profiles WHERE source_name = ? AND table_name = ?",
+            (source_name, table_name),
+        )
+        self.con.execute(
+            "DELETE FROM columns WHERE source_name = ? AND table_name = ?",
+            (source_name, table_name),
+        )
+        self.con.execute(
+            """
+            DELETE FROM relationships
+             WHERE source_name = ? AND (from_table = ? OR to_table = ?)
+            """,
+            (source_name, table_name, table_name),
+        )
+        self.con.execute(
+            "DELETE FROM tables WHERE source_name = ? AND name = ?",
+            (source_name, table_name),
+        )
+        self.con.commit()
+
     def get_tables(self, source_name: str) -> list[dict[str, Any]]:
         rows = self.con.execute(
             "SELECT * FROM tables WHERE source_name = ? ORDER BY name",
@@ -588,6 +637,17 @@ class HeadwaterStore:
         *,
         snapshot_id: str | None = None,
     ) -> int:
+        # Upsert semantics: one row per column pair. A re-discovery or a user
+        # confirmation REPLACES the prior row (confirm carries confidence 1.0)
+        # instead of stacking duplicates the UI and EDA would then repeat.
+        self.con.execute(
+            """
+            DELETE FROM relationships
+             WHERE source_name = ? AND from_table = ? AND from_column = ?
+               AND to_table = ? AND to_column = ?
+            """,
+            (source_name, from_table, from_column, to_table, to_column),
+        )
         cur = self.con.execute(
             """
             INSERT INTO relationships (
@@ -613,11 +673,26 @@ class HeadwaterStore:
         return int(cur.lastrowid)
 
     def get_relationships(self, source_name: str) -> list[dict[str, Any]]:
+        # Defensive dedupe for rows written before insert_relationship gained
+        # upsert semantics: keep the strongest row per column pair.
         rows = self.con.execute(
-            "SELECT * FROM relationships WHERE source_name = ? ORDER BY id",
+            """
+            SELECT * FROM relationships
+             WHERE source_name = ?
+             ORDER BY confidence DESC, referential_integrity DESC, id DESC
+            """,
             (source_name,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        seen: set[tuple[str, str, str, str]] = set()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            d = dict(row)
+            key = (d["from_table"], d["from_column"], d["to_table"], d["to_column"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(d)
+        return out
 
     def upsert_project(
         self,

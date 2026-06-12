@@ -24,6 +24,7 @@ Schema filtering (via URI query params or source config)::
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 from types import ModuleType
@@ -100,6 +101,14 @@ class RedshiftConnector:
             self._connect_iam(parts)
         else:
             self._connect_userpass(parts)
+
+        # All access here is read-only metadata/aggregates. Autocommit keeps one
+        # failed statement (e.g. svv_table_info without privileges) from aborting
+        # the transaction and poisoning every later query on this connection.
+        try:
+            self._conn.autocommit = True  # type: ignore[union-attr]
+        except Exception:
+            logger.debug("Could not enable autocommit; relying on rollback-on-error")
 
     def capabilities(self) -> ConnectorCapabilities:
         return REDSHIFT_PREVIEW_CAPABILITIES
@@ -229,10 +238,18 @@ class RedshiftConnector:
             name = col["name"]
             quoted = _quote_ident(name)
             alias = _safe_alias(name)
+            # Numeric/temporal min-max must use the native type — casting to
+            # varchar first gives lexicographic bounds ("9" > "19").  Text-ish
+            # types are cast so the result row stays uniformly stringable.
+            if _orders_natively(col.get("data_type") or ""):
+                min_expr, max_expr = f"MIN({quoted})", f"MAX({quoted})"
+            else:
+                min_expr = f"MIN({quoted}::varchar)"
+                max_expr = f"MAX({quoted}::varchar)"
             selects.extend([
                 f"COUNT({quoted}) AS _nn_{alias}",
-                f"MIN({quoted}::varchar) AS _min_{alias}",
-                f"MAX({quoted}::varchar) AS _max_{alias}",
+                f"{min_expr} AS _min_{alias}",
+                f"{max_expr} AS _max_{alias}",
                 f"COUNT(DISTINCT {quoted}) AS _dist_{alias}",
             ])
 
@@ -454,6 +471,9 @@ class RedshiftConnector:
             cur.execute(sql, params)
             self._last_description = cur.description
             return cur.fetchall()
+        except Exception:
+            self._rollback_quietly()
+            raise
         finally:
             cur.close()
 
@@ -463,8 +483,18 @@ class RedshiftConnector:
             cur.execute(sql, params)
             self._last_description = cur.description
             return cur.fetchone()
+        except Exception:
+            self._rollback_quietly()
+            raise
         finally:
             cur.close()
+
+    def _rollback_quietly(self) -> None:
+        # Without autocommit, a failed statement leaves the transaction aborted
+        # and every subsequent statement fails. Reset so the next query can run.
+        if self._conn is not None:
+            with contextlib.suppress(Exception):
+                self._conn.rollback()
 
     def _description(self):
         return getattr(self, "_last_description", []) or []
@@ -536,6 +566,18 @@ def _split_table(
         parts = table_name.split(".", 1)
         return parts[0], parts[1]
     return default_schema or "public", table_name
+
+
+_NATIVE_ORDER_TYPES = (
+    "int", "numeric", "decimal", "double", "real", "float",
+    "date", "time",  # covers timestamp/timestamptz/time
+)
+
+
+def _orders_natively(data_type: str) -> bool:
+    """True when MIN/MAX on the native type is meaningful (numeric/temporal)."""
+    dt = data_type.lower()
+    return any(k in dt for k in _NATIVE_ORDER_TYPES)
 
 
 def _quote_ident(value: str) -> str:

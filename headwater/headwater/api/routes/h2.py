@@ -20,6 +20,7 @@ Route structure:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, UploadFile, status
@@ -28,6 +29,8 @@ from pydantic import BaseModel
 
 from headwater.core.config import get_settings
 from headwater.core.store import HeadwaterStore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/h2", tags=["h2"])
 
@@ -117,7 +120,17 @@ class QueryRequest(BaseModel):
 
 @router.post("/sources", status_code=status.HTTP_201_CREATED)
 def discover_source(req: DiscoverRequest) -> dict[str, Any]:
+    from headwater.core.redaction import redact_secrets
     from headwater.services.h2_source import discover_and_persist
+
+    # Never log raw connection strings -- they may carry passwords.
+    safe_target = redact_secrets(req.path)
+    logger.info(
+        "Discover source requested: type=%s name=%s target=%s",
+        req.source_type or "auto",
+        req.name or "(auto)",
+        safe_target,
+    )
 
     store = _get_store()
     try:
@@ -133,10 +146,35 @@ def discover_source(req: DiscoverRequest) -> dict[str, Any]:
             source_type=req.source_type,
             name=req.name,
         )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Surface the real reason to the UI and the server log instead of a
+        # bare 500 -- connector/driver/auth failures were previously silent.
+        detail = redact_secrets(str(exc)) or exc.__class__.__name__
+        logger.exception(
+            "Discover source failed: type=%s target=%s -- %s",
+            req.source_type or "auto",
+            safe_target,
+            detail,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not connect/profile source: {detail}",
+        ) from exc
     finally:
         store.close()
 
+    logger.info(
+        "Discover source ok: name=%s tables=%d profiles=%d relationships=%d",
+        req.name or safe_target,
+        len(outcome.discovery.tables),
+        len(outcome.discovery.profiles),
+        len(outcome.discovery.relationships),
+    )
     return {
+        "source_name": outcome.discovery.source.name,
+        "source_type": outcome.discovery.source.type,
         "snapshot_id": outcome.snapshot_id,
         "table_count": len(outcome.discovery.tables),
         "profile_count": len(outcome.discovery.profiles),
@@ -251,9 +289,71 @@ def ingest_source_tables(
 
     store = _get_store()
     try:
-        return ingest_tables(store, source_name, req.tables)
+        result = ingest_tables(store, source_name, req.tables)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        store.close()
+    logger.info(
+        "Ingest tables: source=%s requested=%d ingested=%d failed=%d",
+        source_name,
+        len(req.tables),
+        len(result["ingested"]),
+        len(result["failed"]),
+    )
+    for f in result["failed"]:
+        logger.warning("Ingest failed: %s.%s -- %s", source_name, f["table"], f["error"])
+    return result
+
+
+@router.post("/sources/{source_name}/refresh-stats")
+def refresh_source_stats(source_name: str) -> dict[str, Any]:
+    """Re-profile every ingested table of the source (pushdown for warehouses).
+
+    Fills statistics for tables ingested before profiling existed, and refreshes
+    stale stats — readiness contracts and the catalog read the new profiles on
+    the next recompute.
+    """
+    from headwater.services.h2_source import ingest_tables
+
+    store = _get_store()
+    try:
+        if store.get_source(source_name) is None:
+            raise HTTPException(status_code=404, detail=f"Source '{source_name}' not found.")
+        tables = [t["name"] for t in store.get_tables(source_name)]
+        if not tables:
+            return {"ingested": [], "failed": [], "profiled": False, "snapshot_id": None}
+        result = ingest_tables(store, source_name, tables)
+    finally:
+        store.close()
+    logger.info(
+        "Refresh stats: source=%s tables=%d ok=%d failed=%d",
+        source_name,
+        len(tables),
+        len(result["ingested"]),
+        len(result["failed"]),
+    )
+    return result
+
+
+@router.delete("/sources/{source_name}/tables/{table_name}")
+def remove_source_table(source_name: str, table_name: str) -> dict[str, Any]:
+    """Drop one table from the source's catalog (columns, profiles, relationships).
+
+    The source connection is untouched — the table can be re-added from Browse.
+    """
+    store = _get_store()
+    try:
+        if store.get_source(source_name) is None:
+            raise HTTPException(status_code=404, detail=f"Source '{source_name}' not found.")
+        known = {t["name"] for t in store.get_tables(source_name)}
+        if table_name not in known:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Table '{table_name}' is not in source '{source_name}'.",
+            )
+        store.delete_table(source_name, table_name)
+        return {"removed": table_name}
     finally:
         store.close()
 
@@ -282,6 +382,7 @@ def get_catalog(
         result.append({
             "table_name": tbl.table_name,
             "row_count": tbl.row_count,
+            "profiled": tbl.profiled,
             "description": tbl.description,
             "columns": [
                 {
@@ -844,19 +945,19 @@ def derive_resolve(
 
 @router.post("/query")
 def run_query(req: QueryRequest) -> dict[str, Any]:
-    """Run read-only SQL against a freshly materialized source (sandboxed)."""
-    from headwater.services.h2_execute import execute_one, materialize_source
+    """Run read-only SQL against a source.
+
+    File/embedded sources are materialized locally; warehouse sources push the
+    SELECT down over the live connection.
+    """
+    from headwater.services.h2_execute import query_source
 
     store = _get_store()
-    con = None
     try:
-        con, _ = materialize_source(store, req.source_name)
-        result = execute_one(con, "adhoc", req.sql)
+        result = query_source(store, req.source_name, req.sql)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     finally:
-        if con is not None:
-            con.close()
         store.close()
 
     return {

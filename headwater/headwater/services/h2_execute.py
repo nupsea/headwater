@@ -130,7 +130,12 @@ def execute_one(
         return ExecutedResult(
             question_id=question_id, sql_text=sql_text, error=str(exc)
         )
+    return _result_from_frame(question_id, sql_text, df)
 
+
+def _result_from_frame(
+    question_id: str, sql_text: str, df: pl.DataFrame
+) -> ExecutedResult:
     row_count = df.height
     truncated = row_count > _MAX_PREVIEW_ROWS
     preview = df.head(_MAX_PREVIEW_ROWS)
@@ -145,13 +150,115 @@ def execute_one(
     )
 
 
+# ── Warehouse pushdown (read-only, no local copy) ─────────────────────────────
+
+
+def _is_warehouse(src: dict[str, Any]) -> bool:
+    return str(src["type"]) not in _MATERIALIZABLE
+
+
+def _warehouse_connector(src: dict[str, Any]):
+    """Connect a warehouse source's connector, requiring read-only execution."""
+    config = SourceConfig(
+        name=src["name"],
+        type=str(src["type"]),  # type: ignore[arg-type]
+        path=src.get("path"),
+        uri=src.get("uri"),
+        mode="generate",
+    )
+    connector = get_connector(config.type)
+    if not callable(getattr(connector, "execute_readonly", None)):
+        raise ValueError(
+            f"Source type '{config.type}' does not support querying."
+        )
+    connector.connect(config)
+    return connector
+
+
+def _close_quietly(connector: Any) -> None:
+    close = getattr(connector, "close", None)
+    if callable(close):
+        with contextlib.suppress(Exception):
+            close()
+
+
+def _execute_pushdown_one(
+    connector: Any, question_id: str, sql_text: str | None
+) -> ExecutedResult:
+    """Run one SELECT on the warehouse and shape the result like a local run."""
+    if not sql_text:
+        return ExecutedResult(question_id=question_id, sql_text=sql_text)
+    try:
+        arrow_table = connector.execute_readonly(sql_text)
+    except Exception as exc:  # surfaced to the UI as a non-certifiable result
+        from headwater.core.redaction import redact_secrets
+
+        return ExecutedResult(
+            question_id=question_id,
+            sql_text=sql_text,
+            error=redact_secrets(str(exc)) or exc.__class__.__name__,
+        )
+    df = pl.from_arrow(arrow_table)
+    if isinstance(df, pl.Series):  # single-column arrow input edge case
+        df = df.to_frame()
+    return _result_from_frame(question_id, sql_text, df)
+
+
+def query_source(
+    store: HeadwaterStore, source_name: str, sql_text: str
+) -> ExecutedResult:
+    """Run one ad-hoc read-only query against a source, wherever it lives.
+
+    Embedded/file sources are materialized into in-memory DuckDB (all tables,
+    so joins work).  Warehouse sources (postgres/mysql/snowflake/redshift) push
+    the SELECT down over the connector's ``execute_readonly`` — nothing is
+    copied locally beyond the result rows.
+    """
+    src = store.get_source(source_name)
+    if src is None:
+        raise ValueError(f"Source '{source_name}' not found.")
+
+    if not _is_warehouse(src):
+        con, _ = materialize_source(store, source_name)
+        try:
+            return execute_one(con, "adhoc", sql_text)
+        finally:
+            con.close()
+
+    connector = _warehouse_connector(src)
+    try:
+        return _execute_pushdown_one(connector, "adhoc", sql_text)
+    finally:
+        _close_quietly(connector)
+
+
 def execute_answers(
     store: HeadwaterStore,
     source_name: str,
     items: list[tuple[str, str | None]],
 ) -> dict[str, ExecutedResult]:
-    """Materialize the source once and execute many (question_id, sql) pairs."""
+    """Execute many (question_id, sql) pairs against one source connection.
+
+    Embedded sources are materialized once locally; warehouse sources keep one
+    live connection and push every SELECT down.  Per-question failures land in
+    that question's result — one bad query never sinks the batch.
+    """
+    src = store.get_source(source_name)
+    if src is None:
+        raise ValueError(f"Source '{source_name}' not found.")
+
     results: dict[str, ExecutedResult] = {}
+    if _is_warehouse(src):
+        connector = _warehouse_connector(src)
+        try:
+            for question_id, sql_text in items:
+                results[question_id] = _execute_pushdown_one(
+                    connector, question_id, sql_text
+                )
+        finally:
+            _close_quietly(connector)
+        return results
+
     con: duckdb.DuckDBPyConnection | None = None
     try:
         con, _ = materialize_source(store, source_name)
@@ -164,6 +271,12 @@ def execute_answers(
 
 
 _SAFE_IDENT = re.compile(r"[A-Za-z0-9_ ]+")
+# Warehouse tables are schema-qualified ("schema.table" / "db.schema.table").
+_SAFE_TABLE = re.compile(r"[A-Za-z0-9_ ]+(\.[A-Za-z0-9_ ]+){0,2}")
+
+
+def _quoted_table(table: str) -> str:
+    return ".".join(f'"{part}"' for part in table.split("."))
 
 
 def sample_text_columns(
@@ -177,40 +290,69 @@ def sample_text_columns(
     """Return up to ``per_column`` distinct non-null string samples per column.
 
     Best-effort fallback for when the profile holds no sample values (e.g. a
-    high-cardinality text column).  Materializes the source ONCE and samples each
-    ``(table, column)``; returns ``{"table.column": [values...]}``.  Any failure
+    high-cardinality text column).  Embedded sources are materialized ONCE and
+    sampled locally; warehouse sources push a bounded DISTINCT … LIMIT query
+    down per column.  Returns ``{"table.column": [values...]}``.  Any failure
     yields no samples for that column (never raises).
 
     With ``persist`` (default), the samples are written back into each column's
-    profile (``sample_values``) so the materialization is a one-time cost — later
-    reads find them in metadata, and the catalog can show them.
+    profile (``sample_values``) so the cost is one-time — later reads find them
+    in metadata, and the catalog can show them.
     """
     items = [
         (t, c)
         for (t, c) in columns
-        if _SAFE_IDENT.fullmatch(t) and _SAFE_IDENT.fullmatch(c)
+        if _SAFE_TABLE.fullmatch(t) and _SAFE_IDENT.fullmatch(c)
     ]
     if not items:
         return {}
 
-    out: dict[str, list[str]] = {}
-    con: duckdb.DuckDBPyConnection | None = None
-    try:
-        con, _ = materialize_source(store, source_name)
-    except Exception:
+    src = store.get_source(source_name)
+    if src is None:
         return {}
-    try:
-        for table, column in items:
-            with contextlib.suppress(Exception):
-                rows = con.execute(
-                    f'SELECT DISTINCT CAST("{column}" AS VARCHAR) AS v '
-                    f'FROM "{table}" WHERE "{column}" IS NOT NULL LIMIT {int(per_column)}'
-                ).fetchall()
-                vals = [str(r[0]) for r in rows if r and r[0] is not None]
-                if vals:
-                    out[f"{table}.{column}"] = vals
-    finally:
-        con.close()
+
+    out: dict[str, list[str]] = {}
+    if _is_warehouse(src):
+        try:
+            connector = _warehouse_connector(src)
+        except Exception:
+            return {}
+        try:
+            for table, column in items:
+                with contextlib.suppress(Exception):
+                    sql = (
+                        f'SELECT DISTINCT CAST("{column}" AS VARCHAR) AS v '
+                        f'FROM {_quoted_table(table)} WHERE "{column}" IS NOT NULL '
+                        f"LIMIT {int(per_column)}"
+                    )
+                    tbl = connector.execute_readonly(sql)
+                    # First column regardless of how the driver cases the alias.
+                    vals = [
+                        str(v) for v in tbl.column(0).to_pylist() if v is not None
+                    ]
+                    if vals:
+                        out[f"{table}.{column}"] = vals
+        finally:
+            _close_quietly(connector)
+    else:
+        con: duckdb.DuckDBPyConnection | None = None
+        try:
+            con, _ = materialize_source(store, source_name)
+        except Exception:
+            return {}
+        try:
+            for table, column in items:
+                with contextlib.suppress(Exception):
+                    rows = con.execute(
+                        f'SELECT DISTINCT CAST("{column}" AS VARCHAR) AS v '
+                        f'FROM {_quoted_table(table)} WHERE "{column}" IS NOT NULL '
+                        f"LIMIT {int(per_column)}"
+                    ).fetchall()
+                    vals = [str(r[0]) for r in rows if r and r[0] is not None]
+                    if vals:
+                        out[f"{table}.{column}"] = vals
+        finally:
+            con.close()
 
     if persist and out:
         _persist_sample_values(store, source_name, out)
