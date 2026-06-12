@@ -104,16 +104,42 @@ def evaluate_and_certify(
     questions = store.list_questions(project_id)
     resolve_items = store.list_resolve_items(project_id)
 
+    from headwater.services.h2_readiness import (
+        _FANOUT_RI_THRESHOLD,
+        _columns_with_satisfying_claim,
+    )
+
     profile_map = {
         f"{p['table_name']}.{p['column_name']}": p["profile"] for p in profiles
     }
+    # Mirror evaluate_project_readiness exactly — certify re-checks the SAME
+    # contract inputs, otherwise a freshly certified question demotes on the
+    # next pass for reasons readiness never saw (a false revocation).
+    satisfied_cols = _columns_with_satisfying_claim(claims)
     high_priority_open: set[str] = {
         f"{r['payload'].get('table','')}.{r['payload'].get('column','')}"
         for r in resolve_items
         if r.get("priority") == "high" and r.get("status") == "open"
         if r.get("payload", {}).get("column")
-    }
+    } - satisfied_cols
     conflicting_cols: set[str] = _find_conflicting_claims(claims)
+    unmapped_code_cols: set[str] = {
+        f"{r['payload'].get('table','')}.{r['payload'].get('column','')}"
+        for r in resolve_items
+        if r.get("issue_kind") == "enum_mapping_needed" and r.get("status") == "open"
+        if r.get("payload", {}).get("column")
+    } - satisfied_cols
+    weak_joins: dict[tuple[str, str], float] = {}
+    for rel in store.get_relationships(source_name):
+        ri = rel.get("referential_integrity")
+        if ri is not None and float(ri) < _FANOUT_RI_THRESHOLD:
+            weak_joins[(rel["from_table"], rel["to_table"])] = float(ri)
+    profiled_tables = {p["table_name"] for p in profiles}
+    empty_tables: set[str] = {
+        t["name"]
+        for t in store.get_tables(source_name)
+        if int(t.get("row_count") or 0) == 0 and t["name"] in profiled_tables
+    }
 
     # Compute snapshot diff for enriched explanations
     prior_profiles = _load_prior_profiles(store, source_name, snapshot_id)
@@ -130,12 +156,28 @@ def evaluate_and_certify(
         prior_verdict = store.get_readiness_verdict(prior_verdict_id)
         prior_state = prior_verdict["state"] if prior_verdict else None
 
+        # The stored EDA insight contract is evidence, not derived state — pass
+        # it through or every certified question would demote to "unknown".
+        stored_contracts = store.list_readiness_contracts(question["id"])
+        eda_contract = next(
+            (
+                c
+                for c in stored_contracts
+                if c["contract_type"] == "insight_confidence"
+                and (c.get("evidence") or {}).get("status") != "unknown"
+            ),
+            None,
+        )
         new_result = evaluate_question(
             question=question,
             profile_map=profile_map,
             high_priority_open=high_priority_open,
             conflicting_cols=conflicting_cols,
             snapshot_id=snapshot_id,
+            eda_contract=eda_contract,
+            unmapped_code_cols=unmapped_code_cols,
+            weak_joins=weak_joins,
+            empty_tables=empty_tables,
         )
 
         # Persist updated verdict and contracts

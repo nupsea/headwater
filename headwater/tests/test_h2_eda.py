@@ -259,8 +259,12 @@ class TestEDAReadinessIntegration:
         finally:
             get_settings.cache_clear()
 
-    def test_readiness_defaults_pass_before_eda(self, monkeypatch, tmp_path):
-        """Before EDA runs, insight_confidence defaults to pass so questions can certify."""
+    def test_readiness_fails_closed_before_eda(self, monkeypatch, tmp_path):
+        """Before EDA runs, insight_confidence is UNKNOWN and can never certify.
+
+        Fail-closed certification (reasoning-engine plan §4.3): missing evidence
+        is not a pass — the question caps at Draft until the battery runs.
+        """
         monkeypatch.setenv("HEADWATER_DATA_DIR", str(tmp_path))
         get_settings.cache_clear()
         try:
@@ -278,9 +282,15 @@ class TestEDAReadinessIntegration:
                         (c for c in contracts if c["contract_type"] == "insight_confidence"), None
                     )
                     if ic is not None:
-                        assert ic.get("passed"), (
-                            "insight_confidence must default to pass before EDA runs"
+                        assert not ic.get("passed"), (
+                            "uncomputed insight evidence must fail closed"
                         )
+                        assert ic.get("evidence", {}).get("status") == "unknown"
+                # And no question may be certified on unknown evidence.
+                for r in store.con.execute(
+                    "SELECT state FROM readiness_verdicts"
+                ).fetchall():
+                    assert r["state"] != "certified"
             finally:
                 store.close()
         finally:

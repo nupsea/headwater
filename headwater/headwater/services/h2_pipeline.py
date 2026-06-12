@@ -139,6 +139,14 @@ def finalize_project_answers(
         # H2's HeadwaterStore lacks the LLM audit/cache methods, so pass store=None.
         provider = get_provider(settings, store=None)
 
+    # 0. The deterministic insight battery over stored profiles, BEFORE
+    # readiness evaluates: certification fails closed on uncomputed evidence
+    # (plan §4.3), so insight_confidence must exist by the time contracts are
+    # checked. Metadata-only and cheap (no data access).
+    from headwater.services.h2_eda import run_eda
+
+    run_eda(store, project_id)
+
     # 1. Draft SQL + chart specs (also persists answer artifacts).
     drafts = draft_project_answers(store, project_id)
     draft_by_q = {d.question_id: d for d in drafts.answers}
@@ -295,7 +303,14 @@ def _finalize_one(
         if value_labels and col in value_labels
     }
 
-    executed_ok = bool(executed is not None and executed.ok)
+    # A query that ran but returned ZERO rows produced no evidence — it cannot
+    # certify (fail closed) and there is nothing to chart. It is reported as a
+    # doubt, not silently presented as an empty answer.
+    executed_ok = bool(
+        executed is not None
+        and executed.ok
+        and (executed.sql_text is None or executed.row_count > 0)
+    )
     # A promoted console query has no template-derived contracts, so its
     # statistical factor is simply "did the analyst's SQL execute cleanly". The
     # judge still independently gates whether it answers the question. We also
@@ -548,6 +563,15 @@ def _doubt_reasons(
         reasons.extend(failed[:2])
     if executed is not None and executed.error:
         reasons.append(f"Query failed to execute: {executed.error}")
+    elif executed is not None and executed.sql_text and executed.row_count == 0:
+        # The query ran and returned nothing — there is no evidence to certify
+        # and nothing to chart. Usually an empty source table or an over-strict
+        # filter; say so instead of presenting a silently blank answer.
+        reasons.append(
+            "Query executed but returned no rows — the source table may be "
+            "empty, or the filter excludes everything. Check the table's row "
+            "count in the catalog."
+        )
     if not judge.approves:
         if judge.available:
             reasons.append(f"Judge withheld certification ({judge.verdict}).")
@@ -681,7 +705,18 @@ def project_input_fingerprint(store: HeadwaterStore, project_id: str) -> str:
                 }
             )
         payload["sources"].append(
-            {"source": source_name, "selected": selected, "tables": tables_meta}
+            {
+                "source": source_name,
+                "selected": selected,
+                "tables": tables_meta,
+                # The latest snapshot id changes when the source's data-side
+                # state changes (re-ingest, Refresh stats). Including it makes
+                # a stats refresh flip staleness, so the recompute banner
+                # offers to re-verify answers against the new statistics.
+                "snapshot": (store.get_latest_source_snapshot(source_name) or {}).get(
+                    "id"
+                ),
+            }
         )
 
     payload["claims"] = sorted(
@@ -774,9 +809,15 @@ def regenerate_engine_questions(
     retry the model). It clears the engine question set + the caches that pin it,
     then recomputes — producing a fresh LLM-proposed set and its verdicts.
     """
+    import logging
+
+    logger = logging.getLogger(__name__)
     settings = settings or get_settings()
     if not getattr(settings, "reasoning_engine", False):
         # Engine off: just re-run the normal recompute (templates).
+        logger.info(
+            "regenerate: engine OFF — re-running template recompute for %s", project_id
+        )
         return recompute_project(store, project_id, settings=settings)
 
     from headwater.reasoning.cache import NodeCache
@@ -795,6 +836,12 @@ def regenerate_engine_questions(
     # so a global clear only forces a cheap recompute for them, never a re-LLM.
     for node_id in ("question.vertical", "relevance", "answers"):
         cache.invalidate(node_id)
+    logger.info(
+        "regenerate: project=%s — deleted %d engine question(s), cleared caches "
+        "(goalsig, question.vertical, relevance, answers); recomputing fresh",
+        project_id,
+        len(rq_ids),
+    )
 
     return recompute_project(store, project_id, settings=settings)
 
@@ -873,8 +920,9 @@ def _legacy_recompute_project(
 
     propose_relevance(store=store, project_id=project_id)
 
-    # Stages 2-4 — readiness, draft, execute (and optional judge) over the
-    # freshly proposed question set.
+    # Stages 2-4 — EDA evidence, readiness, draft, execute (and optional judge)
+    # over the freshly proposed question set (finalize runs the insight battery
+    # first so certification evidence exists — fail-closed cert, plan §4.3).
     result = finalize_project_answers(
         store, project_id, settings=settings, run_judge=run_judge
     )

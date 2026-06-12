@@ -4,16 +4,22 @@ Evaluates per-question evidence contracts and computes a derived question state.
 Certification is NEVER set directly — it is derived only when all contracts pass.
 A question demotes automatically when a contract it once relied on fails.
 
+Certification FAILS CLOSED: a contract whose evidence has not been computed is
+``unknown``, and unknown can never certify — missing evidence is not a pass.
+(Reasoning-engine plan §4.3: the badge is sacred.)
+
 Contract types:
   columns_profiled      - all needed columns exist in the profile store
   no_blocking_gaps      - no high-priority open resolve items for needed columns
   structural_integrity  - needed columns are present and have acceptable null rates
-  no_misleading         - no obviously misleading quality patterns detected
+  no_misleading         - no misleading quality patterns: elevated nulls, code-like
+                          columns without meanings, join fan-out risk
   definition_consistent - no conflicting locked semantic claims for needed columns
+  insight_confidence    - EDA evidence supports the answer (unknown until EDA runs)
 
 Question states:
   certified    - all contracts pass
-  draft        - at least one contract failed
+  draft        - at least one contract failed or is unknown
   cannot_answer - question was flagged cannot_answer (no certification path)
   demoted      - was certified but a contract now fails (not yet tracked — placeholder)
 """
@@ -35,8 +41,15 @@ ContractType = Literal[
 ]
 
 QuestionState = Literal["certified", "draft", "cannot_answer", "demoted"]
+ContractStatus = Literal["pass", "fail", "unknown"]
 
 _HIGH_NULL_THRESHOLD = 0.50
+# Nulls below the structural-failure bar but high enough to skew an aggregate
+# silently — surfaced by no_misleading rather than structural_integrity.
+_ELEVATED_NULL_THRESHOLD = 0.25
+# A join whose referential integrity is below this fans out / drops rows enough
+# to mislead an aggregate built across it.
+_FANOUT_RI_THRESHOLD = 0.90
 _CONTRACT_WEIGHT: dict[ContractType, int] = {
     "columns_profiled": 20,
     "no_blocking_gaps": 20,
@@ -53,6 +66,15 @@ class ContractResult:
     passed: bool
     note: str
     evidence: dict[str, Any] = field(default_factory=dict)
+    # Tri-state: "unknown" = evidence not computed yet. passed is always False
+    # for unknown (fail closed); status preserves the distinction for the UI.
+    status: ContractStatus = "pass"
+
+    def __post_init__(self) -> None:
+        if self.status == "unknown":
+            self.passed = False  # unknown can never certify
+        else:
+            self.status = "pass" if self.passed else "fail"
 
 
 @dataclass(slots=True)
@@ -114,6 +136,22 @@ def evaluate_project_readiness(
     profile_map = {
         f"{p['table_name']}.{p['column_name']}": p["profile"] for p in profiles
     }
+    # Joins whose referential integrity is weak enough to fan out / drop rows —
+    # an aggregate built across one of these can silently mislead.
+    weak_joins: dict[tuple[str, str], float] = {}
+    for rel in store.get_relationships(source_name):
+        ri = rel.get("referential_integrity")
+        if ri is not None and float(ri) < _FANOUT_RI_THRESHOLD:
+            weak_joins[(rel["from_table"], rel["to_table"])] = float(ri)
+    # Tables VERIFIED empty (profiled, zero rows): any question needing one has
+    # no data to answer from. An unprofiled row_count of 0 means "unknown" and
+    # is not flagged.
+    profiled_tables = {p["table_name"] for p in profiles}
+    empty_tables: set[str] = {
+        t["name"]
+        for t in store.get_tables(source_name)
+        if int(t.get("row_count") or 0) == 0 and t["name"] in profiled_tables
+    }
     # Columns the user has now defined (a filled enum mapping, a non-empty
     # definition, or a locked claim) no longer count as blocking gaps, even if
     # the originating resolve card still reads "open".  This makes gap-clearing
@@ -127,12 +165,30 @@ def evaluate_project_readiness(
         if r.get("payload", {}).get("column")
     } - satisfied_cols
     conflicting_cols: set[str] = _find_conflicting_claims(claims)
+    # Code-like columns (an open enum-mapping card) with no meanings supplied:
+    # an aggregate grouped by raw codes reads fine and means nothing.
+    unmapped_code_cols: set[str] = {
+        f"{r['payload'].get('table','')}.{r['payload'].get('column','')}"
+        for r in resolve_items
+        if r.get("issue_kind") == "enum_mapping_needed" and r.get("status") == "open"
+        if r.get("payload", {}).get("column")
+    } - satisfied_cols
 
-    # Load stored EDA insight_confidence contracts (written by hw2 eda run)
+    # Load stored EDA insight_confidence contracts (written by the EDA runner).
+    # A persisted "unknown" placeholder is NOT evidence — skip it, else the
+    # round-trip would launder uncomputed evidence into a computed-looking fail.
     eda_contracts: dict[str, dict[str, Any]] = {}
     for q in questions:
         stored = store.list_readiness_contracts(q["id"])
-        eda = next((c for c in stored if c["contract_type"] == "insight_confidence"), None)
+        eda = next(
+            (
+                c
+                for c in stored
+                if c["contract_type"] == "insight_confidence"
+                and (c.get("evidence") or {}).get("status") != "unknown"
+            ),
+            None,
+        )
         if eda:
             eda_contracts[q["id"]] = eda
 
@@ -145,6 +201,9 @@ def evaluate_project_readiness(
             conflicting_cols=conflicting_cols,
             snapshot_id=snapshot_id,
             eda_contract=eda_contracts.get(q["id"]),
+            unmapped_code_cols=unmapped_code_cols,
+            weak_joins=weak_joins,
+            empty_tables=empty_tables,
         )
         _persist_verdict(store, result)
         question_results.append(result)
@@ -165,6 +224,9 @@ def evaluate_question(
     conflicting_cols: set[str],
     snapshot_id: str | None,
     eda_contract: dict[str, Any] | None = None,
+    unmapped_code_cols: set[str] | None = None,
+    weak_joins: dict[tuple[str, str], float] | None = None,
+    empty_tables: set[str] | None = None,
 ) -> QuestionReadiness:
     question_id = question["id"]
     answerability = question.get("answerability", "answerable")
@@ -190,6 +252,9 @@ def evaluate_question(
         high_priority_open=high_priority_open,
         conflicting_cols=conflicting_cols,
         eda_contract=eda_contract,
+        unmapped_code_cols=unmapped_code_cols or set(),
+        weak_joins=weak_joins or {},
+        empty_tables=empty_tables or set(),
     )
 
     readiness_pct = _compute_readiness_pct(contracts)
@@ -215,7 +280,13 @@ def _evaluate_contracts(
     high_priority_open: set[str],
     conflicting_cols: set[str],
     eda_contract: dict[str, Any] | None = None,
+    unmapped_code_cols: set[str] | None = None,
+    weak_joins: dict[tuple[str, str], float] | None = None,
+    empty_tables: set[str] | None = None,
 ) -> list[ContractResult]:
+    unmapped_code_cols = unmapped_code_cols or set()
+    weak_joins = weak_joins or {}
+    empty_tables = empty_tables or set()
     results: list[ContractResult] = []
 
     # 1. columns_profiled
@@ -268,13 +339,65 @@ def _evaluate_contracts(
         )
     )
 
-    # 4. no_misleading
+    # 4. no_misleading — evidence-derived (plan §4.3: implemented for real).
+    # Scans the answer's lineage for patterns that read fine but lie:
+    # elevated nulls below the structural bar, code-like dimensions with no
+    # meanings, and join paths weak enough to fan out or drop rows.
+    misleading_reasons: list[str] = []
+    needed_tables_all = {c.rsplit(".", 1)[0] for c in needed_columns if "." in c}
+    empty_needed = sorted(needed_tables_all & empty_tables)
+    if empty_needed:
+        misleading_reasons.append(
+            f"table(s) verified EMPTY — no data to answer from: "
+            f"{', '.join(empty_needed[:3])}"
+        )
+    elevated_null = [
+        c
+        for c in needed_columns
+        if _ELEVATED_NULL_THRESHOLD
+        <= (profile_map.get(c, {}).get("null_rate") or 0.0)
+        < _HIGH_NULL_THRESHOLD
+    ]
+    if elevated_null:
+        misleading_reasons.append(
+            f"elevated null rate (>= {int(_ELEVATED_NULL_THRESHOLD * 100)}%) in: "
+            f"{', '.join(elevated_null[:3])}"
+        )
+    unmapped = [c for c in needed_columns if c in unmapped_code_cols]
+    if unmapped:
+        misleading_reasons.append(
+            f"code-like column(s) without meanings: {', '.join(unmapped[:3])}"
+        )
+    needed_tables = {c.rsplit(".", 1)[0] for c in needed_columns if "." in c}
+    fanout = [
+        (a, b, ri)
+        for (a, b), ri in weak_joins.items()
+        if a in needed_tables and b in needed_tables
+    ]
+    if fanout:
+        worst = min(fanout, key=lambda x: x[2])
+        misleading_reasons.append(
+            f"join fan-out risk {worst[0]} -> {worst[1]} "
+            f"(referential integrity {worst[2]:.0%})"
+        )
     results.append(
         ContractResult(
             contract_type="no_misleading",
-            passed=True,
-            note="No misleading quality patterns detected in needed columns.",
-            evidence={},
+            passed=not misleading_reasons,
+            note=(
+                "No misleading quality patterns detected in needed columns."
+                if not misleading_reasons
+                else "Misleading pattern(s): " + "; ".join(misleading_reasons)
+            ),
+            evidence={
+                "empty_tables": empty_needed,
+                "elevated_null_columns": elevated_null,
+                "unmapped_code_columns": unmapped,
+                "weak_joins": [
+                    {"from": a, "to": b, "referential_integrity": ri}
+                    for a, b, ri in fanout
+                ],
+            },
         )
     )
 
@@ -293,8 +416,9 @@ def _evaluate_contracts(
         )
     )
 
-    # 6. insight_confidence — populated by the EDA runner when it has been executed.
-    # Defaults to passing with a note so questions are not blocked before EDA runs.
+    # 6. insight_confidence — populated by the EDA runner when it has been
+    # executed. Uncomputed evidence is UNKNOWN and fails closed (plan §4.3):
+    # it never blocks drafting or exploration, only the credential.
     if eda_contract:
         results.append(
             ContractResult(
@@ -308,8 +432,12 @@ def _evaluate_contracts(
         results.append(
             ContractResult(
                 contract_type="insight_confidence",
-                passed=True,
-                note="EDA not yet run; defaulting to pass. Run `hw2 eda` to compute.",
+                passed=False,
+                status="unknown",
+                note=(
+                    "Insight evidence not computed yet — certification is capped "
+                    "at Draft until the EDA battery runs (recompute runs it)."
+                ),
                 evidence={},
             )
         )
@@ -416,9 +544,15 @@ def _compute_readiness_pct(contracts: list[ContractResult]) -> int:
 def _build_summary(state: QuestionState, contracts: list[ContractResult]) -> str:
     if state == "certified":
         return "All evidence contracts pass. This question is certified."
-    failed = [c for c in contracts if not c.passed]
-    reasons = "; ".join(c.note for c in failed[:2])
-    return f"Draft — {reasons}."
+    # Genuine failures explain the draft better than uncomputed evidence does;
+    # mention unknown evidence only when it is the sole blocker.
+    failed = [c for c in contracts if c.status == "fail"]
+    unknown = [c for c in contracts if c.status == "unknown"]
+    if failed:
+        reasons = "; ".join(c.note for c in failed[:2])
+        return f"Draft — {reasons}."
+    reasons = "; ".join(c.note for c in unknown[:2])
+    return f"Draft (evidence pending) — {reasons}."
 
 
 def _persist_verdict(store: HeadwaterStore, result: QuestionReadiness) -> None:
@@ -441,7 +575,9 @@ def _persist_verdict(store: HeadwaterStore, result: QuestionReadiness) -> None:
             contract_type=contract.contract_type,
             passed=contract.passed,
             note=contract.note,
-            evidence=contract.evidence,
+            # status rides inside evidence so the tri-state survives storage
+            # without a schema change ("unknown" = evidence not computed).
+            evidence={**contract.evidence, "status": contract.status},
             snapshot_id=result.source_snapshot_id,
         )
 

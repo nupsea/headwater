@@ -5,7 +5,8 @@ Two deterministic nodes reproduce today's linear refresh exactly:
     relevance  (propose_relevance)      -> questions + relevant columns
        |  node:relevance (a digest of the produced questions)
        v
-    answers    (finalize_project_answers) -> readiness, draft, execute, (judge)
+    answers    (finalize_project_answers) -> EDA evidence, readiness, draft,
+                                             execute, (judge)
 
 Inputs mirror the sub-payloads ``project_input_fingerprint`` already hashes
 (goal / scope / columns / claims / resolve), so a node re-runs exactly when the
@@ -69,7 +70,18 @@ def _project_input(state: ProjectState, ref: InputRef) -> object:
             if not selected:
                 selected = sorted(t["name"] for t in store.get_tables(source_name))
             if suffix == "scope":
-                out.append({"source": source_name, "selected": selected})
+                out.append(
+                    {
+                        "source": source_name,
+                        "selected": selected,
+                        # Latest snapshot id: a re-ingest / stats refresh is an
+                        # input change — downstream nodes re-run against the
+                        # new statistics (mirrors project_input_fingerprint).
+                        "snapshot": (
+                            store.get_latest_source_snapshot(source_name) or {}
+                        ).get("id"),
+                    }
+                )
                 continue
             for tname in selected:
                 cols = store.get_columns(source_name, tname)
@@ -90,6 +102,10 @@ def _project_input(state: ProjectState, ref: InputRef) -> object:
         return out
 
     if suffix == "claims":
+        # ``eda_finding`` claims are the EDA node's own product — derived state,
+        # not user input (same rationale as the answer_gap exclusion below).
+        # Including them would make every node downstream of claims re-run once
+        # after each EDA pass; invalidation flows through node:eda instead.
         return sorted(
             (
                 {
@@ -99,6 +115,7 @@ def _project_input(state: ProjectState, ref: InputRef) -> object:
                     "claim": c.get("claim") or c.get("claim_json"),
                 }
                 for c in store.list_semantic_claims(pid)
+                if c.get("claim_type") != "eda_finding"
             ),
             key=lambda x: str(x["id"]),
         )
@@ -144,7 +161,9 @@ class RelevanceNode(BaseNode):
 
 
 class AnswersNode(BaseNode):
-    """Wraps ``finalize_project_answers``: readiness, draft, execute, (judge).
+    """Wraps ``finalize_project_answers``: EDA evidence, readiness, draft,
+    execute, (judge). The insight battery runs inside finalize, before readiness,
+    so fail-closed certification always has its evidence computed.
 
     ``run_judge`` is part of the node's input identity so a fast-path (no-judge)
     result is never reused for a certification run.
@@ -162,6 +181,9 @@ class AnswersNode(BaseNode):
             _CLAIMS,
             _RESOLVE,
             _COLUMNS,
+            # Scope carries the source snapshot id: a stats refresh must
+            # re-execute and re-verify answers against the new statistics.
+            _SCOPE,
             f"param:run_judge:{int(self._run_judge)}",
         ]
 
