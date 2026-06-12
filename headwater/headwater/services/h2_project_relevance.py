@@ -884,9 +884,12 @@ def _maybe_engine_questions(
     if not getattr(settings, "reasoning_engine", False):
         return None
 
+    import logging
+
     from headwater.reasoning.cache import NodeCache
     from headwater.reasoning.types import stable_hash
 
+    logger = logging.getLogger(__name__)
     cache = NodeCache(store)
     goal_sig = stable_hash(goal_text or "")
     existing = [
@@ -898,13 +901,32 @@ def _maybe_engine_questions(
 
     # Already generated for this goal -> keep them exactly as they are.
     if existing and prev_sig == goal_sig:
+        logger.info(
+            "engine.questions: project=%s goal unchanged — keeping the existing "
+            "%d question(s) (use Regenerate for a fresh set)",
+            project_id,
+            len(existing),
+        )
         return [_proposal_from_row(q) for q in existing]
 
+    logger.info(
+        "engine.questions: project=%s building a fresh set — %s (had %d prior "
+        "question(s))",
+        project_id,
+        "goal changed" if existing else "first run for this goal",
+        len(existing),
+    )
     from headwater.reasoning.nodes import run_question_vertical
 
     specs = run_question_vertical(store, project_id, settings=settings)
     if not specs:
         # Engine produced nothing this run; never wipe an existing set to templates.
+        logger.warning(
+            "engine.questions: project=%s produced NOTHING — keeping the prior "
+            "%d question(s) (never wiping to templates)",
+            project_id,
+            len(existing),
+        )
         return [_proposal_from_row(q) for q in existing] if existing else None
 
     # New or changed goal: (re)generate the engine question set.
@@ -930,6 +952,12 @@ def _maybe_engine_questions(
             )
         )
     cache.put("engine.goalsig", project_id, goal_sig)
+    logger.info(
+        "engine.questions: project=%s persisted %d question(s): %s",
+        project_id,
+        len(proposals),
+        "; ".join(p.title[:60] for p in proposals[:10]),
+    )
     return proposals
 
 
@@ -1285,7 +1313,8 @@ def _find_named_column_in_table(
 
 
 def _column_ref(discovery: DiscoveryResult, dotted_name: str) -> H2RelevantColumn | None:
-    table_name, column_name = dotted_name.split(".", 1)
+    # Column is the last component; the table may be schema-qualified.
+    table_name, column_name = dotted_name.rsplit(".", 1)
     for table in discovery.tables:
         if table.name != table_name:
             continue

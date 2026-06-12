@@ -484,7 +484,8 @@ def _affected_questions(col_key: str, question_columns: dict[str, list[str]]) ->
 
 
 def _split(col_ref: str) -> tuple[str, str]:
-    parts = col_ref.split(".", 1)
+    # Column is the last component; the table may be schema-qualified.
+    parts = col_ref.rsplit(".", 1)
     return (parts[0], parts[1]) if len(parts) == 2 else ("", col_ref)
 
 

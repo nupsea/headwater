@@ -161,6 +161,18 @@ def _segment_finding(
     high_label, high_val = pairs[0]
     low_label, low_val = pairs[-1]
 
+    # Degenerate ranking: every segment shows the same value — there is no
+    # "highest", and claiming one ("X has the highest flag: 0") is misleading.
+    # State the absence of variation; that IS the finding.
+    if len(pairs) > 1 and high_val == low_val:
+        return Finding(
+            headline=(
+                f"No variation in {name} across {_measure_name(x)} — "
+                f"all {len(pairs)} segments show {_fmt(high_val)}{suffix}."
+            ),
+            support="A ranking is not meaningful here; nothing differentiates the segments.",
+        )
+
     if intent == "low":
         # The question asked for the lowest — lead with it.
         headline = f"{low_label} has the lowest {name}: {_fmt(low_val)}{suffix}."

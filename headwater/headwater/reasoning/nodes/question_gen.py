@@ -21,7 +21,7 @@ from headwater.knowledge.projection import GraphEdge, GraphFact, GraphNode
 from headwater.reasoning.node import BaseNode
 from headwater.reasoning.types import NodeCtx, NodeResult, ProjectState, stable_hash
 
-_MAX_QUESTIONS = 3
+_MAX_QUESTIONS = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +89,18 @@ class QuestionGenNode(BaseNode):
         )
         specs: list[QuestionSpec] = []
         facts: list[GraphFact] = []
-        for m in matches[:_MAX_QUESTIONS]:
+        # Diversity: at most 2 questions per measure and per dimension — six
+        # near-identical "which X has the highest <same measure>" rows is one
+        # question asked six times, not six questions.
+        measure_uses: dict[str, int] = {}
+        dim_uses: dict[str, int] = {}
+        for m in matches:
+            if len(specs) >= _MAX_QUESTIONS:
+                break
+            if measure_uses.get(m.measure, 0) >= 2 or dim_uses.get(m.dimension, 0) >= 2:
+                continue
+            measure_uses[m.measure] = measure_uses.get(m.measure, 0) + 1
+            dim_uses[m.dimension] = dim_uses.get(m.dimension, 0) + 1
             measure_ref, dim_ref = _col(m.measure), _col(m.dimension)
             mlabel, dlabel = _label(measure_ref), _label(dim_ref)
             usuffix = f" in {unit}" if unit else ""

@@ -44,6 +44,9 @@ Relation = Literal[
 _TIME_RE = re.compile(r"(^|_)(date|time|datetime|timestamp|year|month|day|week|hour)s?($|_)", re.I)
 _TIME_AT_RE = re.compile(r"_at$", re.I)
 _ID_RE = re.compile(r"(^id$|_id$|_key$|uuid|guid)", re.I)
+# Boolean-ish shape: a flag is a segmenting attribute, never an aggregatable
+# quantity — "which X has the highest downgrade_flag" is not a question.
+_FLAG_RE = re.compile(r"(^|_)(is|has|flag|bool|active|enabled|deleted)(_|$)", re.I)
 _LOCATION_RE = re.compile(
     r"(location|site|zone|region|room|area|city|country|state|address|geo|lat|lon)", re.I
 )
@@ -162,18 +165,50 @@ def classify_column(stats: ColumnStats) -> ConceptAssignment:
     if _LOCATION_RE.search(name):
         return ConceptAssignment(stats.ref, "Location", {"kind": "location"}, 0.7)
 
-    # 4. Measure — numeric, not an identifier, with a unit cue or wide spread.
+    # 4. Flag / binary — numeric shape, but a 0/1 (or two-valued) column is a
+    # segmenting attribute, not an aggregatable quantity. Ranking by a flag is
+    # always nonsense ("highest downgrade_flag: 0"); grouping BY it is fine.
+    if dtype == "bool" or _FLAG_RE.search(name) or (
+        _is_numeric(dtype) and 0 < stats.distinct <= 2 and stats.total > 2
+    ):
+        return ConceptAssignment(stats.ref, "Dimension", {"kind": "status"}, 0.8)
+
+    # 5. Measure — numeric, not an identifier/flag, with a unit cue or spread.
     if _is_numeric(dtype):
         unit = _unit_for(name)
         conf = 0.85 if unit else 0.6
         return ConceptAssignment(stats.ref, "Measure", {"unit": unit or "quantity"}, conf)
 
-    # 5. Code — low-cardinality, code-like short tokens.
+    # 6. Code — low-cardinality, code-like short tokens.
     if stats.distinct and stats.distinct <= 50 and _looks_code_like(stats.top_values):
         return ConceptAssignment(stats.ref, "Code", {"needs_mapping": "1"}, 0.6)
 
-    # 6. Dimension — the categorical default for everything else.
+    # 7. Dimension — the categorical default for everything else.
     return ConceptAssignment(stats.ref, "Dimension", {"kind": _dimension_kind(name)}, 0.55)
+
+
+def compatible_concept(concept: str, stats: ColumnStats) -> bool:
+    """Deterministic gate for an LLM-proposed concept (L proposes, D verifies).
+
+    A proposal is accepted only when the column's observable shape can support
+    it: a Measure must be numeric, a TimeAnchor temporal (by dtype or name).
+    Categorical concepts are shape-permissive — the model's reading of the
+    name/description is the added signal there.
+    """
+    name = stats.ref.rsplit(".", 1)[-1]
+    if concept == "Measure":
+        # Numeric, and not a flag/binary — a two-valued column can never be a
+        # rankable quantity, whatever the model says.
+        if not _is_numeric(stats.dtype) or stats.dtype.lower() == "bool":
+            return False
+        if _FLAG_RE.search(name):
+            return False
+        return not (0 < stats.distinct <= 2 and stats.total > 2)
+    if concept == "TimeAnchor":
+        return _is_temporal(stats.dtype) or bool(
+            _TIME_RE.search(name) or _TIME_AT_RE.search(name)
+        )
+    return concept in {"Dimension", "Code", "Identifier", "Location"}
 
 
 def _looks_code_like(values: tuple[str, ...]) -> bool:

@@ -196,7 +196,7 @@ def _draft_answer(
     caveats.extend(join_caveats)
 
     sql, chart_spec = _build_sql_and_chart(
-        question_type, col_info, source_name, caveats, rel_join or {}
+        question_type, col_info, source_name, caveats, rel_join or {}, title=title
     )
 
     return AnswerDraft(
@@ -219,7 +219,10 @@ def _build_sql_and_chart(
     source_name: str,
     caveats: list[str],
     rel_join: dict[frozenset[str], dict[str, Any]] | None = None,
+    title: str = "",
 ) -> tuple[str | None, dict[str, Any]]:
+    from headwater.services.h2_insight import _ranking_intent
+
     rel_join = rel_join or {}
     ts_cols = [c for c in col_info if c["role_class"] == "timestamp"]
     measure_cols = [c for c in col_info if c["role_class"] == "measure"]
@@ -234,12 +237,21 @@ def _build_sql_and_chart(
 
     if question_type == "temporal" and ts_cols and measure_cols:
         return _temporal_sql(primary_table, ts_cols[0], measure_cols[0], caveats)
+    if question_type == "temporal" and ts_cols:
+        # No numeric measure — the activity trend IS the count per period.
+        return _temporal_count_sql(primary_table, ts_cols[0])
 
     # Segmentation and ranking both group by a categorical or identity column.
-    # Ranking sorts ASC (find the lowest), segmentation sorts DESC (find the highest).
+    # Sort direction comes from the QUESTION's wording: "highest/most/top" wants
+    # the top of a descending sort, "lowest/fewest" an ascending one. (It was
+    # previously tied to the question *type*, which inverted "highest" rankings
+    # — LIMIT then kept the wrong end entirely.)
     group_col = cat_cols[0] if cat_cols else (id_cols[0] if id_cols else None)
+    sort_asc = _ranking_intent(title) == "low"
+    if question_type in ("segment", "ranking") and group_col and not measure_cols:
+        # Count question ("most popular X"): rows per group.
+        return _count_sql(group_col, caveats, sort_asc=sort_asc)
     if question_type in ("segment", "ranking") and group_col and measure_cols:
-        sort_asc = question_type == "ranking"
         measure_col = measure_cols[0]
         # Cross-table insight: when the dimension and measure live in different
         # tables that a confident relationship joins, build the JOIN rather than
@@ -287,6 +299,49 @@ def _temporal_sql(
     )
     chart = {"type": "line", "x": "period", "y": m_alias, "record_count": "record_count"}
     return sql, chart
+
+
+def _temporal_count_sql(
+    table: str, ts_col: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Events per period — the honest trend when no numeric measure exists."""
+    t = _q(table)
+    tc = _q(ts_col["column"])
+    ts_expr = _ts_trunc_expr(ts_col)
+    sql = (
+        f"SELECT\n"
+        f"    {ts_expr} AS period,\n"
+        f"    COUNT(*) AS event_count\n"
+        f"FROM {t}\n"
+        f"WHERE {tc} IS NOT NULL\n"
+        f"GROUP BY period\n"
+        f"ORDER BY period ASC"
+    )
+    return sql, {"type": "line", "x": "period", "y": "event_count"}
+
+
+def _count_sql(
+    cat_col: dict[str, Any],
+    caveats: list[str],
+    *,
+    sort_asc: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """Rows per group — 'most popular X' without abusing an id as a measure."""
+    t = _q(cat_col["table"])
+    cc = _q(cat_col["column"])
+    c_alias = _safe_alias(cat_col["column"])
+    order_dir = "ASC" if sort_asc else "DESC"
+    sql = (
+        f"SELECT\n"
+        f"    {cc} AS {c_alias},\n"
+        f"    COUNT(*) AS record_count\n"
+        f"FROM {t}\n"
+        f"WHERE {cc} IS NOT NULL\n"
+        f"GROUP BY {cc}\n"
+        f"ORDER BY record_count {order_dir}\n"
+        f"LIMIT 20"
+    )
+    return sql, {"type": "bar", "x": c_alias, "y": "record_count"}
 
 
 def _segmentation_sql(
@@ -381,8 +436,8 @@ def _coverage_sql(
 # ── Identifier and expression helpers ────────────────────────────────────────
 
 def _q(name: str) -> str:
-    """Quote a single identifier."""
-    return f'"{name}"'
+    """Quote an identifier; schema-qualified names quote each part."""
+    return ".".join(f'"{part}"' for part in name.split("."))
 
 
 def _safe_alias(name: str) -> str:
@@ -421,7 +476,9 @@ def _measure_agg_expr(
 
 
 def _validate_identifier(name: str) -> bool:
-    return bool(_IDENTIFIER_RE.match(name.lower()))
+    # A table may be schema-qualified ("data.dim_subscription") — every
+    # dot-separated part must independently be a safe identifier.
+    return all(bool(_IDENTIFIER_RE.match(p.lower())) for p in name.split(".")) if name else False
 
 
 # ── Column resolution ─────────────────────────────────────────────────────────
@@ -437,7 +494,9 @@ def _resolve_col_info(
     set these when it created the question, so they are authoritative.  The heuristic
     dtype/name classification is only used as a fallback when the explicit role is absent.
     """
-    parts = col_ref.split(".", 1)
+    # The column is always the LAST component — the table itself may be
+    # schema-qualified ("data.dim_subscription.cancel_date").
+    parts = col_ref.rsplit(".", 1)
     if len(parts) == 2:
         table, column = parts
     else:

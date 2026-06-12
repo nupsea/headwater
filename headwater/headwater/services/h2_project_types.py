@@ -217,6 +217,7 @@ def candidate_parts(candidate: H2RelevantColumn | str) -> tuple[str | None, str]
     if isinstance(candidate, H2RelevantColumn):
         return candidate.table_name, candidate.column_name
     if "." in candidate:
-        table_name, column_name = candidate.split(".", 1)
+        # Column is the last component; the table may be schema-qualified.
+        table_name, column_name = candidate.rsplit(".", 1)
         return table_name, column_name
     return None, candidate

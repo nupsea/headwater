@@ -225,12 +225,25 @@ def test_llm_propose_verifies_and_grounds(monkeypatch, tmp_path):
         NodeRunner(NodeCache(store), proj, ProvenanceLedger(store)).run(
             build_question_vertical(), state, NodeCtx(settings=settings, run_slow=True)
         )
-        real_cols = {
-            f"{t['name']}.{c['name']}"
-            for t in store.get_tables("sample")
-            for c in store.get_columns("sample", t["name"])
-        }
-        a, b = sorted(real_cols)[0], sorted(real_cols)[1]
+        # Concept-grounded verification: the measure must be a real Measure
+        # and the dimension a real grouping axis (mirrors the production graph
+        # where ontology.map always runs before propose).
+        measures = sorted(
+            str(n.props.get("ref")) for n in proj.nodes_of_type("Measure")
+        )
+        dims = sorted(
+            str(n.props.get("ref"))
+            for n in proj.nodes_of_type("Dimension", "Code", "Location")
+        )
+        # Same-table pair: a cross-table pair would (rightly) also need a
+        # relationship, which is not what this test exercises.
+        pair = next(
+            (m, d)
+            for m in measures
+            for d in dims
+            if m.rsplit(".", 1)[0] == d.rsplit(".", 1)[0]
+        )
+        a, b = pair
         provider = _StubProvider(
             {
                 "questions": [
