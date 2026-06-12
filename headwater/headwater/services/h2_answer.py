@@ -179,7 +179,13 @@ def _draft_answer(
             source_snapshot_id=snapshot_id,
         )
 
-    question_type = _detect_question_type(qid, title)
+    # The proposal's verified intent is authoritative: "Trend of delays by
+    # vehicle type" carries intent=segment (the dimension is categorical), and
+    # title-word sniffing ("over time" -> temporal -> no timestamp -> coverage
+    # fallback) must not override it.
+    intent_to_type = {"trend": "temporal", "ranking": "ranking", "segment": "segment"}
+    stored_intent = str(q_payload.get("intent") or "")
+    question_type = intent_to_type.get(stored_intent) or _detect_question_type(qid, title)
     caveats: list[str] = []
 
     explicit_roles: dict[str, str] = q_payload.get("col_roles") or {}
@@ -249,7 +255,14 @@ def _build_sql_and_chart(
     group_col = cat_cols[0] if cat_cols else (id_cols[0] if id_cols else None)
     sort_asc = _ranking_intent(title) == "low"
     if question_type in ("segment", "ranking") and group_col and not measure_cols:
-        # Count question ("most popular X"): rows per group.
+        # Count question ("most popular X" / "frequency by X"): rows per group.
+        # When a fact table REFERENCES the dimension's table, the meaningful
+        # frequency is the fact rows per dimension value (trips per depot) —
+        # counting the dimension's own rows (vehicles per depot) answers a
+        # different, usually unintended question.
+        fact_rel = _referencing_relationship(group_col["table"], rel_join)
+        if fact_rel is not None:
+            return _count_sql_joined(group_col, fact_rel, caveats, sort_asc=sort_asc)
         return _count_sql(group_col, caveats, sort_asc=sort_asc)
     if question_type in ("segment", "ranking") and group_col and measure_cols:
         measure_col = measure_cols[0]
@@ -318,6 +331,51 @@ def _temporal_count_sql(
         f"ORDER BY period ASC"
     )
     return sql, {"type": "line", "x": "period", "y": "event_count"}
+
+
+def _referencing_relationship(
+    dim_table: str, rel_join: dict[frozenset[str], dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The strongest relationship whose FK side points AT the dimension table."""
+    candidates = [
+        rel
+        for rel in rel_join.values()
+        if rel.get("to_table") == dim_table
+        and float(rel.get("confidence") or 0.0) >= 0.80
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda r: float(r.get("confidence") or 0.0))
+
+
+def _count_sql_joined(
+    cat_col: dict[str, Any],
+    rel: dict[str, Any],
+    caveats: list[str],
+    *,
+    sort_asc: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """Fact rows per dimension value (e.g. trips per depot), via the FK join."""
+    fact_t, dim_t = rel["from_table"], rel["to_table"]
+    g_ref = f"{_q(dim_t)}.{_q(cat_col['column'])}"
+    c_alias = _safe_alias(cat_col["column"])
+    join_on = (
+        f"{_q(fact_t)}.{_q(rel['from_column'])} = "
+        f"{_q(dim_t)}.{_q(rel['to_column'])}"
+    )
+    order_dir = "ASC" if sort_asc else "DESC"
+    sql = (
+        f"SELECT\n"
+        f"    {g_ref} AS {c_alias},\n"
+        f"    COUNT(*) AS record_count\n"
+        f"FROM {_q(fact_t)}\n"
+        f"JOIN {_q(dim_t)} ON {join_on}\n"
+        f"WHERE {g_ref} IS NOT NULL\n"
+        f"GROUP BY {g_ref}\n"
+        f"ORDER BY record_count {order_dir}\n"
+        f"LIMIT 20"
+    )
+    return sql, {"type": "bar", "x": c_alias, "y": "record_count"}
 
 
 def _count_sql(

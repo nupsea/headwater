@@ -949,6 +949,7 @@ def _maybe_engine_questions(
                 confidence=float(spec.get("score") or 0.8),
                 snapshot_id=snapshot_id,
                 col_roles=dict(spec.get("col_roles") or {}),
+                intent=str(spec.get("intent") or "") or None,
             )
         )
     cache.put("engine.goalsig", project_id, goal_sig)
@@ -975,6 +976,7 @@ def _persist_question(
     snapshot_id: str | None = None,
     is_gap: bool = False,
     col_roles: dict[str, str] | None = None,
+    intent: str | None = None,
 ) -> H2QuestionProposal:
     full_id = f"{project_id}:{question_id}"
     needed = [
@@ -990,6 +992,10 @@ def _persist_question(
             "reason": reason,
             "needed_columns": needed,
             "col_roles": col_roles or {},
+            # The proposal's verified intent (ranking|segment|trend) — the
+            # drafting layer treats this as authoritative over title wording
+            # ("Trend of X by category" is a segment, whatever the title says).
+            "intent": intent,
             "answerability": answerability,
             "source_snapshot_id": snapshot_id,
         },

@@ -78,6 +78,16 @@ class QuestionGenNode(BaseNode):
             broad_m = measure_kinds | {"quantity", "count", "amount", "duration", "rate"}
             broad_d = dim_kinds | {"category", "step", "location", "status"}
             specs, facts = self._by_dimension(proj, broad_m, broad_d, unit, comparison)
+        # A temporal view is part of any complete question set: when the data
+        # has a time anchor and no trend made it in, add one (the top-up source
+        # for the LLM path, and breadth for the deterministic path).
+        if specs and not any(s.intent == "trend" for s in specs):
+            trend_specs, trend_facts = self._trend(proj, measure_kinds, unit)
+            for ts in trend_specs:
+                if len(specs) >= _MAX_QUESTIONS + 1:
+                    break
+                specs.append(ts)
+                facts.extend(trend_facts)
 
         out = [asdict(s) for s in specs]
         prov = self._prov(state, facts)
@@ -131,7 +141,21 @@ class QuestionGenNode(BaseNode):
         times = proj.nodes_of_type("TimeAnchor")
         if not measures or not times:
             return [], []
-        m, ts = measures[0], times[0]
+        # The measure and the time anchor must live in the SAME table — the
+        # temporal SQL builder does not join, so a cross-table pair would draft
+        # a query that cannot bind.
+        pair = next(
+            (
+                (m, ts)
+                for m in measures
+                for ts in times
+                if m.props.get("table") == ts.props.get("table")
+            ),
+            None,
+        )
+        if pair is None:
+            return [], []
+        m, ts = pair
         measure_ref, time_ref = _col(m.id), _col(ts.id)
         mlabel = _label(measure_ref)
         usuffix = f" in {unit}" if unit else ""

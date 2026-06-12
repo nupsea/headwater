@@ -106,12 +106,30 @@ def run_question_vertical(
     llm_specs = _attempt_llm(
         store, project_id, projection, settings, goal_text, brief, avoid_titles
     )
-    result = llm_specs or deterministic
     if llm_specs:
-        logger.info(
-            "question.vertical: using %d model-proposed question(s)", len(llm_specs)
-        )
+        # Top up a thin verified set from the deterministic traversal: the
+        # model's goal-grounded questions lead, the graph's (Measure x
+        # Dimension) matches fill uncovered column pairs. Never duplicated.
+        result = list(llm_specs)
+        if len(result) < 6:
+            covered = {frozenset(s.get("needed_columns") or []) for s in result}
+            for spec in deterministic:
+                if len(result) >= 8:
+                    break
+                cols = frozenset(spec.get("needed_columns") or [])
+                if cols and cols not in covered:
+                    covered.add(cols)
+                    result.append(spec)
+            if len(result) > len(llm_specs):
+                logger.info(
+                    "question.vertical: topped up %d model question(s) with %d "
+                    "deterministic traversal question(s)",
+                    len(llm_specs),
+                    len(result) - len(llm_specs),
+                )
+        logger.info("question.vertical: using %d question(s)", len(result))
     else:
+        result = deterministic
         logger.info(
             "question.vertical: model produced nothing usable — using %d "
             "deterministic traversal question(s)",

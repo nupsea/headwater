@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -28,7 +29,9 @@ _SYSTEM = (
     "columns with inferred roles and descriptions, and the relationships between "
     "tables), propose 6 to 10 precise analytical questions that DIRECTLY serve the "
     "goal. Cover DIFFERENT facets of the goal — rankings, trends over time, and "
-    "segment comparisons — not variations of one idea. Map the user's business terms "
+    "segment comparisons — not variations of one idea. When a date or time column "
+    "exists, include AT LEAST ONE trend-over-time question whose dimension IS that "
+    "date/time column. Map the user's business terms "
     "to the CLOSEST ACTUAL columns in the schema (e.g. a goal about 'modality' may map "
     "to a column like 'exam_type'). When two tables are RELATED, prefer questions that "
     "JOIN them — a measure from one table grouped by a dimension from a related table "
@@ -48,6 +51,24 @@ _INTENTS = {"ranking", "trend", "segment"}
 # ("data.dim_subscription.cancel_date" -> table "data.dim_subscription").
 def _table_of(col_ref: str) -> str:
     return col_ref.rsplit(".", 1)[0] if "." in col_ref else ""
+
+
+# Models often hand back "SUM(t.col)" / "AVG(t.col)" despite being asked for
+# bare columns. The aggregation is the drafting layer's job — normalize to the
+# inner column. COUNT(...) collapses to the row-count marker.
+_AGG_WRAP_RE = re.compile(
+    r"^(sum|avg|mean|min|max|count|total)\s*\(\s*(.*?)\s*\)$", re.IGNORECASE
+)
+
+
+def _normalize_col(raw: str) -> str:
+    m = _AGG_WRAP_RE.match(raw.strip())
+    if not m:
+        return raw.strip()
+    fn, inner = m.group(1).lower(), m.group(2).strip()
+    if fn == "count":
+        return "count"  # COUNT(*) / COUNT(col): a row-count question
+    return inner
 
 
 def _invoke(provider: Any, prompt: str, system: str) -> dict[str, Any]:
@@ -282,8 +303,8 @@ def propose_and_verify(
     for q in raw[:12]:
         if not isinstance(q, dict):
             continue
-        measure = str(q.get("measure") or "").strip()
-        dimension = str(q.get("dimension") or "").strip()
+        measure = _normalize_col(str(q.get("measure") or ""))
+        dimension = _normalize_col(str(q.get("dimension") or ""))
         title = str(q.get("title") or "").strip()
         # Verify: real columns only (kills hallucinations), distinct measure/dim.
         # Every drop is logged with its reason — this is the comprehension trail.
@@ -385,10 +406,14 @@ def propose_and_verify(
             )
             continue
         # Ground intent/role in the dimension's verified concept, not the model's
-        # label: a non-time dimension can never be a temporal "trend".
+        # label: a non-time dimension can never be a temporal "trend", and a
+        # time anchor in ANOTHER table charts as a joined segment (the temporal
+        # builder is single-table; "duration by model year" is a bar, not a line).
         dim_is_time = cmap.get(dimension, ("", ""))[0] == "TimeAnchor"
-        if dim_is_time:
+        if dim_is_time and mt == dt:
             intent, role = "trend", "event_ts"
+        elif dim_is_time:
+            intent, role = "segment", "categorical"
         else:
             claimed = q.get("intent")
             intent = claimed if claimed in {"ranking", "segment"} else "segment"

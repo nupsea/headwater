@@ -87,7 +87,15 @@ def _measure_name(y: str) -> str:
 
 def _label(col: str, value: Any, value_labels: dict[str, dict[str, str]]) -> str:
     mapping = value_labels.get(col) or {}
-    return mapping.get(str(value)) or str(value)
+    mapped = mapping.get(str(value))
+    if mapped:
+        return mapped
+    raw = str(value)
+    # A bare boolean/flag value reads as nothing ("1 has the highest…") —
+    # carry the column name so the statement stays meaningful.
+    if raw.lower() in {"0", "1", "true", "false", "yes", "no"}:
+        return f"{_measure_name(col)}={raw}"
+    return raw
 
 
 def infer_chart_spec(
@@ -137,6 +145,12 @@ def summarize_answer(
         return _segment_finding(rows, x, y, labels, suffix, _ranking_intent(title))
     if ctype == "line" and x and y:
         return _temporal_finding(rows, x, y, suffix)
+    if ctype in ("bar", "line"):
+        # A chart-shaped answer either yields a chart-shaped finding or NOTHING.
+        # Falling back to a row-count line ("4,090,229 records in scope") for a
+        # ranking/trend question is filler that reads as an insight — presenting
+        # it costs more trust than presenting nothing.
+        return None
     return _coverage_finding(rows, columns)
 
 
@@ -171,6 +185,19 @@ def _segment_finding(
                 f"all {len(pairs)} segments show {_fmt(high_val)}{suffix}."
             ),
             support="A ranking is not meaningful here; nothing differentiates the segments.",
+        )
+    # Near-flat ranking (<5% spread): a "highest" exists but the difference is
+    # noise-level — say so rather than implying a meaningful gap.
+    if len(pairs) > 1 and low_val > 0 and (high_val / low_val) < 1.05:
+        return Finding(
+            headline=(
+                f"{name.capitalize()} is nearly uniform across "
+                f"{_measure_name(x)} ({_fmt(low_val)}–{_fmt(high_val)}{suffix})."
+            ),
+            support=(
+                f"Top is {high_label}, but the spread is under 5% — "
+                "not a meaningful differentiator."
+            ),
         )
 
     if intent == "low":
