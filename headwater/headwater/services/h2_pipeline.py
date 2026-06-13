@@ -822,12 +822,11 @@ def regenerate_engine_questions(
 
     from headwater.reasoning.cache import NodeCache
 
-    rq_ids = [
-        q["id"]
+    existing_count = sum(
+        1
         for q in store.list_questions(project_id)
         if str(q["id"]).startswith(f"{project_id}:rq")
-    ]
-    store.delete_questions(rq_ids)
+    )
 
     cache = NodeCache(store)
     cache.invalidate("engine.goalsig", project_id)  # force regeneration for this project
@@ -836,11 +835,16 @@ def regenerate_engine_questions(
     # so a global clear only forces a cheap recompute for them, never a re-LLM.
     for node_id in ("question.vertical", "relevance", "answers"):
         cache.invalidate(node_id)
+    # NB: the old questions are NOT pre-deleted. The regeneration flow
+    # (_maybe_engine_questions) upserts the fresh set and deletes only what's
+    # genuinely stale, and KEEPS the existing set if the engine produces nothing
+    # (e.g. an unreachable source). Pre-deleting would leave the project empty on
+    # any failure — strictly worse than a stale-but-present set.
     logger.info(
-        "regenerate: project=%s — deleted %d engine question(s), cleared caches "
-        "(goalsig, question.vertical, relevance, answers); recomputing fresh",
+        "regenerate: project=%s — invalidated caches (goalsig, question.vertical, "
+        "relevance, answers); recomputing fresh from %d existing question(s)",
         project_id,
-        len(rq_ids),
+        existing_count,
     )
 
     return recompute_project(store, project_id, settings=settings)

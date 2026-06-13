@@ -225,7 +225,12 @@ def query_source(
         finally:
             con.close()
 
-    connector = _warehouse_connector(src)
+    try:
+        connector = _warehouse_connector(src)
+    except Exception as exc:
+        # An unreachable warehouse is a result the console shows inline, not
+        # a 500 that throws the analyst out of their flow.
+        return _all_failed([("adhoc", sql_text)], exc)["adhoc"]
     try:
         return _execute_pushdown_one(connector, "adhoc", sql_text)
     finally:
@@ -240,8 +245,10 @@ def execute_answers(
     """Execute many (question_id, sql) pairs against one source connection.
 
     Embedded sources are materialized once locally; warehouse sources keep one
-    live connection and push every SELECT down.  Per-question failures land in
-    that question's result — one bad query never sinks the batch.
+    live connection and push every SELECT down.  Failures land in each
+    question's result — a bad query, an unreachable warehouse, or a missing
+    file degrades the ANSWERS (doubtful, with the reason), never the pipeline:
+    a recompute must complete and tell the truth, not 500.
     """
     src = store.get_source(source_name)
     if src is None:
@@ -249,7 +256,10 @@ def execute_answers(
 
     results: dict[str, ExecutedResult] = {}
     if _is_warehouse(src):
-        connector = _warehouse_connector(src)
+        try:
+            connector = _warehouse_connector(src)
+        except Exception as exc:
+            return _all_failed(items, exc)
         try:
             for question_id, sql_text in items:
                 results[question_id] = _execute_pushdown_one(
@@ -262,12 +272,27 @@ def execute_answers(
     con: duckdb.DuckDBPyConnection | None = None
     try:
         con, _ = materialize_source(store, source_name)
+    except Exception as exc:
+        return _all_failed(items, exc)
+    try:
         for question_id, sql_text in items:
             results[question_id] = execute_one(con, question_id, sql_text)
     finally:
-        if con is not None:
-            con.close()
+        con.close()
     return results
+
+
+def _all_failed(
+    items: list[tuple[str, str | None]], exc: Exception
+) -> dict[str, ExecutedResult]:
+    """Source-level failure (connect/materialize): every answer carries it."""
+    from headwater.core.redaction import redact_secrets
+
+    reason = redact_secrets(str(exc)) or exc.__class__.__name__
+    return {
+        qid: ExecutedResult(question_id=qid, sql_text=sql, error=reason)
+        for qid, sql in items
+    }
 
 
 _SAFE_IDENT = re.compile(r"[A-Za-z0-9_ ]+")

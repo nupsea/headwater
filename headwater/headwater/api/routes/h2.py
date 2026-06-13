@@ -269,6 +269,7 @@ def delete_project(project_id: str) -> dict[str, Any]:
 @router.get("/sources/{source_name}/browse")
 def browse_source_tables(source_name: str) -> list[dict[str, Any]]:
     """List a source's tables (cheap, no profiling) for subset selection."""
+    from headwater.core.redaction import redact_secrets
     from headwater.services.h2_source import list_source_tables
 
     store = _get_store()
@@ -276,6 +277,14 @@ def browse_source_tables(source_name: str) -> list[dict[str, Any]]:
         return list_source_tables(store, source_name)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        # Connection/driver failures read as actionable errors, not bare 500s.
+        detail = redact_secrets(str(exc)) or exc.__class__.__name__
+        logger.warning("Browse failed: source=%s -- %s", source_name, detail)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not reach the source: {detail}",
+        ) from exc
     finally:
         store.close()
 
@@ -292,6 +301,15 @@ def ingest_source_tables(
         result = ingest_tables(store, source_name, req.tables)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        from headwater.core.redaction import redact_secrets
+
+        detail = redact_secrets(str(exc)) or exc.__class__.__name__
+        logger.warning("Ingest failed: source=%s -- %s", source_name, detail)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not reach the source: {detail}",
+        ) from exc
     finally:
         store.close()
     logger.info(
@@ -324,6 +342,17 @@ def refresh_source_stats(source_name: str) -> dict[str, Any]:
         if not tables:
             return {"ingested": [], "failed": [], "profiled": False, "snapshot_id": None}
         result = ingest_tables(store, source_name, tables)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from headwater.core.redaction import redact_secrets
+
+        detail = redact_secrets(str(exc)) or exc.__class__.__name__
+        logger.warning("Refresh stats failed: source=%s -- %s", source_name, detail)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not reach the source: {detail}",
+        ) from exc
     finally:
         store.close()
     logger.info(

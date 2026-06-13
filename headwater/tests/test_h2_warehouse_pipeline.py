@@ -170,6 +170,25 @@ def test_warehouse_sample_text_columns_pushdown(warehouse):
     assert set(out["data.subscriptions.status"]) == {"active", "cancelled"}
 
 
+def test_unreachable_warehouse_degrades_to_per_answer_errors(warehouse, monkeypatch):
+    """A source that can't be reached must not 500 the recompute — every answer
+    carries the connection failure as its own error, and the batch completes."""
+    import headwater.services.h2_execute as h2_execute_mod
+
+    def _boom(_src):
+        raise ConnectionError("connection to server timed out")
+
+    monkeypatch.setattr(h2_execute_mod, "_warehouse_connector", _boom)
+    results = execute_answers(
+        warehouse,
+        "wh",
+        [("q1", "SELECT 1"), ("q2", "SELECT 2")],
+    )
+    assert set(results) == {"q1", "q2"}
+    assert all(r.error and "timed out" in r.error for r in results.values())
+    assert all(r.row_count == 0 for r in results.values())
+
+
 def test_verified_empty_table_fails_no_misleading():
     """A question needing a PROFILED 0-row table cannot read as answerable."""
     from headwater.services.h2_readiness import evaluate_question

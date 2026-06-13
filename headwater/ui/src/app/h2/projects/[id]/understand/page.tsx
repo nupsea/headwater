@@ -616,6 +616,7 @@ export default function UnderstandPage() {
   const { runAnalysis } = useH2Context();
   const { confirm, confirmDialog } = useConfirm();
   const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [newQuestion, setNewQuestion] = useState("");
   const [addNote, setAddNote] = useState("");
@@ -712,6 +713,7 @@ export default function UnderstandPage() {
     });
     if (!ok) return;
     setRegenerating(true);
+    setRegenerateError(null);
     try {
       await runAnalysis("Regenerating questions from your goal…", () =>
         h2.projects.regenerateQuestions(id)
@@ -720,7 +722,12 @@ export default function UnderstandPage() {
       notifyInputChanged();
       notifyRecomputed();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to regenerate questions");
+      // A source that's unreachable (paused warehouse, VPN off) shouldn't throw
+      // the analyst out with a browser popup — show it inline and keep the
+      // existing questions in place.
+      setRegenerateError(
+        e instanceof Error ? e.message : "Failed to regenerate questions"
+      );
     } finally {
       setRegenerating(false);
     }
@@ -1109,6 +1116,24 @@ export default function UnderstandPage() {
             </button>
           </div>
         </div>
+
+        {regenerateError && (
+          <div
+            style={{
+              margin: "0 22px",
+              padding: "10px 14px",
+              background: HW2_COLOR.badSoft,
+              border: `1px solid ${HW2_COLOR.bad}44`,
+              borderRadius: 8,
+              font: "400 12.5px 'DM Sans', sans-serif",
+              color: HW2_COLOR.bad,
+              lineHeight: 1.5,
+            }}
+          >
+            Couldn&rsquo;t regenerate: {regenerateError} The current questions are
+            unchanged.
+          </div>
+        )}
 
         <div style={{ padding: "12px 22px 18px", display: "grid", gap: 8 }}>
           {questions.length === 0 ? (
