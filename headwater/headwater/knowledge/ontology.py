@@ -126,6 +126,22 @@ class ConceptAssignment:
         )
 
 
+def _is_binary_flag(stats: ColumnStats, name: str) -> bool:
+    """True when the evidence says this numeric column is a two-valued flag.
+
+    Precedence: observed statistics first — known distinct count <= 2 IS a
+    flag, known distinct count > 2 is NOT one. The name-shape cue (is_/has_/
+    _flag) decides only when no statistics exist; it never overrides evidence.
+    """
+    if not _is_numeric(stats.dtype):
+        return False
+    if stats.distinct > 2:
+        return False  # evidence: many values -> a quantity, whatever the name
+    if 0 < stats.distinct <= 2 and stats.total > 2:
+        return True  # evidence: two-valued -> a flag, whatever the name
+    return bool(_FLAG_RE.search(name))  # no stats -> fall back to name shape
+
+
 def _unit_for(name: str) -> str | None:
     for unit, pat in _UNIT_CUES:
         if re.search(pat, name, re.I):
@@ -165,12 +181,13 @@ def classify_column(stats: ColumnStats) -> ConceptAssignment:
     if _LOCATION_RE.search(name):
         return ConceptAssignment(stats.ref, "Location", {"kind": "location"}, 0.7)
 
-    # 4. Flag / binary — numeric shape, but a 0/1 (or two-valued) column is a
-    # segmenting attribute, not an aggregatable quantity. Ranking by a flag is
-    # always nonsense ("highest downgrade_flag: 0"); grouping BY it is fine.
-    if dtype == "bool" or _FLAG_RE.search(name) or (
-        _is_numeric(dtype) and 0 < stats.distinct <= 2 and stats.total > 2
-    ):
+    # 4. Flag / binary — a two-valued column is a segmenting attribute, not an
+    # aggregatable quantity. Ranking by a flag is always nonsense ("highest
+    # downgrade_flag: 0"); grouping BY it is fine. Evidence outranks the name:
+    # the flag-shaped-name cue applies only when statistics are absent or agree
+    # — "active_devices" with 400 distinct values is a count, whatever the
+    # morpheme suggests.
+    if dtype == "bool" or _is_binary_flag(stats, name):
         return ConceptAssignment(stats.ref, "Dimension", {"kind": "status"}, 0.8)
 
     # 5. Measure — numeric, not an identifier/flag, with a unit cue or spread.
@@ -201,9 +218,7 @@ def compatible_concept(concept: str, stats: ColumnStats) -> bool:
         # rankable quantity, whatever the model says.
         if not _is_numeric(stats.dtype) or stats.dtype.lower() == "bool":
             return False
-        if _FLAG_RE.search(name):
-            return False
-        return not (0 < stats.distinct <= 2 and stats.total > 2)
+        return not _is_binary_flag(stats, name)
     if concept == "TimeAnchor":
         return _is_temporal(stats.dtype) or bool(
             _TIME_RE.search(name) or _TIME_AT_RE.search(name)

@@ -259,6 +259,23 @@ def test_flag_columns_are_dimensions_not_measures():
     assert classify_column(real).concept == "Measure"
 
 
+def test_evidence_outranks_flag_name_shape():
+    """Statistics decide; the name morpheme is only a no-stats fallback.
+
+    'active_devices' matches the flag regex but has 400 distinct values — it
+    is a count (Measure). Conversely an oddly-named two-valued column is a
+    flag even though no name cue fires.
+    """
+    from headwater.knowledge.ontology import classify_column
+
+    count_col = ColumnStats(ref="t.active_devices", dtype="integer", distinct=400, total=5000)
+    assert classify_column(count_col).concept == "Measure"
+    assert compatible_concept("Measure", count_col)
+    odd_flag = ColumnStats(ref="t.xyzzy", dtype="integer", distinct=2, total=5000)
+    assert classify_column(odd_flag).concept == "Dimension"
+    assert not compatible_concept("Measure", odd_flag)
+
+
 def test_ranking_sort_direction_follows_question_wording():
     from headwater.services.h2_answer import _build_sql_and_chart
 
