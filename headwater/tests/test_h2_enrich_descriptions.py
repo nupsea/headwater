@@ -83,7 +83,7 @@ def test_failed_chunk_is_reported_not_hidden(wide_source):
 
     assert result["available"] is True
     assert result["updated"] == n_cols - _DESC_CHUNK_SIZE  # one chunk lost
-    assert "failed" in result["note"]
+    assert "timed out" in result["note"]
 
 
 def test_prompt_includes_profile_stats(wide_source):
@@ -92,3 +92,89 @@ def test_prompt_includes_profile_stats(wide_source):
     generate_descriptions(store, "w", provider=provider)
     # Locally profiled source: at least one chunk line carries a stats hint.
     assert any("distinct" in call for call in provider.calls)
+
+
+# ── Robust response matching (silent-rejection bug: model replies, none match) ──
+
+from headwater.services.h2_enrich import _match_descriptions  # noqa: E402
+
+
+def test_match_exact_and_caseless_and_qualified():
+    valid = {"martian_id", "account_name", "brand"}
+    # Exact
+    assert _match_descriptions({"martian_id": "an id"}, valid) == {"martian_id": "an id"}
+    # Case difference
+    assert _match_descriptions({"Account_Name": "a name"}, valid) == {
+        "account_name": "a name"
+    }
+    # Qualified key -> matched by last component
+    assert _match_descriptions(
+        {"data.fct_subscription.brand": "the brand"}, valid
+    ) == {"brand": "the brand"}
+
+
+def test_match_unwraps_wrapper_key():
+    valid = {"col_a", "col_b"}
+    raw = {"descriptions": {"col_a": "desc a", "col_b": "desc b"}}
+    assert _match_descriptions(raw, valid) == {"col_a": "desc a", "col_b": "desc b"}
+
+
+def test_match_handles_list_of_objects():
+    valid = {"col_a", "col_b"}
+    raw = {"columns": [
+        {"name": "col_a", "description": "desc a"},
+        {"column": "col_b", "desc": "desc b"},
+    ]}
+    assert _match_descriptions(raw, valid) == {"col_a": "desc a", "col_b": "desc b"}
+
+
+def test_match_ignores_unknown_and_blank():
+    valid = {"col_a"}
+    raw = {"col_a": "  ", "nope": "stray"}
+    assert _match_descriptions(raw, valid) == {}
+
+
+class QualifiedKeyProvider:
+    """Returns descriptions keyed by FULLY-QUALIFIED column name (the real bug)."""
+
+    def __init__(self, table: str) -> None:
+        self.table = table
+
+    async def analyze(self, prompt: str, system: str) -> dict:
+        if "Describe in ONE sentence" in prompt:
+            return {"description": "One row per record."}
+        out: dict[str, str] = {}
+        for line in prompt.splitlines():
+            if line.startswith("- "):
+                name = line[2:].split(":", 1)[0]
+                out[f"{self.table}.{name}"] = f"Description of {name}."
+        return out
+
+
+def test_qualified_key_response_is_not_silently_dropped(wide_source):
+    store, n_cols = wide_source
+    result = generate_descriptions(store, "w", provider=QualifiedKeyProvider("w"))
+    assert result["available"] is True
+    assert result["updated"] == n_cols  # all matched despite qualified keys
+    described = [
+        c for c in store.get_columns("w", "wide") if (c.get("description") or "").strip()
+    ]
+    assert len(described) == n_cols
+
+
+class UnparseableProvider:
+    """Replies with a non-empty but unusable shape (no column names match)."""
+
+    async def analyze(self, prompt: str, system: str) -> dict:
+        if "Describe in ONE sentence" in prompt:
+            return {}  # table desc also fails
+        return {"unexpected": "totally wrong shape"}
+
+
+def test_unparseable_response_reports_failure_not_success(wide_source):
+    store, _ = wide_source
+    result = generate_descriptions(store, "w", provider=UnparseableProvider())
+    # Must NOT claim "no new descriptions to add" — it must say it couldn't parse.
+    assert result["available"] is False
+    assert result["updated"] == 0
+    assert "format" in result["note"].lower() or "parse" in result["note"].lower()

@@ -155,6 +155,76 @@ def _chunks(items: list, size: int) -> list[list]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+# Keys a model commonly nests the mapping under instead of returning it flat.
+_DESC_WRAPPER_KEYS = ("descriptions", "columns", "result", "mapping", "fields")
+
+
+def _match_descriptions(
+    raw: Any, valid: set[str]
+) -> dict[str, str]:
+    """Pull {column_name: description} out of a model response, robustly.
+
+    Local models don't reliably return the exact JSON shape asked for. This
+    tolerates the common deviations so a good answer isn't silently dropped:
+      * the mapping nested under a wrapper key ({"descriptions": {...}})
+      * a list of {name/column, description} objects
+      * qualified keys ("schema.table.col") — matched by last component
+      * case differences
+    Only columns in ``valid`` are returned; the match is exact first, then
+    case-insensitive, then by the final dotted component.
+    """
+    if not isinstance(raw, dict):
+        # A bare list of {name, description} objects.
+        if isinstance(raw, list):
+            raw = {"columns": raw}
+        else:
+            return {}
+
+    # Unwrap a single common wrapper key if the top level isn't the mapping.
+    payload: Any = raw
+    if not any(k in valid for k in raw) and not _looks_flat_mapping(raw, valid):
+        for key in _DESC_WRAPPER_KEYS:
+            if key in raw:
+                payload = raw[key]
+                break
+
+    pairs: list[tuple[str, str]] = []
+    if isinstance(payload, dict):
+        pairs = [(str(k), v) for k, v in payload.items()]
+    elif isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("column") or item.get("col")
+                desc = item.get("description") or item.get("desc")
+                if name is not None:
+                    pairs.append((str(name), desc))
+
+    # Resolution maps for case-insensitive and last-component matching.
+    by_lower = {v.lower(): v for v in valid}
+    by_tail = {v.rsplit(".", 1)[-1].lower(): v for v in valid}
+
+    out: dict[str, str] = {}
+    for raw_name, desc in pairs:
+        if not isinstance(desc, str) or not desc.strip():
+            continue
+        key = raw_name.strip()
+        target = (
+            key
+            if key in valid
+            else by_lower.get(key.lower())
+            or by_tail.get(key.rsplit(".", 1)[-1].lower())
+        )
+        if target and target not in out:
+            out[target] = desc.strip()
+    return out
+
+
+def _looks_flat_mapping(raw: dict, valid: set[str]) -> bool:
+    """True when the dict's values are description strings (a flat mapping)."""
+    str_vals = sum(1 for v in raw.values() if isinstance(v, str))
+    return str_vals >= max(1, len(raw) // 2)
+
+
 def generate_descriptions(
     store: HeadwaterStore,
     source_name: str,
@@ -206,6 +276,7 @@ def generate_descriptions(
     tables_updated = 0
     attempted = 0
     failed_calls = 0
+    unparsed_calls = 0
     for t in store.get_tables(source_name):
         cols = store.get_columns(source_name, t["name"])
         targets = [
@@ -224,22 +295,27 @@ def generate_descriptions(
                 f"TABLE: {t['name']}\n"
                 "COLUMNS (name: type, then statistics if known):\n"
                 + "\n".join(lines)
-                + "\n\nReturn JSON mapping column name -> one-sentence description, "
-                'e.g. {"created_at": "Timestamp when the record was created."}'
+                + "\n\nReturn a JSON object mapping each column name (exactly as "
+                "listed, unqualified) to a one-sentence description, e.g. "
+                '{"created_at": "Timestamp when the record was created."}'
             )
             raw = _invoke(prov, prompt, system)
-            if not isinstance(raw, dict) or not raw:
+            if not raw:
                 # Empty result from a reachable model almost always means the call
                 # failed (timeout / dropped connection) — track it, keep going.
                 failed_calls += 1
                 continue
             valid = {c["name"] for c in chunk}
-            for name, desc in raw.items():
-                if name in valid and isinstance(desc, str) and desc.strip():
-                    update_column(
-                        store, source_name, t["name"], name, description=desc.strip()
-                    )
-                    updated += 1
+            matched = _match_descriptions(raw, valid)
+            if not matched:
+                # The model answered but nothing matched these columns (a shape
+                # we couldn't parse). That is NOT "nothing to do" — surface it
+                # so we never silently report success while columns stay blank.
+                unparsed_calls += 1
+                continue
+            for name, desc in matched.items():
+                update_column(store, source_name, t["name"], name, description=desc)
+                updated += 1
 
         # Table description: one cheap call (short output) when missing.
         if overwrite or not (t.get("description") or "").strip():
@@ -252,7 +328,11 @@ def generate_descriptions(
                 'represents. Return JSON: {"description": "<sentence>"}'
             )
             traw = _invoke(prov, tprompt, system)
-            tdesc = str((traw or {}).get("description") or "").strip()
+            tdesc = ""
+            if isinstance(traw, dict):
+                tdesc = str(
+                    traw.get("description") or traw.get("summary") or ""
+                ).strip()
             if tdesc:
                 store.upsert_table(
                     source_name,
@@ -267,22 +347,37 @@ def generate_descriptions(
             else:
                 failed_calls += 1
 
-    if attempted and updated == 0 and tables_updated == 0:
-        # Reachable when we started, but produced nothing — surface it, don't pretend.
-        return {
-            "updated": 0,
-            "available": False,
-            "note": (
+    if attempted == 0:
+        # Genuinely nothing to do: every column already has a description (or is
+        # locked) and every table is described. A true no-op, reported as such.
+        return {"updated": 0, "tables_updated": 0, "available": True, "note": ""}
+
+    if updated == 0 and tables_updated == 0:
+        # We asked the model and got nothing usable — a timeout, or a response
+        # shape we couldn't parse. Surface the real reason; never pretend success.
+        # Prefer the unparsed diagnosis when present: it is the more actionable
+        # one (the model IS responding, just not in the asked-for format).
+        if unparsed_calls:
+            note = (
+                f"The model ({model}) replied but not in the expected format, so "
+                "no descriptions could be applied. Try again, or set a stronger "
+                "reasoning model."
+            )
+        else:
+            note = (
                 f"The model ({model}) returned no descriptions — it may have timed "
                 "out or be too small. Try again, or set a stronger reasoning model."
-            ),
-        }
-    note = ""
+            )
+        return {"updated": 0, "available": False, "note": note}
+
+    note_parts: list[str] = []
     if failed_calls:
-        note = (
-            f"{failed_calls} of {attempted} calls failed (model timeout) — "
-            "re-run to fill the rest."
-        )
+        note_parts.append(f"{failed_calls} call(s) timed out")
+    if unparsed_calls:
+        note_parts.append(f"{unparsed_calls} reply(ies) couldn't be parsed")
+    note = ""
+    if note_parts:
+        note = f"{'; '.join(note_parts)} — re-run to fill the rest."
     return {
         "updated": updated,
         "tables_updated": tables_updated,
