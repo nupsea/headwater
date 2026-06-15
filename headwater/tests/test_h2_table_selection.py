@@ -75,3 +75,55 @@ def test_ingest_empty_selection_is_a_noop(source):
 def test_browse_unknown_source_raises(source):
     with pytest.raises(ValueError, match="not registered"):
         list_source_tables(source, "nope")
+
+
+def test_ingest_reports_missing_tables_as_failed(source):
+    """A table that cannot be ingested is reported, never silently dropped."""
+    result = ingest_tables(source, "wh", ["customers", "no_such_table"])
+    assert result["ingested"] == ["customers"]
+    assert [f["table"] for f in result["failed"]] == ["no_such_table"]
+    assert result["failed"][0]["error"]
+
+
+def test_warehouse_ingest_continues_after_one_table_fails(source, monkeypatch):
+    """One failing table must not lose the rest of the selection (the 9-of-9 bug)."""
+
+    class FlakyConnector:
+        def connect(self, config):
+            pass
+
+        def list_columns(self, name):
+            if name == "orders":
+                raise RuntimeError("permission denied for relation orders")
+            return [
+                {"name": "id", "data_type": "integer", "is_nullable": False, "ordinal_position": 0},
+            ]
+
+        def close(self):
+            pass
+
+    import headwater.services.h2_source as h2_source_mod
+
+    monkeypatch.setattr(h2_source_mod, "get_connector", lambda _type: FlakyConnector())
+    # Re-register as a warehouse type so the metadata-only path runs.
+    source.upsert_source("wh", "redshift", None, "redshift://example:5439/dev")
+
+    result = ingest_tables(source, "wh", ["customers", "orders", "web_events"])
+    assert result["ingested"] == ["customers", "web_events"]
+    assert [f["table"] for f in result["failed"]] == ["orders"]
+    assert "permission denied" in result["failed"][0]["error"]
+    assert {t["name"] for t in source.get_tables("wh")} == {"customers", "web_events"}
+
+
+def test_delete_table_cascades_and_prunes_project_scope(source):
+    ingest_tables(source, "wh", ["customers", "orders"])
+    source.con.execute("INSERT INTO projects (id, slug, display_name) VALUES ('p1', 'p1', 'P1')")
+    source.upsert_project_source("p1", "wh", selected_tables=["customers", "orders"])
+
+    source.delete_table("wh", "customers")
+
+    assert {t["name"] for t in source.get_tables("wh")} == {"orders"}
+    assert source.get_columns("wh", "customers") == []
+    assert all(p["table_name"] != "customers" for p in source.get_profiles("wh"))
+    ps = source.get_project_sources("p1")
+    assert ps[0]["selected_tables"] == ["orders"]

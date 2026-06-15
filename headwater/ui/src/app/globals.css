@@ -55,3 +55,18 @@ body {
     transform: translateY(0);
   }
 }
+
+/* Indeterminate "AI analysing" progress strip + pulsing glyph. */
+@keyframes hw2-indeterminate {
+  0% { left: -45%; width: 45%; }
+  50% { left: 25%; width: 55%; }
+  100% { left: 100%; width: 45%; }
+}
+@keyframes hw2-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Reveal the per-project delete button only on row hover. */
+.hw2-proj-row .hw2-del { opacity: 0; transition: opacity 0.12s ease; }
+.hw2-proj-row:hover .hw2-del { opacity: 1; }

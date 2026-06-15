@@ -10,6 +10,7 @@ import {
   type H2Source,
 } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+import { useH2Context } from "@/app/h2/layout";
 
 // ─── Catalog side panel ─────────────────────────────────────────────────────
 
@@ -23,14 +24,28 @@ function sampleHint(profile: Record<string, unknown>): string {
   return "";
 }
 
+// Quote an identifier for SQL unless it is already a plain (optionally
+// schema-qualified) name. Works for both DuckDB and warehouse dialects.
+function sqlIdentifier(name: string): string {
+  if (/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$/.test(name)) {
+    return name;
+  }
+  return name
+    .split(".")
+    .map((part) => `"${part.replace(/"/g, '""')}"`)
+    .join(".");
+}
+
 function CatalogPanel({
   tables,
   loading,
   onInsert,
+  onPreview,
 }: {
   tables: H2CatalogTable[];
   loading: boolean;
   onInsert: (identifier: string) => void;
+  onPreview: (tableName: string) => void;
 }) {
   // Tables are expanded by default; track only the ones explicitly collapsed
   // (avoids syncing state from props in an effect).
@@ -102,13 +117,13 @@ function CatalogPanel({
                 <span
                   onClick={(e) => {
                     e.stopPropagation();
-                    onInsert(t.table_name);
+                    onPreview(t.table_name);
                   }}
                   style={{
                     font: "600 12.5px 'DM Mono', monospace",
                     color: HW2_COLOR.ink,
                   }}
-                  title="Insert table name"
+                  title="Preview: SELECT * FROM … LIMIT 100"
                 >
                   {t.table_name}
                 </span>
@@ -179,6 +194,7 @@ function CatalogPanel({
 // ─── Page ───────────────────────────────────────────────────────────────────
 
 export default function QueryConsolePage() {
+  const { activeSource, setActiveSource } = useH2Context();
   const [sources, setSources] = useState<H2Source[]>([]);
   const [source, setSource] = useState<string>("");
   const [sql, setSql] = useState<string>("");
@@ -206,11 +222,21 @@ export default function QueryConsolePage() {
       .list()
       .then((s) => {
         setSources(s);
-        if (s[0]) setSource(s[0].name);
+        // Start in the workspace's active source context.
+        const preferred =
+          (activeSource && s.find((x) => x.name === activeSource)) || s[0];
+        if (preferred) setSource((cur) => cur || preferred.name);
       })
       .catch(() => {});
     h2.projects.list().then(setProjects).catch(() => {});
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSource]);
+
+  // Switching the console's source switches the workspace context with it.
+  const switchSource = (name: string) => {
+    setSource(name);
+    setActiveSource(name);
+  };
 
   // Only projects framed on the source being explored can track this query.
   const sourceProjects = projects.filter((p) => p.source_name === source);
@@ -246,14 +272,15 @@ export default function QueryConsolePage() {
     });
   };
 
-  const run = async () => {
-    if (!source || !sql.trim()) return;
+  const run = async (sqlText?: string) => {
+    const text = sqlText ?? sql;
+    if (!source || !text.trim()) return;
     setRunning(true);
     setError(null);
     setPromoted(null);
     setPromoteOpen(false);
     try {
-      const r = await h2.query(source, sql);
+      const r = await h2.query(source, text);
       if (r.error) {
         setError(r.error);
         setResult(null);
@@ -266,6 +293,14 @@ export default function QueryConsolePage() {
     } finally {
       setRunning(false);
     }
+  };
+
+  // Quick preview: clicking a table in the catalog loads and runs a default
+  // SELECT * … LIMIT 100. The SQL lands in the editor, ready to refine.
+  const previewTable = (tableName: string) => {
+    const text = `SELECT * FROM ${sqlIdentifier(tableName)} LIMIT 100`;
+    setSql(text);
+    void run(text);
   };
 
   const openPromote = () => {
@@ -335,10 +370,10 @@ export default function QueryConsolePage() {
           marginBottom: 20,
         }}
       >
-        Read-only SQL against a freshly materialized source — all of its tables
-        are loaded, so you can <b>join across tables</b> for richer insights and
-        track the result as a certifiable answer. Click a table or column in the
-        catalog to insert it.
+        Read-only SQL against the active source — file sources are materialized
+        locally, warehouse sources run the query on the live connection. Click a
+        table in the catalog for a quick preview (SELECT * … LIMIT 100), click a
+        column to insert it, and track any result as a certifiable answer.
       </p>
 
       <div
@@ -353,6 +388,7 @@ export default function QueryConsolePage() {
           tables={catalog}
           loading={catalogLoading}
           onInsert={insertIdentifier}
+          onPreview={previewTable}
         />
 
         <div style={{ minWidth: 0 }}>
@@ -361,7 +397,7 @@ export default function QueryConsolePage() {
               <button
                 key={s.name}
                 type="button"
-                onClick={() => setSource(s.name)}
+                onClick={() => switchSource(s.name)}
                 style={{
                   appearance: "none",
                   cursor: "pointer",
@@ -402,7 +438,7 @@ export default function QueryConsolePage() {
 
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
             <button
-              onClick={run}
+              onClick={() => void run()}
               disabled={running || !source || !sql.trim()}
               style={{
                 appearance: "none",

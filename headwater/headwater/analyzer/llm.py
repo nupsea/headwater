@@ -291,6 +291,46 @@ def get_provider(
     return NoLLMProvider()
 
 
+def check_llm_available(
+    settings: HeadwaterSettings, *, model: str | None = None
+) -> tuple[bool, str]:
+    """Best-effort reachability check for AI features.
+
+    Returns ``(ok, message)``. When ``ok`` is False the message is a concrete,
+    user-facing reason (provider off, Ollama not running, model not installed,
+    missing API key) — so features can tell the user what's wrong instead of
+    failing silently. ``model`` overrides which model to verify (e.g. the
+    reasoning model).
+    """
+    provider = settings.llm_provider
+    if provider == "none":
+        return False, "AI is off. Choose a provider (e.g. `hw2 engine on` with Ollama)."
+    if provider == "anthropic":
+        if not settings.llm_api_key:
+            return False, "Anthropic is selected but HEADWATER_LLM_API_KEY is not set."
+        return True, ""
+    if provider == "openai_compat":
+        if not settings.openai_compat_base_url:
+            return False, "OpenAI-compatible provider has no endpoint configured."
+        return True, ""
+    if provider == "ollama":
+        import httpx
+
+        url = settings.ollama_base_url.rstrip("/")
+        want = model or settings.llm_model
+        try:
+            resp = httpx.get(f"{url}/api/tags", timeout=4.0)
+            resp.raise_for_status()
+            installed = [m.get("name", "") for m in resp.json().get("models", [])]
+        except Exception:
+            return False, f"Can't reach Ollama at {url}. Start it with `ollama serve`."
+        family = want.split(":", 1)[0]
+        if want and not any(t == want or t.startswith(family) for t in installed):
+            return False, f"Model '{want}' isn't installed. Run: `ollama pull {want}`."
+        return True, ""
+    return True, ""
+
+
 def _cached_response(
     store: LLMAuditStore | None,
     *,

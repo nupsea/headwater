@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { h2, type H2BrowseTable, type H2Source } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+import { useH2Context } from "@/app/h2/layout";
 
 const pickBtn: React.CSSProperties = {
   appearance: "none",
@@ -66,6 +67,7 @@ function Field({
 
 export default function NewProjectPage() {
   const router = useRouter();
+  const { runAnalysis, activeSource, setActiveSource } = useH2Context();
   const [sources, setSources] = useState<H2Source[]>([]);
   const [tables, setTables] = useState<H2BrowseTable[]>([]);
   const [tableSearch, setTableSearch] = useState("");
@@ -108,6 +110,12 @@ export default function NewProjectPage() {
   useEffect(() => {
     h2.sources.list().then(setSources).catch(() => {});
   }, []);
+
+  // New projects start in the workspace's active source context.
+  useEffect(() => {
+    if (!sourceName && activeSource) setSourceName(activeSource);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSource]);
 
   // Load tables when source is selected
   useEffect(() => {
@@ -173,18 +181,31 @@ export default function NewProjectPage() {
       // Ingest ONLY the selected subset first (profiles embedded tables / registers
       // warehouse schema), so the project pulls just what it needs.
       if (selectedTables.size > 0) {
-        await h2.sources.ingest(sourceName, [...selectedTables]);
+        const ingested = await h2.sources.ingest(sourceName, [...selectedTables]);
+        if (ingested.failed?.length) {
+          throw new Error(
+            `${ingested.failed.length} table(s) could not be ingested: ` +
+              ingested.failed
+                .map((f) => `${f.table} (${f.error})`)
+                .join("; ") +
+              ". Deselect them or fix access, then try again."
+          );
+        }
       }
-      await h2.projects.frame({
-        project_id: pid,
-        source_name: sourceName,
-        display_name: displayName || pid,
-        goal: goal.trim(),
-        decision: decision || undefined,
-        target_metric: targetMetric || undefined,
-        time_horizon: timeHorizon || undefined,
-        selected_tables: selectedTables.size > 0 ? [...selectedTables] : undefined,
-      });
+      // Framing runs the goal-aware analysis (the LLM maps your goal to the data);
+      // show the global bar while it works.
+      await runAnalysis("Analysing your data and goal…", () =>
+        h2.projects.frame({
+          project_id: pid,
+          source_name: sourceName,
+          display_name: displayName || pid,
+          goal: goal.trim(),
+          decision: decision || undefined,
+          target_metric: targetMetric || undefined,
+          time_horizon: timeHorizon || undefined,
+          selected_tables: selectedTables.size > 0 ? [...selectedTables] : undefined,
+        })
+      );
       // Ingest any provided context so it is considered from the very start.
       const ingests: Promise<unknown>[] = [];
       if (contextText.trim()) {
@@ -199,6 +220,9 @@ export default function NewProjectPage() {
         ingests.push(h2.projects.resources.ingest(pid, f));
       }
       if (ingests.length) await Promise.allSettled(ingests);
+      // The new project lives in this source's context — make it the active one
+      // so the rail and home view show it.
+      setActiveSource(sourceName);
       router.push(`/h2/projects/${pid}/understand`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to create project");

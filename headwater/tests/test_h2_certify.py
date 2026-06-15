@@ -29,6 +29,9 @@ def _setup_certified_question(tmp_path: Path, source_path: str, source_name: str
         "--goal", goal,
     ])
     runner.invoke(app, ["resolve", "--project-id", project_id])
+    # Certification fails closed on uncomputed insight evidence, so the EDA
+    # battery must run before readiness for anything to certify.
+    runner.invoke(app, ["eda", "run", "--project-id", project_id])
     runner.invoke(app, ["readiness", "--project-id", project_id])
 
     store = HeadwaterStore(tmp_path / "h2_metadata.db")

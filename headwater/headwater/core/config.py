@@ -28,6 +28,9 @@ _PERSISTED_KEYS = frozenset(
         "mart_min_relationships",
         "mart_min_metric_columns",
         "mart_min_rows",
+        "reasoning_engine",
+        "knowledge_backend",
+        "reasoning_model",
     }
 )
 
@@ -68,6 +71,15 @@ class HeadwaterSettings(BaseSettings):
     mart_min_relationships: int = 2
     mart_min_metric_columns: int = 1
     mart_min_rows: int = 100
+
+    # Reasoning engine (capability-gated; default off keeps the legacy path)
+    reasoning_engine: bool = False
+    knowledge_backend: Literal["sqlite", "duckpgq", "kuzu"] = "sqlite"
+    insight_battery: bool = False
+    pii_detection: bool = False
+    # Model used for goal comprehension / question proposal. Empty => use llm_model.
+    # Defaults to a capable local model; falls back to deterministic if unavailable.
+    reasoning_model: str = "qwen2.5:14b-instruct"
 
     @property
     def metadata_db_path(self) -> Path:

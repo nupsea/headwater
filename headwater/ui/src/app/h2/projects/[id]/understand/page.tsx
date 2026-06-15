@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import {
   h2,
   notifyInputChanged,
+  notifyRecomputed,
   onHw2Event,
   HW2_RECOMPUTED,
   type H2Question,
@@ -12,6 +13,8 @@ import {
   type H2EdaFinding,
 } from "@/lib/h2api";
 import { HW2_COLOR } from "@/components/h2/readiness-ring";
+import { useConfirm } from "@/components/h2/confirm-dialog";
+import { useH2Context } from "@/app/h2/layout";
 import { SchemaEditor } from "@/components/h2/schema-editor";
 import { AiSuggestions } from "@/components/h2/ai-suggestions";
 
@@ -610,6 +613,14 @@ function GoalGate({
 export default function UnderstandPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const { runAnalysis } = useH2Context();
+  const { confirm, confirmDialog } = useConfirm();
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [newQuestion, setNewQuestion] = useState("");
+  const [addNote, setAddNote] = useState("");
+  const [addError, setAddError] = useState(false);
 
   const [questions, setQuestions] = useState<H2Question[]>([]);
   const [relevance, setRelevance] = useState<H2RelevantColumn[]>([]);
@@ -691,6 +702,62 @@ export default function UnderstandPage() {
     ).then(() => notifyInputChanged());
   };
 
+  const regenerate = async () => {
+    const ok = await confirm({
+      title: "Regenerate the question set?",
+      body:
+        "This replaces the current questions (and any answers or verdicts on " +
+        "them) with a fresh AI analysis of your goal and data. Use this after " +
+        "changing scope or to retry.",
+      confirmLabel: "Regenerate",
+    });
+    if (!ok) return;
+    setRegenerating(true);
+    setRegenerateError(null);
+    try {
+      await runAnalysis("Regenerating questions from your goal…", () =>
+        h2.projects.regenerateQuestions(id)
+      );
+      await load();
+      notifyInputChanged();
+      notifyRecomputed();
+    } catch (e) {
+      // A source that's unreachable (paused warehouse, VPN off) shouldn't throw
+      // the analyst out with a browser popup — show it inline and keep the
+      // existing questions in place.
+      setRegenerateError(
+        e instanceof Error ? e.message : "Failed to regenerate questions"
+      );
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
+  const addOwnQuestion = async () => {
+    const text = newQuestion.trim();
+    if (!text) return;
+    setAddNote("");
+    setAddError(false);
+    try {
+      const r = await runAnalysis("Mapping your question to the data…", () =>
+        h2.projects.addCustomQuestion(id, text)
+      );
+      if (r.added) {
+        setNewQuestion("");
+        setAdding(false);
+        await load();
+        notifyInputChanged();
+        notifyRecomputed();
+      } else {
+        setAddError(true);
+        setAddNote(r.note || "Couldn't add that question.");
+      }
+    } catch (e) {
+      setAddError(true);
+      setAddNote(e instanceof Error ? e.message : "Failed to add the question.");
+    }
+  };
+
   useEffect(() => {
     load();
     rerunRelevance();
@@ -751,6 +818,7 @@ export default function UnderstandPage() {
         fontFamily: "'DM Sans', sans-serif",
       }}
     >
+      {confirmDialog}
       <span
         style={{
           font: "600 11px 'DM Sans', sans-serif",
@@ -1010,23 +1078,62 @@ export default function UnderstandPage() {
               own.
             </div>
           </div>
-          <button
-            onClick={acceptAll}
+          <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+            <button
+              onClick={regenerate}
+              disabled={regenerating}
+              title="Re-run the AI analysis of your goal and replace the question set"
+              style={{
+                appearance: "none",
+                cursor: regenerating ? "default" : "pointer",
+                background: "#fff",
+                border: `1px solid ${HW2_COLOR.rule2}`,
+                borderRadius: 8,
+                padding: "6px 12px",
+                font: "500 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.blue,
+                fontFamily: "'DM Sans', sans-serif",
+                opacity: regenerating ? 0.6 : 1,
+              }}
+            >
+              {regenerating ? "Regenerating…" : "↻ Regenerate"}
+            </button>
+            <button
+              onClick={acceptAll}
+              style={{
+                appearance: "none",
+                cursor: "pointer",
+                background: "#fff",
+                border: `1px solid ${HW2_COLOR.rule2}`,
+                borderRadius: 8,
+                padding: "6px 12px",
+                font: "500 12px 'DM Sans', sans-serif",
+                color: HW2_COLOR.ink2,
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              Accept all answerable
+            </button>
+          </div>
+        </div>
+
+        {regenerateError && (
+          <div
             style={{
-              appearance: "none",
-              cursor: "pointer",
-              background: "#fff",
-              border: `1px solid ${HW2_COLOR.rule2}`,
+              margin: "0 22px",
+              padding: "10px 14px",
+              background: HW2_COLOR.badSoft,
+              border: `1px solid ${HW2_COLOR.bad}44`,
               borderRadius: 8,
-              padding: "6px 12px",
-              font: "500 12px 'DM Sans', sans-serif",
-              color: HW2_COLOR.ink2,
-              fontFamily: "'DM Sans', sans-serif",
+              font: "400 12.5px 'DM Sans', sans-serif",
+              color: HW2_COLOR.bad,
+              lineHeight: 1.5,
             }}
           >
-            Accept all answerable
-          </button>
-        </div>
+            Couldn&rsquo;t regenerate: {regenerateError} The current questions are
+            unchanged.
+          </div>
+        )}
 
         <div style={{ padding: "12px 22px 18px", display: "grid", gap: 8 }}>
           {questions.length === 0 ? (
@@ -1049,6 +1156,103 @@ export default function UnderstandPage() {
                 onToggle={() => toggleKept(q.id)}
               />
             ))
+          )}
+
+          {/* Add your own — typed in plain English, mapped to your columns. */}
+          {adding ? (
+            <div
+              style={{
+                display: "grid",
+                gap: 8,
+                padding: "12px",
+                border: `1px dashed ${HW2_COLOR.rule2}`,
+                borderRadius: 10,
+              }}
+            >
+              <input
+                autoFocus
+                value={newQuestion}
+                onChange={(e) => setNewQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") addOwnQuestion();
+                  if (e.key === "Escape") {
+                    setAdding(false);
+                    setAddNote("");
+                  }
+                }}
+                placeholder="e.g. average wait time by department"
+                style={{
+                  appearance: "none",
+                  border: `1px solid ${HW2_COLOR.rule2}`,
+                  borderRadius: 8,
+                  padding: "9px 11px",
+                  font: "400 13px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.ink,
+                  outline: "none",
+                }}
+              />
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                  onClick={addOwnQuestion}
+                  style={{
+                    appearance: "none",
+                    cursor: "pointer",
+                    background: HW2_COLOR.blue,
+                    color: "#fff",
+                    border: "1px solid transparent",
+                    borderRadius: 8,
+                    padding: "7px 13px",
+                    font: "600 12px 'DM Sans', sans-serif",
+                  }}
+                >
+                  Add question
+                </button>
+                <button
+                  onClick={() => {
+                    setAdding(false);
+                    setAddNote("");
+                    setAddError(false);
+                  }}
+                  style={{
+                    appearance: "none",
+                    cursor: "pointer",
+                    background: "transparent",
+                    color: HW2_COLOR.muted,
+                    border: "none",
+                    font: "500 12px 'DM Sans', sans-serif",
+                  }}
+                >
+                  Cancel
+                </button>
+                {addNote && (
+                  <span
+                    style={{
+                      font: `${addError ? 500 : 400} 12px 'DM Sans', sans-serif`,
+                      color: addError ? HW2_COLOR.bad : HW2_COLOR.muted,
+                    }}
+                  >
+                    {addError ? "⚠ " : ""}
+                    {addNote}
+                  </span>
+                )}
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setAdding(true)}
+              style={{
+                appearance: "none",
+                cursor: "pointer",
+                justifySelf: "start",
+                background: "transparent",
+                border: "none",
+                padding: "6px 0",
+                font: "600 13px 'DM Sans', sans-serif",
+                color: HW2_COLOR.blue,
+              }}
+            >
+              + Add your own question
+            </button>
           )}
         </div>
       </div>

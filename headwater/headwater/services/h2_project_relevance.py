@@ -106,17 +106,21 @@ def propose_relevance(
             source="relevance",
             locked=column.score >= 4.0,
         )
-    top_questions = _build_question_proposals(
-        source_view,
-        semantic_map,
-        project_goal,
-        relevant_columns,
-        selected_tables=selected_table_names,
-        project_id=project_id,
-        source_name=source_name,
-        store=store,
-        source_snapshot_id=source_snapshot_id,
+    top_questions = _maybe_engine_questions(
+        store, project_id, source_name, source_snapshot_id, goal_text
     )
+    if top_questions is None:
+        top_questions = _build_question_proposals(
+            source_view,
+            semantic_map,
+            project_goal,
+            relevant_columns,
+            selected_tables=selected_table_names,
+            project_id=project_id,
+            source_name=source_name,
+            store=store,
+            source_snapshot_id=source_snapshot_id,
+        )
 
     notes: list[str] = []
     if not selected_table_names:
@@ -221,7 +225,6 @@ def _goal_text(goal: dict[str, Any]) -> str:
         " ".join(str(note) for note in goal.get("notes") or []),
     ]
     return " ".join(part for part in parts if part).strip().lower()
-
 
 
 def _goal_intents(
@@ -425,11 +428,7 @@ def _build_question_proposals(
     # chose, keep their richer wording (e.g. a two-word label) over the column's
     # bare name.  It still names the same measure, so they can't diverge.
     goal_metric = str(goal.get("target_metric") or "").strip()
-    if (
-        goal_metric
-        and measure_candidate
-        and _label_matches_column(goal_metric, measure_candidate)
-    ):
+    if goal_metric and measure_candidate and _label_matches_column(goal_metric, measure_candidate):
         metric_label = goal_metric
     category_candidate = (
         _find_named_column_in_table(
@@ -661,9 +660,7 @@ def _build_question_proposals(
     return proposals[:5]
 
 
-def _table_measure(
-    top_by_table: dict[str, list[H2RelevantColumn]], table: str
-) -> str | None:
+def _table_measure(top_by_table: dict[str, list[H2RelevantColumn]], table: str) -> str | None:
     """A measure column strictly within ``table`` (no cross-table fallback)."""
     for column in top_by_table.get(table, []):
         role = (column.semantic_role or "").lower()
@@ -770,6 +767,201 @@ def _cr(col: H2RelevantColumn | str | None) -> str:
     return str(col)
 
 
+def add_custom_question(
+    store: HeadwaterStore, project_id: str, text: str
+) -> dict[str, Any]:
+    """Add a user-typed question, mapped to real columns by the engine.
+
+    Plain-English question -> the model picks the measure + grouping/time column
+    (verified against the catalog) -> persisted as an answerable question that
+    flows through the normal draft/execute/certify pipeline. User questions
+    (``<project>:uq*``) are independent of the engine set, so Regenerate never
+    removes them. Surfaces a concrete reason when it can't (no model, unmappable).
+    """
+    from headwater.analyzer.llm import NoLLMProvider, check_llm_available, get_provider
+    from headwater.core.config import get_settings
+    from headwater.knowledge import make_projection
+    from headwater.reasoning.nodes.llm_propose import build_schema_brief, map_user_question
+
+    text = (text or "").strip()
+    if not text:
+        return {"added": False, "note": "Type a question first."}
+    if store.get_project(project_id) is None:
+        raise ValueError(f"Project '{project_id}' is not registered.")
+    sources = store.get_project_sources(project_id)
+    source_name = sources[0]["source_name"] if sources else None
+
+    settings = get_settings()
+    model = getattr(settings, "reasoning_model", "") or settings.llm_model
+    ok, why = check_llm_available(settings, model=model)
+    if not ok:
+        return {"added": False, "note": why}
+    provider = get_provider(settings.model_copy(update={"llm_model": model}))
+    if isinstance(provider, NoLLMProvider):
+        return {"added": False, "note": "AI is off — no model configured."}
+
+    projection = make_projection(settings, store)
+    brief = build_schema_brief(store, project_id, projection)
+    spec = map_user_question(
+        store,
+        project_id,
+        projection=projection,
+        provider=provider,
+        question_text=text,
+        brief=brief,
+    )
+    if not spec:
+        return {
+            "added": False,
+            "note": (
+                "Couldn't map that to your columns. Try naming a measure and a "
+                "grouping (e.g. 'average wait time by department'), or use the "
+                "Query console for custom SQL."
+            ),
+        }
+
+    n = sum(
+        1
+        for q in store.list_questions(project_id)
+        if str(q["id"]).startswith(f"{project_id}:uq")
+    )
+    snapshot_id = (
+        (store.get_latest_source_snapshot(source_name) or {}).get("id")
+        if source_name
+        else None
+    )
+    prop = _persist_question(
+        store,
+        project_id,
+        source_name,
+        question_id=f"uq{n}",
+        title=str(spec["title"]),
+        answerability="answerable",
+        reason=str(spec.get("reason") or "Added by you."),
+        needed_columns=list(spec["needed_columns"]),
+        confidence=float(spec.get("score") or 0.8),
+        snapshot_id=snapshot_id,
+        col_roles=dict(spec.get("col_roles") or {}),
+    )
+    return {"added": True, "question_id": prop.question_id, "title": str(spec["title"])}
+
+
+def _proposal_from_row(q: dict[str, Any]) -> H2QuestionProposal:
+    """Rebuild a proposal from a stored question row (the keep-stable path)."""
+    payload = q.get("question") or {}
+    return H2QuestionProposal(
+        question_id=str(q["id"]),
+        title=str(q.get("title") or payload.get("title") or ""),
+        answerability=str(q.get("answerability") or payload.get("answerability") or "answerable"),
+        reason=str(payload.get("reason") or ""),
+        needed_columns=list(payload.get("needed_columns") or []),
+        confidence=float(q.get("confidence") or 0.0),
+    )
+
+
+def _maybe_engine_questions(
+    store: HeadwaterStore,
+    project_id: str,
+    source_name: str,
+    snapshot_id: str | None,
+    goal_text: str,
+) -> list[H2QuestionProposal] | None:
+    """Goal-aware questions from the reasoning engine, when enabled.
+
+    Stability is the contract: the engine question set is generated ONCE per goal
+    and then left alone. Answering a question, defining a term, resolving an item,
+    or any recompute that does not change the goal returns the EXACT same questions
+    (and keeps their verdicts/answers). Only a new or edited goal regenerates them.
+    This prevents the confusing "questions vanish as I work" behavior — a recompute
+    must never silently rewrite the question set the user is acting on.
+
+    Returns ``None`` (callers fall back to heuristic templates) only when the engine
+    is off, or when there are no questions yet and the engine produces none.
+    """
+    from headwater.core.config import get_settings
+
+    settings = get_settings()
+    if not getattr(settings, "reasoning_engine", False):
+        return None
+
+    import logging
+
+    from headwater.reasoning.cache import NodeCache
+    from headwater.reasoning.types import stable_hash
+
+    logger = logging.getLogger(__name__)
+    cache = NodeCache(store)
+    goal_sig = stable_hash(goal_text or "")
+    existing = [
+        q
+        for q in store.list_questions(project_id)
+        if str(q["id"]).startswith(f"{project_id}:rq")
+    ]
+    prev_sig = cache.get("engine.goalsig", project_id)
+
+    # Already generated for this goal -> keep them exactly as they are.
+    if existing and prev_sig == goal_sig:
+        logger.info(
+            "engine.questions: project=%s goal unchanged — keeping the existing "
+            "%d question(s) (use Regenerate for a fresh set)",
+            project_id,
+            len(existing),
+        )
+        return [_proposal_from_row(q) for q in existing]
+
+    logger.info(
+        "engine.questions: project=%s building a fresh set — %s (had %d prior "
+        "question(s))",
+        project_id,
+        "goal changed" if existing else "first run for this goal",
+        len(existing),
+    )
+    from headwater.reasoning.nodes import run_question_vertical
+
+    specs = run_question_vertical(store, project_id, settings=settings)
+    if not specs:
+        # Engine produced nothing this run; never wipe an existing set to templates.
+        logger.warning(
+            "engine.questions: project=%s produced NOTHING — keeping the prior "
+            "%d question(s) (never wiping to templates)",
+            project_id,
+            len(existing),
+        )
+        return [_proposal_from_row(q) for q in existing] if existing else None
+
+    # New or changed goal: (re)generate the engine question set.
+    desired_ids = {f"{project_id}:rq{i}" for i in range(len(specs))}
+    stale = [q["id"] for q in existing if q["id"] not in desired_ids]
+    store.delete_questions(stale)
+
+    proposals: list[H2QuestionProposal] = []
+    for i, spec in enumerate(specs):
+        proposals.append(
+            _persist_question(
+                store,
+                project_id,
+                source_name,
+                question_id=f"rq{i}",
+                title=str(spec.get("title") or f"Question {i + 1}"),
+                answerability="answerable",
+                reason=str(spec.get("reason") or "Goal-aware question from the reasoning engine."),
+                needed_columns=list(spec.get("needed_columns") or []),
+                confidence=float(spec.get("score") or 0.8),
+                snapshot_id=snapshot_id,
+                col_roles=dict(spec.get("col_roles") or {}),
+                intent=str(spec.get("intent") or "") or None,
+            )
+        )
+    cache.put("engine.goalsig", project_id, goal_sig)
+    logger.info(
+        "engine.questions: project=%s persisted %d question(s): %s",
+        project_id,
+        len(proposals),
+        "; ".join(p.title[:60] for p in proposals[:10]),
+    )
+    return proposals
+
+
 def _persist_question(
     store: HeadwaterStore,
     project_id: str,
@@ -784,6 +976,7 @@ def _persist_question(
     snapshot_id: str | None = None,
     is_gap: bool = False,
     col_roles: dict[str, str] | None = None,
+    intent: str | None = None,
 ) -> H2QuestionProposal:
     full_id = f"{project_id}:{question_id}"
     needed = [
@@ -799,6 +992,10 @@ def _persist_question(
             "reason": reason,
             "needed_columns": needed,
             "col_roles": col_roles or {},
+            # The proposal's verified intent (ranking|segment|trend) — the
+            # drafting layer treats this as authoritative over title wording
+            # ("Trend of X by category" is a segment, whatever the title says).
+            "intent": intent,
             "answerability": answerability,
             "source_snapshot_id": snapshot_id,
         },
@@ -1122,7 +1319,8 @@ def _find_named_column_in_table(
 
 
 def _column_ref(discovery: DiscoveryResult, dotted_name: str) -> H2RelevantColumn | None:
-    table_name, column_name = dotted_name.split(".", 1)
+    # Column is the last component; the table may be schema-qualified.
+    table_name, column_name = dotted_name.rsplit(".", 1)
     for table in discovery.tables:
         if table.name != table_name:
             continue
@@ -1248,12 +1446,44 @@ def _find_named_column(discovery: DiscoveryResult, hints: set[str]) -> str | Non
 
 # ── Resource context helpers ──────────────────────────────────────────────────
 
-_DEFINITION_STOP_WORDS = frozenset({
-    "the", "and", "for", "are", "was", "were", "has", "have", "had",
-    "its", "with", "from", "this", "that", "which", "each", "all",
-    "can", "may", "will", "used", "been", "per", "not", "but", "also",
-    "into", "than", "more", "over", "when", "where", "how", "any",
-})
+_DEFINITION_STOP_WORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "are",
+        "was",
+        "were",
+        "has",
+        "have",
+        "had",
+        "its",
+        "with",
+        "from",
+        "this",
+        "that",
+        "which",
+        "each",
+        "all",
+        "can",
+        "may",
+        "will",
+        "used",
+        "been",
+        "per",
+        "not",
+        "but",
+        "also",
+        "into",
+        "than",
+        "more",
+        "over",
+        "when",
+        "where",
+        "how",
+        "any",
+    }
+)
 
 
 def _resource_context_from_claims(
@@ -1290,7 +1520,8 @@ def _resource_context_from_claims(
             value = claim.get("claim", {}).get("value")
             if isinstance(value, str):
                 words = {
-                    w for w in re.findall(r"[a-z][a-z0-9]+", value.lower())
+                    w
+                    for w in re.findall(r"[a-z][a-z0-9]+", value.lower())
                     if w not in _DEFINITION_STOP_WORDS and len(w) >= 3
                 }
                 vocab_words |= words

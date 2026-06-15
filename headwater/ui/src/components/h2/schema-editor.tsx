@@ -171,6 +171,7 @@ export function SchemaEditor({
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [genNote, setGenNote] = useState("");
+  const [genError, setGenError] = useState(false);
 
   const load = useCallback(() => {
     Promise.all([
@@ -192,15 +193,26 @@ export function SchemaEditor({
   const generate = async () => {
     setGenerating(true);
     setGenNote("");
+    setGenError(false);
     try {
       const r = await h2.sources.generateDescriptions(sourceName);
-      setGenNote(
-        r.available
-          ? `Generated ${r.updated} description${r.updated === 1 ? "" : "s"}.`
-          : "No model available — start Ollama to auto-describe columns."
-      );
-      load();
-      notifyInputChanged();
+      if (!r.available) {
+        // The AI couldn't run — show the concrete reason, never fail silently.
+        setGenError(true);
+        setGenNote(r.note || "AI is unavailable right now.");
+      } else {
+        setGenError(false);
+        const base =
+          r.updated > 0
+            ? `Generated ${r.updated} description${r.updated === 1 ? "" : "s"}.`
+            : "No new descriptions to add.";
+        setGenNote(r.note ? `${base} ${r.note}` : base);
+        load();
+        notifyInputChanged();
+      }
+    } catch (e) {
+      setGenError(true);
+      setGenNote(e instanceof Error ? e.message : "Failed to generate descriptions.");
     } finally {
       setGenerating(false);
     }
@@ -236,7 +248,13 @@ export function SchemaEditor({
           {generating ? "Generating…" : "✦ Generate descriptions with AI"}
         </button>
         {genNote && (
-          <span style={{ font: "400 12px 'DM Sans', sans-serif", color: HW2_COLOR.muted }}>
+          <span
+            style={{
+              font: `${genError ? 500 : 400} 12px 'DM Sans', sans-serif`,
+              color: genError ? HW2_COLOR.bad : HW2_COLOR.muted,
+            }}
+          >
+            {genError ? "⚠ " : ""}
             {genNote}
           </span>
         )}

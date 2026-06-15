@@ -444,7 +444,9 @@ def _persist_findings(
 ) -> int:
     created = 0
     for i, f in enumerate(findings):
-        parts = f.col_ref.split(".", 1)
+        # Column is the last component; the table may be schema-qualified.
+        # Relationship findings ("t1→t2") have no dot-split semantics.
+        parts = f.col_ref.rsplit(".", 1)
         table_name = parts[0] if len(parts) == 2 else None
         col_name = parts[1] if len(parts) == 2 else None
         claim_id = f"{project_id}:eda:{f.family}:{f.col_ref}:{i}"
@@ -479,15 +481,22 @@ def _update_insight_confidence(
     report: EDAReport,
     questions: list[dict[str, Any]],
 ) -> None:
-    """Update the insight_confidence contract for each question based on EDA findings."""
-    score = report.insight_confidence_score
+    """Update the insight_confidence contract for each question from EDA findings.
+
+    Per-question and evidence-scoped (plan §4.2/4.3): the contract passes when
+    the battery has run AND none of the question's OWN needed columns carries a
+    critical quality finding. A critical issue elsewhere in the source must not
+    fail an unrelated question — and a global score blend must not certify past
+    a critical issue. Calibrated confidence over the full evidence subgraph is
+    the P3 follow-on; this contract is the fail-closed gate.
+    """
     critical_col_refs = {f.col_ref.lower() for f in report.critical_findings}
 
     for question in questions:
         needed = [c.lower() for c in (question.get("question", {}).get("needed_columns") or [])]
-        q_has_critical = any(c in critical_col_refs for c in needed)
-        q_confidence = 0.0 if q_has_critical else score
-        passed = q_confidence >= 0.50 and not q_has_critical
+        critical_hits = [c for c in needed if c in critical_col_refs]
+        relevant = [f for f in report.findings if f.col_ref.lower() in needed]
+        passed = not critical_hits
 
         store.upsert_readiness_contract(
             f"{question['id']}:contract:insight_confidence",
@@ -495,18 +504,20 @@ def _update_insight_confidence(
             contract_type="insight_confidence",
             passed=passed,
             note=(
-                f"EDA confidence score {q_confidence:.0%}."
+                f"EDA computed {len(report.findings)} findings "
+                f"({len(relevant)} on this question's columns); no critical "
+                "quality issues in needed columns."
                 if passed
                 else (
-                    "EDA detected critical quality issues in needed columns."
-                    if q_has_critical
-                    else f"EDA confidence score {q_confidence:.0%} below threshold."
+                    "EDA detected critical quality issues in needed columns: "
+                    + ", ".join(critical_hits[:3])
                 )
             ),
             evidence={
-                "eda_score": q_confidence,
-                "critical_cols": [c for c in needed if c in critical_col_refs],
+                "critical_cols": critical_hits,
+                "relevant_findings": len(relevant),
                 "total_findings": len(report.findings),
+                "eda_score": report.insight_confidence_score,
             },
             snapshot_id=None,
         )

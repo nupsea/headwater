@@ -928,6 +928,22 @@ function ResultTable({ answer }: { answer: H2AnswerDraft }) {
           {answer.truncated ? " · showing first 50" : ""}
         </span>
       </div>
+      {answer.row_count === 0 && (
+        <div
+          style={{
+            padding: "14px 16px",
+            font: "400 12.5px 'DM Sans', sans-serif",
+            color: HW2_COLOR.warn,
+            background: HW2_COLOR.warnSoft,
+            borderBottom: `1px solid ${HW2_COLOR.rule}`,
+            lineHeight: 1.5,
+          }}
+        >
+          The query executed but returned no rows — there is no evidence to
+          chart or certify. The source table may be empty (check its row count
+          in the catalog), or the filter excludes everything.
+        </div>
+      )}
       <div style={{ overflowX: "auto", maxHeight: 360 }}>
         <table style={{ borderCollapse: "collapse", width: "100%" }}>
           <thead>

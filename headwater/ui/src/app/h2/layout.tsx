@@ -19,20 +19,44 @@ import {
 } from "@/lib/h2api";
 import { ReadinessRing, HW2_COLOR } from "@/components/h2/readiness-ring";
 import { Stepper, type StageKey } from "@/components/h2/stepper";
+import { useConfirm } from "@/components/h2/confirm-dialog";
 
 // ─── Context ────────────────────────────────────────────────────────────────
 
 interface H2ContextValue {
   projects: H2Project[];
   sources: H2Source[];
+  /** The source the workspace is scoped to. Projects, Catalog, and Query all
+   *  operate within this source's context. */
+  activeSource: string | null;
+  setActiveSource: (name: string) => void;
   reload: () => void;
+  /** True once the first workspace load has settled (success OR failure) — lets
+   *  views distinguish "still loading" from "genuinely empty". */
+  loaded: boolean;
+  /** Set when the workspace load failed (backend down/unreachable). Distinct
+   *  from an empty workspace, which the silent-catch used to render identically. */
+  loadError: string | null;
+  /** Whether a long LLM analysis is currently running (drives the global bar). */
+  analysis: { active: boolean; label: string };
+  /** Run an async op while showing the global "Analysing with AI" bar. Owned by
+   *  the layout, so it survives client-side navigation to other H2 pages. */
+  runAnalysis: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
 }
 
 const H2Context = createContext<H2ContextValue>({
   projects: [],
   sources: [],
+  activeSource: null,
+  setActiveSource: () => {},
   reload: () => {},
+  loaded: false,
+  loadError: null,
+  analysis: { active: false, label: "" },
+  runAnalysis: (_label, fn) => fn(),
 });
+
+const ACTIVE_SOURCE_KEY = "hw2.activeSource";
 
 export function useH2Context() {
   return useContext(H2Context);
@@ -263,16 +287,42 @@ function RailDivider() {
 function H2Rail({
   sources,
   projects,
+  activeSource,
+  onSelectSource,
   pathname,
   onNavigate,
 }: {
   sources: H2Source[];
   projects: H2Project[];
+  activeSource: string | null;
+  onSelectSource: (name: string) => void;
   pathname: string;
   onNavigate: (href: string) => void;
 }) {
-  const primarySource = sources[0] ?? null;
+  const primarySource =
+    sources.find((s) => s.name === activeSource) ?? sources[0] ?? null;
   const activeProjectId = projectIdFromPath(pathname);
+  const { reload } = useH2Context();
+  const { confirm, confirmDialog } = useConfirm();
+
+  const deleteProject = async (p: H2Project) => {
+    const ok = await confirm({
+      title: `Delete project "${p.display_name}"?`,
+      body:
+        "This permanently removes its goal, questions, verdicts, and answers. " +
+        "The shared data source is not affected. This cannot be undone.",
+      confirmLabel: "Delete project",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await h2.projects.remove(p.id);
+      if (activeProjectId === p.id || activeProjectId === p.slug) onNavigate("/h2");
+      reload();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to delete project");
+    }
+  };
 
   return (
     <aside
@@ -286,6 +336,7 @@ function H2Rail({
         overflowY: "auto",
       }}
     >
+      {confirmDialog}
       {/* Source switcher */}
       <div style={{ padding: "16px 14px 8px" }}>
         <div
@@ -301,59 +352,77 @@ function H2Rail({
           Source
         </div>
 
-        {primarySource ? (
-          <button
-            onClick={() => onNavigate(`/h2/sources/${encodeURIComponent(primarySource.name)}`)}
-            style={{
-              appearance: "none",
-              cursor: "pointer",
-              width: "100%",
-              background: "#fff",
-              border: `1px solid ${HW2_COLOR.rule2}`,
-              borderRadius: 8,
-              padding: "8px 10px",
-              textAlign: "left",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontFamily: "'DM Sans', sans-serif",
-            }}
-          >
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: "50%",
-                background: primarySource.latest_snapshot_id
-                  ? HW2_COLOR.good
-                  : HW2_COLOR.faint,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <div
-                style={{
-                  font: "600 13px 'DM Sans', sans-serif",
-                  color: HW2_COLOR.ink,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {primarySource.name}
-              </div>
-              <div
-                style={{
-                  font: "500 10px 'DM Mono', monospace",
-                  color: HW2_COLOR.muted,
-                  marginTop: 1,
-                }}
-              >
-                {primarySource.type}
-                {primarySource.latest_snapshot_id ? " · profiled" : " · not profiled"}
-              </div>
-            </span>
-          </button>
+        {sources.length > 0 ? (
+          <div style={{ display: "grid", gap: 4 }}>
+            {sources.map((s) => {
+              const isActive = primarySource?.name === s.name;
+              return (
+                <button
+                  key={s.name}
+                  onClick={() => {
+                    onSelectSource(s.name);
+                    onNavigate(`/h2/sources/${encodeURIComponent(s.name)}`);
+                  }}
+                  title={
+                    isActive
+                      ? "Open this source's catalog"
+                      : "Switch the workspace to this source"
+                  }
+                  style={{
+                    appearance: "none",
+                    cursor: "pointer",
+                    width: "100%",
+                    background: isActive ? "#fff" : "transparent",
+                    border: isActive
+                      ? `1px solid ${HW2_COLOR.blue}66`
+                      : `1px solid transparent`,
+                    borderRadius: 8,
+                    padding: "8px 10px",
+                    textAlign: "left",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    fontFamily: "'DM Sans', sans-serif",
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      background: s.latest_snapshot_id
+                        ? HW2_COLOR.good
+                        : HW2_COLOR.faint,
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        font: `${isActive ? 600 : 500} 13px 'DM Sans', sans-serif`,
+                        color: isActive ? HW2_COLOR.ink : HW2_COLOR.ink2,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {s.name}
+                    </div>
+                    <div
+                      style={{
+                        font: "500 10px 'DM Mono', monospace",
+                        color: HW2_COLOR.muted,
+                        marginTop: 1,
+                      }}
+                    >
+                      {s.type}
+                      {isActive ? " · active" : ""}
+                    </div>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         ) : (
           <div
             style={{
@@ -425,9 +494,9 @@ function H2Rail({
 
       <RailDivider />
 
-      {/* Projects */}
+      {/* Projects (scoped to the active source) */}
       <RailSection
-        label="Projects"
+        label={primarySource ? `Projects · ${primarySource.name}` : "Projects"}
         action={
           <button
             onClick={() => onNavigate("/h2/projects/new")}
@@ -465,28 +534,74 @@ function H2Rail({
               activeProjectId === p.id || activeProjectId === p.slug;
 
             return (
-              <RailItem
-                key={p.id}
-                active={isActive}
-                onClick={() => onNavigate(`/h2/projects/${p.id}`)}
-                icon={
-                  <ReadinessRing
-                    value={ro.pct}
-                    certified={
-                      ro.certifiedCount === ro.total &&
-                      ro.total > 0 &&
-                      !hasDrift
-                    }
-                    demoted={hasDrift}
-                    size={18}
-                    stroke={2.5}
-                    showLabel={false}
-                    animate={false}
-                  />
-                }
-                label={p.display_name}
-                hint={`${p.questions?.length ?? 0} q · ${ro.certifiedCount}/${ro.total} cert.`}
-              />
+              <div key={p.id} className="hw2-proj-row" style={{ position: "relative" }}>
+                <RailItem
+                  active={isActive}
+                  onClick={() => onNavigate(`/h2/projects/${p.id}`)}
+                  icon={
+                    <ReadinessRing
+                      value={ro.pct}
+                      certified={
+                        ro.certifiedCount === ro.total &&
+                        ro.total > 0 &&
+                        !hasDrift
+                      }
+                      demoted={hasDrift}
+                      size={18}
+                      stroke={2.5}
+                      showLabel={false}
+                      animate={false}
+                    />
+                  }
+                  label={p.display_name}
+                  hint={`${p.questions?.length ?? 0} q · ${ro.certifiedCount}/${ro.total} cert.`}
+                />
+                <button
+                  className="hw2-del"
+                  title="Delete project"
+                  aria-label={`Delete project ${p.display_name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteProject(p);
+                  }}
+                  style={{
+                    position: "absolute",
+                    top: "50%",
+                    right: 6,
+                    transform: "translateY(-50%)",
+                    appearance: "none",
+                    cursor: "pointer",
+                    background: "#fff",
+                    border: `1px solid ${HW2_COLOR.rule2}`,
+                    borderRadius: 6,
+                    width: 24,
+                    height: 24,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: HW2_COLOR.muted,
+                    padding: 0,
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.color = HW2_COLOR.bad;
+                    e.currentTarget.style.borderColor = HW2_COLOR.bad + "66";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.color = HW2_COLOR.muted;
+                    e.currentTarget.style.borderColor = HW2_COLOR.rule2;
+                  }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path
+                      d="M3 6h18M8 6V4h8v2m-9 0v14a1 1 0 001 1h8a1 1 0 001-1V6M10 11v6M14 11v6"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
             );
           })
         )}
@@ -545,9 +660,6 @@ function ProjectBanner({
         padding: "20px 32px 14px",
         background: HW2_COLOR.paper,
         borderBottom: `1px solid ${HW2_COLOR.rule}`,
-        position: "sticky",
-        top: 0,
-        zIndex: 5,
       }}
     >
       <div
@@ -653,6 +765,59 @@ function ProjectBanner({
 
 // ─── Recompute banner (staged) ───────────────────────────────────────────────
 
+/** Global indeterminate progress strip shown while the LLM is analysing. Rendered
+ *  in the persistent layout, so it stays put when the user switches pages. NOT
+ *  sticky by itself — the layout stacks it with the project banner in one sticky
+ *  header group so the two can never overlap while scrolling. */
+function AnalysisBar({ active, label }: { active: boolean; label: string }) {
+  if (!active) return null;
+  return (
+    <div>
+      <div
+        style={{
+          position: "relative",
+          height: 3,
+          background: HW2_COLOR.blue + "22",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            background: HW2_COLOR.blue,
+            borderRadius: 2,
+            animation: "hw2-indeterminate 1.15s ease-in-out infinite",
+          }}
+        />
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "7px 32px",
+          background: HW2_COLOR.blue + "0e",
+          borderBottom: `1px solid ${HW2_COLOR.blue}22`,
+          font: "600 12px 'DM Sans', sans-serif",
+        }}
+      >
+        <span
+          aria-hidden
+          style={{ color: HW2_COLOR.blue, animation: "hw2-pulse 1.4s ease-in-out infinite" }}
+        >
+          ✦
+        </span>
+        <span style={{ color: HW2_COLOR.blue }}>{label || "Analysing with AI…"}</span>
+        <span style={{ color: HW2_COLOR.ink2, fontWeight: 500 }}>
+          — you can keep working; this finishes in the background.
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function RecomputeBanner({ projectId }: { projectId: string }) {
   const [state, setState] = useState<{
     stale: boolean;
@@ -660,6 +825,7 @@ function RecomputeBanner({ projectId }: { projectId: string }) {
     impacted_count: number;
   } | null>(null);
   const [busy, setBusy] = useState(false);
+  const { runAnalysis } = useH2Context();
 
   const load = useCallback(() => {
     h2.projects
@@ -680,7 +846,11 @@ function RecomputeBanner({ projectId }: { projectId: string }) {
   const recompute = async () => {
     setBusy(true);
     try {
-      await h2.projects.recompute(projectId);
+      // Routed through runAnalysis so the global "Analysing" bar shows and persists
+      // even if the user navigates to Catalog while this runs.
+      await runAnalysis("Re-analysing your goal and data…", () =>
+        h2.projects.recompute(projectId)
+      );
       // Re-check our own staleness (the banner hides once fresh) and tell every
       // open view to re-fetch — a seamless refresh instead of a full reload.
       load();
@@ -743,14 +913,66 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
   const [projects, setProjects] = useState<H2Project[]>([]);
   const [sources, setSources] = useState<H2Source[]>([]);
   const [activeProject, setActiveProject] = useState<H2Project | null>(null);
+  const [analysis, setAnalysis] = useState({ active: false, label: "" });
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Starts null on server AND first client render (then hydrates from
+  // localStorage in an effect) so SSR and client markup match.
+  const [activeSource, setActiveSourceState] = useState<string | null>(null);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(ACTIVE_SOURCE_KEY);
+    if (stored) setActiveSourceState(stored);
+  }, []);
+
+  const setActiveSource = useCallback((name: string) => {
+    setActiveSourceState(name);
+    try {
+      window.localStorage.setItem(ACTIVE_SOURCE_KEY, name);
+    } catch {
+      // private mode / storage full — scoping still works for this session
+    }
+  }, []);
+
+  // Keep the active source valid: fall back to the first connected source when
+  // the stored one was removed (or nothing is stored yet).
+  useEffect(() => {
+    if (sources.length === 0) return;
+    if (!activeSource || !sources.some((s) => s.name === activeSource)) {
+      setActiveSource(sources[0].name);
+    }
+  }, [sources, activeSource, setActiveSource]);
+
+  // Owned by the (persistent) layout, so an in-flight analysis and its bar survive
+  // client-side navigation between H2 pages (e.g. switching to Catalog).
+  const runAnalysis = useCallback(
+    async <T,>(label: string, fn: () => Promise<T>): Promise<T> => {
+      setAnalysis({ active: true, label });
+      try {
+        return await fn();
+      } finally {
+        setAnalysis({ active: false, label: "" });
+      }
+    },
+    []
+  );
 
   const reload = useCallback(() => {
     Promise.all([h2.projects.list(), h2.sources.list()])
       .then(([ps, ss]) => {
         setProjects(ps);
         setSources(ss);
+        setLoadError(null);
       })
-      .catch(() => {});
+      .catch((e) => {
+        // A failed load must NOT masquerade as an empty workspace — surface it
+        // so the user knows the backend is unreachable, not that their data is
+        // gone. Keep any previously-loaded lists in place.
+        setLoadError(
+          e instanceof Error ? e.message : "Couldn't reach the Headwater backend."
+        );
+      })
+      .finally(() => setLoaded(true));
   }, []);
 
   useEffect(() => {
@@ -825,8 +1047,26 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
     router.push(stageMap[key]);
   };
 
+  // Everything in the workspace is a projection of the active source: the rail,
+  // the home view, and project pickers all see only this source's projects.
+  const scopedProjects = activeSource
+    ? projects.filter((p) => !p.source_name || p.source_name === activeSource)
+    : projects;
+
   return (
-    <H2Context.Provider value={{ projects, sources, reload }}>
+    <H2Context.Provider
+      value={{
+        projects: scopedProjects,
+        sources,
+        activeSource,
+        setActiveSource,
+        reload,
+        loaded,
+        loadError,
+        analysis,
+        runAnalysis,
+      }}
+    >
       <div
         style={{
           height: "100vh",
@@ -938,7 +1178,9 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
         >
           <H2Rail
             sources={sources}
-            projects={projects}
+            projects={scopedProjects}
+            activeSource={activeSource}
+            onSelectSource={setActiveSource}
             pathname={pathname}
             onNavigate={handleNavigate}
           />
@@ -951,18 +1193,71 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
               minWidth: 0,
             }}
           >
+            {/* Backend unreachable: a workspace-wide banner so an empty rail
+                reads as "can't connect", not "you have no data". */}
+            {loadError && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  padding: "10px 32px",
+                  background: HW2_COLOR.badSoft,
+                  borderBottom: `1px solid ${HW2_COLOR.bad}44`,
+                  font: "500 13px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.bad,
+                }}
+              >
+                <span style={{ flex: 1 }}>
+                  Can&rsquo;t reach the Headwater backend — your sources and
+                  projects are safe, just not loading. Check that the API is
+                  running, then retry.
+                </span>
+                <button
+                  onClick={reload}
+                  style={{
+                    appearance: "none",
+                    cursor: "pointer",
+                    background: "#fff",
+                    border: `1px solid ${HW2_COLOR.bad}66`,
+                    borderRadius: 8,
+                    padding: "5px 14px",
+                    font: "600 12px 'DM Sans', sans-serif",
+                    color: HW2_COLOR.bad,
+                    fontFamily: "'DM Sans', sans-serif",
+                    flexShrink: 0,
+                  }}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+            {/* Global: shows on every H2 page (incl. Catalog) and persists while
+                the user navigates during a long analysis. The analysis bar and
+                the project banner live in ONE sticky group so they stack —
+                never overlap — while scrolling. */}
             {activeProject ? (
               <>
-                <ProjectBanner
-                  project={activeProject}
-                  stage={stage}
-                  onJumpStage={handleJumpStage}
-                />
+                <div style={{ position: "sticky", top: 0, zIndex: 30 }}>
+                  <AnalysisBar active={analysis.active} label={analysis.label} />
+                  <ProjectBanner
+                    project={activeProject}
+                    stage={stage}
+                    onJumpStage={handleJumpStage}
+                  />
+                </div>
                 <RecomputeBanner projectId={activeProject.id} />
                 <div>{children}</div>
               </>
             ) : (
-              children
+              <>
+                {analysis.active && (
+                  <div style={{ position: "sticky", top: 0, zIndex: 30 }}>
+                    <AnalysisBar active={analysis.active} label={analysis.label} />
+                  </div>
+                )}
+                {children}
+              </>
             )}
           </main>
         </div>

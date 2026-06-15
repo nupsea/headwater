@@ -120,6 +120,110 @@ def _fallback_goal(table_names: list[str]) -> str:
 
 # ── Column descriptions ─────────────────────────────────────────────────────────
 
+# Columns per LLM call. A 14B local model generates ~15 tok/s; one sentence per
+# column is ~25-30 tokens, so 16 columns ≈ 30s — comfortably inside the timeout.
+# A 66-column table in a single call (~2000 tokens) blows the 120s budget.
+_DESC_CHUNK_SIZE = 16
+
+
+def _profile_hint(prof: dict[str, Any]) -> str:
+    """One short, I-3-safe stats hint for a column prompt line (aggregates only)."""
+    if not prof:
+        return ""
+    bits: list[str] = []
+    null_rate = prof.get("null_rate")
+    if null_rate:
+        bits.append(f"{int(float(null_rate) * 100)}% null")
+    distinct = prof.get("distinct_count")
+    if distinct:
+        bits.append(f"{int(distinct)} distinct")
+    lo, hi = prof.get("min_value"), prof.get("max_value")
+    if lo is None and hi is None:
+        lo, hi = prof.get("min_date"), prof.get("max_date")
+    if lo is not None and hi is not None:
+        bits.append(f"range {lo}..{hi}")
+    top = prof.get("top_values") or []
+    values = [str(v[0]) if isinstance(v, (list, tuple)) else str(v) for v in top[:3]]
+    if not values:
+        values = [str(v) for v in (prof.get("sample_values") or [])[:3]]
+    if values:
+        bits.append(f"e.g. {', '.join(values)}")
+    return f"  ({'; '.join(bits)})" if bits else ""
+
+
+def _chunks(items: list, size: int) -> list[list]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+# Keys a model commonly nests the mapping under instead of returning it flat.
+_DESC_WRAPPER_KEYS = ("descriptions", "columns", "result", "mapping", "fields")
+
+
+def _match_descriptions(
+    raw: Any, valid: set[str]
+) -> dict[str, str]:
+    """Pull {column_name: description} out of a model response, robustly.
+
+    Local models don't reliably return the exact JSON shape asked for. This
+    tolerates the common deviations so a good answer isn't silently dropped:
+      * the mapping nested under a wrapper key ({"descriptions": {...}})
+      * a list of {name/column, description} objects
+      * qualified keys ("schema.table.col") — matched by last component
+      * case differences
+    Only columns in ``valid`` are returned; the match is exact first, then
+    case-insensitive, then by the final dotted component.
+    """
+    if not isinstance(raw, dict):
+        # A bare list of {name, description} objects.
+        if isinstance(raw, list):
+            raw = {"columns": raw}
+        else:
+            return {}
+
+    # Unwrap a single common wrapper key if the top level isn't the mapping.
+    payload: Any = raw
+    if not any(k in valid for k in raw) and not _looks_flat_mapping(raw, valid):
+        for key in _DESC_WRAPPER_KEYS:
+            if key in raw:
+                payload = raw[key]
+                break
+
+    pairs: list[tuple[str, str]] = []
+    if isinstance(payload, dict):
+        pairs = [(str(k), v) for k, v in payload.items()]
+    elif isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("column") or item.get("col")
+                desc = item.get("description") or item.get("desc")
+                if name is not None:
+                    pairs.append((str(name), desc))
+
+    # Resolution maps for case-insensitive and last-component matching.
+    by_lower = {v.lower(): v for v in valid}
+    by_tail = {v.rsplit(".", 1)[-1].lower(): v for v in valid}
+
+    out: dict[str, str] = {}
+    for raw_name, desc in pairs:
+        if not isinstance(desc, str) or not desc.strip():
+            continue
+        key = raw_name.strip()
+        target = (
+            key
+            if key in valid
+            else by_lower.get(key.lower())
+            or by_tail.get(key.rsplit(".", 1)[-1].lower())
+        )
+        if target and target not in out:
+            out[target] = desc.strip()
+    return out
+
+
+def _looks_flat_mapping(raw: dict, valid: set[str]) -> bool:
+    """True when the dict's values are description strings (a flat mapping)."""
+    str_vals = sum(1 for v in raw.values() if isinstance(v, str))
+    return str_vals >= max(1, len(raw) // 2)
+
 
 def generate_descriptions(
     store: HeadwaterStore,
@@ -129,28 +233,50 @@ def generate_descriptions(
     settings: HeadwaterSettings | None = None,
     provider: LLMProvider | None = None,
 ) -> dict[str, Any]:
-    """LLM-generate column descriptions from names/types, one call per table.
+    """LLM-generate table + column descriptions, chunked to fit the model budget.
 
-    Skips locked columns and (unless overwrite) columns that already have a
-    description.  Returns counts.  Never overwrites raw data; metadata only.
+    Columns go to the model in batches of ``_DESC_CHUNK_SIZE`` so a wide table
+    cannot exceed the Ollama timeout in a single call.  Prompts carry the column's
+    statistical summary when a profile exists (I-3-safe: aggregates only, never
+    rows) so descriptions reflect the actual data.  Tables without a description
+    get one too.  Skips locked columns and (unless overwrite) columns that already
+    have a description.  Returns counts; partial failure is reported, not hidden.
     """
+    from headwater.analyzer.llm import check_llm_available
     from headwater.services.h2_catalog import update_column
 
     if store.get_source(source_name) is None:
         raise ValueError(f"Source '{source_name}' not found.")
 
-    prov, _ = _provider(settings, provider)
+    settings = settings or get_settings()
+    # Use the capable reasoning model (qwen) rather than a possibly-weak default.
+    model = getattr(settings, "reasoning_model", "") or settings.llm_model
+    if provider is None:
+        ok, why = check_llm_available(settings, model=model)
+        if not ok:
+            return {"updated": 0, "available": False, "note": why}
+        provider = get_provider(settings.model_copy(update={"llm_model": model}))
+    prov = provider
     if isinstance(prov, NoLLMProvider):
-        return {"updated": 0, "available": False, "note": "No model available."}
+        return {"updated": 0, "available": False, "note": "AI is off — no model configured."}
+
+    profiles = {
+        f"{p['table_name']}.{p['column_name']}": p["profile"]
+        for p in store.get_profiles(source_name)
+    }
 
     system = (
         "You write concise, plain-English data dictionary entries. Given a table "
-        "name and its columns (name + type), return a one-sentence description for "
-        "each column INFERRED FROM ITS NAME. Only include columns you are "
-        "reasonably confident about; omit the rest. Respond as JSON only."
+        "name and some of its columns (name, type, and data statistics when "
+        "known), return a one-sentence description for EACH listed column, "
+        "grounded in the name, type, and statistics. Respond as JSON only."
     )
 
     updated = 0
+    tables_updated = 0
+    attempted = 0
+    failed_calls = 0
+    unparsed_calls = 0
     for t in store.get_tables(source_name):
         cols = store.get_columns(source_name, t["name"])
         targets = [
@@ -159,27 +285,105 @@ def generate_descriptions(
             if not c.get("locked")
             and (overwrite or not (c.get("description") or "").strip())
         ]
-        if not targets:
-            continue
-        prompt = (
-            f"TABLE: {t['name']}\n"
-            "COLUMNS (name: type):\n"
-            + "\n".join(f"- {c['name']}: {c.get('dtype')}" for c in targets)
-            + "\n\nReturn JSON mapping column name -> one-sentence description, "
-            'e.g. {"created_at": "Timestamp when the record was created."}'
-        )
-        raw = _invoke(prov, prompt, system)
-        if not isinstance(raw, dict):
-            continue
-        valid = {c["name"] for c in targets}
-        for name, desc in raw.items():
-            if name in valid and isinstance(desc, str) and desc.strip():
-                update_column(
-                    store, source_name, t["name"], name, description=desc.strip()
-                )
+        for chunk in _chunks(targets, _DESC_CHUNK_SIZE):
+            attempted += 1
+            lines = []
+            for c in chunk:
+                hint = _profile_hint(profiles.get(f"{t['name']}.{c['name']}", {}))
+                lines.append(f"- {c['name']}: {c.get('dtype')}{hint}")
+            prompt = (
+                f"TABLE: {t['name']}\n"
+                "COLUMNS (name: type, then statistics if known):\n"
+                + "\n".join(lines)
+                + "\n\nReturn a JSON object mapping each column name (exactly as "
+                "listed, unqualified) to a one-sentence description, e.g. "
+                '{"created_at": "Timestamp when the record was created."}'
+            )
+            raw = _invoke(prov, prompt, system)
+            if not raw:
+                # Empty result from a reachable model almost always means the call
+                # failed (timeout / dropped connection) — track it, keep going.
+                failed_calls += 1
+                continue
+            valid = {c["name"] for c in chunk}
+            matched = _match_descriptions(raw, valid)
+            if not matched:
+                # The model answered but nothing matched these columns (a shape
+                # we couldn't parse). That is NOT "nothing to do" — surface it
+                # so we never silently report success while columns stay blank.
+                unparsed_calls += 1
+                continue
+            for name, desc in matched.items():
+                update_column(store, source_name, t["name"], name, description=desc)
                 updated += 1
 
-    return {"updated": updated, "available": True}
+        # Table description: one cheap call (short output) when missing.
+        if overwrite or not (t.get("description") or "").strip():
+            attempted += 1
+            col_names = ", ".join(c["name"] for c in cols[:40])
+            tprompt = (
+                f"TABLE: {t['name']} ({t.get('row_count') or 'unknown'} rows)\n"
+                f"COLUMNS: {col_names}\n\n"
+                "Describe in ONE sentence what each row of this table most likely "
+                'represents. Return JSON: {"description": "<sentence>"}'
+            )
+            traw = _invoke(prov, tprompt, system)
+            tdesc = ""
+            if isinstance(traw, dict):
+                tdesc = str(
+                    traw.get("description") or traw.get("summary") or ""
+                ).strip()
+            if tdesc:
+                store.upsert_table(
+                    source_name,
+                    t["name"],
+                    schema_name=t.get("schema_name"),
+                    row_count=int(t.get("row_count") or 0),
+                    description=tdesc,
+                    domain=t.get("domain"),
+                    selected=bool(t.get("selected")),
+                )
+                tables_updated += 1
+            else:
+                failed_calls += 1
+
+    if attempted == 0:
+        # Genuinely nothing to do: every column already has a description (or is
+        # locked) and every table is described. A true no-op, reported as such.
+        return {"updated": 0, "tables_updated": 0, "available": True, "note": ""}
+
+    if updated == 0 and tables_updated == 0:
+        # We asked the model and got nothing usable — a timeout, or a response
+        # shape we couldn't parse. Surface the real reason; never pretend success.
+        # Prefer the unparsed diagnosis when present: it is the more actionable
+        # one (the model IS responding, just not in the asked-for format).
+        if unparsed_calls:
+            note = (
+                f"The model ({model}) replied but not in the expected format, so "
+                "no descriptions could be applied. Try again, or set a stronger "
+                "reasoning model."
+            )
+        else:
+            note = (
+                f"The model ({model}) returned no descriptions — it may have timed "
+                "out or be too small. Try again, or set a stronger reasoning model."
+            )
+        return {"updated": 0, "available": False, "note": note}
+
+    note_parts: list[str] = []
+    if failed_calls:
+        note_parts.append(f"{failed_calls} call(s) timed out")
+    if unparsed_calls:
+        note_parts.append(f"{unparsed_calls} reply(ies) couldn't be parsed")
+    note = ""
+    if note_parts:
+        note = f"{'; '.join(note_parts)} — re-run to fill the rest."
+    return {
+        "updated": updated,
+        "tables_updated": tables_updated,
+        "available": True,
+        "note": note,
+    }
 
 
 # ── Resolve-card suggestion (Ask AI) ────────────────────────────────────────────

@@ -37,6 +37,10 @@ class CatalogTable:
     table_name: str
     row_count: int
     description: str | None
+    # True when statistics exist for this table. Distinguishes a VERIFIED
+    # empty table (profiled, 0 rows — flag it, exclude it from answers) from
+    # an unknown one (never profiled — row_count 0 means nothing).
+    profiled: bool = False
     columns: list[CatalogColumn] = field(default_factory=list)
 
 
@@ -66,6 +70,7 @@ def get_source_catalog(
     tables = store.get_tables(source_name)
     if table_name:
         tables = [t for t in tables if t["name"] == table_name]
+    profiled_tables = {p["table_name"] for p in profiles}
 
     result: list[CatalogTable] = []
     for table in tables:
@@ -94,6 +99,7 @@ def get_source_catalog(
             table_name=table["name"],
             row_count=int(table.get("row_count") or 0),
             description=table.get("description"),
+            profiled=table["name"] in profiled_tables,
             columns=catalog_cols,
         ))
     return result
