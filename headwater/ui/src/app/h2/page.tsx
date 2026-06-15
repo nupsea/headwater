@@ -19,7 +19,30 @@ function computeReadout(project: H2Project) {
 export default function H2HomePage() {
   const router = useRouter();
   // Layout-owned data: projects are already scoped to the active source.
-  const { projects, sources, activeSource, setActiveSource } = useH2Context();
+  const { projects, sources, activeSource, setActiveSource, loaded, loadError } =
+    useH2Context();
+
+  // Don't paint "Start a project / No sources yet" until the first load has
+  // settled — and never when it failed (the layout shows a connect-error
+  // banner). Showing the empty state during a load failure is what made a
+  // disconnected backend look like a wiped workspace.
+  if (!loaded || loadError) {
+    return (
+      <div
+        style={{
+          maxWidth: 900,
+          margin: "0 auto",
+          padding: "48px 32px",
+          font: "400 14px 'DM Sans', sans-serif",
+          color: HW2_COLOR.muted,
+        }}
+      >
+        {loadError
+          ? "Workspace unavailable — see the connection notice above."
+          : "Loading your workspace…"}
+      </div>
+    );
+  }
 
   return (
     <div

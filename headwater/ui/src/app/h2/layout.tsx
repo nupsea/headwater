@@ -31,6 +31,12 @@ interface H2ContextValue {
   activeSource: string | null;
   setActiveSource: (name: string) => void;
   reload: () => void;
+  /** True once the first workspace load has settled (success OR failure) — lets
+   *  views distinguish "still loading" from "genuinely empty". */
+  loaded: boolean;
+  /** Set when the workspace load failed (backend down/unreachable). Distinct
+   *  from an empty workspace, which the silent-catch used to render identically. */
+  loadError: string | null;
   /** Whether a long LLM analysis is currently running (drives the global bar). */
   analysis: { active: boolean; label: string };
   /** Run an async op while showing the global "Analysing with AI" bar. Owned by
@@ -44,6 +50,8 @@ const H2Context = createContext<H2ContextValue>({
   activeSource: null,
   setActiveSource: () => {},
   reload: () => {},
+  loaded: false,
+  loadError: null,
   analysis: { active: false, label: "" },
   runAnalysis: (_label, fn) => fn(),
 });
@@ -906,6 +914,8 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
   const [sources, setSources] = useState<H2Source[]>([]);
   const [activeProject, setActiveProject] = useState<H2Project | null>(null);
   const [analysis, setAnalysis] = useState({ active: false, label: "" });
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   // Starts null on server AND first client render (then hydrates from
   // localStorage in an effect) so SSR and client markup match.
   const [activeSource, setActiveSourceState] = useState<string | null>(null);
@@ -952,8 +962,17 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
       .then(([ps, ss]) => {
         setProjects(ps);
         setSources(ss);
+        setLoadError(null);
       })
-      .catch(() => {});
+      .catch((e) => {
+        // A failed load must NOT masquerade as an empty workspace — surface it
+        // so the user knows the backend is unreachable, not that their data is
+        // gone. Keep any previously-loaded lists in place.
+        setLoadError(
+          e instanceof Error ? e.message : "Couldn't reach the Headwater backend."
+        );
+      })
+      .finally(() => setLoaded(true));
   }, []);
 
   useEffect(() => {
@@ -1042,6 +1061,8 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
         activeSource,
         setActiveSource,
         reload,
+        loaded,
+        loadError,
         analysis,
         runAnalysis,
       }}
@@ -1172,6 +1193,45 @@ export default function H2Layout({ children }: { children: React.ReactNode }) {
               minWidth: 0,
             }}
           >
+            {/* Backend unreachable: a workspace-wide banner so an empty rail
+                reads as "can't connect", not "you have no data". */}
+            {loadError && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  padding: "10px 32px",
+                  background: HW2_COLOR.badSoft,
+                  borderBottom: `1px solid ${HW2_COLOR.bad}44`,
+                  font: "500 13px 'DM Sans', sans-serif",
+                  color: HW2_COLOR.bad,
+                }}
+              >
+                <span style={{ flex: 1 }}>
+                  Can&rsquo;t reach the Headwater backend — your sources and
+                  projects are safe, just not loading. Check that the API is
+                  running, then retry.
+                </span>
+                <button
+                  onClick={reload}
+                  style={{
+                    appearance: "none",
+                    cursor: "pointer",
+                    background: "#fff",
+                    border: `1px solid ${HW2_COLOR.bad}66`,
+                    borderRadius: 8,
+                    padding: "5px 14px",
+                    font: "600 12px 'DM Sans', sans-serif",
+                    color: HW2_COLOR.bad,
+                    fontFamily: "'DM Sans', sans-serif",
+                    flexShrink: 0,
+                  }}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
             {/* Global: shows on every H2 page (incl. Catalog) and persists while
                 the user navigates during a long analysis. The analysis bar and
                 the project banner live in ONE sticky group so they stack —
